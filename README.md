@@ -41,7 +41,7 @@ cd skizzles
 bunx skills add ./skills --skill install-skizzles
 ```
 
-The linked skill is still skill-only. Its Container Lab launcher uses an existing PATH binary when available, otherwise it clearly asks for the full plugin or a source checkout. From a source checkout or stable plugin, the same launcher has bundled tooling before any PATH cutover; host PATH and LaunchAgent wiring stay explicit and reversible. Full-harness development uses the isolated installer and generated plugin; keep live Codex configuration out of scope until an explicit cutover is approved.
+The linked skill is still skill-only. Its Container Lab launcher uses an existing PATH binary when available, otherwise it clearly asks for the full plugin or a source checkout. From a source checkout or stable plugin, the same launcher has bundled tooling; host PATH and LaunchAgent wiring are optional, explicit, reversible, and machine-local. Full-harness development uses the isolated installer and generated plugin; keep live Codex configuration outside ordinary repository setup.
 
 ## Keep the loop delightful
 
@@ -54,4 +54,4 @@ bun run verify
 
 Plugins and new tasks use cached, versioned content, so start a fresh task after an update. For ownership, release rules, and safety details, see [AGENTS.md](AGENTS.md).
 
-> **Pre-release note:** the Git-based examples become runnable once the repository and a versioned release are published. The live `~/.codex` cutover remains a separate, human-approved step.
+> **Pre-release note:** the Git-based examples become runnable once the repository and a versioned release are published. Stable marketplace publication remains a separate release step; host wiring is optional machine-local setup.

@@ -9,7 +9,7 @@ Skizzles is a packaging project, not a live installation. Keep its canonical sou
 - Keep repo-local `.codex/skills/` as maintainer guidance, separate from the public skill collection unless packaging intentionally includes it.
 - Treat `packages/codex-container-lab/cli` as the canonical Bun workspace package. Keep `bun.lock` at the Skizzles root as its sole lockfile; do not restore a nested lock.
 - The stable plugin carries bundled Container Lab CLI/reaper entrypoints plus the public skill launcher. Do not hand-edit those generated bundles. PATH and LaunchAgent activation remain separate, explicit host wiring.
-- The former standalone Container Lab checkout is a temporary rollback source only until an explicit cutover retires it; never mutate it from Skizzles work.
+- The former standalone Container Lab checkout is rollback history only, not live authority; never mutate it from Skizzles work.
 
 ## Safe working rules
 

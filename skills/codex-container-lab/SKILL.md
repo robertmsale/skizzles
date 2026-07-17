@@ -14,7 +14,7 @@ Resolve the skill directory, then send the literal launcher path as the outer Ba
 /absolute/path/to/skills/codex-container-lab/scripts/codex-container-lab health
 ```
 
-The `codex-container-lab` PATH command is an optional host-installed convenience. Host PATH and LaunchAgent activation remain explicit, reversible wiring; see the canonical [installation and cutover guide](../../packages/codex-container-lab/docs/installation.md) from a Skizzles checkout or plugin snapshot.
+The `codex-container-lab` PATH command is an optional host-installed convenience. Host PATH and LaunchAgent activation remain explicit, reversible, machine-local wiring; see the canonical [installation and optional host-wiring guide](../../packages/codex-container-lab/docs/installation.md) from a Skizzles checkout or plugin snapshot.
 
 Use this skill when work benefits from an isolated Linux workspace or disposable project stack. It augments counterfactual engineering: use one lab per serious hypothesis, validate each against the same criteria, and synchronize only the selected result.
 

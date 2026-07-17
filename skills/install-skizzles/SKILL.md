@@ -54,7 +54,7 @@ A skill-only installation contains Container Lab guidance and its launcher, not 
 
 Use the `scripts/codex-container-lab` launcher beside the public `codex-container-lab` skill before relying on any `PATH` command. `doctorContainerLab` reports only the optional PATH convenience; bundled ownership paths and source provenance come from `integrations/container-lab.json`. Host PATH and LaunchAgent activation remain explicit, reversible wiring, not part of a skill-only or plugin install.
 
-Read the canonical [Container Lab installation and cutover guide](../../packages/codex-container-lab/docs/installation.md) from the selected checkout or plugin snapshot. Keep doctor health probes on disposable owner/state/runtime roots. Never wrap an attached `run`, invoke live reaping, edit `PATH`, or load launchd from this workflow without a separate explicit cutover approval.
+Read the canonical [Container Lab installation and optional host-wiring guide](../../packages/codex-container-lab/docs/installation.md) from the selected checkout or plugin snapshot. Keep doctor health probes on disposable owner/state/runtime roots. Never wrap an attached `run`, invoke live reaping, edit `PATH`, or load launchd as part of a skill/plugin install; host wiring is separate, explicit, reversible, and machine-local.
 
 An installed bundle with an unavailable Docker daemon is `installed-not-ready`, not proof that Container Lab is broken. The configured `0.1.0` compatibility is unverified until a release fingerprint is supplied.
 
