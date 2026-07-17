@@ -20,7 +20,7 @@ jobs:
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
       - name: Typecheck
-        run: bunx tsc --noEmit
+        run: bun run typecheck
       - name: Test
         run: bun test
       - name: Validate plugin and generated drift

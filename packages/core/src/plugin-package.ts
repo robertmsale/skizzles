@@ -1,4 +1,5 @@
 import {
+  chmod,
   copyFile,
   lstat,
   mkdir,
@@ -17,6 +18,22 @@ const PLUGIN_NAME = "skizzles";
 const TEMPLATE_PATH = "packages/core/plugin-template";
 const GENERATED_PATH = `plugins/${PLUGIN_NAME}`;
 const MARKETPLACE_PATH = ".agents/plugins/marketplace.json";
+const CONTAINER_LAB_SOURCE_PATH = "packages/codex-container-lab";
+
+const CONTAINER_LAB_ENTRYPOINTS = [
+  "cli/src/cli.ts",
+  "cli/src/reaper-cli.ts",
+] as const;
+
+const CONTAINER_LAB_STATIC_INPUTS = [
+  "LICENSE",
+  "cli/install/com.openai.codex-container-lab-reaper.plist",
+  "docs/architecture.md",
+  "docs/completion-contract.md",
+  "docs/installation.md",
+  "docs/manifest.md",
+  "docs/safety.md",
+] as const;
 
 const CANONICAL_INPUTS = [
   ["skills", "skills"],
@@ -85,6 +102,8 @@ export async function stagePlugin(repoRoot: string, destination: string): Promis
     if (!(await exists(source))) continue;
     await copyCanonicalTree(source, join(destination, destinationPath), sourcePath);
   }
+
+  await stageContainerLabRuntime(paths.repoRoot, destination);
 
   await validateGeneratedPlugin(paths.repoRoot, destination, paths.marketplacePath);
 }
@@ -184,7 +203,70 @@ async function validateGeneratedPlugin(
     validateHookCommands(hooks, "hooks/hooks.json");
   }
 
+  await validateContainerLabRuntime(pluginRoot);
   await rejectForbiddenDistributableContent(pluginRoot);
+}
+
+async function stageContainerLabRuntime(repoRoot: string, pluginRoot: string): Promise<void> {
+  const sourceRoot = join(repoRoot, CONTAINER_LAB_SOURCE_PATH);
+  const destinationRoot = join(pluginRoot, CONTAINER_LAB_SOURCE_PATH);
+  const bundleRoot = join(destinationRoot, "cli", "src");
+  await mkdir(bundleRoot, { recursive: true });
+
+  for (const path of CONTAINER_LAB_ENTRYPOINTS) {
+    const destination = join(bundleRoot, path.split("/").at(-1)!);
+    const build = Bun.spawnSync([
+      process.execPath,
+      "build",
+      join(CONTAINER_LAB_SOURCE_PATH, path),
+      "--target=bun",
+      "--format=esm",
+      `--outfile=${destination}`,
+    ], {
+      cwd: repoRoot,
+      env: { PATH: process.env.PATH ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (build.exitCode !== 0) {
+      const details = Buffer.concat([Buffer.from(build.stdout), Buffer.from(build.stderr)]).toString("utf8").trim();
+      throw new PackagingError(`Unable to bundle Container Lab runtime ${path}:\n${details}`);
+    }
+  }
+
+  const bundledFiles = await listFiles(bundleRoot);
+  const expectedFiles = CONTAINER_LAB_ENTRYPOINTS.map((path) => path.split("/").at(-1)!);
+  if (bundledFiles.length !== expectedFiles.length || expectedFiles.some((path) => !bundledFiles.includes(path))) {
+    throw new PackagingError(`Container Lab bundling produced unexpected files: ${bundledFiles.join(", ")}.`);
+  }
+  await Promise.all(expectedFiles.map((path) => chmod(join(bundleRoot, path), 0o755)));
+
+  for (const path of CONTAINER_LAB_STATIC_INPUTS) {
+    await copyCanonicalFile(
+      join(sourceRoot, path),
+      join(destinationRoot, path),
+      `${CONTAINER_LAB_SOURCE_PATH}/${path}`,
+    );
+  }
+}
+
+async function validateContainerLabRuntime(pluginRoot: string): Promise<void> {
+  const runtimeRoot = join(pluginRoot, CONTAINER_LAB_SOURCE_PATH);
+  for (const path of CONTAINER_LAB_ENTRYPOINTS) {
+    const bundledPath = join(runtimeRoot, path);
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(bundledPath);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        throw new PackagingError(`Container Lab runtime is missing ${path}.`);
+      }
+      throw error;
+    }
+    if (!metadata.isFile() || (metadata.mode & 0o111) === 0) {
+      throw new PackagingError(`Container Lab runtime ${path} must be an executable regular file.`);
+    }
+  }
 }
 
 async function validateManifest(manifest: Record<string, unknown>, pluginRoot: string): Promise<void> {
@@ -306,6 +388,17 @@ async function copyCanonicalTree(sourceRoot: string, destinationRoot: string, la
       throw new PackagingError(`${label}/${entry.name} is not a regular file or directory.`);
     }
   }
+}
+
+async function copyCanonicalFile(source: string, destination: string, label: string): Promise<void> {
+  const metadata = await lstat(source);
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw new PackagingError(`${label} must be a self-contained regular file.`);
+  }
+  assertDistributableName(source.split(sep).at(-1)!, label);
+  await mkdir(dirname(destination), { recursive: true });
+  await copyFile(source, destination);
+  await chmod(destination, metadata.mode & 0o777);
 }
 
 async function rejectFinderMetadata(root: string, label: string): Promise<void> {

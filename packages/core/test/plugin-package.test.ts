@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { dirname, join, resolve } from "node:path";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
   buildPlugin,
@@ -17,6 +17,16 @@ afterEach(async () => {
 });
 
 describe("deterministic plugin packaging", () => {
+  test("uses the root lockfile for the Container Lab workspace", async () => {
+    const repoRoot = resolve(import.meta.dir, "../../..");
+    const rootPackage = await Bun.file(join(repoRoot, "package.json")).json() as { workspaces?: unknown };
+    expect(rootPackage.workspaces).toContain("packages/codex-container-lab/cli");
+    expect(await Bun.file(join(repoRoot, "packages/codex-container-lab/cli/bun.lock")).exists()).toBe(false);
+    expect(await readFile(join(repoRoot, "bun.lock"), "utf8")).toContain(
+      '"codex-container-lab@workspace:packages/codex-container-lab/cli"',
+    );
+  });
+
   test("canonical hook discovery contract uses plugin-root commands", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const hooks = await Bun.file(join(repoRoot, "hooks/hooks.json")).json();
@@ -101,6 +111,58 @@ describe("deterministic plugin packaging", () => {
     await chmod(join(root, "plugins/skizzles/runtime/executable.ts"), 0o644);
 
     expect(checkPlugin(root)).rejects.toThrow("changed mode runtime/executable.ts");
+  });
+
+  test("check reports drift in the bundled Container Lab runtime", async () => {
+    const root = await fixture();
+    await buildPlugin(root);
+    await write(
+      root,
+      "packages/codex-container-lab/cli/src/cli.ts",
+      "#!/usr/bin/env bun\nconsole.log(JSON.stringify({ help: 'changed' }));\n",
+    );
+
+    expect(checkPlugin(root)).rejects.toThrow(
+      "changed packages/codex-container-lab/cli/src/cli.ts",
+    );
+  });
+
+  test("ships runnable dependency-self-contained Container Lab bundles", async () => {
+    const repoRoot = resolve(import.meta.dir, "../../..");
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "skizzles-container-lab-plugin-"));
+    temporaryRoots.push(temporaryRoot);
+    const stagedPlugin = join(temporaryRoot, "staged");
+    const isolatedPlugin = join(temporaryRoot, "isolated");
+    await stagePlugin(repoRoot, stagedPlugin);
+    await cp(stagedPlugin, isolatedPlugin, { recursive: true });
+
+    const runtimeRoot = join(isolatedPlugin, "packages/codex-container-lab");
+    expect(await filesUnder(runtimeRoot)).toEqual([
+      "LICENSE",
+      "cli/install/com.openai.codex-container-lab-reaper.plist",
+      "cli/src/cli.ts",
+      "cli/src/reaper-cli.ts",
+      "docs/architecture.md",
+      "docs/completion-contract.md",
+      "docs/installation.md",
+      "docs/manifest.md",
+      "docs/safety.md",
+    ]);
+
+    for (const entrypoint of ["cli/src/cli.ts", "cli/src/reaper-cli.ts"]) {
+      const path = join(runtimeRoot, entrypoint);
+      expect((await stat(path)).mode & 0o111).not.toBe(0);
+      const result = Bun.spawnSync(["bun", path, "--help"], {
+        cwd: isolatedPlugin,
+        env: { PATH: process.env.PATH ?? "" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      const response = JSON.parse(result.stdout.toString()) as { help?: unknown };
+      expect(typeof response.help).toBe("string");
+      expect(result.stderr.toString()).toBe("");
+    }
   });
 
   test("rejects Finder metadata in canonical package inputs", async () => {
@@ -216,6 +278,25 @@ async function fixture(): Promise<string> {
       2,
     ),
   );
+  await write(
+    root,
+    "packages/codex-container-lab/cli/src/cli.ts",
+    "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture cli' }));\n",
+  );
+  await write(
+    root,
+    "packages/codex-container-lab/cli/src/reaper-cli.ts",
+    "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture reaper' }));\n",
+  );
+  await write(
+    root,
+    "packages/codex-container-lab/cli/install/com.openai.codex-container-lab-reaper.plist",
+    "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>\n",
+  );
+  await write(root, "packages/codex-container-lab/LICENSE", "fixture license\n");
+  for (const document of ["architecture", "completion-contract", "installation", "manifest", "safety"]) {
+    await write(root, `packages/codex-container-lab/docs/${document}.md`, `# ${document}\n`);
+  }
   return root;
 }
 
@@ -223,4 +304,18 @@ async function write(root: string, relativePath: string, content: string): Promi
   const path = join(root, relativePath);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, content);
+}
+
+async function filesUnder(root: string): Promise<string[]> {
+  const files: string[] = [];
+  async function visit(directory: string, prefix = ""): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await visit(join(directory, entry.name), relativePath);
+      else files.push(relativePath);
+    }
+  }
+  await visit(root);
+  return files.sort();
 }
