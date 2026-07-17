@@ -41,7 +41,7 @@ cd skizzles
 bunx skills add ./skills --skill install-skizzles
 ```
 
-The linked skill is still skill-only. Its Container Lab launcher uses an existing PATH binary when available, otherwise it clearly asks for the full plugin or a source checkout. From a source checkout or stable plugin, the same launcher has bundled tooling; host PATH and LaunchAgent wiring are optional, explicit, reversible, and machine-local. Full-harness development uses the isolated installer and generated plugin; keep live Codex configuration outside ordinary repository setup.
+Container Lab is fully included in this repository—not merely documented here. A source-linked installation runs the canonical CLI and reaper directly from the checkout, while the stable plugin carries dependency-self-contained bundles. If you install only a copied skill, `install-skizzles` guides Codex through obtaining a selected Skizzles version and installing the complete surface; the launcher can also use an existing `codex-container-lab` PATH command. Host PATH and LaunchAgent wiring are optional, explicit, reversible, and machine-local. Full-harness development uses the isolated installer and generated plugin; keep live Codex configuration outside ordinary repository setup.
 
 ## Keep the loop delightful
 
