@@ -1,0 +1,355 @@
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const PLUGIN_NAME = "skizzles";
+const TEMPLATE_PATH = "packages/core/plugin-template";
+const GENERATED_PATH = `plugins/${PLUGIN_NAME}`;
+const MARKETPLACE_PATH = ".agents/plugins/marketplace.json";
+
+const CANONICAL_INPUTS = [
+  ["skills", "skills"],
+  ["hooks", "hooks"],
+  ["scripts", "scripts"],
+  ["runtime", "runtime"],
+  ["assets", "assets"],
+] as const;
+
+const BLOCKED_NAMES = new Set([
+  ".DS_Store",
+  ".env",
+  ".git",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".venv",
+  "__pycache__",
+  "node_modules",
+]);
+
+const BLOCKED_SUFFIXES = [".db", ".log", ".sqlite", ".sqlite3"];
+const FORBIDDEN_DISTRIBUTABLE_TEXT = ["/Users/robertsale"];
+
+export class PackagingError extends Error {}
+
+export interface PackagePaths {
+  repoRoot: string;
+  templateRoot: string;
+  generatedRoot: string;
+  marketplacePath: string;
+}
+
+export function packagePaths(repoRoot = defaultRepoRoot()): PackagePaths {
+  const absoluteRoot = resolve(repoRoot);
+  return {
+    repoRoot: absoluteRoot,
+    templateRoot: join(absoluteRoot, TEMPLATE_PATH),
+    generatedRoot: join(absoluteRoot, GENERATED_PATH),
+    marketplacePath: join(absoluteRoot, MARKETPLACE_PATH),
+  };
+}
+
+export async function stagePlugin(repoRoot: string, destination: string): Promise<void> {
+  const paths = packagePaths(repoRoot);
+  await rm(destination, { force: true, recursive: true });
+  await mkdir(destination, { recursive: true });
+  await copyCanonicalTree(paths.templateRoot, destination, "plugin template");
+
+  for (const [sourcePath, destinationPath] of CANONICAL_INPUTS) {
+    const source = join(paths.repoRoot, sourcePath);
+    if (!(await exists(source))) continue;
+    await copyCanonicalTree(source, join(destination, destinationPath), sourcePath);
+  }
+
+  await validateGeneratedPlugin(paths.repoRoot, destination, paths.marketplacePath);
+}
+
+export async function buildPlugin(repoRoot = defaultRepoRoot()): Promise<void> {
+  const paths = packagePaths(repoRoot);
+  const stageParent = dirname(paths.generatedRoot);
+  await mkdir(stageParent, { recursive: true });
+  const stagingRoot = await mkdtemp(join(stageParent, `.${PLUGIN_NAME}-stage-`));
+
+  try {
+    await stagePlugin(paths.repoRoot, stagingRoot);
+    await rm(paths.generatedRoot, { force: true, recursive: true });
+    await rename(stagingRoot, paths.generatedRoot);
+  } finally {
+    await rm(stagingRoot, { force: true, recursive: true });
+  }
+}
+
+export async function checkPlugin(repoRoot = defaultRepoRoot()): Promise<void> {
+  const paths = packagePaths(repoRoot);
+  const comparisonRoot = await mkdtemp(join(tmpdir(), `${PLUGIN_NAME}-package-check-`));
+
+  try {
+    await stagePlugin(paths.repoRoot, comparisonRoot);
+    await rejectFinderMetadata(paths.generatedRoot, "generated plugin");
+    const drift = await compareTrees(comparisonRoot, paths.generatedRoot);
+    if (drift.length > 0) {
+      throw new PackagingError(
+        `Generated plugin diverges from canonical sources:\n${drift.map((line) => `- ${line}`).join("\n")}\nRun \`bun run plugin:build\`.`,
+      );
+    }
+  } finally {
+    await rm(comparisonRoot, { force: true, recursive: true });
+  }
+}
+
+export async function compareTrees(expectedRoot: string, actualRoot: string): Promise<string[]> {
+  const expectedFiles = await listFiles(expectedRoot);
+  const actualFiles = await listFiles(actualRoot);
+  const expectedSet = new Set(expectedFiles);
+  const actualSet = new Set(actualFiles);
+  const differences: string[] = [];
+
+  for (const path of expectedFiles) {
+    if (!actualSet.has(path)) {
+      differences.push(`missing ${path}`);
+      continue;
+    }
+    const [expected, actual] = await Promise.all([
+      readFile(join(expectedRoot, path)),
+      readFile(join(actualRoot, path)),
+    ]);
+    if (!expected.equals(actual)) differences.push(`changed ${path}`);
+    const [expectedMetadata, actualMetadata] = await Promise.all([
+      lstat(join(expectedRoot, path)),
+      lstat(join(actualRoot, path)),
+    ]);
+    if ((expectedMetadata.mode & 0o777) !== (actualMetadata.mode & 0o777)) {
+      differences.push(`changed mode ${path}`);
+    }
+  }
+
+  for (const path of actualFiles) {
+    if (!expectedSet.has(path)) differences.push(`unexpected ${path}`);
+  }
+
+  return differences;
+}
+
+async function validateGeneratedPlugin(
+  repoRoot: string,
+  pluginRoot: string,
+  marketplacePath: string,
+): Promise<void> {
+  const manifestPath = join(pluginRoot, ".codex-plugin", "plugin.json");
+  const manifest = await readJsonObject(manifestPath, "plugin manifest");
+  const rootPackage = await readJsonObject(join(repoRoot, "package.json"), "root package.json");
+
+  if (manifest.name !== PLUGIN_NAME) {
+    throw new PackagingError(`Plugin manifest name must be ${PLUGIN_NAME}.`);
+  }
+  if (manifest.version !== rootPackage.version) {
+    throw new PackagingError("Plugin manifest and root package versions must match.");
+  }
+  if ("hooks" in manifest) {
+    throw new PackagingError("plugin.json must omit unsupported field `hooks`; Codex discovers hooks/hooks.json.");
+  }
+
+  const marketplace = await readJsonObject(marketplacePath, "marketplace metadata");
+  validateMarketplaceEntry(marketplace);
+
+  const hooksPath = join(pluginRoot, "hooks", "hooks.json");
+  if (await exists(hooksPath)) {
+    const hooks = await readJsonObject(hooksPath, "hooks/hooks.json");
+    validateHookCommands(hooks, "hooks/hooks.json");
+  }
+
+  await rejectForbiddenDistributableContent(pluginRoot);
+}
+
+function validateMarketplaceEntry(marketplace: Record<string, unknown>): void {
+  const plugins = marketplace.plugins;
+  if (!Array.isArray(plugins)) {
+    throw new PackagingError("Marketplace metadata must contain a plugins array.");
+  }
+  const entry = plugins.find(
+    (candidate): candidate is Record<string, unknown> =>
+      isObject(candidate) && candidate.name === PLUGIN_NAME,
+  );
+  if (entry === undefined) {
+    throw new PackagingError(`Marketplace metadata is missing ${PLUGIN_NAME}.`);
+  }
+  const source = entry.source;
+  if (!isObject(source) || source.source !== "local" || source.path !== `./plugins/${PLUGIN_NAME}`) {
+    throw new PackagingError("Marketplace source must be local at ./plugins/skizzles.");
+  }
+  const policy = entry.policy;
+  if (
+    !isObject(policy) ||
+    typeof policy.installation !== "string" ||
+    typeof policy.authentication !== "string" ||
+    typeof entry.category !== "string"
+  ) {
+    throw new PackagingError("Marketplace entry must include installation, authentication, and category metadata.");
+  }
+}
+
+function validateHookCommands(value: unknown, path: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => validateHookCommands(item, `${path}[${index}]`));
+    return;
+  }
+  if (!isObject(value)) return;
+
+  for (const [key, item] of Object.entries(value)) {
+    const itemPath = `${path}.${key}`;
+    if (key === "command") {
+      const commands = typeof item === "string" ? [item] : Array.isArray(item) ? item : [];
+      if (commands.length === 0 || !commands.every((command) => typeof command === "string")) {
+        throw new PackagingError(`${itemPath} must be a command string or array of command strings.`);
+      }
+      for (const command of commands) {
+        if (!command.includes("${PLUGIN_ROOT}")) {
+          throw new PackagingError(`${itemPath} must resolve bundled commands through \${PLUGIN_ROOT}.`);
+        }
+      }
+    }
+    validateHookCommands(item, itemPath);
+  }
+}
+
+async function rejectForbiddenDistributableContent(pluginRoot: string): Promise<void> {
+  const forbiddenBytes = FORBIDDEN_DISTRIBUTABLE_TEXT.map((text) => Buffer.from(text));
+  for (const path of await listFiles(pluginRoot)) {
+    const content = await readFile(join(pluginRoot, path));
+    for (const forbidden of forbiddenBytes) {
+      if (content.indexOf(forbidden) !== -1) {
+        throw new PackagingError(`${path} contains machine-specific path ${forbidden.toString()}.`);
+      }
+    }
+  }
+}
+
+async function copyCanonicalTree(sourceRoot: string, destinationRoot: string, label: string): Promise<void> {
+  const sourceStat = await lstat(sourceRoot);
+  if (!sourceStat.isDirectory()) throw new PackagingError(`${label} must be a directory.`);
+  await mkdir(destinationRoot, { recursive: true });
+
+  const entries = await readdir(sourceRoot, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name, "en"));
+  for (const entry of entries) {
+    assertDistributableName(entry.name, `${label}/${entry.name}`);
+    const source = join(sourceRoot, entry.name);
+    const destination = join(destinationRoot, entry.name);
+    const sourceMetadata = await lstat(source);
+    if (sourceMetadata.isSymbolicLink()) {
+      throw new PackagingError(`${label}/${entry.name} is a symlink; distributable inputs must be self-contained.`);
+    }
+    if (sourceMetadata.isDirectory()) {
+      await copyCanonicalTree(source, destination, `${label}/${entry.name}`);
+    } else if (sourceMetadata.isFile()) {
+      await mkdir(dirname(destination), { recursive: true });
+      await copyFile(source, destination);
+    } else {
+      throw new PackagingError(`${label}/${entry.name} is not a regular file or directory.`);
+    }
+  }
+}
+
+async function rejectFinderMetadata(root: string, label: string): Promise<void> {
+  for (const path of await listFiles(root)) {
+    if (path.split("/").includes(".DS_Store")) {
+      throw new PackagingError(`${label} contains forbidden Finder metadata at ${path}.`);
+    }
+  }
+}
+
+function assertDistributableName(name: string, path: string): void {
+  if (BLOCKED_NAMES.has(name) || BLOCKED_SUFFIXES.some((suffix) => name.endsWith(suffix))) {
+    throw new PackagingError(`${path} looks like local or live state and cannot be packaged.`);
+  }
+}
+
+async function listFiles(root: string): Promise<string[]> {
+  if (!(await exists(root))) return [];
+  const rootStat = await lstat(root);
+  if (!rootStat.isDirectory()) throw new PackagingError(`${root} must be a directory.`);
+  const files: string[] = [];
+
+  async function visit(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name, "en"));
+    for (const entry of entries) {
+      const absolutePath = join(directory, entry.name);
+      const path = relative(root, absolutePath).split(sep).join("/");
+      const metadata = await lstat(absolutePath);
+      if (metadata.isSymbolicLink()) throw new PackagingError(`${path} is an unsupported symlink.`);
+      if (metadata.isDirectory()) await visit(absolutePath);
+      else if (metadata.isFile()) files.push(path);
+      else throw new PackagingError(`${path} is not a regular file or directory.`);
+    }
+  }
+
+  await visit(root);
+  return files;
+}
+
+async function readJsonObject(path: string, label: string): Promise<Record<string, unknown>> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    throw new PackagingError(`Unable to read ${label} at ${path}: ${String(error)}`);
+  }
+  if (!isObject(value)) throw new PackagingError(`${label} must contain a JSON object.`);
+  return value;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+function defaultRepoRoot(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+}
+
+async function main(): Promise<void> {
+  const command = process.argv[2];
+  if (command === "build") {
+    await buildPlugin();
+    console.log(`Built ${GENERATED_PATH} from canonical sources.`);
+    return;
+  }
+  if (command === "check") {
+    await checkPlugin();
+    console.log(`${GENERATED_PATH} matches canonical sources.`);
+    return;
+  }
+  throw new PackagingError("Usage: bun run packages/core/src/plugin-package.ts <build|check>");
+}
+
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cargo Build Optimize"
+  short_description: "Measured Rust build optimization"
+  default_prompt: "Use $cargo-build-optimize to profile this Rust workspace and reduce build latency through small, measured slices."

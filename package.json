@@ -1,0 +1,23 @@
+{
+  "name": "skizzles",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun run plugin:build",
+    "plugin:build": "bun run packages/core/src/plugin-package.ts build",
+    "plugin:check": "bun run packages/core/src/plugin-package.ts check",
+    "test": "bun test",
+    "test:packaging": "bun test packages/core/test/plugin-package.test.ts",
+    "verify": "bun run plugin:check && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  }
+}
+

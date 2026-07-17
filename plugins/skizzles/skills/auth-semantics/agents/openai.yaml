@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auth Semantics"
+  short_description: "Preserve auth and permission semantics"
+  default_prompt: "Use $auth-semantics to check auth, session, and permission behavior."

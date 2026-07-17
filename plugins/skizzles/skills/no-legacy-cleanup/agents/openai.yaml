@@ -1,0 +1,4 @@
+interface:
+  display_name: "No Legacy Cleanup"
+  short_description: "Remove obsolete paths without tombstones"
+  default_prompt: "Use $no-legacy-cleanup to remove obsolete code, config, tooling, or docs cleanly."

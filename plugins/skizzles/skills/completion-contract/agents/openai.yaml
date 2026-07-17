@@ -1,0 +1,4 @@
+interface:
+  display_name: "Completion Contract"
+  short_description: "Turn intent into clear completion gates"
+  default_prompt: "Use $completion-contract to turn this task into a clear completion contract."

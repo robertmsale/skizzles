@@ -1,0 +1,23 @@
+{
+  "name": "codex-fastmcp-template",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/start.ts",
+    "server": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "validate:stdio": "bun run src/validate-stdio.ts",
+    "inspect:browser": "fastmcp inspect src/index.ts",
+    "dev": "fastmcp dev src/index.ts"
+  },
+  "dependencies": {
+    "fastmcp": "^4.4.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.8.0"
+  }
+}

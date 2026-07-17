@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rinf Boundary"
+  short_description: "Respect Flutter Rinf Rust boundaries"
+  default_prompt: "Use $rinf-boundary when changing a Flutter app that uses Rinf."

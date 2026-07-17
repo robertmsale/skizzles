@@ -1,0 +1,34 @@
+{
+  "name": "skizzles",
+  "version": "0.1.0",
+  "description": "Portable Codex harness skills, hooks, and maintenance tooling.",
+  "author": {
+    "name": "Robert Sale"
+  },
+  "homepage": "https://github.com/robertsale/skizzles",
+  "repository": "https://github.com/robertsale/skizzles",
+  "keywords": [
+    "codex",
+    "developer-tools",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Skizzles",
+    "shortDescription": "A portable Codex harness for durable developer workflows.",
+    "longDescription": "Skizzles packages reusable skills, hooks, and maintenance tooling for a consistent Codex development environment.",
+    "developerName": "Robert Sale",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Skills",
+      "Hooks",
+      "Developer tooling"
+    ],
+    "defaultPrompt": [
+      "Check this workspace with the Skizzles harness.",
+      "Help me use the available Skizzles skills."
+    ],
+    "logo": "./assets/logo.png"
+  }
+}
+

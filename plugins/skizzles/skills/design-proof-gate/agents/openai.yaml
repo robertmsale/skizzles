@@ -1,0 +1,4 @@
+interface:
+  display_name: "Design Proof Gate"
+  short_description: "Require screenshot-backed UI quality proof"
+  default_prompt: "Use $design-proof-gate to verify this UI work with screenshot-backed design evidence."

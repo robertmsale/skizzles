@@ -1,0 +1,4 @@
+interface:
+  display_name: "Counterfactual Engineering"
+  short_description: "Test competing causes and approaches"
+  default_prompt: "Use $counterfactual-engineering to test competing causal models or implementation approaches in isolated workspaces and select or synthesize the strongest validated outcome."

@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import subprocess
+from pathlib import Path
+
+
+def run(cmd, *, capture=False):
+    try:
+        if capture:
+            return subprocess.check_output(cmd, text=True)
+        subprocess.run(cmd, check=True)
+        return ""
+    except FileNotFoundError:
+        raise SystemExit(f"required command not found: {cmd[0]}")
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(exc.returncode)
+
+
+def load_json(raw):
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"failed to parse JSON: {exc}") from exc
+
+
+def parse_selector(value):
+    if not value:
+        return {}
+    try:
+        selector = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--selector must be JSON: {exc}") from exc
+    if not isinstance(selector, dict):
+        raise SystemExit("--selector must be a JSON object")
+    return selector
+
+
+def command_exists(name):
+    return subprocess.run(
+        ["sh", "-lc", f"command -v {name} >/dev/null 2>&1"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def simctl_devices():
+    raw = run(["xcrun", "simctl", "list", "devices", "booted", "--json"], capture=True)
+    devices = []
+    for runtime, entries in load_json(raw).get("devices", {}).items():
+        for entry in entries:
+            if entry.get("state") == "Booted":
+                devices.append(
+                    {
+                        "name": entry.get("name"),
+                        "udid": entry.get("udid"),
+                        "runtime": runtime,
+                        "state": entry.get("state"),
+                    }
+                )
+    return devices
+
+
+def idb_hierarchy(device_id):
+    if not command_exists("idb"):
+        raise SystemExit("idb is required for hierarchy and interaction commands")
+    raw = run(["idb", "ui", "describe-all", "--udid", device_id, "--json"], capture=True)
+    return load_json(raw)
+
+
+def iter_nodes(value):
+    if isinstance(value, dict):
+        yield value
+        for key in ("children", "subviews", "elements"):
+            child = value.get(key)
+            if isinstance(child, list):
+                for item in child:
+                    yield from iter_nodes(item)
+        for child in value.values():
+            if isinstance(child, dict):
+                yield from iter_nodes(child)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_nodes(item)
+
+
+def node_texts(node):
+    keys = ("text", "label", "name", "identifier", "id", "value", "title")
+    texts = []
+    for key in keys:
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            texts.append((key, value))
+    return texts
+
+
+def frame_from_node(node):
+    frame = node.get("frame") or node.get("rect")
+    if isinstance(frame, dict):
+        x = frame.get("x")
+        y = frame.get("y")
+        width = frame.get("width") or frame.get("w")
+        height = frame.get("height") or frame.get("h")
+    elif isinstance(frame, list) and len(frame) >= 4:
+        x, y, width, height = frame[:4]
+    else:
+        x = node.get("x")
+        y = node.get("y")
+        width = node.get("width") or node.get("w")
+        height = node.get("height") or node.get("h")
+    try:
+        return float(x), float(y), float(width), float(height)
+    except (TypeError, ValueError):
+        return None
+
+
+def matches_selector(node, selector):
+    contains = bool(selector.get("contains"))
+    for key, expected in selector.items():
+        if key == "contains":
+            continue
+        expected_text = str(expected).casefold()
+        candidates = [str(node.get(key, ""))]
+        if key in ("text", "label", "name", "id"):
+            candidates.extend(text for _, text in node_texts(node))
+        for candidate in candidates:
+            candidate_text = candidate.casefold()
+            if (contains and expected_text in candidate_text) or candidate_text == expected_text:
+                return True
+    return False
+
+
+def find_node(hierarchy, selector):
+    for node in iter_nodes(hierarchy):
+        if matches_selector(node, selector) and frame_from_node(node):
+            return node
+    return None
+
+
+def image_size(path):
+    raw = run(["magick", "identify", "-format", "%w %h", str(path)], capture=True)
+    width, height = raw.strip().split()
+    return int(width), int(height)
+
+
+def hierarchy_bounds(hierarchy):
+    frames = [frame_from_node(node) for node in iter_nodes(hierarchy)]
+    frames = [frame for frame in frames if frame]
+    if not frames:
+        return None
+    max_x = max(x + width for x, _, width, _ in frames)
+    max_y = max(y + height for _, y, _, height in frames)
+    return max_x, max_y
+
+
+def crop_selector(image_path, out_path, hierarchy, selector):
+    node = find_node(hierarchy, selector)
+    if not node:
+        raise SystemExit(f"selector did not match a visible element: {json.dumps(selector)}")
+    frame = frame_from_node(node)
+    bounds = hierarchy_bounds(hierarchy)
+    img_width, img_height = image_size(image_path)
+    if bounds:
+        scale_x = img_width / bounds[0]
+        scale_y = img_height / bounds[1]
+    else:
+        scale_x = scale_y = 1.0
+    x, y, width, height = frame
+    crop_x = max(0, round(x * scale_x))
+    crop_y = max(0, round(y * scale_y))
+    crop_w = max(1, round(width * scale_x))
+    crop_h = max(1, round(height * scale_y))
+    run(["magick", str(image_path), "-crop", f"{crop_w}x{crop_h}+{crop_x}+{crop_y}", "+repage", str(out_path)])
+
+
+def screenshot(args):
+    out = Path(args.out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    run(["xcrun", "simctl", "io", args.device_id, "screenshot", str(out)])
+    if args.selector:
+        crop_selector(out, out, idb_hierarchy(args.device_id), parse_selector(args.selector))
+    print(str(out))
+
+
+def tap_on(args):
+    selector = parse_selector(args.selector)
+    hierarchy = idb_hierarchy(args.device_id)
+    node = find_node(hierarchy, selector)
+    if not node:
+        raise SystemExit(f"selector did not match a tappable element: {json.dumps(selector)}")
+    x, y, width, height = frame_from_node(node)
+    tap_x = round(x + width / 2)
+    tap_y = round(y + height / 2)
+    run(["idb", "ui", "tap", "--udid", args.device_id, str(tap_x), str(tap_y)])
+    print(f"tapped {tap_x},{tap_y}")
+
+
+def parse_point(value, name):
+    parts = value.split(",")
+    if len(parts) != 2:
+        raise SystemExit(f"{name} must be formatted as x,y")
+    return parts[0].strip(), parts[1].strip()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Small iOS Simulator runtime for Codex Designer/QA agents.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("devices")
+
+    hierarchy_parser = sub.add_parser("hierarchy")
+    hierarchy_parser.add_argument("--device-id", required=True)
+
+    shot_parser = sub.add_parser("screenshot")
+    shot_parser.add_argument("--device-id", required=True)
+    shot_parser.add_argument("--out", default="/tmp/codex-designer-runtime/screenshot.png")
+    shot_parser.add_argument("--selector")
+
+    tap_parser = sub.add_parser("tap")
+    tap_parser.add_argument("--device-id", required=True)
+    tap_parser.add_argument("--x", required=True)
+    tap_parser.add_argument("--y", required=True)
+    tap_parser.add_argument("--duration")
+
+    tap_on_parser = sub.add_parser("tap-on")
+    tap_on_parser.add_argument("--device-id", required=True)
+    tap_on_parser.add_argument("--selector", required=True)
+
+    text_parser = sub.add_parser("text")
+    text_parser.add_argument("--device-id", required=True)
+    text_parser.add_argument("--text", required=True)
+
+    swipe_parser = sub.add_parser("swipe")
+    swipe_parser.add_argument("--device-id", required=True)
+    swipe_parser.add_argument("--from", dest="start", required=True)
+    swipe_parser.add_argument("--to", dest="end", required=True)
+    swipe_parser.add_argument("--duration")
+
+    launch_parser = sub.add_parser("launch")
+    launch_parser.add_argument("--device-id", required=True)
+    launch_parser.add_argument("--bundle-id", required=True)
+    launch_parser.add_argument("args", nargs=argparse.REMAINDER)
+
+    terminate_parser = sub.add_parser("terminate")
+    terminate_parser.add_argument("--device-id", required=True)
+    terminate_parser.add_argument("--bundle-id", required=True)
+
+    url_parser = sub.add_parser("open-url")
+    url_parser.add_argument("--device-id", required=True)
+    url_parser.add_argument("--url", required=True)
+
+    crop_parser = sub.add_parser("crop")
+    crop_parser.add_argument("--input", required=True)
+    crop_parser.add_argument("--out", required=True)
+    crop_parser.add_argument("--x", required=True, type=int)
+    crop_parser.add_argument("--y", required=True, type=int)
+    crop_parser.add_argument("--width", required=True, type=int)
+    crop_parser.add_argument("--height", required=True, type=int)
+
+    args = parser.parse_args()
+
+    if args.command == "devices":
+        print(json.dumps(simctl_devices(), indent=2))
+    elif args.command == "hierarchy":
+        print(json.dumps(idb_hierarchy(args.device_id), indent=2))
+    elif args.command == "screenshot":
+        screenshot(args)
+    elif args.command == "tap":
+        cmd = ["idb", "ui", "tap", "--udid", args.device_id]
+        if args.duration:
+            cmd.extend(["--duration", args.duration])
+        cmd.extend([args.x, args.y])
+        run(cmd)
+    elif args.command == "tap-on":
+        tap_on(args)
+    elif args.command == "text":
+        run(["idb", "ui", "text", "--udid", args.device_id, args.text])
+    elif args.command == "swipe":
+        x1, y1 = parse_point(args.start, "--from")
+        x2, y2 = parse_point(args.end, "--to")
+        cmd = ["idb", "ui", "swipe", "--udid", args.device_id]
+        if args.duration:
+            cmd.extend(["--duration", args.duration])
+        cmd.extend([x1, y1, x2, y2])
+        run(cmd)
+    elif args.command == "launch":
+        run(["xcrun", "simctl", "launch", args.device_id, args.bundle_id, *args.args])
+    elif args.command == "terminate":
+        run(["xcrun", "simctl", "terminate", args.device_id, args.bundle_id])
+    elif args.command == "open-url":
+        run(["xcrun", "simctl", "openurl", args.device_id, args.url])
+    elif args.command == "crop":
+        out = Path(args.out).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                "magick",
+                args.input,
+                "-crop",
+                f"{args.width}x{args.height}+{args.x}+{args.y}",
+                "+repage",
+                str(out),
+            ]
+        )
+        print(str(out))
+
+
+if __name__ == "__main__":
+    main()

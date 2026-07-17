@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Project Tooling"
+  short_description: "Author hooks, agents, and MCPs"
+  default_prompt: "Use $codex-project-tooling to configure repo-local Codex hooks, subagent roles, MCP servers, paired skills, and trusted project .codex behavior."

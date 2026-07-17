@@ -1,0 +1,7 @@
+interface:
+  display_name: "Designer Runtime"
+  short_description: "Pilot iOS simulators and capture visual proof"
+  default_prompt: "Use $designer-runtime to pilot an iOS simulator and capture visual proof for this UI task."
+
+policy:
+  allow_implicit_invocation: false
