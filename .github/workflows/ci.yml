@@ -23,10 +23,12 @@ jobs:
         run: bunx tsc --noEmit
       - name: Test
         run: bun test
-      - name: Build generated plugin
-        run: bun run plugin:build
       - name: Validate plugin and generated drift
         run: bun run plugin:check
+      - name: Rebuild generated plugin reproducibly
+        run: |
+          bun run plugin:build
+          git diff --exit-code -- plugins/skizzles
       - name: Reject Finder metadata outside the preserved root file
         shell: bash
         run: |

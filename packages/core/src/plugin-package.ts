@@ -40,7 +40,20 @@ const BLOCKED_NAMES = new Set([
 ]);
 
 const BLOCKED_SUFFIXES = [".db", ".log", ".sqlite", ".sqlite3"];
-const FORBIDDEN_DISTRIBUTABLE_TEXT = ["/Users/robertsale"];
+const BLOCKED_CREDENTIAL_NAMES = new Set([
+  ".netrc",
+  ".npmrc",
+  ".pypirc",
+  "credentials.json",
+  "id_ed25519",
+  "id_rsa",
+  "service-account.json",
+]);
+const MACHINE_PATH_PATTERNS = [
+  /\/Users\/[A-Za-z0-9._-]+(?:\/|\b)/,
+  /\/home\/[A-Za-z0-9._-]+(?:\/|\b)/,
+  /[A-Za-z]:\\Users\\[A-Za-z0-9._-]+(?:\\|\b)/i,
+];
 
 export class PackagingError extends Error {}
 
@@ -157,8 +170,9 @@ async function validateGeneratedPlugin(
   if (manifest.version !== rootPackage.version) {
     throw new PackagingError("Plugin manifest and root package versions must match.");
   }
+  await validateManifest(manifest, pluginRoot);
   if ("hooks" in manifest) {
-    throw new PackagingError("plugin.json must omit unsupported field `hooks`; Codex discovers hooks/hooks.json.");
+    throw new PackagingError("plugin.json intentionally omits `hooks`; keep the canonical default discovery path at hooks/hooks.json.");
   }
 
   const marketplace = await readJsonObject(marketplacePath, "marketplace metadata");
@@ -171,6 +185,39 @@ async function validateGeneratedPlugin(
   }
 
   await rejectForbiddenDistributableContent(pluginRoot);
+}
+
+async function validateManifest(manifest: Record<string, unknown>, pluginRoot: string): Promise<void> {
+  if (typeof manifest.version !== "string" || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(manifest.version)) {
+    throw new PackagingError("Plugin manifest version must be strict semver.");
+  }
+  if (typeof manifest.description !== "string" || manifest.description.trim() === "") {
+    throw new PackagingError("Plugin manifest requires a description.");
+  }
+  if (!isObject(manifest.author) || typeof manifest.author.name !== "string" || manifest.author.name.trim() === "") {
+    throw new PackagingError("Plugin manifest requires author.name.");
+  }
+  const interfaceValue = manifest.interface;
+  if (!isObject(interfaceValue)) throw new PackagingError("Plugin manifest requires interface metadata.");
+  for (const field of ["displayName", "shortDescription", "longDescription", "developerName", "category"] as const) {
+    if (typeof interfaceValue[field] !== "string" || interfaceValue[field].trim() === "") {
+      throw new PackagingError(`Plugin interface requires ${field}.`);
+    }
+  }
+  if (!Array.isArray(interfaceValue.capabilities) || !interfaceValue.capabilities.every((value) => typeof value === "string")) {
+    throw new PackagingError("Plugin interface capabilities must be an array of strings.");
+  }
+  if (!Array.isArray(interfaceValue.defaultPrompt) || interfaceValue.defaultPrompt.length > 3 ||
+      !interfaceValue.defaultPrompt.every((value) => typeof value === "string" && value.length <= 128)) {
+    throw new PackagingError("Plugin interface defaultPrompt must contain at most three strings of 128 characters or fewer.");
+  }
+  for (const field of ["composerIcon", "logo", "logoDark"] as const) {
+    const value = interfaceValue[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !value.startsWith("./") || value.includes("..") || !(await exists(join(pluginRoot, value)))) {
+      throw new PackagingError(`Plugin interface ${field} must reference an existing bundled file.`);
+    }
+  }
 }
 
 function validateMarketplaceEntry(marketplace: Record<string, unknown>): void {
@@ -192,8 +239,8 @@ function validateMarketplaceEntry(marketplace: Record<string, unknown>): void {
   const policy = entry.policy;
   if (
     !isObject(policy) ||
-    typeof policy.installation !== "string" ||
-    typeof policy.authentication !== "string" ||
+    !["NOT_AVAILABLE", "AVAILABLE", "INSTALLED_BY_DEFAULT"].includes(String(policy.installation)) ||
+    !["ON_INSTALL", "ON_USE"].includes(String(policy.authentication)) ||
     typeof entry.category !== "string"
   ) {
     throw new PackagingError("Marketplace entry must include installation, authentication, and category metadata.");
@@ -225,13 +272,12 @@ function validateHookCommands(value: unknown, path: string): void {
 }
 
 async function rejectForbiddenDistributableContent(pluginRoot: string): Promise<void> {
-  const forbiddenBytes = FORBIDDEN_DISTRIBUTABLE_TEXT.map((text) => Buffer.from(text));
   for (const path of await listFiles(pluginRoot)) {
     const content = await readFile(join(pluginRoot, path));
-    for (const forbidden of forbiddenBytes) {
-      if (content.indexOf(forbidden) !== -1) {
-        throw new PackagingError(`${path} contains machine-specific path ${forbidden.toString()}.`);
-      }
+    const text = content.toString("utf8");
+    const match = MACHINE_PATH_PATTERNS.find((pattern) => pattern.test(text))?.exec(text)?.[0];
+    if (match) {
+      throw new PackagingError(`${path} contains machine-specific path ${match}.`);
     }
   }
 }
@@ -271,7 +317,9 @@ async function rejectFinderMetadata(root: string, label: string): Promise<void> 
 }
 
 function assertDistributableName(name: string, path: string): void {
-  if (BLOCKED_NAMES.has(name) || BLOCKED_SUFFIXES.some((suffix) => name.endsWith(suffix))) {
+  const lowerName = name.toLowerCase();
+  if (BLOCKED_NAMES.has(name) || lowerName === ".env" || lowerName.startsWith(".env.") ||
+      BLOCKED_CREDENTIAL_NAMES.has(lowerName) || BLOCKED_SUFFIXES.some((suffix) => lowerName.endsWith(suffix))) {
     throw new PackagingError(`${path} looks like local or live state and cannot be packaged.`);
   }
 }

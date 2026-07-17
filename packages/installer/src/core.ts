@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -32,6 +33,42 @@ const receiptName = "skills-receipt.json";
 
 export function skillsReceiptPath(codexHome: string): string {
   return join(resolve(codexHome), ".skizzles", receiptName);
+}
+
+export function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export function copyDirectoryExclusive(
+  source: string,
+  target: string,
+  copyEntry: (source: string, target: string) => void = (from, to) => cpSync(from, to, { recursive: true }),
+): void {
+  mkdirSync(target);
+  try {
+    for (const name of readdirSync(source)) {
+      if (name === ".DS_Store") continue;
+      copyEntry(join(source, name), join(target, name));
+    }
+  } catch (error) {
+    rmSync(target, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export function assertManagedParentsAreReal(rootInput: string, managedParents: string[]): void {
+  const root = resolve(rootInput);
+  for (const path of [root, ...managedParents.map((parent) => join(root, parent))]) {
+    if (pathEntryExists(path) && lstatSync(path).isSymbolicLink()) {
+      throw new Error(`refusing to manage through a symlinked parent: ${path}`);
+    }
+  }
 }
 
 function publicSkills(sourceRoot: string): Array<{ name: string; source: string }> {
@@ -71,8 +108,9 @@ function readReceipt(codexHome: string): SkillsReceipt {
 export function installSkills(options: SkillsOptions): SkillsReceipt {
   const codexHome = resolve(options.codexHome);
   const sourceRoot = resolve(options.sourceRoot);
+  assertManagedParentsAreReal(codexHome, ["skills", ".skizzles"]);
   const receiptPath = skillsReceiptPath(codexHome);
-  if (existsSync(receiptPath)) throw new Error(`Skizzles skills receipt already exists: ${receiptPath}`);
+  if (pathEntryExists(receiptPath)) throw new Error(`Skizzles skills receipt already exists: ${receiptPath}`);
 
   const skills = publicSkills(sourceRoot).map(({ name, source }) => ({
     name,
@@ -80,7 +118,7 @@ export function installSkills(options: SkillsOptions): SkillsReceipt {
     target: join(codexHome, "skills", name),
   }));
   if (skills.length === 0) throw new Error("no public skills were found");
-  const conflict = skills.find(({ target }) => existsSync(target));
+  const conflict = skills.find(({ target }) => pathEntryExists(target));
   if (conflict) throw new Error(`refusing to replace existing skill: ${conflict.target}`);
 
   const receipt: SkillsReceipt = {
@@ -95,9 +133,9 @@ export function installSkills(options: SkillsOptions): SkillsReceipt {
   const created: string[] = [];
   try {
     for (const skill of skills) {
-      created.push(skill.target);
       if (options.transfer === "link") symlinkSync(skill.source, skill.target, "dir");
-      else cpSync(skill.source, skill.target, { recursive: true, filter: (source) => !source.endsWith("/.DS_Store") });
+      else copyDirectoryExclusive(skill.source, skill.target);
+      created.push(skill.target);
     }
     mkdirSync(dirname(receiptPath), { recursive: true });
     writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx" });
@@ -108,13 +146,18 @@ export function installSkills(options: SkillsOptions): SkillsReceipt {
   return receipt;
 }
 
-export function uninstallSkills(codexHomeInput: string, dryRun = false): SkillsReceipt {
+export function uninstallSkills(
+  codexHomeInput: string,
+  dryRun = false,
+  move: (from: string, to: string) => void = renameSync,
+): SkillsReceipt {
   const codexHome = resolve(codexHomeInput);
+  assertManagedParentsAreReal(codexHome, ["skills", ".skizzles"]);
   const receipt = readReceipt(codexHome);
   for (const skill of receipt.skills) {
     const target = resolve(skill.target);
     const expectedParent = join(codexHome, "skills");
-    if (dirname(target) !== expectedParent || !existsSync(target)) {
+    if (dirname(target) !== expectedParent || !pathEntryExists(target)) {
       throw new Error(`owned skill target is missing or outside CODEX_HOME: ${target}`);
     }
     const source = join(receipt.sourceRoot, "skills", skill.name);
@@ -127,8 +170,27 @@ export function uninstallSkills(codexHomeInput: string, dryRun = false): SkillsR
     }
   }
   if (dryRun) return receipt;
-  for (const skill of receipt.skills) rmSync(skill.target, { recursive: true, force: false });
-  rmSync(skillsReceiptPath(codexHome));
+  const quarantine = join(codexHome, ".skizzles", `uninstall-${crypto.randomUUID()}`);
+  mkdirSync(quarantine);
+  const moved: Array<{ from: string; to: string }> = [];
+  try {
+    for (const skill of receipt.skills) {
+      const destination = join(quarantine, skill.name);
+      move(skill.target, destination);
+      moved.push({ from: skill.target, to: destination });
+    }
+    const receiptPath = skillsReceiptPath(codexHome);
+    const receiptDestination = join(quarantine, receiptName);
+    move(receiptPath, receiptDestination);
+    moved.push({ from: receiptPath, to: receiptDestination });
+  } catch (error) {
+    for (const item of moved.reverse()) {
+      if (pathEntryExists(item.to) && !pathEntryExists(item.from)) renameSync(item.to, item.from);
+    }
+    rmSync(quarantine, { recursive: true, force: true });
+    throw error;
+  }
+  try { rmSync(quarantine, { recursive: true, force: true }); } catch {}
   return receipt;
 }
 

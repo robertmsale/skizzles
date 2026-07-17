@@ -4,6 +4,8 @@
 
 **A neat little harness for making Codex work feel less like re-packing a suitcase.** Skizzles keeps reusable skills, optional hooks, runtime helpers, and release tooling in one reviewable source tree.
 
+> **Pre-release:** this checkout is the canonical source and packaging project. No public Git remote or tagged stable release is configured yet, so the public install commands below become executable only after the repository and a versioned release are published.
+
 ## Choose your ride
 
 ### Stable distribution: the versioned plugin
@@ -16,7 +18,7 @@ Skizzles does not modify an existing Codex installation, `PATH`, launchd, or ano
 
 ### Plain skills: pick exactly what you need
 
-Use the Skills CLI when you want a single skill without the plugin runtime:
+After publication, use the Skills CLI when you want a single skill without the plugin runtime:
 
 ```sh
 bunx skills add https://github.com/robertsale/skizzles --skill install-skizzles
@@ -26,7 +28,7 @@ Add more `--skill <name>` flags to select individual skills, or omit `--skill` t
 
 ### Develop against the source tree
 
-Clone Skizzles, then point the Skills CLI at the local canonical `skills/` directory and choose its symlink option:
+From an owner-provided checkout (or from the public repository after publication), point the Skills CLI at the local canonical `skills/` directory and choose its symlink option:
 
 ```sh
 git clone https://github.com/robertsale/skizzles.git

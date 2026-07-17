@@ -16,7 +16,7 @@ Release only from a clean, validated source state. Keep versioning, generated ou
 ## Align and validate
 
 1. Update the canonical version in `package.json` and `packages/core/plugin-template/.codex-plugin/plugin.json` together.
-2. Regenerate with `bun run plugin:build`; do not edit `plugins/skizzles/` directly.
+2. Run `bun run plugin:check` to record expected pre-regeneration drift, then regenerate with `bun run plugin:build`; do not edit `plugins/skizzles/` directly.
 3. Run `bun install --frozen-lockfile`, `bunx tsc --noEmit`, `bun test`, and `bun run plugin:check`.
 4. Inspect the diff for the intended metadata and generated output only. Resolve drift in canonical sources and rerun validation.
 

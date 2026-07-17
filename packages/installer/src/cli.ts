@@ -14,8 +14,8 @@ function usage(): never {
 function parse(argv: string[]): Parsed {
   const command = argv.shift();
   if (command !== "install" && command !== "uninstall" && command !== "doctor") usage();
-  let codexHome = process.env.CODEX_HOME;
-  let home = process.env.HOME;
+  let codexHome: string | undefined;
+  let home: string | undefined;
   let sourceRoot = resolve(import.meta.dir, "../../..");
   let transfer: Transfer = "link";
   let surface: "skills" | "harness" | undefined;
@@ -46,7 +46,9 @@ function parse(argv: string[]): Parsed {
 export function main(argv = process.argv.slice(2)): void {
   const parsed = parse([...argv]);
   if (parsed.command === "doctor") {
-    console.log(JSON.stringify(doctor(parsed.home!, parsed.codexHome!)));
+    const report = doctor(parsed.home!, parsed.codexHome!);
+    console.log(JSON.stringify(report));
+    if (!report.ok) process.exitCode = 1;
     return;
   }
   if (parsed.surface === "skills") {

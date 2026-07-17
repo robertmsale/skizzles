@@ -1,16 +1,16 @@
 import {
-  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { sameTree, type Transfer } from "./core";
+import { assertManagedParentsAreReal, copyDirectoryExclusive, pathEntryExists, sameTree, type Transfer } from "./core";
 
 interface Marketplace {
   name: string;
@@ -24,7 +24,6 @@ export interface HarnessReceipt {
   transfer: Transfer;
   pluginTarget: string;
   marketplacePath: string;
-  marketplaceBefore: string | null;
   marketplaceAfter: string;
 }
 
@@ -48,16 +47,8 @@ function pluginEntry(): Record<string, unknown> {
   };
 }
 
-function marketplaceWithSkizzles(before: string | null): string {
-  const marketplace: Marketplace = before === null
-    ? { name: "personal", interface: { displayName: "Personal" }, plugins: [] }
-    : JSON.parse(before) as Marketplace;
-  if (!marketplace || typeof marketplace.name !== "string" || !Array.isArray(marketplace.plugins)) {
-    throw new Error("existing marketplace has an unsupported shape");
-  }
-  if (marketplace.plugins.some((entry) => entry.name === "skizzles")) {
-    throw new Error("marketplace already contains a skizzles entry");
-  }
+function marketplaceWithSkizzles(): string {
+  const marketplace: Marketplace = { name: "personal", interface: { displayName: "Personal" }, plugins: [] };
   marketplace.plugins.push(pluginEntry());
   return `${JSON.stringify(marketplace, null, 2)}\n`;
 }
@@ -79,20 +70,20 @@ export function installHarness(options: HarnessOptions): HarnessReceipt {
   const pluginTarget = join(home, "plugins", "skizzles");
   const marketplacePath = join(home, ".agents", "plugins", "marketplace.json");
   const receiptPath = harnessReceiptPath(home);
+  assertManagedParentsAreReal(home, ["plugins", ".agents", ".agents/plugins", ".skizzles"]);
   if (!existsSync(join(pluginSource, ".codex-plugin", "plugin.json"))) {
     throw new Error(`generated plugin is missing: ${pluginSource}`);
   }
-  if (existsSync(pluginTarget)) throw new Error(`refusing to replace existing plugin: ${pluginTarget}`);
-  if (existsSync(receiptPath)) throw new Error(`Skizzles harness receipt already exists: ${receiptPath}`);
-  const marketplaceBefore = existsSync(marketplacePath) ? readFileSync(marketplacePath, "utf8") : null;
-  const marketplaceAfter = marketplaceWithSkizzles(marketplaceBefore);
+  if (pathEntryExists(pluginTarget)) throw new Error(`refusing to replace existing plugin: ${pluginTarget}`);
+  if (pathEntryExists(receiptPath)) throw new Error(`Skizzles harness receipt already exists: ${receiptPath}`);
+  if (pathEntryExists(marketplacePath)) throw new Error(`isolated harness requires an absent marketplace: ${marketplacePath}`);
+  const marketplaceAfter = marketplaceWithSkizzles();
   const receipt: HarnessReceipt = {
     version: 1,
     sourceRoot,
     transfer: options.transfer,
     pluginTarget,
     marketplacePath,
-    marketplaceBefore,
     marketplaceAfter,
   };
   if (options.dryRun) return receipt;
@@ -100,29 +91,33 @@ export function installHarness(options: HarnessOptions): HarnessReceipt {
   try {
     mkdirSync(dirname(pluginTarget), { recursive: true });
     if (options.transfer === "link") symlinkSync(pluginSource, pluginTarget, "dir");
-    else cpSync(pluginSource, pluginTarget, { recursive: true, filter: (source) => !source.endsWith("/.DS_Store") });
+    else copyDirectoryExclusive(pluginSource, pluginTarget);
     mkdirSync(dirname(marketplacePath), { recursive: true });
-    writeFileSync(marketplacePath, marketplaceAfter);
+    writeFileSync(marketplacePath, marketplaceAfter, { flag: "wx" });
     mkdirSync(dirname(receiptPath), { recursive: true });
     writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx" });
   } catch (error) {
     rmSync(pluginTarget, { recursive: true, force: true });
-    if (marketplaceBefore === null) rmSync(marketplacePath, { force: true });
-    else writeFileSync(marketplacePath, marketplaceBefore);
+    rmSync(marketplacePath, { force: true });
     throw error;
   }
   return receipt;
 }
 
-export function uninstallHarness(homeInput: string, dryRun = false): HarnessReceipt {
+export function uninstallHarness(
+  homeInput: string,
+  dryRun = false,
+  move: (from: string, to: string) => void = renameSync,
+): HarnessReceipt {
   const home = resolve(homeInput);
+  assertManagedParentsAreReal(home, ["plugins", ".agents", ".agents/plugins", ".skizzles"]);
   const receipt = readReceipt(home);
   const expectedTarget = join(home, "plugins", "skizzles");
   const expectedMarketplace = join(home, ".agents", "plugins", "marketplace.json");
   if (resolve(receipt.pluginTarget) !== expectedTarget || resolve(receipt.marketplacePath) !== expectedMarketplace) {
     throw new Error("harness receipt targets are outside the selected HOME");
   }
-  if (!existsSync(receipt.pluginTarget)) throw new Error("owned plugin target is missing");
+  if (!pathEntryExists(receipt.pluginTarget)) throw new Error("owned plugin target is missing");
   const pluginSource = join(receipt.sourceRoot, "plugins", "skizzles");
   if (receipt.transfer === "link") {
     if (!lstatSync(receipt.pluginTarget).isSymbolicLink()) throw new Error("owned plugin link changed type");
@@ -135,9 +130,26 @@ export function uninstallHarness(homeInput: string, dryRun = false): HarnessRece
     throw new Error("marketplace changed after Skizzles installation");
   }
   if (dryRun) return receipt;
-  rmSync(receipt.pluginTarget, { recursive: true, force: false });
-  if (receipt.marketplaceBefore === null) rmSync(receipt.marketplacePath);
-  else writeFileSync(receipt.marketplacePath, receipt.marketplaceBefore);
-  rmSync(harnessReceiptPath(home));
+  const quarantine = join(home, ".skizzles", `harness-uninstall-${crypto.randomUUID()}`);
+  mkdirSync(quarantine);
+  const moved: Array<{ from: string; to: string }> = [];
+  try {
+    for (const [from, name] of [
+      [receipt.marketplacePath, "marketplace.json"],
+      [receipt.pluginTarget, "plugin"],
+      [harnessReceiptPath(home), "receipt.json"],
+    ] as const) {
+      const to = join(quarantine, name);
+      move(from, to);
+      moved.push({ from, to });
+    }
+  } catch (error) {
+    for (const item of moved.reverse()) {
+      if (pathEntryExists(item.to) && !pathEntryExists(item.from)) renameSync(item.to, item.from);
+    }
+    rmSync(quarantine, { recursive: true, force: true });
+    throw error;
+  }
+  try { rmSync(quarantine, { recursive: true, force: true }); } catch {}
   return receipt;
 }

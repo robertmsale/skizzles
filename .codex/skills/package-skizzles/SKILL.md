@@ -16,8 +16,8 @@ Package from canonical sources only. Treat `plugins/skizzles/` as generated outp
 ## Stage and verify
 
 1. Run `bun install --frozen-lockfile` when dependencies are not already available.
-2. Run `bun run plugin:build` to stage the versioned plugin.
-3. Run `bun run plugin:check` to restage into isolation, validate manifest/marketplace/hooks, reject machine paths and Finder metadata, and prove no generated drift.
+2. Run `bun run plugin:check` before regeneration so existing canonical/generated drift remains visible.
+3. Run `bun run plugin:build` to stage the versioned plugin, then run `bun run plugin:check` again to validate manifest/marketplace/hooks, reject machine paths and Finder metadata, and prove no generated drift.
 4. Run `bun test packages/core/test/plugin-package.test.ts` when package logic or canonical inputs changed.
 5. Inspect the generated diff. Fix canonical inputs, then rebuild; never patch generated files as the fix.
 

@@ -23,6 +23,7 @@ Run the narrowest useful check first, then use the complete package boundary whe
 ```sh
 bunx tsc --noEmit
 bun test
+bun run plugin:check
 bun run plugin:build
 bun run plugin:check
 ```

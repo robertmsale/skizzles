@@ -124,11 +124,27 @@ describe("deterministic plugin packaging", () => {
 
   test("rejects machine-specific paths in distributable output", async () => {
     const root = await fixture();
-    await write(root, "runtime/config.ts", "export const path = '/Users/robertsale/.codex';\n");
+    await write(root, "runtime/config.ts", "export const path = '/Users/alice/.codex';\n");
 
     expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
-      "contains machine-specific path /Users/robertsale",
+      "contains machine-specific path /Users/alice/",
     );
+  });
+
+  test("rejects environment and credential artifacts", async () => {
+    const root = await fixture();
+    await write(root, "runtime/.env.production", "TOKEN=secret\n");
+    expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow("looks like local or live state");
+  });
+
+  test("validates creator-required manifest metadata", async () => {
+    const root = await fixture();
+    const manifestPath = join(root, "packages/core/plugin-template/.codex-plugin/plugin.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.version = "not-semver";
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "skizzles", version: "not-semver" }));
+    expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow("strict semver");
   });
 
   test("rejects hooks that bypass PLUGIN_ROOT", async () => {
@@ -156,6 +172,7 @@ async function fixture(): Promise<string> {
     "package.json",
     JSON.stringify({ name: "skizzles", version: "0.1.0", private: true }, null, 2),
   );
+  await write(root, "skills/example/SKILL.md", "---\nname: example\ndescription: Fixture skill.\n---\n");
   await write(
     root,
     "packages/core/plugin-template/.codex-plugin/plugin.json",

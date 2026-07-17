@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { harnessReceiptPath, installHarness, uninstallHarness } from "../src/harness";
 
@@ -29,15 +29,13 @@ describe("harness installer", () => {
     });
   }
 
-  test("merges and restores an existing marketplace", () => {
+  test("requires an absent marketplace for isolated harness mode", () => {
     const f = fixture();
     const path = join(f.home, ".agents/plugins/marketplace.json");
     mkdirSync(join(f.home, ".agents/plugins"), { recursive: true });
     const before = '{"name":"personal","plugins":[{"name":"other"}]}\n';
     writeFileSync(path, before);
-    installHarness({ ...f, transfer: "link" });
-    expect(JSON.parse(readFileSync(path, "utf8")).plugins.map((entry: { name: string }) => entry.name)).toEqual(["other", "skizzles"]);
-    uninstallHarness(f.home);
+    expect(() => installHarness({ ...f, transfer: "link" })).toThrow("requires an absent marketplace");
     expect(readFileSync(path, "utf8")).toBe(before);
   });
 
@@ -47,6 +45,39 @@ describe("harness installer", () => {
     expect(existsSync(f.home)).toBe(false);
     mkdirSync(join(f.home, "plugins/skizzles"), { recursive: true });
     expect(() => installHarness({ ...f, transfer: "copy" })).toThrow("refusing to replace");
+  });
+
+  test("preflight preserves a foreign dangling plugin symlink", () => {
+    const f = fixture();
+    mkdirSync(join(f.home, "plugins"), { recursive: true });
+    const target = join(f.home, "plugins/skizzles");
+    symlinkSync(join(f.home, "missing"), target);
+    expect(() => installHarness({ ...f, transfer: "link" })).toThrow("refusing to replace");
+    expect(lstatSync(target).isSymbolicLink()).toBe(true);
+  });
+
+  test("rejects symlinked managed parents", () => {
+    const f = fixture();
+    const outside = join(f.home, "outside");
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(f.home, { recursive: true });
+    symlinkSync(outside, join(f.home, "plugins"));
+    expect(() => installHarness({ ...f, transfer: "link" })).toThrow("symlinked parent");
+    expect(existsSync(join(outside, "skizzles"))).toBe(false);
+  });
+
+  test("uninstall rolls back staged moves on failure", () => {
+    const f = fixture();
+    installHarness({ ...f, transfer: "link" });
+    let calls = 0;
+    expect(() => uninstallHarness(f.home, false, (from, to) => {
+      calls += 1;
+      if (calls === 2) throw new Error("injected move failure");
+      renameSync(from, to);
+    })).toThrow("injected move failure");
+    expect(existsSync(join(f.home, "plugins/skizzles/.codex-plugin/plugin.json"))).toBe(true);
+    expect(existsSync(join(f.home, ".agents/plugins/marketplace.json"))).toBe(true);
+    expect(existsSync(harnessReceiptPath(f.home))).toBe(true);
   });
 
   test("uninstall refuses marketplace drift", () => {
