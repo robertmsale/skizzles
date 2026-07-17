@@ -207,12 +207,19 @@ function isAssignment(word: string): boolean {
 function normalizeCommand(command: SimpleCommand): SimpleCommand | undefined {
   const { words, uncertain } = command;
   let index = 0;
-  while (isAssignment(words[index] ?? "")) index += 1;
+  const isCertain = (tokenIndex: number) => !uncertain[tokenIndex];
+
+  while (isAssignment(words[index] ?? "")) {
+    if (!isCertain(index)) return undefined;
+    index += 1;
+  }
 
   if (basename(words[index] ?? "") === "env") {
+    if (!isCertain(index)) return undefined;
     index += 1;
     while (index < words.length) {
       const word = words[index]!;
+      if (!isCertain(index)) return undefined;
       if (word === "--") {
         index += 1;
         break;
@@ -222,6 +229,7 @@ function normalizeCommand(command: SimpleCommand): SimpleCommand | undefined {
         continue;
       }
       if (["-u", "--unset", "-C", "--chdir"].includes(word)) {
+        if (words[index + 1] === undefined || !isCertain(index + 1)) return undefined;
         index += 2;
         continue;
       }
@@ -232,7 +240,10 @@ function normalizeCommand(command: SimpleCommand): SimpleCommand | undefined {
       if (word.startsWith("-")) return undefined;
       break;
     }
-    while (isAssignment(words[index] ?? "")) index += 1;
+    while (isAssignment(words[index] ?? "")) {
+      if (!isCertain(index)) return undefined;
+      index += 1;
+    }
   }
 
   const launcher = basename(words[index] ?? "");

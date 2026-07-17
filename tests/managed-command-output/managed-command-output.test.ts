@@ -116,6 +116,9 @@ describe("managed command output hook", () => {
       "bun /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab --owner thread-1 run --lab experiment -- echo hello",
       "A=1 /tmp/source/skills/codex-container-lab/scripts/codex-container-lab --owner thread-1 run --lab experiment -- echo hello",
       "env A=1 /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab --state-root /tmp/state run --lab experiment -- echo hello",
+      "env -i A=1 /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab run --lab experiment -- echo hello",
+      "env -u FOO A=1 /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab run --lab experiment -- echo hello",
+      "env -C ./tmp A=1 /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab run --lab experiment -- echo hello",
     ]) {
       const result = invoke(hook, [], { stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { command } }) });
       expect(text(result.stdout), command).not.toBe("");
@@ -134,6 +137,13 @@ describe("managed command output hook", () => {
       "A=1 \"codex-container-lab\" run --lab experiment -- echo hello",
       "A=1 /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab --owner review \"\" run --lab experiment -- echo hello",
       "env A=1 \"/tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab\" run --lab experiment -- echo hello",
+      "\"A=1\" codex-container-lab run --lab experiment -- echo hello",
+      "A=\"1\" codex-container-lab run --lab experiment -- echo hello",
+      "\"env\" A=1 codex-container-lab run --lab experiment -- echo hello",
+      "env \"A=1\" codex-container-lab run --lab experiment -- echo hello",
+      "env \"-i\" A=1 codex-container-lab run --lab experiment -- echo hello",
+      "env -u \"FOO\" A=1 codex-container-lab run --lab experiment -- echo hello",
+      "env -C \"./tmp\" A=1 codex-container-lab run --lab experiment -- echo hello",
       "codex-container-lab --owner thread health",
     ]) {
       const result = invoke(hook, [], { stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { command } }) });
