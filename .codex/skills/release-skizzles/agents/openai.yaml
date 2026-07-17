@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Skizzles"
+  short_description: "Prepare a safe versioned Skizzles release"
+  default_prompt: "Use $release-skizzles to prepare a validated Skizzles release."

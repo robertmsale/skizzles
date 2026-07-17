@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Test
+        run: bun test
+      - name: Build generated plugin
+        run: bun run plugin:build
+      - name: Validate plugin and generated drift
+        run: bun run plugin:check
+      - name: Reject Finder metadata outside the preserved root file
+        shell: bash
+        run: |
+          roots=(.agents .codex hooks runtime scripts skills packages plugins profiles)
+          matches="$(find "${roots[@]}" -name .DS_Store -print)"
+          if [ -n "$matches" ]; then
+            printf '%s\n' "$matches"
+            exit 1
+          fi

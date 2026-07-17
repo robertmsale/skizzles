@@ -1,0 +1,4 @@
+interface:
+  display_name: "Package Skizzles"
+  short_description: "Stage and validate the Skizzles plugin"
+  default_prompt: "Use $package-skizzles to stage and validate the Skizzles plugin."
