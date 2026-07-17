@@ -1,0 +1,8 @@
+image:
+  name: ubuntu:24.04
+  service: lab
+runtime:
+  workspace: /workspace
+  shell: [/bin/bash, -lc]
+ports: {}
+environment: []

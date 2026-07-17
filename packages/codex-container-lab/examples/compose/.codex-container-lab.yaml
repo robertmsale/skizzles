@@ -1,0 +1,12 @@
+compose:
+  files: [compose.yaml]
+  command_service: app
+runtime:
+  workspace: /workspace
+  shell: [/bin/bash, -lc]
+ports:
+  redis:
+    service: cache
+    target: 6379
+    scheme: redis
+environment: []

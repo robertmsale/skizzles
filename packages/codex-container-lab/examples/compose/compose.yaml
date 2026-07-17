@@ -1,0 +1,7 @@
+services:
+  app:
+    image: ubuntu:24.04
+    command: [sleep, infinity]
+    depends_on: [cache]
+  cache:
+    image: redis:7-alpine

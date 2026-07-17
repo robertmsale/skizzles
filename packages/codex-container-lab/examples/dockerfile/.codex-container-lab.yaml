@@ -1,0 +1,9 @@
+dockerfile:
+  path: Dockerfile
+  context: .
+  service: lab
+runtime:
+  workspace: /workspace
+  shell: [/bin/bash, -lc]
+ports: {}
+environment: []
