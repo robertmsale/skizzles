@@ -11,12 +11,13 @@ Keep installation deliberate and reversible. Never mutate a live Codex home, plu
 
 - Use plain-skill mode when the user only wants skills. It manages selected directories below an explicit `CODEX_HOME/skills` and never activates hooks or runtime helpers.
 - Use full-harness mode only when the user wants the generated Skizzles plugin and accepts that its hooks may become available through the target marketplace.
+- After the complete plugin surface is installed, choose `passive` orchestration to enable hooks without overriding Codex's native MultiAgentV2 defaults, or `aggressive` orchestration to activate proactive Fourth Wall routing.
 - Use `link` for a trusted local checkout that should hot-reload source updates. Use `copy` for an isolated snapshot.
 - Prefer a versioned release checkout for stable use. Treat `plugins/skizzles` as generated output and build it before a full-harness install.
 
 Confirm the source checkout, absolute target `HOME`, absolute target `CODEX_HOME`, surface, and transfer method before running a non-dry-run command. Use temporary targets for demonstrations and validation. The current skills surface installs every public skill as one owned set.
 
-If this skill was installed by itself with the Skills CLI, do not assume the repository CLI exists beside it. Ask the user to select a Skizzles release or commit, obtain that versioned checkout, verify the checkout, and run every `packages/installer/...` command below from its root.
+The complete plugin bundles the installer at `packages/installer/`; run the commands below from the plugin root or a selected source checkout. If this skill was installed by itself with the Skills CLI, do not assume that package exists beside it. Ask the user to select a Skizzles release or commit, obtain and verify that versioned checkout, then run the installer from its root.
 
 ## Run the lifecycle
 
@@ -47,6 +48,34 @@ bun run packages/installer/src/cli.ts uninstall --surface harness --home /absolu
 ```
 
 The custom harness surface is for isolated development and test fixtures. Install, update, or uninstall a stable versioned plugin through the official Codex plugin/marketplace flow instead; plugin installs are cached snapshots and a new task may be required. The installer fails closed on foreign targets. Skills receipts live below `CODEX_HOME/.skizzles/`; harness receipts live below `HOME/.skizzles/`. Uninstall verifies receipt-listed links or copied content and restores the exact marketplace state it owned. Do not bypass conflicts by deleting or overwriting paths for the user.
+
+## Complete the Codex configuration
+
+Only run this lifecycle after the complete plugin surface—and therefore its packaged hook—has been installed. It is independent from skill/plugin file transfer so a user can change machine policy without reinstalling content.
+
+Ask the user to choose an orchestration mode:
+
+- `passive` writes only `features.hooks = true`. It does not write any MultiAgentV2 setting or hint, so Codex retains its model-specific native defaults.
+- `aggressive` also enables MultiAgentV2, sets `max_concurrent_threads_per_session = 7`, adds one concise proactive mode hint, and gives roots and subagents short pointers to `$fourth-wall`. Use this only when the user wants autonomous quality-and-speed delegation.
+
+Preview against an explicit `CODEX_HOME` and absolute Codex binary:
+
+```sh
+bun run packages/installer/src/cli.ts configure \
+  --codex-home /absolute/target/codex-home \
+  --codex-binary /absolute/path/to/codex \
+  --orchestration aggressive --dry-run
+```
+
+Review the reported key list, then repeat without `--dry-run`. Restore the exact prior values with:
+
+```sh
+bun run packages/installer/src/cli.ts unconfigure \
+  --codex-home /absolute/target/codex-home \
+  --codex-binary /absolute/path/to/codex --dry-run
+```
+
+Repeat restoration without `--dry-run` only after previewing it. The lifecycle launches that Codex binary's app-server against the selected home and uses native `config/read` plus atomic `config/batchWrite` with version-conflict detection. Its receipt lives at `CODEX_HOME/.skizzles/config-receipt.json`; restoration fails closed if an owned value drifted. It never edits `AGENTS.md`, `developer_instructions`, approvals, permissions, goals, model defaults, MCP registrations, or unrelated feature flags. Do not manually delete the receipt to bypass a conflict.
 
 ## Use Container Lab deliberately
 

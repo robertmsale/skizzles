@@ -37,6 +37,14 @@ const CONTAINER_LAB_STATIC_INPUTS = [
 ] as const;
 
 const CONTAINER_LAB_LAUNCHER = "skills/codex-container-lab/scripts/codex-container-lab";
+const INSTALLER_INPUTS = [
+  "package.json",
+  "src/cli.ts",
+  "src/config.ts",
+  "src/core.ts",
+  "src/doctor.ts",
+  "src/harness.ts",
+] as const;
 
 const CANONICAL_INPUTS = [
   ["skills", "skills"],
@@ -104,6 +112,14 @@ export async function stagePlugin(repoRoot: string, destination: string): Promis
     const source = join(paths.repoRoot, sourcePath);
     if (!(await exists(source))) continue;
     await copyCanonicalTree(source, join(destination, destinationPath), sourcePath);
+  }
+
+  for (const path of INSTALLER_INPUTS) {
+    await copyCanonicalFile(
+      join(paths.repoRoot, "packages/installer", path),
+      join(destination, "packages/installer", path),
+      `packages/installer/${path}`,
+    );
   }
 
   await stageContainerLabRuntime(paths.repoRoot, destination);

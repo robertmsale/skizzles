@@ -68,6 +68,7 @@ describe("deterministic plugin packaging", () => {
 
     expect(await compareTrees(first, second)).toEqual([]);
     expect(await readFile(join(first, "runtime/hook.ts"), "utf8")).toBe("console.log('hook');\n");
+    expect(await readFile(join(first, "packages/installer/src/cli.ts"), "utf8")).toContain("fixture cli");
     expect(await Bun.file(join(first, "README.md")).exists()).toBe(false);
   });
 
@@ -320,6 +321,11 @@ async function fixture(): Promise<string> {
     "packages/codex-container-lab/cli/src/cli.ts",
     "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture cli' }));\n",
   );
+  for (const path of ["config.ts", "core.ts", "doctor.ts", "harness.ts"]) {
+    await write(root, `packages/installer/src/${path}`, `export const fixture = "${path}";\n`);
+  }
+  await write(root, "packages/installer/src/cli.ts", "console.log('fixture cli');\n");
+  await write(root, "packages/installer/package.json", JSON.stringify({ name: "@skizzles/installer", version: "0.1.0" }));
   await write(
     root,
     "packages/codex-container-lab/cli/src/reaper-cli.ts",
