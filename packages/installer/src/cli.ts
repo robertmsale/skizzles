@@ -2,17 +2,18 @@
 import { resolve } from "node:path";
 import { installSkills, receiptSummary, uninstallSkills, type Transfer } from "./core";
 import { installHarness, uninstallHarness } from "./harness";
+import { doctor } from "./doctor";
 
-type Parsed = { command: "install" | "uninstall"; surface: "skills" | "harness"; codexHome: string | undefined; home: string | undefined; sourceRoot: string; transfer: Transfer; dryRun: boolean };
+type Parsed = { command: "install" | "uninstall" | "doctor"; surface: "skills" | "harness" | undefined; codexHome: string | undefined; home: string | undefined; sourceRoot: string; transfer: Transfer; dryRun: boolean };
 
 function usage(): never {
-  console.error("usage: bun packages/installer/src/cli.ts <install|uninstall> --surface <skills|harness> [--codex-home PATH] [--home PATH] [--source-root PATH] [--transfer link|copy] [--dry-run]");
+  console.error("usage: bun packages/installer/src/cli.ts <install|uninstall> --surface <skills|harness> [--codex-home PATH] [--home PATH] [--source-root PATH] [--transfer link|copy] [--dry-run] | doctor --home PATH --codex-home PATH");
   process.exit(2);
 }
 
 function parse(argv: string[]): Parsed {
   const command = argv.shift();
-  if (command !== "install" && command !== "uninstall") usage();
+  if (command !== "install" && command !== "uninstall" && command !== "doctor") usage();
   let codexHome = process.env.CODEX_HOME;
   let home = process.env.HOME;
   let sourceRoot = resolve(import.meta.dir, "../../..");
@@ -36,12 +37,18 @@ function parse(argv: string[]): Parsed {
     }
     else usage();
   }
-  if (!surface || (surface === "skills" && !codexHome) || (surface === "harness" && !home)) usage();
+  if (command === "doctor") {
+    if (!home || !codexHome || surface) usage();
+  } else if (!surface || (surface === "skills" && !codexHome) || (surface === "harness" && !home)) usage();
   return { command, surface, codexHome: codexHome && resolve(codexHome), home: home && resolve(home), sourceRoot, transfer, dryRun };
 }
 
 export function main(argv = process.argv.slice(2)): void {
   const parsed = parse([...argv]);
+  if (parsed.command === "doctor") {
+    console.log(JSON.stringify(doctor(parsed.home!, parsed.codexHome!)));
+    return;
+  }
   if (parsed.surface === "skills") {
     const receipt = parsed.command === "install"
       ? installSkills({ codexHome: parsed.codexHome!, sourceRoot: parsed.sourceRoot, transfer: parsed.transfer, dryRun: parsed.dryRun })

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Install Skizzles"
+  short_description: "Install and diagnose Skizzles safely"
+  default_prompt: "Use $install-skizzles to choose and safely install or diagnose Skizzles."

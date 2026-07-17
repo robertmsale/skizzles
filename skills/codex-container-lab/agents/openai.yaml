@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Container Lab"
+  short_description: "Operate isolated disposable Compose labs"
+  default_prompt: "Use $codex-container-lab to run this work in a disposable isolated lab."

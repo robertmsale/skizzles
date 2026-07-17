@@ -1,0 +1,23 @@
+{
+  "id": "codex-container-lab",
+  "integrationContract": 1,
+  "configuredRuntime": "0.1.0",
+  "supportedRuntime": ">=0.1.0 <0.2.0",
+  "versionVerification": "contract-fingerprint-only",
+  "binaries": {
+    "operational": "codex-container-lab",
+    "reaper": "codex-container-lab-reaper"
+  },
+  "execution": {
+    "adminProtocol": "single-json-v1",
+    "adminMaxBytes": 16384,
+    "runProtocol": "attached-raw-v1",
+    "runMustBeOutermost": true,
+    "ownerEnvironment": "CODEX_THREAD_ID"
+  },
+  "reaper": {
+    "outputMaxBytes": 1536,
+    "lifecycleOwner": "external-runtime",
+    "launchAgentLabel": "com.openai.codex-container-lab-reaper"
+  }
+}
