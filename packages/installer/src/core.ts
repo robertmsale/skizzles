@@ -43,7 +43,7 @@ function publicSkills(sourceRoot: string): Array<{ name: string; source: string 
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function sameTree(left: string, right: string): boolean {
+export function sameTree(left: string, right: string): boolean {
   if (!existsSync(left) || !existsSync(right)) return false;
   const leftStat = lstatSync(left);
   const rightStat = lstatSync(right);
@@ -92,12 +92,19 @@ export function installSkills(options: SkillsOptions): SkillsReceipt {
   if (options.dryRun) return receipt;
 
   mkdirSync(join(codexHome, "skills"), { recursive: true });
-  for (const skill of skills) {
-    if (options.transfer === "link") symlinkSync(skill.source, skill.target, "dir");
-    else cpSync(skill.source, skill.target, { recursive: true, filter: (source) => !source.endsWith("/.DS_Store") });
+  const created: string[] = [];
+  try {
+    for (const skill of skills) {
+      created.push(skill.target);
+      if (options.transfer === "link") symlinkSync(skill.source, skill.target, "dir");
+      else cpSync(skill.source, skill.target, { recursive: true, filter: (source) => !source.endsWith("/.DS_Store") });
+    }
+    mkdirSync(dirname(receiptPath), { recursive: true });
+    writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx" });
+  } catch (error) {
+    for (const target of created.reverse()) rmSync(target, { recursive: true, force: true });
+    throw error;
   }
-  mkdirSync(dirname(receiptPath), { recursive: true });
-  writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx" });
   return receipt;
 }
 
