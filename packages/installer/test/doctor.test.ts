@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { doctorContainerLab } from "../src/doctor";
+import { bundledContainerLabPaths, doctorBundledContainerLab, doctorContainerLab } from "../src/doctor";
 import { doctor } from "../src/doctor";
 import { installSkills } from "../src/core";
 import { installHarness } from "../src/harness";
@@ -46,11 +46,10 @@ describe("Container Lab doctor", () => {
   test("uses the descriptor version and output cap", () => {
     const path = stubs("ready");
     const descriptorPath = join(path, "contract.json");
-    writeFileSync(descriptorPath, JSON.stringify({
-      configuredRuntime: "9.8.7",
-      binaries: { operational: "codex-container-lab", reaper: "codex-container-lab-reaper" },
-      execution: { adminMaxBytes: 8 },
-    }));
+    const descriptor = JSON.parse(readFileSync(resolve(import.meta.dir, "../../../integrations/container-lab.json"), "utf8"));
+    descriptor.configuredRuntime = "9.8.7";
+    descriptor.execution.adminMaxBytes = 8;
+    writeFileSync(descriptorPath, JSON.stringify(descriptor));
     expect(doctorContainerLab(path, descriptorPath)).toMatchObject({
       version: "configured-9.8.7-unverified",
       compatible: false,
@@ -60,6 +59,21 @@ describe("Container Lab doctor", () => {
   test("bounds hanging commands and stderr", () => {
     expect(doctorContainerLab(stubs("hang"), undefined, 50)).toMatchObject({ compatible: false, ready: false });
     expect(doctorContainerLab(stubs("stderr"))).toMatchObject({ compatible: false, ready: false });
+  });
+  test("derives and validates Skizzles bundled ownership paths", () => {
+    const sourceRoot = resolve(import.meta.dir, "../../..");
+    const paths = bundledContainerLabPaths(sourceRoot);
+    expect(paths).toMatchObject({
+      operational: join(sourceRoot, "packages/codex-container-lab/cli/src/cli.ts"),
+      reaper: join(sourceRoot, "packages/codex-container-lab/cli/src/reaper-cli.ts"),
+      launcher: join(sourceRoot, "skills/codex-container-lab/scripts/codex-container-lab"),
+      launchAgentTemplate: join(sourceRoot, "packages/codex-container-lab/cli/install/com.openai.codex-container-lab-reaper.plist"),
+    });
+    expect(doctorBundledContainerLab(sourceRoot)).toMatchObject({
+      installed: true,
+      compatible: true,
+      version: "configured-0.1.0-unverified",
+    });
   });
   test("reports Skizzles install health independently of optional Container Lab", () => {
     const root = `${process.env.TMPDIR ?? "/tmp"}/skizzles-install-doctor-${crypto.randomUUID()}`;

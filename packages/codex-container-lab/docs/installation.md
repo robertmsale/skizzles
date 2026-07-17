@@ -1,49 +1,36 @@
 # Installation and eventual cutover
 
-The repository root remains a Codex skill plugin, but operational execution is provided only by the `cli/` Bun package. There is no `.mcp.json`, MCP registration, or stdio server.
+Container Lab is included in Skizzles. The canonical source package is `packages/codex-container-lab/cli`, the root Skizzles `bun.lock` is its only lockfile, and a stable plugin carries dependency-self-contained CLI and reaper bundles. There is no MCP execution server or registration.
 
-Do not perform these steps while evaluating an isolated development branch. They are the eventual cutover procedure after review and merge.
+## Use the bundled launcher now
 
-## Prepare the PATH binaries
-
-```sh
-cd /path/to/codex-container-lab/cli
-bun install --frozen-lockfile
-bun link
-```
-
-This exposes `codex-container-lab` and `codex-container-lab-reaper`. Confirm that the shell environment used by Codex can resolve both binaries before removing a live MCP registration. The operational CLI inherits the task working directory and obtains the exact current thread from `CODEX_THREAD_ID`.
-
-Codex's `~/.codex/hooks/manage-command-output.ts` must match the outer `codex-container-lab run --lab ... -- COMMAND...` command so the attached stream is supervised. Do not match the inner container argv: `run` intentionally has no JSON footer, and long attached output is retained by that supervisor. This repository does not install or edit the hook.
-
-For a harmless verification in a consuming Git checkout:
+From a Skizzles source checkout, use the public skill launcher without touching `PATH`:
 
 ```sh
-codex-container-lab health
-codex-container-lab --help
-codex-container-lab-reaper --help
+bun skills/codex-container-lab/scripts/codex-container-lab --help
+bun skills/codex-container-lab/scripts/codex-container-lab health
 ```
 
-Outside Codex, pass `--owner THREAD_ID` to every operational command. Use `--state-root`, `--runtime-root`, and `--db` only for isolated testing or an intentional non-default installation.
+The launcher resolves `../../../packages/codex-container-lab/cli/src/cli.ts` from the skill's scripts directory. That relative contract is identical in a source checkout and an installed plugin: source uses the canonical workspace CLI; the plugin uses its bundled, self-contained CLI. For a plugin snapshot, invoke its own `skills/codex-container-lab/scripts/codex-container-lab` file.
 
-## Install the skill plugin
+Run `bun install --frozen-lockfile` from the Skizzles root before source development. A stable plugin does not need Bun/npm dependency installation for the bundled entrypoints.
 
-Install or update the repository as a local Codex plugin so `skills/codex-container-lab/SKILL.md` is discovered. The plugin metadata advertises the procedural skill only; it does not register an execution server. Start a new Codex task after changing plugin or skill metadata.
+The managed-output hook recognizes the launcher’s outer `run --lab ... -- COMMAND...` invocation. Do not match or wrap the inner container argv: `run` intentionally has no JSON footer, and the normal supervisor retains long attached output.
 
-## Configure the archive reaper
+## Optional host wiring — not in this stage
 
-The repository contains a LaunchAgent template for periodic one-shot execution. Copy it to a temporary location and replace `__BUN_ABSOLUTE_PATH__` with the absolute Bun interpreter, `__REAPER_ABSOLUTE_PATH__` with this checkout's absolute `cli/src/reaper-cli.ts`, and the two log placeholders with absolute user-owned paths. LaunchAgents have a minimal environment, so the template deliberately does not depend on `PATH` or the script's `/usr/bin/env bun` shebang. Validate the rendered file with `plutil`, then place it in `~/Library/LaunchAgents`. The reaper defaults to `~/.codex/state_5.sqlite` and the per-user durable state root; do not add write flags, database-copy steps, or `immutable=1`.
+`codex-container-lab` and `codex-container-lab-reaper` PATH binaries are conveniences, not prerequisites. Do not run `bun link`, edit `PATH`, render/load a LaunchAgent, or remove any existing integration until a separate live-cutover approval names exact targets and rollback steps.
 
-Only after the CLI and template have been reviewed should an operator load the LaunchAgent. The reaper exits after one scan, so a `StartInterval` LaunchAgent is preferred to a persistent daemon. Any read, schema, busy, manifest, or archive-state uncertainty retains resources and reports an error for the next scheduled retry.
+When approved, link the canonical workspace package from `packages/codex-container-lab/cli` after a frozen root install. The LaunchAgent template at `cli/install/com.openai.codex-container-lab-reaper.plist` must be rendered into a user-owned temporary file with absolute Bun, bundled-or-canonical reaper, and log paths; validate it with `plutil` before any deliberate load. LaunchAgents have a minimal environment and must not rely on `PATH` or the `/usr/bin/env bun` shebang.
 
-## Cut over from the live MCP installation
+Keep every doctor health probe on disposable owner, state, runtime, and database roots. The archive reaper defaults are live-host behavior and are not a test target. Any database, schema, busy, manifest, or archive-state uncertainty retains resources.
 
-1. Finish or preserve any active labs owned by the old MCP session implementation.
-2. Merge the reviewed branch and install frozen CLI dependencies.
-3. Link the two new binaries and verify PATH resolution from a fresh Codex unified shell.
-4. Update/reinstall the local skill plugin and begin a fresh task.
-5. Remove the old `codex_container_lab` MCP registration only after the new CLI health check succeeds.
-6. Install and validate the LaunchAgent template, then load it deliberately.
-7. Confirm an unarchived disposable test owner is retained; archive that test task and confirm only its exact labels are eventually removed.
+## Eventual cutover and rollback
 
-Never point validation fixtures at a live Codex database or use unrelated Docker resources. Rollback consists of unloading the new LaunchAgent and restoring the prior MCP registration; it does not require changing Codex's database.
+1. Finish or preserve active labs owned by the previous installation.
+2. Rebuild and validate the Skizzles plugin, then verify the bundled launcher from a fresh task.
+3. If approved, add the optional PATH links and verify both binary names from the Codex shell.
+4. Render, validate, and only then deliberately load the reaper LaunchAgent.
+5. Retire the old standalone checkout only after the Skizzles launcher, PATH convenience, and reaper lifecycle have each been proven against isolated fixtures.
+
+The former standalone Container Lab repository is a temporary rollback source until that approval. Rollback restores the previously approved host wiring and unloads any newly loaded LaunchAgent; it never changes Codex’s database or broad Docker state.

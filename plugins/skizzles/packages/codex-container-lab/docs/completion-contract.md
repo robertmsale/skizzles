@@ -1,12 +1,12 @@
 # Completion contract
 
-Outcome: a complete, version-controlled, script-only Codex plugin companion that gives each exact Codex thread multiple disposable Docker Compose labs with isolated Git clones, one attached command path, guarded bidirectional synchronization, deterministic exact-label cleanup, and archive-aware crash recovery.
+Outcome: a complete, version-controlled Skizzles workspace package and stable-plugin runtime that gives each exact Codex thread multiple disposable Docker Compose labs with isolated Git clones, one attached command path, guarded bidirectional synchronization, deterministic exact-label cleanup, and archive-aware crash recovery.
 
 Approved implementation path: Bun, TypeScript, Git, host-side Docker Compose, atomic durable JSON lab manifests, synchronous attached CLI execution, and Bun's SQLite reader in strict read-only mode. A consuming repository commits `.codex-container-lab.yaml`. Compose mode uses project-owned topology; Dockerfile and image modes share the same generated Compose lifecycle.
 
 Non-negotiable constraints:
 
-- Provide PATH-oriented operational and reaper binaries with no MCP transport, registration, compatibility wrapper, or session lifecycle.
+- Provide bundled operational and reaper entrypoints with no MCP transport, registration, compatibility wrapper, or session lifecycle. PATH binaries are optional explicit host wiring, not a runtime prerequisite.
 - Resolve ownership from `CODEX_THREAD_ID`, with an explicit owner override for manual use and no generated fallback identity.
 - Keep small authoritative owner/lab manifests durable across reboot; keep disposable workspaces, generated files, and sync state under an injectable temporary root.
 - Preserve the consuming Codex task checkout, including Desktop linked worktrees, and support multiple isolated labs per owner.
@@ -27,4 +27,4 @@ Regression expectations: unit tests cover contracts, workspace discovery, Compos
 
 Evidence expected: parsed manifests and plugin metadata, frozen lock, TypeScript typecheck, unit tests, CLI smoke, reaper fixture tests, exact cleanup-filter mocks, output-size measurements, repository-wide obsolete-surface searches, optional safe Docker integration result, clean Git status, and coherent forward-progress commits.
 
-Known valid blockers: unavailable Docker daemon, registry/network access required for a uniquely labeled integration image, or host permissions outside this worktree. These may limit external runtime evidence but cannot narrow implementation or local validation.
+Known valid blockers: unavailable Docker daemon, registry/network access required for a uniquely labeled integration image, or host permissions outside this worktree. These may limit optional Docker evidence but cannot narrow implementation or local validation.

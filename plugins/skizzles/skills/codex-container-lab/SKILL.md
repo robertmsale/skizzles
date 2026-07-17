@@ -1,24 +1,34 @@
 ---
 name: codex-container-lab
-description: Use the codex-container-lab PATH CLI to create, run attached commands in, inspect, synchronize, and destroy disposable Docker Compose labs with isolated Git workspaces.
+description: Use Skizzles' bundled Container Lab launcher to create, run attached commands in, inspect, synchronize, and destroy disposable Docker Compose labs with isolated Git workspaces. Use when Docker/Compose isolation, reproducible experiments, or guarded file synchronization would help.
 ---
 
 # Codex Container Lab
 
-Treat the PATH CLI as an independently versioned external runtime. Skizzles packages this operating guide and compatibility metadata, but does not vendor, relocate, install, reap, or wrap the runtime. From a versioned Skizzles checkout, use `bun packages/installer/src/cli.ts doctor --home <isolated-home> --codex-home <isolated-codex-home>` for a synthetic-root contract check.
+Skizzles includes the complete Container Lab source project and runnable operational/reaper tooling. A stable plugin carries dependency-self-contained Bun bundles; a source checkout runs the canonical workspace package. Use the launcher bundled beside this skill as the guaranteed invocation surface, even before any `PATH` wiring exists.
+
+Set `launcher` to this skill directory's `scripts/codex-container-lab` file, then use it directly:
+
+```sh
+launcher=/absolute/path/to/skills/codex-container-lab/scripts/codex-container-lab
+"$launcher" --help
+"$launcher" health
+```
+
+The `codex-container-lab` PATH command is an optional host-installed convenience. Host PATH and LaunchAgent activation remain explicit, reversible wiring; see the canonical [installation and cutover guide](../../packages/codex-container-lab/docs/installation.md) from a Skizzles checkout or plugin snapshot.
 
 Use this skill when work benefits from an isolated Linux workspace or disposable project stack. It augments counterfactual engineering: use one lab per serious hypothesis, validate each against the same criteria, and synchronize only the selected result.
 
 ## Safe workflow
 
-1. Confirm the consuming repository commits `.codex-container-lab.yaml` in the intended checkout or Desktop worktree. Run `codex-container-lab health` to verify Docker and owner state. The CLI uses the current `CODEX_THREAD_ID` automatically.
-2. Run `codex-container-lab lab create --name NAME`. Provisioning stays attached and returns a compact `{labId,state}` result after durable state reaches `ready` or `failed`.
+1. Confirm the consuming repository commits `.codex-container-lab.yaml` in the intended checkout or Desktop worktree. Run `"$launcher" health` to verify Docker and owner state. The CLI uses the current `CODEX_THREAD_ID` automatically.
+2. Run `"$launcher" lab create --name NAME`. Provisioning stays attached and returns a compact `{labId,state}` result after durable state reaches `ready` or `failed`.
 3. Read `findings` before running code. They report trusted-project privilege surfaces such as host binds, sockets, devices, capabilities, host namespaces, secrets, configs, and exposed ports. They are review guidance, not policy rejections.
-4. Run work with `codex-container-lab run --lab ID [--cwd PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...`. Arguments after `--` are an argv, not a shell-encoded command. The CLI remains attached while output streams; Codex unified execution owns backgrounding, polling, stdin, signals, and the final exit status. Put intentional persistent services in Compose.
-5. Read bounded service output with `codex-container-lab logs --lab ID --service SERVICE`. Use only service names declared by the consuming project.
-6. Finish or cancel the attached run before synchronizing. Run `codex-container-lab sync preview --lab ID --direction pull` to bring a result to the host, or use `push` to refresh the lab.
-7. Resolve every reported conflict and preview again. Apply exactly the returned token with `codex-container-lab sync apply --lab ID --direction DIRECTION --token TOKEN`; tokens expire, are single-use, and fail if either side changed.
-8. Validate synchronized host changes normally, then run `codex-container-lab lab destroy --lab ID`. Use `lab destroy-all` to remove every lab owned by the current thread.
+4. Run work with `"$launcher" run --lab ID [--cwd PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...`. Arguments after `--` are an argv, not a shell-encoded command. The CLI remains attached while output streams; Codex unified execution owns backgrounding, polling, stdin, signals, and the final exit status. Put intentional persistent services in Compose.
+5. Read bounded service output with `"$launcher" logs --lab ID --service SERVICE`. Use only service names declared by the consuming project.
+6. Finish or cancel the attached run before synchronizing. Run `"$launcher" sync preview --lab ID --direction pull` to bring a result to the host, or use `push` to refresh the lab.
+7. Resolve every reported conflict and preview again. Apply exactly the returned token with `"$launcher" sync apply --lab ID --direction DIRECTION --token TOKEN`; tokens expire, are single-use, and fail if either side changed.
+8. Validate synchronized host changes normally, then run `"$launcher" lab destroy --lab ID`. Use `lab destroy-all` to remove every lab owned by the current thread.
 
 For intentional manual use outside Codex, place `--owner THREAD_ID` before the command. Never borrow another task's id or invent a shared owner.
 
@@ -29,7 +39,7 @@ For intentional manual use outside Codex, place `--owner THREAD_ID` before the c
 - `failed` includes a compact actionable error. Inspect findings and bounded service logs, then explicitly destroy the failed lab.
 - Endpoints are named by the manifest and published on random loopback ports. Never guess ports from source Compose files.
 - `logs` returns a bounded service tail with explicit byte, line, and truncation metadata. Use repeated targeted service-log calls for inspection; no internal runtime path is exposed.
-- `health`, create, list, status, destroy, logs, and synchronization use the external runtime's compact public JSON contract. Administrative JSON never exceeds 16 KiB; service transcript text is capped at 8 KiB and the requested line bound. Long attached-run output remains available through the normal command-output supervisor artifact.
+- `health`, create, list, status, destroy, logs, and synchronization use Skizzles' compact public JSON contract. Administrative JSON never exceeds 16 KiB; service transcript text is capped at 8 KiB and the requested line bound. Long attached-run output remains available through the normal command-output supervisor artifact.
 - A sync conflict means both source and target diverged from the last successful baseline. A conflicted, expired, mismatched, already-used, or stale token performs no writes.
 - A preview with more than 100 entries issues no token; reduce the change set so every applied path is visible.
 - Git-tracked and non-ignored untracked files participate in sync. Ignored credentials, caches, build outputs, and Git metadata do not.
@@ -54,7 +64,7 @@ Generate patches as files under `/tmp`; do not print or copy patch bodies throug
 shared_base=$(git rev-parse HEAD)
 patch=$(mktemp /tmp/codex-container-lab.patch.XXXXXX)
 
-codex-container-lab run --lab "$lab" -- \
+"$launcher" run --lab "$lab" -- \
   git diff --binary --full-index "$shared_base" -- path/to/file > "$patch"
 
 git apply --check --3way "$patch"

@@ -4,10 +4,12 @@ Skizzles is a packaging project, not a live installation. Keep its canonical sou
 
 ## Ownership and architecture
 
-- Treat `skills/`, `hooks/`, `runtime/`, `scripts/`, and `assets/` as canonical distributable inputs; `packages/core/plugin-template/` and `.agents/plugins/marketplace.json` define the plugin contract.
+- Treat `skills/`, `hooks/`, `runtime/`, `scripts/`, `assets/`, and `packages/codex-container-lab/` as canonical distributable inputs; `packages/core/plugin-template/` and `.agents/plugins/marketplace.json` define the plugin contract.
 - Treat `plugins/skizzles/` as generated output. Change the canonical source, rebuild, and check drift; never repair generated files in place.
 - Keep repo-local `.codex/skills/` as maintainer guidance, separate from the public skill collection unless packaging intentionally includes it.
-- Keep Container Lab external. Do not vendor, relocate, launch, or update it from this repository.
+- Treat `packages/codex-container-lab/cli` as the canonical Bun workspace package. Keep `bun.lock` at the Skizzles root as its sole lockfile; do not restore a nested lock.
+- The stable plugin carries bundled Container Lab CLI/reaper entrypoints plus the public skill launcher. Do not hand-edit those generated bundles. PATH and LaunchAgent activation remain separate, explicit host wiring.
+- The former standalone Container Lab checkout is a temporary rollback source only until an explicit cutover retires it; never mutate it from Skizzles work.
 
 ## Safe working rules
 
@@ -21,7 +23,7 @@ Skizzles is a packaging project, not a live installation. Keep its canonical sou
 Run the narrowest useful check first, then use the complete package boundary when inputs or packaging change:
 
 ```sh
-bunx tsc --noEmit
+bun run typecheck
 bun test
 bun run plugin:check
 bun run plugin:build

@@ -9,17 +9,17 @@ Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks
 - **Command-output management** — classifies useful build/test commands, keeps output bounded, and leaves a useful artifact when a command gets noisy.
 - **Fourth Wall orchestration** — guarded multi-agent dispatch with explicit roles, contracts, and follow-up boundaries.
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
-- **Container Lab integration** — a skill and compatibility doctor for the external `codex-container-lab` runtime. Skizzles documents and checks that boundary; it does not vendor or manage the runtime.
+- **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **A practical skill shelf** — auth semantics, Cargo optimization, completion contracts, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
 
-Everything is maintained once in the canonical roots (`skills/`, `hooks/`, `runtime/`, `scripts/`) and staged into a versioned plugin. 🎯
+Everything is maintained once in the canonical roots and workspace packages, then staged into a versioned plugin. 🎯
 
 ## Pick your ride
 
 ### Stable plugin
 
-**WIP:** Use the official Codex marketplace/plugin flow to install a released `skizzles` plugin. The plugin packages the skills, hooks, runtime helpers, branding, and marketplace metadata together.
+**WIP:** Use the official Codex marketplace/plugin flow to install a released `skizzles` plugin. It packages the skills, hooks, runtime helpers, branding, and runnable Container Lab CLI/reaper together.
 
 ### Individual skills
 
@@ -41,7 +41,7 @@ cd skizzles
 bunx skills add ./skills --skill install-skizzles
 ```
 
-The linked skill is still skill-only. Full-harness development uses the isolated installer and generated plugin; keep live Codex configuration out of scope until an explicit cutover is approved.
+The linked skill is still skill-only. From a source checkout or stable plugin, the Container Lab skill's bundled launcher works before any PATH cutover; host PATH and LaunchAgent wiring stay explicit and reversible. Full-harness development uses the isolated installer and generated plugin; keep live Codex configuration out of scope until an explicit cutover is approved.
 
 ## Keep the loop delightful
 

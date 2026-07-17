@@ -11,13 +11,13 @@ Release only from a clean, validated source state. Keep versioning, generated ou
 
 1. Obtain the exact target version and release destination from the owner.
 2. Inspect the working tree and preserve unrelated changes, including the root `.DS_Store`.
-3. Confirm that Container Lab remains external and that no live Codex installation, hook configuration, `PATH`, or launchd state is in scope.
+3. Confirm that Container Lab is released from its canonical Skizzles workspace and bundled plugin assets, while no live Codex installation, hook configuration, `PATH`, or launchd state is in scope.
 
 ## Align and validate
 
 1. Update the canonical version in `package.json` and `packages/core/plugin-template/.codex-plugin/plugin.json` together.
 2. Run `bun run plugin:check` to record expected pre-regeneration drift, then regenerate with `bun run plugin:build`; do not edit `plugins/skizzles/` directly.
-3. Run `bun install --frozen-lockfile`, `bunx tsc --noEmit`, `bun test`, and `bun run plugin:check`.
+3. Run `bun install --frozen-lockfile`, `bun run typecheck`, `bun test`, and `bun run plugin:check`.
 4. Inspect the diff for the intended metadata and generated output only. Resolve drift in canonical sources and rerun validation.
 
 ## Release gate

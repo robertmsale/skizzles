@@ -48,11 +48,15 @@ bun run packages/installer/src/cli.ts uninstall --surface harness --home /absolu
 
 The custom harness surface is for isolated development and test fixtures. Install, update, or uninstall a stable versioned plugin through the official Codex plugin/marketplace flow instead; plugin installs are cached snapshots and a new task may be required. The installer fails closed on foreign targets. Skills receipts live below `CODEX_HOME/.skizzles/`; harness receipts live below `HOME/.skizzles/`. Uninstall verifies receipt-listed links or copied content and restores the exact marketplace state it owned. Do not bypass conflicts by deleting or overwriting paths for the user.
 
-## Check Container Lab optionally
+## Use Container Lab deliberately
 
-Container Lab remains an external CLI. Doctor may check its declared compatibility and synthetic health using disposable owner and state/runtime roots. Never wrap `codex-container-lab run`, install or relocate the binary, edit `PATH`, invoke live reaping, or use launchd from this workflow.
+A skill-only installation contains Container Lab guidance and its launcher contract, not the runnable CLI. The stable Skizzles plugin includes the dependency-self-contained operational and reaper bundles; a selected source checkout includes the canonical workspace package.
 
-An installed but unavailable Docker daemon is `installed-not-ready`, not proof that Container Lab is broken. The configured `0.1.0` compatibility is unverified until a release fingerprint is supplied.
+Use the `scripts/codex-container-lab` launcher beside the public `codex-container-lab` skill before relying on any `PATH` command. `doctorContainerLab` reports only the optional PATH convenience; bundled ownership paths and source provenance come from `integrations/container-lab.json`. Host PATH and LaunchAgent activation remain explicit, reversible wiring, not part of a skill-only or plugin install.
+
+Read the canonical [Container Lab installation and cutover guide](../../packages/codex-container-lab/docs/installation.md) from the selected checkout or plugin snapshot. Keep doctor health probes on disposable owner/state/runtime roots. Never wrap an attached `run`, invoke live reaping, edit `PATH`, or load launchd from this workflow without a separate explicit cutover approval.
+
+An installed bundle with an unavailable Docker daemon is `installed-not-ready`, not proof that Container Lab is broken. The configured `0.1.0` compatibility is unverified until a release fingerprint is supplied.
 
 ## Finish on a new task
 

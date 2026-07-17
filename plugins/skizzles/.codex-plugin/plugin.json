@@ -1,7 +1,7 @@
 {
   "name": "skizzles",
   "version": "0.1.0",
-  "description": "Portable Codex harness skills, hooks, and maintenance tooling.",
+  "description": "Portable Codex harness skills, hooks, maintenance tooling, and bundled Container Lab runtime.",
   "author": {
     "name": "Robert Sale"
   },
@@ -15,14 +15,15 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Skizzles",
-    "shortDescription": "A portable Codex harness for durable developer workflows.",
-    "longDescription": "Skizzles packages reusable skills, hooks, and maintenance tooling for a consistent Codex development environment.",
+    "shortDescription": "A portable Codex harness with bundled Container Lab tooling.",
+    "longDescription": "Skizzles packages reusable skills, hooks, maintenance tooling, and runnable Container Lab CLI/reaper bundles for a consistent Codex development environment.",
     "developerName": "Robert Sale",
     "category": "Developer Tools",
     "capabilities": [
       "Skills",
       "Hooks",
-      "Developer tooling"
+      "Developer tooling",
+      "Container Lab CLI and reaper"
     ],
     "defaultPrompt": [
       "Check this workspace with the Skizzles harness.",
@@ -31,4 +32,3 @@
     "logo": "./assets/logo.png"
   }
 }
-

@@ -128,6 +128,7 @@ function isRecognized(words: string[] | undefined): boolean {
   const [program, subcommand, third] = normalized;
 
   if (program === "codex-container-lab") return subcommand === "run";
+  if (program === "bun" && basename(subcommand ?? "") === "codex-container-lab") return third === "run";
   if (program === "bun") {
     return subcommand === "test" || (subcommand === "run" && third === "test");
   }

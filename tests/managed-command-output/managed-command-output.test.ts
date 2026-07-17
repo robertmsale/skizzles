@@ -102,7 +102,7 @@ describe("managed command output hook", () => {
 
   test("recognizes high-value build and test commands through common launchers", () => {
     for (const command of [
-      "cargo build --workspace", "cargo +nightly test --workspace", "cargo nextest run", "cargo llvm-cov --workspace", "cargo install cargo-insta", "RUST_LOG=debug cargo clippy --workspace", "env RUST_BACKTRACE=1 cargo check", "rustup run nightly cargo test", "xcodebuild -workspace App.xcworkspace -scheme App test", "xcrun --sdk iphonesimulator xcodebuild -scheme App build", "/usr/bin/xcodebuild -scheme App build", "swift build", "xcrun swift test", "gradle build", "./gradlew :app:testDebugUnitTest --no-daemon", "./gradlew connectedDebugAndroidTest", "fvm flutter test",
+      "cargo build --workspace", "cargo +nightly test --workspace", "cargo nextest run", "cargo llvm-cov --workspace", "cargo install cargo-insta", "RUST_LOG=debug cargo clippy --workspace", "env RUST_BACKTRACE=1 cargo check", "rustup run nightly cargo test", "xcodebuild -workspace App.xcworkspace -scheme App test", "xcrun --sdk iphonesimulator xcodebuild -scheme App build", "/usr/bin/xcodebuild -scheme App build", "swift build", "xcrun swift test", "gradle build", "./gradlew :app:testDebugUnitTest --no-daemon", "./gradlew connectedDebugAndroidTest", "fvm flutter test", "bun skills/codex-container-lab/scripts/codex-container-lab run --lab experiment -- echo hello",
     ]) {
       const result = invoke(hook, [], { stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { command } }) });
       expect(text(result.stdout), command).not.toBe("");

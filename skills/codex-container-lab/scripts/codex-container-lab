@@ -1,0 +1,30 @@
+#!/usr/bin/env bun
+
+import { resolve } from "node:path";
+
+const entrypoint = resolve(import.meta.dir, "../../../packages/codex-container-lab/cli/src/cli.ts");
+
+/**
+ * Runs the canonical source CLI from a checkout or the dependency-self-contained
+ * bundled CLI from the same relative location in a staged plugin.
+ */
+export async function runContainerLab(args = process.argv.slice(2)): Promise<number> {
+  const child = Bun.spawn([process.execPath, entrypoint, ...args], {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const forward = (signal: "SIGINT" | "SIGTERM") => {
+    if (child.exitCode === null) child.kill(signal);
+  };
+  process.on("SIGINT", forward);
+  process.on("SIGTERM", forward);
+  try {
+    return await child.exited;
+  } finally {
+    process.removeListener("SIGINT", forward);
+    process.removeListener("SIGTERM", forward);
+  }
+}
+
+if (import.meta.main) process.exit(await runContainerLab());

@@ -4,6 +4,24 @@
   "configuredRuntime": "0.1.0",
   "supportedRuntime": ">=0.1.0 <0.2.0",
   "versionVerification": "contract-fingerprint-only",
+  "ownership": {
+    "runtimeOwner": "skizzles",
+    "canonicalSource": "packages/codex-container-lab",
+    "provenanceCommit": "fba6ce29e96b663ba4ddb16b66e12992b9e62ba0"
+  },
+  "bundled": {
+    "operationalEntrypoint": "packages/codex-container-lab/cli/src/cli.ts",
+    "reaperEntrypoint": "packages/codex-container-lab/cli/src/reaper-cli.ts",
+    "launcher": "skills/codex-container-lab/scripts/codex-container-lab",
+    "launchAgentTemplate": "packages/codex-container-lab/cli/install/com.openai.codex-container-lab-reaper.plist",
+    "documentation": [
+      "packages/codex-container-lab/docs/architecture.md",
+      "packages/codex-container-lab/docs/completion-contract.md",
+      "packages/codex-container-lab/docs/installation.md",
+      "packages/codex-container-lab/docs/manifest.md",
+      "packages/codex-container-lab/docs/safety.md"
+    ]
+  },
   "binaries": {
     "operational": "codex-container-lab",
     "reaper": "codex-container-lab-reaper"
@@ -17,7 +35,7 @@
   },
   "reaper": {
     "outputMaxBytes": 1536,
-    "lifecycleOwner": "external-runtime",
+    "lifecycleOwner": "skizzles-explicit-host-wiring",
     "launchAgentLabel": "com.openai.codex-container-lab-reaper"
   }
 }
