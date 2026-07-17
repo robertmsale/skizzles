@@ -15,11 +15,12 @@ type Aggregate = { usage: Usage; inferences: number; sessions: Set<string> };
 type RateSnapshot = { timestamp: number; usedPercent: number; resetsAt?: number };
 type SessionSummary = {
   id: string; actor: Actor; parentId?: string; agentPath?: string; usage: Usage;
-  inferences: number; models: Map<string, Aggregate>; reviewCount: number;
+  inferences: number; models: Map<string, Aggregate>; routes: Map<string, Aggregate>; reviewCount: number;
   reviewAllow: number; reviewDeny: number; reviewDurationMs: number;
 };
 type Options = { from: number; to: number; bucket: "hour" | "day"; cachedWeight: number; top: number; json: boolean };
 
+const subagentRoles = new Set(["triage", "worker", "designer", "qa", "review", "deployment"]);
 const emptyUsage = (): Usage => ({ input: 0, cached: 0, output: 0, reasoning: 0, total: 0, proxy: 0 });
 const emptyAggregate = (): Aggregate => ({ usage: emptyUsage(), inferences: 0, sessions: new Set() });
 const asNumber = (value: unknown): number => typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -180,14 +181,36 @@ function bucketKey(timestamp: number, bucket: Options["bucket"]): string {
   return bucket === "hour" ? `${day} ${pad(date.getHours())}:00` : day;
 }
 
+async function findForkBoundary(path: string): Promise<{ forked: boolean; turnId?: string }> {
+  let forked = false;
+  let turnId: string | undefined;
+  for await (const line of lines(path)) {
+    if (!line.trim()) continue;
+    let event: any;
+    try { event = JSON.parse(line); } catch { continue; }
+    const payload = event.payload;
+    if (event.type === "session_meta") {
+      forked = classify(payload?.source) === "subagent" && typeof payload?.forked_from_id === "string";
+      if (!forked) return { forked: false };
+    }
+    if (forked && event.type === "event_msg" && payload?.type === "task_started" && typeof payload?.turn_id === "string") {
+      turnId = payload.turn_id;
+    }
+  }
+  return { forked, ...(turnId ? { turnId } : {}) };
+}
+
 async function parseRollout(path: string, options: Options): Promise<{ session: SessionSummary; rates: RateSnapshot[]; timeline: Map<string, Aggregate> }> {
+  const forkBoundary = await findForkBoundary(path);
   const fallbackId = /([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i.exec(path)?.[1] ?? basename(path);
-  const session: SessionSummary = { id: fallbackId, actor: "other", usage: emptyUsage(), inferences: 0, models: new Map(), reviewCount: 0, reviewAllow: 0, reviewDeny: 0, reviewDurationMs: 0 };
+  const session: SessionSummary = { id: fallbackId, actor: "other", usage: emptyUsage(), inferences: 0, models: new Map(), routes: new Map(), reviewCount: 0, reviewAllow: 0, reviewDeny: 0, reviewDurationMs: 0 };
   const rates: RateSnapshot[] = [];
   const timeline = new Map<string, Aggregate>();
   let currentModel = "unknown";
+  let currentEffort = "unknown";
   let previousTotal: any;
   let previousSignature: string | undefined;
+  let reachedOwnTurn = !forkBoundary.forked;
   for await (const line of lines(path)) {
     if (!line.trim()) continue;
     let event: any;
@@ -201,7 +224,13 @@ async function parseRollout(path: string, options: Options): Promise<{ session: 
       session.agentPath = payload?.agent_path ?? payload?.source?.subagent?.thread_spawn?.agent_path;
       continue;
     }
-    if (event.type === "turn_context") { currentModel = payload?.model ?? currentModel; continue; }
+    if (event.type === "turn_context") {
+      if (forkBoundary.forked && forkBoundary.turnId !== undefined && payload?.turn_id === forkBoundary.turnId) reachedOwnTurn = true;
+      if (!reachedOwnTurn) continue;
+      currentModel = payload?.model ?? currentModel;
+      currentEffort = payload?.effort ?? payload?.reasoning_effort ?? currentEffort;
+      continue;
+    }
     if (!Number.isFinite(timestamp) || timestamp < options.from || timestamp > options.to) {
       if (event.type === "event_msg" && payload?.type === "token_count") {
         previousTotal = payload?.info?.total_token_usage ?? previousTotal;
@@ -212,6 +241,11 @@ async function parseRollout(path: string, options: Options): Promise<{ session: 
     if (event.type === "event_msg" && payload?.type === "token_count") {
       const total = payload?.info?.total_token_usage;
       const signature = total ? JSON.stringify(total) : undefined;
+      if (!reachedOwnTurn) {
+        previousTotal = total ?? previousTotal;
+        previousSignature = signature ?? previousSignature;
+        continue;
+      }
       if (signature && signature === previousSignature) continue;
       const rawLast = payload?.info?.last_token_usage;
       const usage = rawLast ? usageFrom(rawLast, options.cachedWeight) : usageDelta(total, previousTotal, options.cachedWeight);
@@ -221,6 +255,7 @@ async function parseRollout(path: string, options: Options): Promise<{ session: 
       addUsage(session.usage, usage);
       session.inferences += 1;
       aggregateInto(session.models, currentModel, session.id, usage);
+      aggregateInto(session.routes, `${currentModel}/${currentEffort}`, session.id, usage);
       aggregateInto(timeline, bucketKey(timestamp, options.bucket), session.id, usage);
       const primary = payload?.rate_limits?.primary;
       if (typeof primary?.used_percent === "number") rates.push({ timestamp, usedPercent: primary.used_percent, ...(typeof primary.resets_at === "number" ? { resetsAt: primary.resets_at * 1000 } : {}) });
@@ -295,6 +330,8 @@ async function main(): Promise<void> {
   }
   const actors = new Map<string, Aggregate>();
   const models = new Map<string, Aggregate>();
+  const routes = new Map<string, Aggregate>();
+  const roles = new Map<string, Aggregate>();
   const tiers = new Map<string, Aggregate>();
   const rootTasks = new Map<string, Map<Actor, Aggregate>>();
   let reviews = 0; let reviewAllow = 0; let reviewDeny = 0; let reviewDurationMs = 0;
@@ -307,10 +344,20 @@ async function main(): Promise<void> {
       addUsage(target.usage, aggregate.usage); target.inferences += aggregate.inferences; target.sessions.add(session.id); models.set(model, target);
     }
     if (session.actor === "subagent") {
+      for (const [route, aggregate] of session.routes) {
+        const target = routes.get(route) ?? emptyAggregate();
+        addUsage(target.usage, aggregate.usage); target.inferences += aggregate.inferences; target.sessions.add(session.id); routes.set(route, target);
+      }
       const name = session.agentPath?.split("/").filter(Boolean).at(-1) ?? "unknown";
-      const tier = name.includes("__") ? name.split("__", 1)[0]! : "unclassified";
-      const target = tiers.get(tier) ?? emptyAggregate();
-      addUsage(target.usage, session.usage); target.inferences += session.inferences; target.sessions.add(session.id); tiers.set(tier, target);
+      const parts = name.split("__");
+      const role = subagentRoles.has(parts[0]!) ? parts[0]! : subagentRoles.has(parts[1]!) ? parts[1]! : "unclassified";
+      const roleTarget = roles.get(role) ?? emptyAggregate();
+      addUsage(roleTarget.usage, session.usage); roleTarget.inferences += session.inferences; roleTarget.sessions.add(session.id); roles.set(role, roleTarget);
+      if (parts.length >= 3 && subagentRoles.has(parts[1]!)) {
+        const tier = parts[0]!;
+        const tierTarget = tiers.get(tier) ?? emptyAggregate();
+        addUsage(tierTarget.usage, session.usage); tierTarget.inferences += session.inferences; tierTarget.sessions.add(session.id); tiers.set(tier, tierTarget);
+      }
     }
     const root = rootId(session, sessions);
     const byActor = rootTasks.get(root) ?? new Map<Actor, Aggregate>();
@@ -331,6 +378,8 @@ async function main(): Promise<void> {
     rateLimit: rates.length ? { firstUsedPercent: rates[0]!.usedPercent, lastUsedPercent: rates.at(-1)!.usedPercent, changePoints: rates.at(-1)!.usedPercent - rates[0]!.usedPercent, resetsAt: rates.at(-1)!.resetsAt ? new Date(rates.at(-1)!.resetsAt!).toISOString() : null } : null,
     actors: Object.fromEntries([...actors].map(([key, value]) => [key, serializableAggregate(value)])),
     models: Object.fromEntries([...models].map(([key, value]) => [key, serializableAggregate(value)])),
+    subagentRoutes: Object.fromEntries([...routes].map(([key, value]) => [key, serializableAggregate(value)])),
+    subagentRoles: Object.fromEntries([...roles].map(([key, value]) => [key, serializableAggregate(value)])),
     subagentTiers: Object.fromEntries([...tiers].map(([key, value]) => [key, serializableAggregate(value)])),
     guardian: { reviews, allow: reviewAllow, deny: reviewDeny, unknown: reviews - reviewAllow - reviewDeny, durationMs: reviewDurationMs, averageDurationMs: reviews ? reviewDurationMs / reviews : 0, ...serializableUsage(actors.get("guardian")?.usage ?? emptyUsage()) },
     topRootTasks: rankedRoots.slice(0, options.top).map(({ id, title, total, byActor }) => ({ id, title, ...serializableUsage(total), actors: Object.fromEntries([...byActor].map(([key, value]) => [key, serializableAggregate(value)])) })),
@@ -364,7 +413,9 @@ function printHuman(report: any): void {
   }
   printTable("Actors", ["actor", "sessions", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.actors).map(([name, value]) => usageRow(name, value, totalProxy(report.actors))));
   printTable("Models", ["model", "sessions", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.models).map(([name, value]) => usageRow(name, value, totalProxy(report.models))));
-  if (Object.keys(report.subagentTiers).length) printTable("Subagent tiers", ["tier", "agents", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.subagentTiers).map(([name, value]) => usageRow(name, value, totalProxy(report.subagentTiers))));
+  if (Object.keys(report.subagentRoutes).length) printTable("Subagent routes", ["model/effort", "agents", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.subagentRoutes).map(([name, value]) => usageRow(name, value, totalProxy(report.subagentRoutes))));
+  if (Object.keys(report.subagentRoles).length) printTable("Subagent roles", ["role", "agents", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.subagentRoles).map(([name, value]) => usageRow(name, value, totalProxy(report.subagentRoles))));
+  if (Object.keys(report.subagentTiers).length) printTable("Legacy subagent tiers", ["tier", "agents", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.subagentTiers).map(([name, value]) => usageRow(name, value, totalProxy(report.subagentTiers))));
   const guardian = report.guardian;
   console.log(`\nGuardian\n  reviews ${guardian.reviews} (${guardian.allow} allow, ${guardian.deny} deny, ${guardian.unknown} unknown) | avg ${guardian.averageDurationMs ? `${(guardian.averageDurationMs / 1000).toFixed(1)}s` : "n/a"} | cache ${guardian.cachePercent.toFixed(1)}% | proxy ${formatNumber(guardian.comparisonProxy)}`);
   printTable("Top root tasks", ["task", "proxy", "root", "agents", "guardian", "agent%", "id"], report.topRootTasks.map((task: any) => {

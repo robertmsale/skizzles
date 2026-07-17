@@ -1,10 +1,9 @@
 /**
  * MultiAgentV2 dispatch boundary.
  *
- * Root PreToolUse events omit `agent_id`; spawned subagents include it. The
- * hook validates tier/role task names, permits one bounded worker delegation
- * layer, and blocks follow-up reactivation because an unloaded child may resume
- * with the caller's model and reasoning effort.
+ * Native spawn_agent owns model and reasoning selection. This hook validates
+ * role-oriented task names, requires explicit routing controls, permits one
+ * bounded worker delegation layer, and blocks completed-task reactivation.
  */
 type HookInput = {
   agent_id?: unknown;
@@ -19,23 +18,14 @@ type HookInput = {
   };
 };
 
-const routes = {
-  mechanical: { model: "gpt-5.6-luna", effort: "high" },
-  scoped: { model: "gpt-5.6-luna", effort: "xhigh" },
-  broad: { model: "gpt-5.6-terra", effort: "high" },
-  standard: { model: "gpt-5.6-terra", effort: "high" },
-  complex: { model: "gpt-5.6-sol", effort: "medium" },
-  specialized: { model: "gpt-5.6-sol", effort: "high" },
-  critical: { model: "gpt-5.6-sol", effort: "xhigh" },
-} as const;
-
 const roles = ["triage", "worker", "designer", "qa", "review", "deployment"] as const;
-const delegatingWorkerTiers = new Set(["broad", "standard", "complex", "specialized", "critical"]);
-const delegatedWorkerTiers = new Set(["mechanical", "scoped"]);
-const sessionMetadataReadLimit = 2 * 1024 * 1024;
 const taskNamePattern = new RegExp(
-  `^(${Object.keys(routes).join("|")})__(${roles.join("|")})__[a-z0-9]+(?:_[a-z0-9]+)*$`,
+  `^(${roles.join("|")})__[a-z0-9]+(?:_[a-z0-9]+)*$`,
 );
+const legacyTaskNamePattern = new RegExp(
+  `^[a-z0-9]+__(${roles.join("|")})__[a-z0-9]+(?:_[a-z0-9]+)*$`,
+);
+const sessionMetadataReadLimit = 2 * 1024 * 1024;
 
 function deny(reason: string): never {
   console.log(
@@ -50,38 +40,92 @@ function deny(reason: string): never {
   process.exit(0);
 }
 
-type ThreadSpawn = {
+type ThreadState = {
   depth?: unknown;
   agent_path?: unknown;
+  model?: string;
 };
 
-async function readThreadSpawn(transcriptPath: unknown): Promise<ThreadSpawn | null> {
+async function readLatestModel(file: ReturnType<typeof Bun.file>): Promise<string | undefined> {
+  let end = file.size;
+  let carry = "";
+  while (end > 0) {
+    const start = Math.max(0, end - sessionMetadataReadLimit);
+    const text = await file.slice(start, end).text();
+    const lines = `${text}${carry}`.split("\n");
+    carry = start > 0 ? (lines.shift() ?? "") : "";
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as {
+          type?: unknown;
+          payload?: { model?: unknown };
+        };
+        if (entry.type === "turn_context" && typeof entry.payload?.model === "string") {
+          return entry.payload.model;
+        }
+      } catch {
+        // A non-context record can be truncated at a chunk boundary. Continue
+        // scanning older complete records rather than losing verified state.
+      }
+    }
+    if (carry.length > sessionMetadataReadLimit) carry = "";
+    end = start;
+  }
+  return undefined;
+}
+
+async function readThreadState(transcriptPath: unknown): Promise<ThreadState | null> {
   if (typeof transcriptPath !== "string" || !transcriptPath) return null;
 
   try {
-    // Session metadata is the first JSONL record; never load a long rollout just
-    // to recover its task path and depth.
-    const prefix = await Bun.file(transcriptPath).slice(0, sessionMetadataReadLimit).text();
-    const newline = prefix.indexOf("\n");
-    if (newline < 0) return null;
-    const firstLine = prefix.slice(0, newline);
-    const entry = JSON.parse(firstLine) as {
-      type?: unknown;
-      payload?: { source?: { subagent?: { thread_spawn?: ThreadSpawn } } };
-    };
-    if (entry.type !== "session_meta") return null;
-    return entry.payload?.source?.subagent?.thread_spawn ?? null;
+    const file = Bun.file(transcriptPath);
+    const prefix = await file.slice(0, sessionMetadataReadLimit).text();
+    let state: ThreadState = {};
+    const lines = prefix.split("\n");
+    if (!prefix.endsWith("\n")) lines.pop();
+    for (const line of lines) {
+      if (!line) continue;
+      const entry = JSON.parse(line) as {
+        type?: unknown;
+        payload?: {
+          model?: unknown;
+          source?: { subagent?: { thread_spawn?: ThreadState } };
+        };
+      };
+      if (entry.type === "session_meta") {
+        state = { ...state, ...entry.payload?.source?.subagent?.thread_spawn };
+      }
+    }
+    state.model = await readLatestModel(file);
+    return state;
   } catch {
     return null;
   }
 }
 
-function parseRouteFromPath(agentPath: unknown): { tier: string; role: string } | null {
+function parseRoleFromPath(agentPath: unknown): string | null {
   if (typeof agentPath !== "string") return null;
   const taskName = agentPath.split("/").filter(Boolean).at(-1);
-  if (!taskName || !taskNamePattern.test(taskName)) return null;
-  const [tier, role] = taskName.split("__", 3);
-  return { tier, role };
+  if (!taskName) return null;
+  return taskName.match(taskNamePattern)?.[1] ?? taskName.match(legacyTaskNamePattern)?.[1] ?? null;
+}
+
+function isExplicitRouting(model: unknown, reasoningEffort: unknown): boolean {
+  return (
+    typeof model === "string" &&
+    model.trim().length > 0 &&
+    typeof reasoningEffort === "string" &&
+    reasoningEffort.trim().length > 0
+  );
+}
+
+function isBoundedWorkerRoute(model: unknown, reasoningEffort: unknown): boolean {
+  if (model === "gpt-5.6-luna") {
+    return reasoningEffort === "low" || reasoningEffort === "medium";
+  }
+  return model === "gpt-5.6-terra" && reasoningEffort === "low";
 }
 
 const raw = await Bun.stdin.text();
@@ -97,24 +141,20 @@ try {
 }
 
 if (event.hook_event_name === "SubagentStart") {
-  const spawn = await readThreadSpawn(event.transcript_path);
-  const route = parseRouteFromPath(spawn?.agent_path);
-  const depth = spawn?.depth;
+  const state = await readThreadState(event.transcript_path);
+  const role = parseRoleFromPath(state?.agent_path);
+  const depth = state?.depth;
 
   let additionalContext: string | null = null;
-  if (depth === 1 && route?.role === "worker" && delegatingWorkerTiers.has(route.tier)) {
+  if (depth === 1 && role === "worker") {
     additionalContext =
-      "Fourth Wall worker delegation is available: you may keep implementing your owned work while dispatching at most one active mechanical__worker__... or scoped__worker__... Luna grandchild for a small, disjoint, self-contained ownership slice. Give it the complete inspect-edit-focused-validation-fix-report loop, use fork_turns=\"none\", avoid overlapping writes, and mark it done after delivery. Delegate outcomes, not command-running errands.";
-  } else if (
-    depth === 2 &&
-    route?.role === "worker" &&
-    delegatedWorkerTiers.has(route.tier)
-  ) {
+      "Fourth Wall worker delegation may be available: while continuing independent implementation, you may dispatch at most one active worker__... grandchild for a small, disjoint, self-contained ownership slice. Use explicit Luna low/medium routing when available or Terra low as the bounded fallback, fork_turns=\"none\", and give it the complete inspect-edit-focused-validation-fix-report loop. The spawn guard verifies the effective parent and child routes.";
+  } else if (depth === 2 && role === "worker") {
     additionalContext =
-      "You are a Luna worker grandchild and a guaranteed leaf. Own the assigned bounded slice end to end: inspect, edit, run focused validation, fix in-scope failures, and report changed areas plus evidence. Do not spawn or perform Git integration. Message your parent only for a material blocker or ownership collision, then send one compact final result.";
+      "You are a bounded worker grandchild and a guaranteed leaf. Own the assigned slice end to end: inspect, edit, run focused validation, fix in-scope failures, and report changed areas plus evidence. Do not spawn or perform Git integration. Message your parent only for a material blocker or ownership collision, then send one compact final result.";
   } else if (depth === 2) {
     additionalContext =
-      "Fourth Wall policy violation: depth-2 tasks must be mechanical or scoped Workers. Do not take ownership or spawn; report the invalid route to the parent/root and stop.";
+      "Fourth Wall policy violation: depth-2 tasks must be bounded Workers. Do not take ownership or spawn; report the invalid route to the parent/root and stop.";
   }
 
   console.log(
@@ -131,7 +171,7 @@ if (event.hook_event_name === "SubagentStart") {
 const toolName = typeof event.tool_name === "string" ? event.tool_name : "";
 if (toolName.endsWith("followup_task")) {
   deny(
-    "Completed subagents are not reusable. Spawn a fresh tier__role__objective task with a compact handoff, raising the tier when the prior attempt exposed greater complexity.",
+    "Completed subagents are not reusable. Spawn a fresh role__objective task with a compact handoff and explicit model/reasoning controls.",
   );
 }
 
@@ -142,54 +182,50 @@ if (!toolName.endsWith("spawn_agent")) {
 const taskName = event.tool_input?.task_name;
 if (typeof taskName !== "string" || !taskNamePattern.test(taskName)) {
   deny(
-    "Task names must use tier__role__objective. Tiers: mechanical, scoped, broad, standard, complex, specialized, critical. Roles: triage, worker, designer, qa, review, deployment. Use lowercase letters, digits, and underscores only.",
+    "Task names must use role__objective. Roles: triage, worker, designer, qa, review, deployment. Use lowercase letters, digits, and underscores only.",
   );
 }
 
-const tier = taskName.split("__", 1)[0] as keyof typeof routes;
-const route = routes[tier];
+if (!isExplicitRouting(event.tool_input?.model, event.tool_input?.reasoning_effort)) {
+  deny(
+    "spawn_agent must pass explicit model and reasoning_effort values selected from the active tool schema using the Fourth Wall complexity and horizon guidance.",
+  );
+}
 
 if (typeof event.agent_id === "string" && event.agent_id.trim()) {
-  const parentSpawn = await readThreadSpawn(event.transcript_path);
-  const parentRoute = parseRouteFromPath(parentSpawn?.agent_path);
-  const childRole = taskName.split("__", 3)[1];
+  const parentState = await readThreadState(event.transcript_path);
+  const parentRole = parseRoleFromPath(parentState?.agent_path);
+  const childRole = taskName.split("__", 1)[0];
 
   if (
-    parentSpawn?.depth !== 1 ||
-    parentRoute?.role !== "worker" ||
-    !delegatingWorkerTiers.has(parentRoute.tier)
+    parentState?.depth !== 1 ||
+    parentRole !== "worker" ||
+    (parentState.model !== "gpt-5.6-terra" && parentState.model !== "gpt-5.6-sol")
   ) {
     deny(
-      "Only depth-1 Terra or Sol workers may delegate. Return the proposed slice to the root orchestrator for dispatch.",
+      "Only depth-1 Terra or Sol Workers may delegate. Return the proposed slice to the root orchestrator for dispatch.",
     );
   }
-  if (childRole !== "worker" || !delegatedWorkerTiers.has(tier)) {
+  if (
+    childRole !== "worker" ||
+    !isBoundedWorkerRoute(event.tool_input?.model, event.tool_input?.reasoning_effort)
+  ) {
     deny(
-      "Worker grandchildren must use mechanical__worker__objective or scoped__worker__objective so they remain bounded Luna ownership slices.",
+      "Worker grandchildren must use worker__objective with Luna low/medium when available or Terra low as the bounded fallback.",
     );
   }
   if (event.tool_input?.fork_turns !== "none") {
     deny(
-      "Worker grandchildren must use fork_turns=\"none\" so bounded Luna slices do not inherit the parent's long context.",
+      "Worker grandchildren must use fork_turns=\"none\" so bounded ownership slices do not inherit the parent's long context.",
     );
   }
 }
 
-/**
- * Tier routing is authoritative. Preserve the complete spawn payload, including
- * encrypted messages and fork settings, while injecting the model controls that
- * Desktop may hide from the model-visible spawn schema.
- */
 console.log(
   JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "allow",
-      updatedInput: {
-        ...event.tool_input,
-        model: route.model,
-        reasoning_effort: route.effort,
-      },
     },
   }),
 );

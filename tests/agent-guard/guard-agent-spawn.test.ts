@@ -27,7 +27,11 @@ afterAll(async () => {
   await rm(fixtureDirectory, { recursive: true, force: true });
 });
 
-async function createTranscript(depth: number, agentPath: string): Promise<string> {
+async function createTranscript(
+  depth: number,
+  agentPath: string,
+  model = "gpt-5.6-terra",
+): Promise<string> {
   const path = join(fixtureDirectory, `transcript-${transcriptSequence++}.jsonl`);
   const metadata = {
     type: "session_meta",
@@ -42,8 +46,9 @@ async function createTranscript(depth: number, agentPath: string): Promise<strin
       },
     },
   };
+  const turnContext = { type: "turn_context", payload: { model } };
 
-  await writeFile(path, `${JSON.stringify(metadata)}\n${JSON.stringify({ ignored: true })}\n`);
+  await writeFile(path, `${JSON.stringify(metadata)}\n${JSON.stringify(turnContext)}\n`);
   return path;
 }
 
@@ -77,58 +82,73 @@ function expectDenied(output: HookOutput, reasonFragment: string): void {
 }
 
 describe("guard-agent-spawn hook", () => {
-  test("allows root dispatch, preserves the payload, and injects authoritative route controls", async () => {
+  test("allows root dispatch without rewriting native routing controls", async () => {
     const output = await runHook({
       hook_event_name: "PreToolUse",
       tool_name: "collaboration.spawn_agent",
       tool_input: {
-        task_name: "standard__worker__build_api",
-        fork_turns: "none",
+        task_name: "worker__build_api",
+        fork_turns: "2",
         message: "opaque handoff",
         encrypted_payload: { ciphertext: "unchanged" },
-        model: "caller-model",
-        reasoning_effort: "low",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "medium",
       },
     });
 
     expect(output.hookSpecificOutput).toEqual({
       hookEventName: "PreToolUse",
       permissionDecision: "allow",
-      updatedInput: {
-        task_name: "standard__worker__build_api",
-        fork_turns: "none",
-        message: "opaque handoff",
-        encrypted_payload: { ciphertext: "unchanged" },
-        model: "gpt-5.6-terra",
-        reasoning_effort: "high",
-      },
     });
   });
 
   for (const malformedName of [
-    "standard_worker_build_api",
-    "unknown__worker__build_api",
-    "standard__unknown__build_api",
-    "standard__worker__BuildApi",
-    "standard__worker__build-api",
-    "standard__worker__",
+    "standard__worker__build_api",
+    "worker_build_api",
+    "unknown__build_api",
+    "worker__BuildApi",
+    "worker__build-api",
+    "worker__",
   ]) {
-    test(`rejects malformed route ${malformedName}`, async () => {
+    test(`rejects malformed role name ${malformedName}`, async () => {
       const output = await runHook({
         hook_event_name: "PreToolUse",
         tool_name: "spawn_agent",
-        tool_input: { task_name: malformedName },
+        tool_input: {
+          task_name: malformedName,
+          model: "gpt-5.6-terra",
+          reasoning_effort: "low",
+        },
       });
 
-      expectDenied(output, "tier__role__objective");
+      expectDenied(output, "role__objective");
     });
   }
 
-  test("announces the bounded delegation allowance to eligible depth-1 workers", async () => {
-    const transcriptPath = await createTranscript(
-      1,
-      "/root/specialized__worker__migrate_agent_guard",
-    );
+  test("requires explicit native model and reasoning fields", async () => {
+    const missingModel = await runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "spawn_agent",
+      tool_input: {
+        task_name: "triage__inspect_route",
+        reasoning_effort: "low",
+      },
+    });
+    expectDenied(missingModel, "explicit model and reasoning_effort");
+
+    const missingEffort = await runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "spawn_agent",
+      tool_input: {
+        task_name: "triage__inspect_route",
+        model: "gpt-5.6-terra",
+      },
+    });
+    expectDenied(missingEffort, "explicit model and reasoning_effort");
+  });
+
+  test("announces bounded delegation to depth-1 workers", async () => {
+    const transcriptPath = await createTranscript(1, "/root/worker__migrate_agent_guard");
     const output = await runHook({
       hook_event_name: "SubagentStart",
       transcript_path: transcriptPath,
@@ -136,81 +156,175 @@ describe("guard-agent-spawn hook", () => {
 
     expect(output.hookSpecificOutput.hookEventName).toBe("SubagentStart");
     expect(output.hookSpecificOutput.additionalContext).toContain("at most one active");
-    expect(output.hookSpecificOutput.additionalContext).toContain("mechanical__worker__");
-    expect(output.hookSpecificOutput.additionalContext).toContain("scoped__worker__");
+    expect(output.hookSpecificOutput.additionalContext).toContain("worker__");
     expect(output.hookSpecificOutput.additionalContext).toContain('fork_turns="none"');
   });
 
-  test("allows one bounded Luna worker route from an eligible depth-1 worker", async () => {
+  test("allows bounded Luna and Terra-fallback worker grandchildren", async () => {
+    const transcriptPath = await createTranscript(1, "/root/worker__fix_boundary");
+    for (const [model, reasoningEffort] of [
+      ["gpt-5.6-luna", "medium"],
+      ["gpt-5.6-terra", "low"],
+    ]) {
+      const output = await runHook({
+        agent_id: "parent-agent",
+        hook_event_name: "PreToolUse",
+        transcript_path: transcriptPath,
+        tool_name: "collaboration.spawn_agent",
+        tool_input: {
+          task_name: "worker__add_fixtures",
+          fork_turns: "none",
+          message: "bounded complete slice",
+          model,
+          reasoning_effort: reasoningEffort,
+        },
+      });
+
+      expect(output.hookSpecificOutput).toEqual({
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+      });
+    }
+  });
+
+  test("accepts legacy parent names during migration", async () => {
     const transcriptPath = await createTranscript(1, "/root/complex__worker__fix_boundary");
     const output = await runHook({
       agent_id: "parent-agent",
       hook_event_name: "PreToolUse",
       transcript_path: transcriptPath,
-      tool_name: "collaboration.spawn_agent",
-      tool_input: {
-        task_name: "scoped__worker__add_fixtures",
-        fork_turns: "none",
-        message: "bounded complete slice",
-      },
-    });
-
-    expect(output.hookSpecificOutput).toMatchObject({
-      hookEventName: "PreToolUse",
-      permissionDecision: "allow",
-      updatedInput: {
-        task_name: "scoped__worker__add_fixtures",
-        fork_turns: "none",
-        model: "gpt-5.6-luna",
-        reasoning_effort: "xhigh",
-      },
-    });
-  });
-
-  test("rejects delegation from leaf roles and deeper workers", async () => {
-    const reviewTranscript = await createTranscript(1, "/root/critical__review__audit_change");
-    const reviewOutput = await runHook({
-      agent_id: "review-agent",
-      hook_event_name: "PreToolUse",
-      transcript_path: reviewTranscript,
       tool_name: "spawn_agent",
       tool_input: {
-        task_name: "scoped__worker__apply_fix",
+        task_name: "worker__add_fixtures",
         fork_turns: "none",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "low",
       },
     });
-    expectDenied(reviewOutput, "Only depth-1 Terra or Sol workers");
 
-    const grandchildTranscript = await createTranscript(
-      2,
-      "/root/standard__worker__parent/scoped__worker__child",
+    expect(output.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+
+  test("ignores an incomplete transcript tail after verified parent metadata", async () => {
+    const transcriptPath = await createTranscript(1, "/root/worker__long_parent");
+    await writeFile(transcriptPath, '{"type":"response_item","payload":{"large":"unterminated', {
+      flag: "a",
+    });
+    const output = await runHook({
+      agent_id: "parent-agent",
+      hook_event_name: "PreToolUse",
+      transcript_path: transcriptPath,
+      tool_name: "spawn_agent",
+      tool_input: {
+        task_name: "worker__small_slice",
+        fork_turns: "none",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "low",
+      },
+    });
+
+    expect(output.hookSpecificOutput.permissionDecision).toBe("allow");
+  });
+
+  test("uses the latest model from a bounded transcript tail", async () => {
+    const largeRecord = `${JSON.stringify({
+      type: "response_item",
+      payload: { large: "x".repeat(2 * 1024 * 1024) },
+    })}\n`;
+
+    const downgradedTranscript = await createTranscript(
+      1,
+      "/root/worker__downgraded_parent",
+      "gpt-5.6-sol",
     );
-    const grandchildOutput = await runHook({
-      agent_id: "grandchild-agent",
+    await writeFile(
+      downgradedTranscript,
+      `${largeRecord}${JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-5.6-luna" },
+      })}\n${largeRecord}`,
+      { flag: "a" },
+    );
+    const denied = await runHook({
+      agent_id: "parent-agent",
       hook_event_name: "PreToolUse",
-      transcript_path: grandchildTranscript,
+      transcript_path: downgradedTranscript,
       tool_name: "spawn_agent",
       tool_input: {
-        task_name: "mechanical__worker__nested_child",
+        task_name: "worker__small_slice",
         fork_turns: "none",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "low",
       },
     });
-    expectDenied(grandchildOutput, "Only depth-1 Terra or Sol workers");
+    expectDenied(denied, "Only depth-1 Terra or Sol Workers");
+
+    const upgradedTranscript = await createTranscript(
+      1,
+      "/root/worker__upgraded_parent",
+      "gpt-5.6-luna",
+    );
+    await writeFile(
+      upgradedTranscript,
+      `${largeRecord}${JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-5.6-terra" },
+      })}\n${largeRecord}`,
+      { flag: "a" },
+    );
+    const allowed = await runHook({
+      agent_id: "parent-agent",
+      hook_event_name: "PreToolUse",
+      transcript_path: upgradedTranscript,
+      tool_name: "spawn_agent",
+      tool_input: {
+        task_name: "worker__small_slice",
+        fork_turns: "none",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "low",
+      },
+    });
+    expect(allowed.hookSpecificOutput.permissionDecision).toBe("allow");
   });
 
-  test("rejects non-Luna grandchildren and inherited-history grandchildren", async () => {
-    const transcriptPath = await createTranscript(1, "/root/specialized__worker__parent");
+  test("rejects delegation from leaf roles, deep workers, and Luna parents", async () => {
+    const cases = [
+      await createTranscript(1, "/root/review__audit_change"),
+      await createTranscript(2, "/root/worker__parent/worker__child"),
+      await createTranscript(1, "/root/worker__small_parent", "gpt-5.6-luna"),
+    ];
+    for (const transcriptPath of cases) {
+      const output = await runHook({
+        agent_id: "parent-agent",
+        hook_event_name: "PreToolUse",
+        transcript_path: transcriptPath,
+        tool_name: "spawn_agent",
+        tool_input: {
+          task_name: "worker__apply_fix",
+          fork_turns: "none",
+          model: "gpt-5.6-terra",
+          reasoning_effort: "low",
+        },
+      });
+      expectDenied(output, "Only depth-1 Terra or Sol Workers");
+    }
+  });
+
+  test("rejects unbounded or inherited-history worker grandchildren", async () => {
+    const transcriptPath = await createTranscript(1, "/root/worker__parent", "gpt-5.6-sol");
     const wrongRouteOutput = await runHook({
       agent_id: "parent-agent",
       hook_event_name: "PreToolUse",
       transcript_path: transcriptPath,
       tool_name: "spawn_agent",
       tool_input: {
-        task_name: "standard__worker__too_broad",
+        task_name: "worker__too_broad",
         fork_turns: "none",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "medium",
       },
     });
-    expectDenied(wrongRouteOutput, "mechanical__worker__objective or scoped__worker__objective");
+    expectDenied(wrongRouteOutput, "Luna low/medium");
 
     const inheritedOutput = await runHook({
       agent_id: "parent-agent",
@@ -218,17 +332,20 @@ describe("guard-agent-spawn hook", () => {
       transcript_path: transcriptPath,
       tool_name: "spawn_agent",
       tool_input: {
-        task_name: "mechanical__worker__small_slice",
-        fork_turns: "all",
+        task_name: "worker__small_slice",
+        fork_turns: "1",
+        model: "gpt-5.6-terra",
+        reasoning_effort: "low",
       },
     });
     expectDenied(inheritedOutput, 'fork_turns="none"');
   });
 
-  test("marks valid Luna grandchildren as leaves and invalid depth-2 routes as violations", async () => {
+  test("marks valid worker grandchildren as leaves and invalid depth-2 roles as violations", async () => {
     const leafTranscript = await createTranscript(
       2,
-      "/root/specialized__worker__parent/scoped__worker__child",
+      "/root/worker__parent/worker__child",
+      "gpt-5.6-terra",
     );
     const leafOutput = await runHook({
       hook_event_name: "SubagentStart",
@@ -239,39 +356,15 @@ describe("guard-agent-spawn hook", () => {
 
     const invalidTranscript = await createTranscript(
       2,
-      "/root/specialized__worker__parent/broad__worker__invalid_child",
+      "/root/worker__parent/review__invalid_child",
     );
     const invalidOutput = await runHook({
       hook_event_name: "SubagentStart",
       transcript_path: invalidTranscript,
     });
     expect(invalidOutput.hookSpecificOutput.additionalContext).toContain(
-      "depth-2 tasks must be mechanical or scoped Workers",
+      "depth-2 tasks must be bounded Workers",
     );
-  });
-
-  test("injects every tier's model and effort contract", async () => {
-    const routes = {
-      mechanical: ["gpt-5.6-luna", "high"],
-      scoped: ["gpt-5.6-luna", "xhigh"],
-      broad: ["gpt-5.6-terra", "high"],
-      standard: ["gpt-5.6-terra", "high"],
-      complex: ["gpt-5.6-sol", "medium"],
-      specialized: ["gpt-5.6-sol", "high"],
-      critical: ["gpt-5.6-sol", "xhigh"],
-    } as const;
-
-    for (const [tier, [model, reasoningEffort]] of Object.entries(routes)) {
-      const output = await runHook({
-        hook_event_name: "PreToolUse",
-        tool_name: "spawn_agent",
-        tool_input: { task_name: `${tier}__triage__inspect_route` },
-      });
-      expect(output.hookSpecificOutput.updatedInput).toMatchObject({
-        model,
-        reasoning_effort: reasoningEffort,
-      });
-    }
   });
 
   test("rejects follow-up reactivation regardless of tool namespace", async () => {

@@ -5,7 +5,7 @@ description: Coordinate work through a bounded native Codex MultiAgentV2 task gr
 
 # Fourth Wall
 
-Use native MultiAgentV2 with two independent dispatch choices: complexity and horizon select the model/effort tier, while a behavioral role selects the duty. Keep the graph bounded: the root dispatches every role, eligible Terra/Sol Workers may dispatch one active Luna Worker for a complete disjoint slice, and a global hook blocks deeper nesting and completed-task reactivation through `followup_task`.
+Use native MultiAgentV2 with two independent dispatch choices: complexity and horizon select explicit model/effort fields, while a behavioral role selects the duty and task-name prefix. Keep the graph bounded: the root dispatches every role, eligible Terra/Sol Workers may dispatch one active bounded Worker for a complete disjoint slice, and a global hook blocks deeper nesting and completed-task reactivation through `followup_task`.
 
 ## Scope
 
@@ -13,29 +13,37 @@ Use native MultiAgentV2 with two independent dispatch choices: complexity and ho
 - Keep the root focused on the overall outcome, decisions, dispatch, integration acceptance, and proof evaluation.
 - Delegate complete ownership slices with a clear owner, boundary, implementation, validation, and evidence contract. Do not retain the expensive execution loop at the root merely because delegation is active.
 - Stay single-agent when coordination overhead would exceed the value of delegation.
-- Children are peers beneath the root. Non-Workers return further decomposition to the root. A depth-1 Terra/Sol Worker may dispatch one active Luna Worker only when it can transfer a small, disjoint, end-to-end ownership slice while continuing independent implementation.
+- Children are peers beneath the root. Non-Workers return further decomposition to the root. A depth-1 Terra/Sol Worker may dispatch one active bounded Worker only when it can transfer a small, disjoint, end-to-end ownership slice while continuing independent implementation.
 
 ## Dispatch Contract
 
-Name every child `<tier>__<role>__<objective>`. Double underscores separate routing fields; use single underscores inside the objective. Do not encode model names in task names.
+Name every child `<role>__<objective>`. Double underscores separate the behavioral role from the objective; use single underscores inside the objective. Examples: `worker__implement_filters`, `triage__map_sync_flow`, and `review__audit_auth_change`. Capability belongs in native spawn fields and the handoff, not in the task name.
 
-Choose the cheapest tier likely to succeed, then raise the tier when horizon, context, specialization, or risk demands it:
+Choose the cheapest route likely to succeed. Complexity selects the model class; horizon selects reasoning effort and how much recent context to fork:
 
-| Tier | Model | Effort | Use |
-|---|---|---|---|
-| `mechanical` | `gpt-5.6-luna` | high | Tiny, repetitive, precisely bounded work |
-| `scoped` | `gpt-5.6-luna` | xhigh | Short conventional implementation with clear acceptance criteria |
-| `broad` | `gpt-5.6-terra` | high | Context-heavy exploration or mapping with straightforward reasoning |
-| `standard` | `gpt-5.6-terra` | high | Normal debugging, implementation, tests, and refactors |
-| `complex` | `gpt-5.6-sol` | medium | Ambiguous but bounded cross-boundary reasoning |
-| `specialized` | `gpt-5.6-sol` | high | Architecture, security, migrations, computer use, or long-horizon work |
-| `critical` | `gpt-5.6-sol` | xhigh | Adversarial review, irreversible operations, crash or security risk, or failed lower-tier work |
+| Route | Complexity / horizon | Preferred model | Effort | Availability fallback |
+|---|---|---|---|---|
+| Mechanical | Tiny, repetitive, short | `gpt-5.6-luna` | low | `gpt-5.6-terra` low |
+| Scoped | Conventional, bounded, short | `gpt-5.6-luna` | medium | `gpt-5.6-terra` low |
+| Broad | Straightforward reasoning, long context | `gpt-5.6-terra` | low | — |
+| Standard | Normal debugging or implementation | `gpt-5.6-terra` | medium | — |
+| Complex | Ambiguous but bounded cross-boundary reasoning | `gpt-5.6-sol` | low | — |
+| Specialized | Architecture, security, migrations, or long horizon | `gpt-5.6-sol` | medium | — |
+| Critical | Adversarial acceptance, irreversible work, or repeated failure | `gpt-5.6-sol` | high | — |
 
-Use Luna only when the assignment is short-lived, self-contained, cheaply verifiable, and comfortably below long-context territory. Luna is the cost-efficient default for a clean bounded packet, not a sink for noisy logs or ambiguous work. Prefer Terra as context insurance when broad repository history must remain coherent even if the reasoning is conventional; do not use it merely as a universal middle tier. Use Sol when ambiguity, specialization, runtime-only behavior, cross-boundary architecture, platform lifecycle, or defect-escape cost dominates. Complexity and horizon are separate signals: a small difficult task may need Sol, while a large straightforward mapping task may fit Terra.
+Use Luna only when the active `spawn_agent` schema offers it and the assignment is short-lived, self-contained, cheaply verifiable, and comfortably below long-context territory. If Luna is unavailable, use the listed Terra fallback. Prefer Terra as context insurance when broad repository history must remain coherent even if reasoning is conventional. Use Sol when ambiguity, specialization, runtime-only behavior, cross-boundary architecture, platform lifecycle, or defect-escape cost dominates. A small difficult task may need Sol, while a large straightforward mapping task may fit Terra.
 
 Do not spend model turns merely polling commands or children. The owner of a long-running command uses the native bounded wait/session primitive, stores verbose output outside model context, and reports only completion state, relevant deltas, error signatures, and artifact paths. Delegate an engineering outcome only when the child can interpret and act on the result.
 
-When `spawn_agent` exposes `model` and `reasoning_effort`, pass the table values explicitly and use `fork_turns = "none"`. If the active schema does not expose those fields, do not invent them; retain the tier prefix as the routing contract and rely on the configured host or hook to apply it. Missing schema feedback is not evidence that the child inherited the root or that routing did not occur. Do not claim an effective model or effort unless the host exposes it.
+Pass `model` and `reasoning_effort` explicitly on every spawn; the hook validates but never rewrites them. Use only models advertised by the active tool schema. Do not add `agent_type` unless a configured role is intentionally required.
+
+Choose `fork_turns` deliberately:
+
+- Use `"none"` for self-contained packets, isolated implementation, sensitive stale context, and Worker grandchildren.
+- Prefer a small positive integer string such as `"1"` or `"2"` when recent owner intent or an established plan would prevent rediscovery.
+- Use `"all"` only when the complete conversation is genuinely required and bounded enough to justify its context cost.
+
+Codex 0.145.0-alpha.18 supports explicit model/reasoning overrides with positive and full-history forks. Full-history forks still inherit the parent `agent_type`, so do not combine `fork_turns="all"` with an `agent_type` override. Do not claim an effective model or effort merely from a successful call; use host-visible task settings or rollout evidence when verification matters.
 
 Choose the independent behavioral role that best matches the duty:
 
@@ -48,22 +56,21 @@ Choose the independent behavioral role that best matches the duty:
 | Review | Independent adversarial review and final validation | [resources/roles/review.md](resources/roles/review.md) |
 | Deployment | Careful procedural deployment and production operations | [resources/roles/deployment.md](resources/roles/deployment.md) |
 
-Examples: `scoped__worker__implement_filters`, `broad__triage__map_sync_flow`, and `critical__review__audit_auth_change`.
-
 In every spawn message:
 
-1. Name the tier and role.
+1. Name the selected route and role.
 2. Tell the child to read this skill and the linked role resource.
 3. Provide the complete objective, ownership, constraints, established decisions, relevant skill obligations, and expected proof.
-4. Prefer `fork_turns = "none"` so the handoff remains explicit and context cost stays bounded.
+4. Choose the smallest useful `fork_turns` value so the handoff remains explicit without forcing the child to rediscover recent decisions.
 
 For a long or replacement-heavy root task, keep one durable task packet under `/tmp` and give children its path plus their slice-specific instructions. Keep the packet concise and operational; do not ask hooks to reconstruct or rewrite encrypted spawn messages. Record the overall objective, established decisions, constraints, live ownership, evidence, open gates, and routing state. Update it only at meaningful handoffs or acceptance points, not as a transcript.
 
 Example:
 
 ```text
-You are dispatched as a Scoped Worker. Read $fourth-wall and follow
-resources/roles/worker.md. You are a Luna leaf and must not spawn subagents.
+You are dispatched as a Scoped Worker using gpt-5.6-luna at medium effort
+(or the advertised Terra-low fallback). Read $fourth-wall and follow
+resources/roles/worker.md. You are a bounded leaf and must not spawn subagents.
 
 Assignment: ...
 Ownership: ...
@@ -73,7 +80,7 @@ Expected proof: ...
 
 ## Execution Discipline
 
-Roles describe duties and remain valid under every model and effort combination. The tier carries the capability decision.
+Roles describe duties and remain valid under every model and effort combination. Explicit spawn fields carry the capability decision.
 
 - Act decisively when the path is clear and evidence is sufficient.
 - Keep mechanical and reversible work direct.
@@ -82,19 +89,19 @@ Roles describe duties and remain valid under every model and effort combination.
 - Prefer one child owning investigation-through-proof for a coherent slice over splitting implementation and its focused validation between child and root.
 - Complete causal ownership includes the smallest executable proof of the real boundary or production entrypoint changed. Source inspection, helper-only tests, and successful builds are not sufficient when a local runtime smoke can exercise the behavior directly.
 - For runtime, platform, cross-process, or live-state boundaries, sequence proof by increasing cost: focused source/unit checks, then the cheapest causal smoke through the production entrypoint, then full product QA. Skip the smoke only when full QA is itself the cheapest executable proof.
-- A test-green/runtime-red result raises the next owner one tier. A second failure on the same causal surface requires fresh Triage of the production path and proof boundary before another implementation attempt.
-- Use the root's capability for decomposition, cross-slice decisions, and acceptance. Route repetitive implementation, integration stabilization, build/test loops, and runtime proof to an appropriately tiered leaf whenever the ownership can be made coherent.
+- A test-green/runtime-red result raises the next owner one route. A second failure on the same causal surface requires fresh Triage of the production path and proof boundary before another implementation attempt.
+- Use the root's capability for decomposition, cross-slice decisions, and acceptance. Route repetitive implementation, integration stabilization, build/test loops, and runtime proof to an appropriately capable leaf whenever the ownership can be made coherent.
 - Delegate engineering loops, not command errands. A Worker grandchild owns inspection, implementation, focused checks, in-scope fixes, and its compact completion evidence together.
 
 ## Escalation And Cooldown
 
 Treat the dispatch table as the baseline and maintain a task-family floor when execution evidence shows the baseline is insufficient. Escalation is fast and de-escalation is deliberately slow.
 
-Raise the affected task family's floor immediately when a lower-tier result fails acceptance, root or reviewer must substantially repair it, ownership crosses an unexpected boundary, reproduction becomes runtime-only or platform-specific, a proposed fix violates an architectural invariant, or the same causal surface fails again. A test-green/runtime-red result raises the next owner one tier. A second failure requires fresh Triage of the production path and proof boundary before another implementation attempt. Attach the floor to a concrete risk signature or ownership family, not permanently to the whole repository.
+Raise the affected task family's floor immediately when a lower-route result fails acceptance, root or reviewer must substantially repair it, ownership crosses an unexpected boundary, reproduction becomes runtime-only or platform-specific, a proposed fix violates an architectural invariant, or the same causal surface fails again. A test-green/runtime-red result raises the next owner one route. A second failure requires fresh Triage of the production path and proof boundary before another implementation attempt. Attach the floor to a concrete risk signature or ownership family, not permanently to the whole repository.
 
-Within an active systemic incident, keep diagnostic and acceptance work at the proven elevated floor. Once uncertainty is removed, bounded implementation descendants may use a lower tier when the invariant, ownership, and proof are explicit; the elevated reviewer still owns acceptance. Never infer that a lower tier would have succeeded merely because a higher-tier task completed in one shot.
+Within an active systemic incident, keep diagnostic and acceptance work at the proven elevated floor. Once uncertainty is removed, bounded implementation descendants may use a lower route when the invariant, ownership, and proof are explicit; the elevated reviewer still owns acceptance. Never infer that a lower route would have succeeded merely because a higher-route task completed in one shot.
 
-Consider a one-route cooldown only after three consecutive independently accepted assignments in the same task family. Count a success only when the first implementation passes focused checks and runtime proof, independent review finds no material issue, and neither root repair nor replacement is required. Use only hook-backed named routes: `critical` -> `specialized` -> `complex` -> `standard`. This preserves the model while reducing reasoning wherever the table supports it, then crosses model class once. `broad` is selected by long context rather than elevated difficulty, so move it to `scoped` only when a new assignment is genuinely short-context; likewise move `standard` to `scoped` only after the work becomes independently Luna-eligible. `mechanical` and `scoped` are already baseline routes. Keep the reduced route on probation for three more clean assignments before adopting it as the new baseline. Any material rejection, root rescue, architecture correction, or attributable regression resets the clean-success count and immediately restores the last proven floor. Do not invent model/effort hybrids outside the routing table.
+Consider a one-route cooldown only after three consecutive independently accepted assignments in the same task family. Count a success only when the first implementation passes focused checks and runtime proof, independent review finds no material issue, and neither root repair nor replacement is required. Use only the documented routes: `critical` -> `specialized` -> `complex` -> `standard`. This preserves the model while reducing reasoning wherever the table supports it, then crosses model class once. `broad` is selected by long context rather than elevated difficulty, so move it to `scoped` only when a new assignment is genuinely short-context; likewise move `standard` to `scoped` only after the work becomes independently Luna-eligible. `mechanical` and `scoped` are already baseline routes. Keep the reduced route on probation for three more clean assignments before adopting it as the new baseline. Any material rejection, root rescue, architecture correction, or attributable regression resets the clean-success count and immediately restores the last proven floor. Do not invent model/effort hybrids outside the routing table.
 
 Do not automatically cool down crash investigation, security or authentication, data corruption, migrations, irreversible operations, native window or engine lifecycle, accessibility-engine faults, or final adversarial acceptance. Their sparse samples and high defect cost do not justify downward experiments. Record the task family, current floor, evidence trigger, clean-success count, probation state, and last accepted route in the durable task packet; the hook remains stateless.
 
@@ -117,7 +124,7 @@ Read [references/coordination-loop.md](references/coordination-loop.md) for exac
 4. Continue only high-leverage root work such as shared-contract decisions, integration inspection, and downstream routing. Do not fill child runtime with duplicate implementation, routine test loops, or repeated status polling.
 5. Treat completion messages as claims. Inspect changes and evidence, then dispatch Review or QA when risk warrants independent proof.
 6. When an integrated ownership slice has focused proof and no known breakage, commit it as a forward-progress checkpoint before changing causal surfaces, beginning risky work, handing off substantial ownership, or starting independent QA/Review. `/goal` state is not required. The root owns the checkpoint and excludes unrelated shared-worktree changes.
-7. Send corrections to a running owner with `send_message`; after it completes, spawn a fresh replacement at the same or next tier with a compact handoff. Prefer corrective commits over rewriting already reviewed checkpoints.
+7. Send corrections to a running owner with `send_message`; after it completes, spawn a fresh replacement at the same or next route with a compact handoff. Prefer corrective commits over rewriting already reviewed checkpoints.
 8. Finish with a coherent integrated outcome, validating the aggregate commit series and working tree rather than only the latest checkpoint.
 
 Read [references/delegation-contract.md](references/delegation-contract.md) before splitting consequential implementation work.
@@ -126,7 +133,7 @@ Read [references/delegation-contract.md](references/delegation-contract.md) befo
 
 - **Big-picture root:** retain product intent and decisions while specialists own bounded execution.
 - **Dependency fan-out:** dispatch independent preparation in parallel, then release downstream work after contracts stabilize.
-- **Worker offload:** a Terra/Sol Worker continues its owned implementation while one Luna Worker owns a small disjoint slice through focused proof.
+- **Worker offload:** a Terra/Sol Worker continues its owned implementation while one bounded Worker owns a small disjoint slice through focused proof.
 - **Fresh specialist:** dispatch one bounded assignment, collect its result, and replace rather than reactivate it.
 - **Adversarial loop:** Review evaluates implementation and evidence; findings go to a fresh owning Worker when more work is needed.
 - **Integration stabilization:** after parallel edits settle, one Worker owns the serial build/test/fix loop across the integrated surface while the root retains Git authority and acceptance.
@@ -140,8 +147,8 @@ When observed behavior reveals a reusable routing or lifecycle caveat, follow [r
 
 ## Hard Boundaries
 
-- Triage, Designer, QA, Review, Deployment, and Luna Workers are leaves. A depth-1 Terra/Sol Worker may have at most one active Luna Worker grandchild; all other delegation proposals return to the root.
-- Worker grandchildren must be named `mechanical__worker__...` or `scoped__worker__...`, use `fork_turns = "none"`, own a disjoint complete implementation loop, and never spawn again. The hook enforces route shape and no-history forks; the one-active-grandchild limit remains parent/root lifecycle policy because the hook is intentionally stateless.
+- Triage, Designer, QA, Review, Deployment, and bounded Luna/Terra-low Workers are leaves. A depth-1 Terra/Sol Worker may have at most one active bounded Worker grandchild; all other delegation proposals return to the root.
+- Worker grandchildren must be named `worker__...`, use explicit Luna low/medium routing when available or Terra low as the bounded fallback, set `fork_turns = "none"`, own a disjoint complete implementation loop, and never spawn again. The hook enforces role, route, and no-history constraints; the one-active-grandchild limit remains parent/root lifecycle policy because the hook is intentionally stateless.
 - A completed child is terminal. Do not reactivate it with `followup_task` or use `send_message` as a disguised follow-up.
 - Do not let two implementation tasks own overlapping files without explicit coordination.
 - The root owns Git integration, decides when parallel edits are stable, and accepts the final result. Once stable, delegate serialized project-wide verification, integration repair loops, and live proof when a leaf can own them coherently; run them at the root only when delegation overhead would exceed the work.

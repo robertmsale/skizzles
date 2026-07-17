@@ -21,25 +21,25 @@ Keep shared Git mutations and final acceptance at the root. When parallel edits 
 
 ## Spawn Shape
 
-Encode tier, role, and objective in the task name:
+Encode the role and objective in the task name; carry capability explicitly:
 
 ```json
 {
-  "task_name": "standard__worker__backend_contract",
-  "fork_turns": "none",
+  "task_name": "worker__backend_contract",
+  "fork_turns": "1",
   "model": "gpt-5.6-terra",
-  "reasoning_effort": "high",
-  "message": "Implement the bounded backend contract described below..."
+  "reasoning_effort": "medium",
+  "message": "You are dispatched as a Standard Worker. Implement the bounded backend contract described below..."
 }
 ```
 
-The tier selects model and effort; the role selects behavior. In the message, name both and tell the child to read `$fourth-wall` plus the matching `resources/roles/*.md` file. Pass model overrides only when the active tool schema exposes them.
+Complexity and horizon select model, effort, and fork depth; the role selects behavior. In the message, name the route and role and tell the child to read `$fourth-wall` plus the matching `resources/roles/*.md` file. Pass explicit model and reasoning overrides from the active tool schema.
 
 ## Worker Grandchildren
 
-A depth-1 `broad`, `standard`, `complex`, `specialized`, or `critical` Worker may dispatch at most one active Luna Worker when all of these hold:
+A depth-1 Terra/Sol Worker may dispatch at most one active bounded Worker when all of these hold:
 
-- The child is named `mechanical__worker__...` or `scoped__worker__...`.
+- The child is named `worker__...` and uses Luna low/medium when available or Terra low as the bounded fallback.
 - The slice is small, disjoint from the parent's continuing edits, and comfortably short-context.
 - The child owns inspection, implementation, focused validation, in-scope fixes, and completion evidence together.
 - The parent has genuinely independent implementation to continue while the child works.
@@ -84,6 +84,6 @@ Require the task to report:
 
 The root verifies this claim before integration or completion.
 
-Completion retires the child. Corrections after completion go to a fresh task with a compact handoff, normally at the same tier for a narrow correction or one tier higher when the prior attempt exposed greater complexity.
+Completion retires the child. Corrections after completion go to a fresh task with a compact handoff, normally at the same route for a narrow correction or one route higher when the prior attempt exposed greater complexity.
 
-When a durable `/tmp` task packet exists, pass its path rather than repeating stable cross-task context. The spawn message must still contain the child's tier, role, concrete objective, ownership, constraints, and expected proof so the packet supplements rather than hides the assignment. Do not put secrets, raw transcripts, or unbounded build logs in the packet.
+When a durable `/tmp` task packet exists, pass its path rather than repeating stable cross-task context. The spawn message must still contain the child's selected route, role, concrete objective, ownership, constraints, and expected proof so the packet supplements rather than hides the assignment. Do not put secrets, raw transcripts, or unbounded build logs in the packet.

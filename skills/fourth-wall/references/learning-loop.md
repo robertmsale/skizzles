@@ -31,4 +31,4 @@ Do not include secrets, customer data, large transcripts, or speculative policy 
 
 ## Promotion
 
-Changing `SKILL.md`, role resources, routing tiers, or hooks is a separate curation action. Promote a candidate only after explicit owner review and either a reproducible authoritative explanation or corroboration from multiple independent tasks. Mark promoted or rejected entries in the log so old evidence is not repeatedly rediscovered.
+Changing `SKILL.md`, role resources, routing presets, or hooks is a separate curation action. Promote a candidate only after explicit owner review and either a reproducible authoritative explanation or corroboration from multiple independent tasks. Mark promoted or rejected entries in the log so old evidence is not repeatedly rediscovered.
