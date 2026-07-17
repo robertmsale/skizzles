@@ -13,17 +13,17 @@ Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks
 - **A practical skill shelf** — auth semantics, Cargo optimization, completion contracts, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
 
-Everything is maintained once in the canonical roots (`skills/`, `hooks/`, `runtime/`, `scripts/`) and staged into a versioned plugin. No hand-maintained duplicate implementations. 🎯
+Everything is maintained once in the canonical roots (`skills/`, `hooks/`, `runtime/`, `scripts/`) and staged into a versioned plugin. 🎯
 
 ## Pick your ride
 
 ### Stable plugin
 
-Use the official Codex marketplace/plugin flow to install a released `skizzles` plugin. The plugin packages the skills, hooks, runtime helpers, branding, and marketplace metadata together.
+**WIP:** Use the official Codex marketplace/plugin flow to install a released `skizzles` plugin. The plugin packages the skills, hooks, runtime helpers, branding, and marketplace metadata together.
 
 ### Individual skills
 
-After this repository is published, install just the skills you want with the Skills CLI:
+Install just the skills you want with the Skills CLI:
 
 ```sh
 bunx skills add https://github.com/robertsale/skizzles --skill install-skizzles
