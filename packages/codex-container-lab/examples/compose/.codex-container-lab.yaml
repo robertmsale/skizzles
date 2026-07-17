@@ -10,3 +10,4 @@ ports:
     target: 6379
     scheme: redis
 environment: []
+secret_environment: []

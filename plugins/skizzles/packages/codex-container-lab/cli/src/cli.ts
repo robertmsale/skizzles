@@ -7186,7 +7186,7 @@ function validateManifest(document) {
   const manifest = asObject(document, [], issues);
   if (!manifest)
     throw new Error(`invalid ${manifestName}: ${issues.map(formatIssue).join("; ")}`);
-  rejectUnknownKeys(manifest, ["compose", "dockerfile", "image", "runtime", "ports", "environment"], [], issues);
+  rejectUnknownKeys(manifest, ["compose", "dockerfile", "image", "runtime", "ports", "environment", "secret_environment"], [], issues);
   const compose = hasOwn(manifest, "compose") ? parseCompose(manifest.compose, ["compose"], issues) : undefined;
   const dockerfile = hasOwn(manifest, "dockerfile") ? parseDockerfile(manifest.dockerfile, ["dockerfile"], issues) : undefined;
   const image = hasOwn(manifest, "image") ? parseImage(manifest.image, ["image"], issues) : undefined;
@@ -7206,13 +7206,21 @@ function validateManifest(document) {
   if (new Set(environment).size !== environment.length) {
     addIssue(issues, ["environment"], "environment forwarding names must be unique");
   }
+  const secretEnvironment = parseEnvironment(manifest.secret_environment, ["secret_environment"], issues);
+  if (new Set(secretEnvironment).size !== secretEnvironment.length) {
+    addIssue(issues, ["secret_environment"], "secret environment names must be unique");
+  }
+  const overlappingEnvironment = environment.filter((name) => secretEnvironment.includes(name));
+  if (overlappingEnvironment.length > 0) {
+    addIssue(issues, ["secret_environment"], `must not overlap environment: ${overlappingEnvironment.join(", ")}`);
+  }
   const portTargets = Object.values(ports).map((port) => `${port.service}:${port.target}`);
   if (new Set(portTargets).size !== portTargets.length) {
     addIssue(issues, ["ports"], "service and target pairs must be unique");
   }
   if (issues.length > 0)
     throw new Error(`invalid ${manifestName}: ${issues.map(formatIssue).join("; ")}`);
-  return { compose, dockerfile, image, runtime, ports, environment };
+  return { compose, dockerfile, image, runtime, ports, environment, secret_environment: secretEnvironment };
 }
 function resolveRepoPath(repoRoot, candidate) {
   if (isAbsolute(candidate)) {
@@ -7260,7 +7268,8 @@ function parseLabConfig(source, repoRoot, sourcePath = resolve(repoRoot, manifes
     mode,
     runtime: value.runtime,
     ports: Object.entries(value.ports).map(([name, port]) => ({ name, ...port })),
-    forwardEnvironment: [...value.environment]
+    forwardEnvironment: [...value.environment],
+    secretEnvironment: [...value.secret_environment]
   };
 }
 async function loadLabConfig(repoRoot, sourcePath = resolve(repoRoot, manifestName)) {
@@ -7430,6 +7439,78 @@ function inspectComposeModel(model) {
     findings.push({ surface: "config", detail: `${topConfigs} top-level config definition(s); names redacted` });
   return findings;
 }
+function validateSecretEnvironmentModel(model, declaredNames, environment) {
+  const declared = new Set(declaredNames);
+  for (const definition of Object.values(model.secrets ?? {})) {
+    if (!isRecord2(definition) || typeof definition.environment !== "string")
+      continue;
+    const source = definition.environment;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(source)) {
+      throw new Error("Compose secret environment source is invalid or undeclared");
+    }
+    if (!declared.has(source))
+      throw new Error(`Compose secret environment source is not declared: ${source}`);
+    if (!Object.hasOwn(environment, source) || typeof environment[source] !== "string") {
+      throw new Error(`Compose secret environment source is unavailable: ${source}`);
+    }
+  }
+  for (const [serviceName, service] of Object.entries(model.services ?? {})) {
+    const serviceEnvironment = service.environment;
+    if (Array.isArray(serviceEnvironment)) {
+      for (const entry of serviceEnvironment) {
+        if (typeof entry !== "string")
+          continue;
+        const separator = entry.indexOf("=");
+        const key = separator < 0 ? entry : entry.slice(0, separator);
+        const value = separator < 0 ? "" : entry.slice(separator + 1);
+        const referenced2 = declared.has(key) ? key : referencedSecretName(value, declaredNames);
+        if (referenced2)
+          throw plaintextSecretEnvironmentError(serviceName, referenced2);
+      }
+    } else if (isRecord2(serviceEnvironment)) {
+      for (const [key, value] of Object.entries(serviceEnvironment)) {
+        const referenced2 = declared.has(key) ? key : referencedSecretName(value, declaredNames);
+        if (referenced2)
+          throw plaintextSecretEnvironmentError(serviceName, referenced2);
+      }
+    }
+  }
+  const referenced = referencedSecretNameInModel(model, declaredNames);
+  if (referenced)
+    throw new Error(`Compose model references declared secret environment source: ${referenced}`);
+}
+function referencedSecretName(value, names) {
+  if (typeof value !== "string")
+    return;
+  return names.find((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\$${escaped}(?![A-Za-z0-9_])|\\$\\{${escaped}(?![A-Za-z0-9_])`).test(value);
+  });
+}
+function referencedSecretNameInModel(model, names) {
+  const pending = [model];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    const direct = referencedSecretName(value, names);
+    if (direct)
+      return direct;
+    if (Array.isArray(value)) {
+      for (const nested of value)
+        pending.push(nested);
+    } else if (isRecord2(value)) {
+      for (const [key, nested] of Object.entries(value)) {
+        const keyReference = referencedSecretName(key, names);
+        if (keyReference)
+          return keyReference;
+        pending.push(nested);
+      }
+    }
+  }
+  return;
+}
+function plaintextSecretEnvironmentError(service, source) {
+  return new Error(`Compose service plaintext environment references declared secret source: ${service}:${source}`);
+}
 function inspectVolume(findings, service, volume) {
   let isBind = false;
   let source = "";
@@ -7566,15 +7647,19 @@ function truncateUtf8(value, maxBytes) {
 // packages/codex-container-lab/cli/src/docker.ts
 var defaultDockerRunner = {
   run: async (args, options = {}) => await runCommand("docker", args, options),
-  spawn: (args) => spawn2("docker", args, { env: process.env, stdio: ["pipe", "pipe", "pipe"] })
+  spawn: (args, options = {}) => spawn2("docker", args, {
+    env: options.env ?? process.env,
+    stdio: ["pipe", "pipe", "pipe"]
+  })
 };
-async function dockerAvailable(runner = defaultDockerRunner) {
+async function dockerAvailable(runner = defaultDockerRunner, secretEnvironment = [], environment = process.env) {
   return (await runner.run(["info", "--format", "{{.ServerVersion}}"], {
     allowFailure: true,
-    timeoutMs: 1e4
+    timeoutMs: 1e4,
+    env: scrubSecretEnvironment(secretEnvironment, environment)
   })).code === 0;
 }
-async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner) {
+async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner, environment = process.env) {
   await mkdir(metadata.runtimeRoot, { recursive: true, mode: 448 });
   const base = generateBaseCompose(config);
   const baseFile = base === undefined ? undefined : join(metadata.runtimeRoot, "base.compose.yaml");
@@ -7584,7 +7669,9 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner)
   await writeFile(overrideFile, `{}
 `, { mode: 384 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
-  const sourceModel = await normalizedModel(composeArgs, runner);
+  const composeEnvironment = secretComposeEnvironment(config.secretEnvironment, environment);
+  const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
+  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
   const findings = inspectComposeModel(sourceModel);
   const override = generateOverrideCompose(config, sourceModel, {
     workspaceHostPath: metadata.workspace,
@@ -7593,24 +7680,40 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner)
     labId: metadata.id
   });
   await writeFile(overrideFile, override, { mode: 384 });
-  await normalizedModel(composeArgs, runner);
+  const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
+  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
   return { metadata, config, composeArgs, baseFile, overrideFile, findings };
 }
-async function normalizedModel(composeArgs, runner) {
-  const result = await runner.run([...composeArgs, "config", "--format", "json"], {
-    timeoutMs: 30000,
-    maxOutputBytes: 16 * 1024 * 1024,
-    allowFailure: true
-  });
+async function normalizedModel(composeArgs, runner, environment = process.env) {
+  let result;
+  try {
+    result = await runner.run([...composeArgs, "config", "--no-interpolate", "--format", "json"], {
+      timeoutMs: 30000,
+      maxOutputBytes: 16 * 1024 * 1024,
+      allowFailure: true,
+      env: environment
+    });
+  } catch {
+    throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
+  }
   if (result.code === 0) {
     try {
       return JSON.parse(result.stdout.toString());
     } catch {}
   }
-  const yaml = await runner.run([...composeArgs, "config"], {
-    timeoutMs: 30000,
-    maxOutputBytes: 16 * 1024 * 1024
-  });
+  let yaml;
+  try {
+    yaml = await runner.run([...composeArgs, "config", "--no-interpolate"], {
+      timeoutMs: 30000,
+      maxOutputBytes: 16 * 1024 * 1024,
+      allowFailure: true,
+      env: environment
+    });
+  } catch {
+    throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
+  }
+  if (yaml.code !== 0)
+    throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
   return $parse(yaml.stdout.toString());
 }
 async function composeCommand(runtime, args, options = {}, runner = defaultDockerRunner) {
@@ -7618,11 +7721,25 @@ async function composeCommand(runtime, args, options = {}, runner = defaultDocke
     timeoutMs: options.timeoutMs,
     allowFailure: options.allowFailure,
     maxOutputBytes: 4 * 1024 * 1024,
-    signal: options.signal
+    signal: options.signal,
+    env: scrubSecretEnvironment(runtime.config.secretEnvironment, process.env)
   });
 }
-async function provisionLabStack(runtime, signal, runner = defaultDockerRunner) {
-  await composeCommand(runtime, ["up", "-d", "--wait", "--wait-timeout", "180"], { timeoutMs: 30 * 60000, signal }, runner);
+async function provisionLabStack(runtime, signal, runner = defaultDockerRunner, environment = process.env) {
+  let provisioned;
+  try {
+    provisioned = await runner.run([...runtime.composeArgs, "up", "-d", "--wait", "--wait-timeout", "180"], {
+      timeoutMs: 30 * 60000,
+      signal,
+      allowFailure: true,
+      maxOutputBytes: 4 * 1024 * 1024,
+      env: secretComposeEnvironment(runtime.config.secretEnvironment, environment)
+    });
+  } catch {
+    throw new Error(signal?.aborted ? "Docker Compose up aborted; secret-bearing diagnostics redacted" : "Docker Compose up failed; secret-bearing diagnostics redacted");
+  }
+  if (provisioned.code !== 0)
+    throw new Error("Docker Compose up failed; secret-bearing diagnostics redacted");
   const compatibility = [
     `test -d ${shellQuote(runtime.config.runtime.workspace)}`,
     `test -w ${shellQuote(runtime.config.runtime.workspace)}`,
@@ -7676,7 +7793,7 @@ async function stackStatus(runtime, runner = defaultDockerRunner) {
 async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunner) {
   if (tailLines < 1 || tailLines > 500)
     throw new Error("tail-lines must be 1..500");
-  const model = await normalizedModel(runtime.composeArgs, runner);
+  const model = await normalizedModel(runtime.composeArgs, runner, scrubSecretEnvironment(runtime.config.secretEnvironment, process.env));
   if (!Object.hasOwn(model.services ?? {}, service))
     throw new Error(`unknown Compose service: ${service}`);
   const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
@@ -7688,7 +7805,8 @@ async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunn
 async function destroyLabStack(runtime, runner = defaultDockerRunner) {
   await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner);
 }
-async function cleanupLabLabels(metadata, removeInternalImage, runner = defaultDockerRunner) {
+async function cleanupLabLabels(metadata, removeInternalImage, runner = defaultDockerRunner, environment = process.env) {
+  runner = scrubDockerRunnerEnvironment(runner, metadata.secretEnvironment, environment);
   const exactFilters = [
     "--filter",
     "label=io.openai.codex-container-lab.managed=true",
@@ -7821,7 +7939,7 @@ async function verifyComposeResource(metadata, kind, id, ownershipLabel, runner)
     throw new Error(`refusing to remove ${kind} without exact ownership labels`);
   }
 }
-function launchDockerRun(runtime, invocation, runner = defaultDockerRunner) {
+function launchDockerRun(runtime, invocation, runner = defaultDockerRunner, environment = process.env) {
   const workdir = invocation.cwd === "." ? runtime.config.runtime.workspace : posix2.join(runtime.config.runtime.workspace, invocation.cwd);
   const pidFile = `/tmp/.codex-container-lab-run-${invocation.runId}.pid`;
   const processIdentity = `CODEX_CONTAINER_LAB_RUN_ID=${invocation.runId}`;
@@ -7851,7 +7969,7 @@ function launchDockerRun(runtime, invocation, runner = defaultDockerRunner) {
     "codex-container-lab-run",
     ...invocation.argv
   ];
-  return runner.spawn(args);
+  return runner.spawn(args, { env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment) });
 }
 async function terminateDockerRun(runtime, identity2, signal, runner = defaultDockerRunner) {
   const pidFile = `/tmp/.codex-container-lab-run-${identity2.runId}.pid`;
@@ -7943,6 +8061,34 @@ function shellQuote(value) {
 }
 function compactError(value) {
   return redactPublicText(value.trim(), 2000, 6);
+}
+function secretComposeEnvironment(names, environment) {
+  const result = scrubSecretEnvironment(names, environment);
+  for (const name of names) {
+    if (Object.hasOwn(environment, name) && typeof environment[name] === "string")
+      result[name] = environment[name];
+  }
+  return result;
+}
+function scrubSecretEnvironment(names, environment) {
+  const result = { ...environment };
+  for (const name of names)
+    delete result[name];
+  return result;
+}
+function scrubDockerRunnerEnvironment(runner, names, environment) {
+  if (names.length === 0)
+    return runner;
+  return {
+    run: async (args, options = {}) => await runner.run(args, {
+      ...options,
+      env: scrubSecretEnvironment(names, options.env ?? environment)
+    }),
+    spawn: (args, options = {}) => runner.spawn(args, {
+      ...options,
+      env: scrubSecretEnvironment(names, options.env ?? environment)
+    })
+  };
 }
 function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -8416,6 +8562,7 @@ function assertLabMetadata(value, roots, owner, labId) {
     resolveOwner(owner, {});
     if (!isRecord5(value) || value.version !== 1 || value.id !== labId || value.owner !== owner || value.ownerKey !== ownerKey(owner))
       throw new Error("identity mismatch");
+    normalizeSecretEnvironment(value);
     if (typeof value.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value.name))
       throw new Error("invalid name");
     if (typeof value.repoHash !== "string" || !/^[a-f0-9]{12}$/.test(value.repoHash))
@@ -8442,6 +8589,8 @@ function assertLabMetadata(value, roots, owner, labId) {
       throw new Error("invalid endpoints");
     if (!Array.isArray(value.findings) || !value.findings.every(isFinding))
       throw new Error("invalid findings");
+    if (!isEnvironmentNames(value.secretEnvironment))
+      throw new Error("invalid secret environment metadata");
     if (value.modeKind !== undefined && value.modeKind !== "compose" && value.modeKind !== "dockerfile" && value.modeKind !== "image") {
       throw new Error("invalid mode kind");
     }
@@ -8493,6 +8642,13 @@ function validatePersistedRuntime(lab, runtime) {
   if (!Array.isArray(config.forwardEnvironment) || config.forwardEnvironment.length > 64 || !config.forwardEnvironment.every((key) => typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) || new Set(config.forwardEnvironment).size !== config.forwardEnvironment.length) {
     throw new Error("invalid forwarded environment");
   }
+  const forwardedEnvironment = new Set(config.forwardEnvironment);
+  if (!isEnvironmentNames(config.secretEnvironment) || config.secretEnvironment.some((key) => forwardedEnvironment.has(key))) {
+    throw new Error("invalid secret environment");
+  }
+  if (JSON.stringify(config.secretEnvironment) !== JSON.stringify(lab.secretEnvironment)) {
+    throw new Error("secret environment metadata mismatch");
+  }
   const runtimeRoot = lab.runtimeRoot;
   const expectedOverride = join2(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join2(runtimeRoot, "base.compose.yaml");
@@ -8505,6 +8661,20 @@ function validatePersistedRuntime(lab, runtime) {
   });
   if (!Array.isArray(runtime.composeArgs) || runtime.composeArgs.length !== expectedArgs.length || !runtime.composeArgs.every((arg, index) => arg === expectedArgs[index]))
     throw new Error("invalid Compose arguments");
+}
+function normalizeSecretEnvironment(lab) {
+  let runtimeNames;
+  if (isRecord5(lab.runtime) && isRecord5(lab.runtime.config)) {
+    if (lab.runtime.config.secretEnvironment === undefined)
+      lab.runtime.config.secretEnvironment = [];
+    runtimeNames = lab.runtime.config.secretEnvironment;
+  }
+  if (lab.secretEnvironment === undefined) {
+    lab.secretEnvironment = Array.isArray(runtimeNames) ? [...runtimeNames] : [];
+  }
+}
+function isEnvironmentNames(value) {
+  return Array.isArray(value) && value.length <= 64 && value.every((key) => typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) && new Set(value).size === value.length;
 }
 function isPathInside(root, candidate, allowRoot = false) {
   if (typeof candidate !== "string" || !isNormalizedAbsolute(candidate))
@@ -9020,19 +9190,22 @@ async function readRequiredJson(file, message2) {
 // packages/codex-container-lab/cli/src/service.ts
 class ContainerLabService {
   docker;
+  environment;
   owner;
   roots;
-  constructor(owner, roots = resolveRoots(), docker = defaultDockerRunner) {
+  constructor(owner, roots = resolveRoots(), docker = defaultDockerRunner, environment = process.env) {
     this.docker = docker;
+    this.environment = environment;
     this.owner = owner;
     this.roots = roots;
   }
   async health() {
     await this.reconcileOwner();
     const labs = await listLabs(this.roots, this.owner);
+    const secretEnvironment = [...new Set(labs.flatMap((lab) => lab.secretEnvironment))];
     return {
       ok: true,
-      dockerAvailable: await dockerAvailable(this.docker).catch(() => false),
+      dockerAvailable: await dockerAvailable(this.docker, secretEnvironment, this.environment).catch(() => false),
       labs: labs.length
     };
   }
@@ -9073,7 +9246,8 @@ class ContainerLabService {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         endpoints: [],
-        findings: []
+        findings: [],
+        secretEnvironment: []
       };
       await withFileLock(this.labLock(id), async () => await writeLab(this.roots, lab));
       await this.provisionLab(id, signal);
@@ -9105,7 +9279,7 @@ class ContainerLabService {
             throw new Error(`run environment is not declared by the manifest: ${key}`);
         }
         const identity3 = { runId: crypto.randomUUID(), cwd, argv, environment };
-        const child = launchDockerRun(runtime, identity3, this.docker);
+        const child = launchDockerRun(runtime, identity3, this.docker, this.environment);
         child.stdout.on("data", output.stdout);
         child.stderr.on("data", output.stderr);
         output.stdin?.pipe(child.stdin);
@@ -9128,7 +9302,7 @@ class ContainerLabService {
                 try {
                   const final = await terminateDockerRun(runtime, identity3, "KILL", this.docker);
                   if (!final.confirmed) {
-                    await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker);
+                    await destroyLabStack(runtime, this.docker);
                     await withFileLock(this.labLock(id), async () => {
                       const current = await readLab(this.roots, this.owner, id);
                       if (current.state === "ready") {
@@ -9230,7 +9404,7 @@ class ContainerLabService {
     if (claimed.runtime)
       await destroyLabStack(runtimeFromLab(claimed), this.docker);
     else
-      await cleanupLabLabels(claimed, claimed.modeKind === "dockerfile", this.docker);
+      await cleanupLabLabels(claimed, claimed.modeKind === "dockerfile", this.docker, this.environment);
     return await withFileLock(this.activityLock(id), async () => await withFileLock(this.labLock(id), async () => {
       let lab;
       try {
@@ -9245,7 +9419,7 @@ class ContainerLabService {
       if (lab.runtime)
         await destroyLabStack(runtimeFromLab(lab), this.docker);
       else
-        await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker);
+        await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker, this.environment);
       if (runtimePresent) {
         if (!await exactDirectoryChain(this.roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory")) {
           throw new Error("lab runtime directory changed during cleanup");
@@ -9270,23 +9444,30 @@ class ContainerLabService {
   async provisionLab(id, signal) {
     let lab = await readLab(this.roots, this.owner, id);
     let runtime;
+    let dockerMaterializationStarted = false;
+    let provisioningEnvironment;
+    let secretEnvironmentNames = [];
     let failure;
     try {
       await this.assertProvisioning(id, signal);
       await mkdir6(lab.runtimeRoot, { recursive: true, mode: 448 });
       const config = await loadLabConfig(lab.sourceRoot);
-      await this.assertProvisioning(id, signal);
+      secretEnvironmentNames = [...config.secretEnvironment];
       lab.manifestPath = config.manifestPath;
       lab.commandService = config.mode.commandService;
       lab.modeKind = config.mode.kind;
+      lab.secretEnvironment = secretEnvironmentNames;
       if (config.mode.kind === "dockerfile")
         lab.managedImage = internalImageTag(lab.ownerKey, lab.id);
       lab = await this.updateProvisioning(id, (current) => {
         current.manifestPath = lab.manifestPath;
         current.commandService = lab.commandService;
         current.modeKind = lab.modeKind;
+        current.secretEnvironment = [...lab.secretEnvironment];
         current.managedImage = lab.managedImage;
       });
+      provisioningEnvironment = resolveProvisioningEnvironment(secretEnvironmentNames, this.environment);
+      await this.assertProvisioning(id, signal);
       const head = (await runCommand("git", ["-C", lab.sourceRoot, "rev-parse", "HEAD"], { timeoutMs: 1e4, signal })).stdout.toString().trim();
       await runCommand("git", ["clone", "--no-checkout", "--no-tags", "--no-hardlinks", lab.sourceRoot, lab.workspace], { timeoutMs: 120000, signal });
       await runCommand("git", ["-C", lab.workspace, "remote", "remove", "origin"], { timeoutMs: 1e4, signal });
@@ -9315,7 +9496,8 @@ class ContainerLabService {
         allowedTargetRoots: [lab.sourceRoot, lab.workspace]
       });
       await this.assertProvisioning(id, signal);
-      runtime = await prepareLabRuntime(lab, config, this.docker);
+      dockerMaterializationStarted = true;
+      runtime = await prepareLabRuntime(lab, config, this.docker, provisioningEnvironment);
       lab.findings = runtime.findings;
       lab.runtime = {
         config: runtime.config,
@@ -9329,7 +9511,7 @@ class ContainerLabService {
         current.runtime = lab.runtime;
       });
       await this.assertProvisioning(id, signal);
-      lab.endpoints = await provisionLabStack(runtime, signal, this.docker);
+      lab.endpoints = await provisionLabStack(runtime, signal, this.docker, provisioningEnvironment);
       await this.assertProvisioning(id, signal);
     } catch (error) {
       failure = error;
@@ -9337,8 +9519,8 @@ class ContainerLabService {
         await destroyLabStack(runtime, this.docker).catch(() => {
           return;
         });
-      else
-        await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker).catch(() => {
+      else if (dockerMaterializationStarted)
+        await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker, provisioningEnvironment).catch(() => {
           return;
         });
     }
@@ -9516,6 +9698,17 @@ function compactError2(error) {
 `).slice(-8).join(`
 `).slice(-4000);
 }
+function resolveProvisioningEnvironment(names, environment) {
+  const resolved = { ...environment };
+  for (const name of names) {
+    delete resolved[name];
+    if (!Object.hasOwn(environment, name) || typeof environment[name] !== "string") {
+      throw new Error(`secret environment variable is unavailable: ${name}`);
+    }
+    resolved[name] = environment[name];
+  }
+  return resolved;
+}
 function compactLabStatus(lab, stack) {
   const endpoints = lab.endpoints.slice(0, 8).map((endpoint) => ({
     name: endpoint.name.slice(0, 128),
@@ -9580,7 +9773,7 @@ async function cliMain(args = process.argv.slice(2), environment = process.env, 
       return 0;
     }
     const owner = resolveOwner(global.owner, environment);
-    const service = new ContainerLabService(owner, resolveRoots(global));
+    const service = new ContainerLabService(owner, resolveRoots(global), undefined, environment);
     const controller = new AbortController;
     let signalExit;
     const interrupt = () => {

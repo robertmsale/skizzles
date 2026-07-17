@@ -1,26 +1,128 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupLabLabels, launchDockerRun, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type LabRuntime } from "./docker";
+import { cleanupLabLabels, launchDockerRun, prepareLabRuntime, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
+import { parseLabConfig } from "./config";
 import type { RunOptions, CommandResult } from "./process";
 import type { LabMetadata } from "./types";
 
 class MockDocker implements DockerRunner {
   calls: string[][] = [];
   spawnCalls: string[][] = [];
+  spawnOptions: Array<DockerSpawnOptions | undefined> = [];
   responses: Array<CommandResult> = [];
   async run(args: string[], _options?: RunOptions): Promise<CommandResult> {
     this.calls.push(args);
     return this.responses.shift() ?? result("");
   }
-  spawn(args: string[]): ChildProcessWithoutNullStreams {
+  spawn(args: string[], options?: DockerSpawnOptions): ChildProcessWithoutNullStreams {
     this.spawnCalls.push(args);
+    this.spawnOptions.push(options);
     return new EventEmitter() as ChildProcessWithoutNullStreams;
   }
 }
+
+class SecretRecordingDocker implements DockerRunner {
+  calls: Array<{ args: string[]; options?: RunOptions }> = [];
+  spawnCalls: Array<{ args: string[]; options?: DockerSpawnOptions }> = [];
+  failConfig = false;
+  failUp = false;
+  constructor(readonly sentinel: string) {}
+  async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    this.calls.push({ args, options });
+    if (args.includes("config")) {
+      if (this.failConfig) return resultWithError(`configuration echoed ${this.sentinel}`);
+      return result(JSON.stringify({
+        services: { dev: {} },
+        secrets: { registry: { environment: "REGISTRY_TOKEN" } },
+      }));
+    }
+    if (args.includes("up") && this.failUp) return resultWithError(`up echoed ${this.sentinel}`);
+    return result("");
+  }
+  spawn(args: string[], options?: DockerSpawnOptions): ChildProcessWithoutNullStreams {
+    this.spawnCalls.push({ args, options });
+    return new EventEmitter() as ChildProcessWithoutNullStreams;
+  }
+}
+
+describe("secret environment materialization", () => {
+  test("keeps values ephemeral and sends them only to Compose config and up", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-secret-"));
+    const sentinel = "sentinel-registry-token-8fca7b";
+    try {
+      const docker = new SecretRecordingDocker(sentinel);
+      const config = parseLabConfig(`
+image: { name: node:24, service: dev }
+environment: [TERM]
+secret_environment: [REGISTRY_TOKEN]
+`, join(root, "source"));
+      const metadata = labAt(root);
+      metadata.secretEnvironment = ["REGISTRY_TOKEN"];
+      const environment = { PATH: "/usr/bin:/bin", TERM: "xterm", REGISTRY_TOKEN: sentinel };
+      const prepared = await prepareLabRuntime(metadata, config, docker, environment);
+      await provisionLabStack(prepared, undefined, docker, environment);
+      launchDockerRun(prepared, {
+        runId: "11111111-1111-4111-8111-111111111111",
+        cwd: ".",
+        argv: ["true"],
+        environment: {},
+      }, docker, environment);
+      await cleanupLabLabels(metadata, false, docker, environment);
+
+      const durable = JSON.stringify({ metadata, runtime: prepared, findings: prepared.findings });
+      expect(durable).not.toContain(sentinel);
+      expect(prepared.findings.some((finding) => finding.surface === "secret")).toBe(true);
+      expect(JSON.stringify(prepared.findings)).not.toContain("REGISTRY_TOKEN");
+      expect(prepared.composeArgs.join("\0")).not.toContain(sentinel);
+      expect(await readFile(prepared.baseFile!, "utf8")).not.toContain(sentinel);
+      expect(await readFile(prepared.overrideFile, "utf8")).not.toContain(sentinel);
+
+      const carryingSecret = docker.calls.filter((call) => call.options?.env?.REGISTRY_TOKEN === sentinel);
+      expect(carryingSecret.length).toBeGreaterThanOrEqual(3);
+      expect(carryingSecret.every((call) => call.args.includes("config") || call.args.includes("up"))).toBe(true);
+      for (const call of docker.calls.filter((call) => !call.args.includes("config") && !call.args.includes("up"))) {
+        expect(Object.hasOwn(call.options?.env ?? {}, "REGISTRY_TOKEN")).toBe(false);
+      }
+      expect(docker.spawnCalls).toHaveLength(1);
+      expect(Object.hasOwn(docker.spawnCalls[0]!.options?.env ?? {}, "REGISTRY_TOKEN")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("replaces secret-bearing Compose config and up diagnostics with fixed errors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-secret-error-"));
+    const sentinel = "sentinel-error-token-290ea1";
+    try {
+      const config = parseLabConfig("image: { name: node:24, service: dev }\nsecret_environment: [REGISTRY_TOKEN]\n", join(root, "source"));
+      const environment = { PATH: "/usr/bin:/bin", REGISTRY_TOKEN: sentinel };
+      const configFailure = new SecretRecordingDocker(sentinel);
+      configFailure.failConfig = true;
+      let configError: unknown;
+      try { await prepareLabRuntime(labAt(root), config, configFailure, environment); }
+      catch (error) { configError = error; }
+      expect(configError).toBeInstanceOf(Error);
+      expect((configError as Error).message).toBe("Docker Compose configuration failed; secret-bearing diagnostics redacted");
+      expect((configError as Error).message).not.toContain(sentinel);
+
+      const upFailure = new SecretRecordingDocker(sentinel);
+      const prepared = await prepareLabRuntime(labAt(root), config, upFailure, environment);
+      upFailure.failUp = true;
+      let upError: unknown;
+      try { await provisionLabStack(prepared, undefined, upFailure, environment); }
+      catch (error) { upError = error; }
+      expect(upError).toBeInstanceOf(Error);
+      expect((upError as Error).message).toBe("Docker Compose up failed; secret-bearing diagnostics redacted");
+      expect((upError as Error).message).not.toContain(sentinel);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("exact Docker cleanup", () => {
   test("uses managed + exact owner + exact lab filters and Compose ownership filters", async () => {
@@ -145,10 +247,10 @@ describe("exact Docker cleanup", () => {
       await chmod(setsid, 0o755);
       const docker: DockerRunner = {
         run: async () => result(""),
-        spawn: (args) => {
+        spawn: (args, options) => {
           const shell = args.indexOf("/bin/sh");
           return spawn(args[shell]!, args.slice(shell + 1), {
-            env: { ...process.env, PATH: `${root}:${process.env.PATH ?? ""}` },
+            env: { ...options?.env, PATH: `${root}:${process.env.PATH ?? ""}` },
             stdio: ["pipe", "pipe", "pipe"],
           });
         },
@@ -238,6 +340,7 @@ function runtime(): LabRuntime {
       runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] },
       ports: [],
       forwardEnvironment: [],
+      secretEnvironment: [],
     },
     composeArgs: ["compose", "--project-name", "ccl-project"],
     overrideFile: "/tmp/runtime/override.compose.yaml",
@@ -273,6 +376,18 @@ function lab(): LabMetadata {
     updatedAt: new Date(0).toISOString(),
     endpoints: [],
     findings: [],
+    secretEnvironment: [],
+  };
+}
+
+function labAt(root: string): LabMetadata {
+  const runtimeRoot = join(root, "runtime");
+  return {
+    ...lab(),
+    sourceRoot: join(root, "source"),
+    runtimeRoot,
+    workspace: join(runtimeRoot, "workspace"),
+    manifestPath: join(root, "source", ".codex-container-lab.yaml"),
   };
 }
 

@@ -114,6 +114,8 @@ describe("managed command output hook", () => {
       "codex-container-lab --owner thread-1 --state-root /tmp/state --runtime-root /tmp/runtime run --lab experiment -- echo hello",
       "/tmp/source/skills/codex-container-lab/scripts/codex-container-lab --owner thread-1 run --lab experiment -- echo hello",
       "bun /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab --owner thread-1 run --lab experiment -- echo hello",
+      "A=1 /tmp/source/skills/codex-container-lab/scripts/codex-container-lab --owner thread-1 run --lab experiment -- echo hello",
+      "env A=1 /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab --state-root /tmp/state run --lab experiment -- echo hello",
     ]) {
       const result = invoke(hook, [], { stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { command } }) });
       expect(text(result.stdout), command).not.toBe("");
@@ -129,6 +131,9 @@ describe("managed command output hook", () => {
       "codex-container-lab --db /tmp/state.sqlite run --lab experiment -- echo hello",
       "codex-container-lab --owner review --state-root /tmp/state --runtime-root /tmp/runtime \"health\" run --lab experiment -- echo hello",
       "codex-container-lab --owner \"review\" --state-root /tmp/state --runtime-root /tmp/runtime run --lab experiment -- echo hello",
+      "A=1 \"codex-container-lab\" run --lab experiment -- echo hello",
+      "A=1 /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab --owner review \"\" run --lab experiment -- echo hello",
+      "env A=1 \"/tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab\" run --lab experiment -- echo hello",
       "codex-container-lab --owner thread health",
     ]) {
       const result = invoke(hook, [], { stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { command } }) });

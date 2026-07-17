@@ -48,13 +48,14 @@ function simpleCommands(script: string): SimpleCommand[] | undefined {
   let uncertainty: boolean[] = [];
   let word = "";
   let wordUncertain = false;
+  let wordStarted = false;
   let inSingle = false;
   let inDouble = false;
   let atWordStart = true;
   let skipRedirectionTarget = false;
 
   const finishWord = () => {
-    if (word) {
+    if (wordStarted) {
       if (skipRedirectionTarget) skipRedirectionTarget = false;
       else {
         words.push(word);
@@ -63,6 +64,7 @@ function simpleCommands(script: string): SimpleCommand[] | undefined {
     }
     word = "";
     wordUncertain = false;
+    wordStarted = false;
   };
   const finishCommand = () => {
     finishWord();
@@ -88,11 +90,13 @@ function simpleCommands(script: string): SimpleCommand[] | undefined {
     }
     if (character === "\\" || character === "`" || character === "$" || character === "(" || character === ")") return undefined;
     if (character === "'") {
+      wordStarted = true;
       wordUncertain = true;
       inSingle = true;
       continue;
     }
     if (character === '"') {
+      wordStarted = true;
       wordUncertain = true;
       inDouble = true;
       continue;
@@ -126,6 +130,7 @@ function simpleCommands(script: string): SimpleCommand[] | undefined {
       continue;
     }
     word += character;
+    wordStarted = true;
     atWordStart = false;
   }
 
@@ -135,13 +140,13 @@ function simpleCommands(script: string): SimpleCommand[] | undefined {
 
 function isRecognized(command: SimpleCommand | undefined): boolean {
   if (!command || command.words.length < 2) return false;
-  const { words, uncertain } = command;
-  const normalized = normalizeCommand(words);
-  if (!normalized || normalized.length === 0) return false;
+  const normalized = normalizeCommand(command);
+  if (!normalized || normalized.words.length === 0) return false;
+  const { words, uncertain } = normalized;
 
-  const [program, subcommand, third] = normalized;
+  const [program, subcommand, third] = words;
 
-  if (isContainerLabRun({ words: normalized, uncertain: normalized.map((_, index) => uncertain[index] ?? false) })) return true;
+  if (isContainerLabRun(normalized)) return true;
   if (program === "bun") {
     return subcommand === "test" || (subcommand === "run" && third === "test");
   }
@@ -155,13 +160,13 @@ function isRecognized(command: SimpleCommand | undefined): boolean {
   if (program === "cargo") {
     const action = subcommand?.startsWith("+") ? third : subcommand;
     return action === "nextest"
-      ? normalized[normalized.indexOf(action) + 1] === "run"
+      ? words[words.indexOf(action) + 1] === "run"
       : ["build", "b", "check", "c", "test", "t", "clippy", "bench", "doc", "install", "llvm-cov"].includes(action!);
   }
   if (program === "xcodebuild") return true;
   if (program === "swift") return ["build", "test"].includes(subcommand!);
   if (program === "gradle" || program === "gradlew") {
-    return normalized.slice(1).some(isGradleBuildOrTestTask);
+    return words.slice(1).some(isGradleBuildOrTestTask);
   }
   return false;
 }
@@ -199,7 +204,8 @@ function isAssignment(word: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(word);
 }
 
-function normalizeCommand(words: string[]): string[] | undefined {
+function normalizeCommand(command: SimpleCommand): SimpleCommand | undefined {
+  const { words, uncertain } = command;
   let index = 0;
   while (isAssignment(words[index] ?? "")) index += 1;
 
@@ -254,7 +260,10 @@ function normalizeCommand(words: string[]): string[] | undefined {
   }
 
   if (index >= words.length) return undefined;
-  return [basename(words[index]!), ...words.slice(index + 1)];
+  return {
+    words: [basename(words[index]!), ...words.slice(index + 1)],
+    uncertain: [uncertain[index] ?? false, ...uncertain.slice(index + 1)],
+  };
 }
 
 function isGradleBuildOrTestTask(word: string): boolean {

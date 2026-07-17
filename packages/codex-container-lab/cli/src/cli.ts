@@ -31,7 +31,7 @@ export async function cliMain(
       return 0;
     }
     const owner = resolveOwner(global.owner, environment);
-    const service = new ContainerLabService(owner, resolveRoots(global));
+    const service = new ContainerLabService(owner, resolveRoots(global), undefined, environment);
     const controller = new AbortController();
     let signalExit: number | undefined;
     const interrupt = () => { signalExit = 130; if (!controller.signal.aborted) controller.abort("SIGINT"); };

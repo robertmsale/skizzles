@@ -213,6 +213,7 @@ function fixtureLab(root: string, owner: string): LabMetadata {
     updatedAt: new Date(0).toISOString(),
     endpoints: [],
     findings: [],
+    secretEnvironment: [],
   };
 }
 
@@ -238,7 +239,7 @@ async function oversizedPreviewFixture() {
   await writeFile(baseFile, "services: {}\n");
   await writeFile(overrideFile, "services: {}\n");
   lab.runtime = {
-    config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [] },
+    config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
     composeArgs: ["compose", "--project-directory", lab.sourceRoot, "--project-name", lab.composeProject, "-f", baseFile, "-f", overrideFile],
     baseFile, overrideFile, findings: [],
   };
@@ -269,7 +270,7 @@ async function attachedFixture() {
   await writeFile(baseFile, "services: {}\n");
   await writeFile(overrideFile, "services: {}\n");
   lab.runtime = {
-    config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [] },
+    config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
     composeArgs: ["compose", "--project-directory", lab.sourceRoot, "--project-name", lab.composeProject, "-f", baseFile, "-f", overrideFile],
     baseFile, overrideFile, findings: [],
   };

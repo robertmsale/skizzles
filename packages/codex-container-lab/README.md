@@ -6,6 +6,8 @@ The root `bun.lock` is authoritative for `cli/`; do not create a nested lockfile
 
 Project topology belongs to the consuming repository. A committed `.codex-container-lab.yaml` selects existing Compose files and a command service, or uses Dockerfile/image shorthand normalized into the same one-service Compose lifecycle. The engine adds only the isolated workspace mount, exact ownership labels, init behavior, and declared random loopback ports.
 
+Manifests keep `environment` (explicit command-service list-form forwarding) separate from optional `secret_environment` (Compose top-level sources backed by the invoking CLI environment). Secret names are retained for lifecycle bookkeeping; secret values are ephemeral and redacted from generated configuration diagnostics and every public or durable boundary. See the [manifest contract](docs/manifest.md) for the exact rules; the bundled examples leave `secret_environment` empty so they run without credentials.
+
 ## Quick start
 
 1. From the Skizzles root, run `bun skills/codex-container-lab/scripts/codex-container-lab --help` to use the bundled launcher without PATH wiring. Read [docs/installation.md](docs/installation.md) before any eventual host cutover.

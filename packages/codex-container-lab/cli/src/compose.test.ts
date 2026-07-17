@@ -6,6 +6,7 @@ import {
   generateBaseCompose,
   generateOverrideCompose,
   inspectComposeModel,
+  validateSecretEnvironmentModel,
   type ComposeModel,
 } from "./compose";
 
@@ -204,5 +205,58 @@ describe("inspectComposeModel", () => {
     expect(findings.map((finding) => finding.surface)).toEqual(["socket-bind", "secret", "secret"]);
     expect(JSON.stringify(findings)).not.toContain("registry-token");
     expect(JSON.stringify(findings)).not.toContain("default");
+  });
+});
+
+describe("validateSecretEnvironmentModel", () => {
+  test("accepts an allowlisted present top-level environment secret source", () => {
+    expect(() => validateSecretEnvironmentModel({
+      services: { api: {} },
+      secrets: { token: { environment: "REGISTRY_TOKEN" } },
+    }, ["REGISTRY_TOKEN"], { REGISTRY_TOKEN: "sentinel-value" })).not.toThrow();
+  });
+
+  test("rejects undeclared and unavailable environment secret sources using names only", () => {
+    expect(() => validateSecretEnvironmentModel({
+      secrets: { token: { environment: "UNDECLARED_TOKEN" } },
+    }, [], { UNDECLARED_TOKEN: "sentinel-value" })).toThrow("not declared: UNDECLARED_TOKEN");
+    expect(() => validateSecretEnvironmentModel({
+      secrets: { token: { environment: "MISSING_TOKEN" } },
+    }, ["MISSING_TOKEN"], {})).toThrow("unavailable: MISSING_TOKEN");
+  });
+
+  test("rejects name references from plaintext service environment without value matching", () => {
+    for (const environment of [
+      { REGISTRY_TOKEN: "literal-does-not-matter" },
+      { OTHER: "${REGISTRY_TOKEN}" },
+      ["OTHER=$REGISTRY_TOKEN"],
+    ]) {
+      expect(() => validateSecretEnvironmentModel({ services: { api: { environment } } },
+        ["REGISTRY_TOKEN"], { REGISTRY_TOKEN: "sentinel-value" })).toThrow("api:REGISTRY_TOKEN");
+    }
+    expect(() => validateSecretEnvironmentModel({
+      services: { api: { environment: { OTHER: "common-value" } } },
+    }, ["REGISTRY_TOKEN"], { REGISTRY_TOKEN: "common-value" })).not.toThrow();
+  });
+
+  test("rejects declared secret references throughout the normalized model", () => {
+    const models: ComposeModel[] = [
+      { services: { api: { command: ["/bin/sh", "-lc", "echo $REGISTRY_TOKEN"] } } },
+      { services: { api: { build: { args: { TOKEN: "${REGISTRY_TOKEN}" } } } } },
+      { services: { api: { labels: { "example.leak": "token=${REGISTRY_TOKEN:-missing}" } } } },
+      { services: { api: { healthcheck: { test: ["CMD-SHELL", "test -n \"${REGISTRY_TOKEN/untrusted}\""] } } } },
+    ];
+    for (const model of models) {
+      expect(() => validateSecretEnvironmentModel(model, ["REGISTRY_TOKEN"], {
+        REGISTRY_TOKEN: "sentinel-value",
+      })).toThrow("Compose model references declared secret environment source: REGISTRY_TOKEN");
+    }
+  });
+
+  test("accepts normal secret source declarations and service attachments", () => {
+    expect(() => validateSecretEnvironmentModel({
+      services: { api: { secrets: ["REGISTRY_TOKEN", { source: "REGISTRY_TOKEN", target: "registry-token" }] } },
+      secrets: { REGISTRY_TOKEN: { environment: "REGISTRY_TOKEN" } },
+    }, ["REGISTRY_TOKEN"], { REGISTRY_TOKEN: "sentinel-value" })).not.toThrow();
   });
 });

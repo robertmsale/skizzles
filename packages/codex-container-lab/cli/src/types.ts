@@ -37,6 +37,7 @@ export type LabMetadata = {
   updatedAt: string;
   endpoints: Endpoint[];
   findings: ComposeInspectionFinding[];
+  secretEnvironment: string[];
   managedImage?: string;
   error?: string;
   runtime?: PersistedLabRuntime;

@@ -7095,9 +7095,13 @@ function truncateUtf8(value, maxBytes) {
 // packages/codex-container-lab/cli/src/docker.ts
 var defaultDockerRunner = {
   run: async (args, options = {}) => await runCommand("docker", args, options),
-  spawn: (args) => spawn2("docker", args, { env: process.env, stdio: ["pipe", "pipe", "pipe"] })
+  spawn: (args, options = {}) => spawn2("docker", args, {
+    env: options.env ?? process.env,
+    stdio: ["pipe", "pipe", "pipe"]
+  })
 };
-async function cleanupLabLabels(metadata, removeInternalImage, runner = defaultDockerRunner) {
+async function cleanupLabLabels(metadata, removeInternalImage, runner = defaultDockerRunner, environment = process.env) {
+  runner = scrubDockerRunnerEnvironment(runner, metadata.secretEnvironment, environment);
   const exactFilters = [
     "--filter",
     "label=io.openai.codex-container-lab.managed=true",
@@ -7229,6 +7233,26 @@ async function verifyComposeResource(metadata, kind, id, ownershipLabel, runner)
   if (labels["io.openai.codex-container-lab.managed"] !== "true" || labels["io.openai.codex-container-lab.owner"] !== metadata.owner || labels["io.openai.codex-container-lab.lab"] !== metadata.id || labels["com.docker.compose.project"] !== metadata.composeProject || typeof labels[ownershipLabel] !== "string") {
     throw new Error(`refusing to remove ${kind} without exact ownership labels`);
   }
+}
+function scrubSecretEnvironment(names, environment) {
+  const result = { ...environment };
+  for (const name of names)
+    delete result[name];
+  return result;
+}
+function scrubDockerRunnerEnvironment(runner, names, environment) {
+  if (names.length === 0)
+    return runner;
+  return {
+    run: async (args, options = {}) => await runner.run(args, {
+      ...options,
+      env: scrubSecretEnvironment(names, options.env ?? environment)
+    }),
+    spawn: (args, options = {}) => runner.spawn(args, {
+      ...options,
+      env: scrubSecretEnvironment(names, options.env ?? environment)
+    })
+  };
 }
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -7666,6 +7690,7 @@ function assertLabMetadata(value, roots, owner, labId) {
     resolveOwner(owner, {});
     if (!isRecord3(value) || value.version !== 1 || value.id !== labId || value.owner !== owner || value.ownerKey !== ownerKey(owner))
       throw new Error("identity mismatch");
+    normalizeSecretEnvironment(value);
     if (typeof value.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value.name))
       throw new Error("invalid name");
     if (typeof value.repoHash !== "string" || !/^[a-f0-9]{12}$/.test(value.repoHash))
@@ -7692,6 +7717,8 @@ function assertLabMetadata(value, roots, owner, labId) {
       throw new Error("invalid endpoints");
     if (!Array.isArray(value.findings) || !value.findings.every(isFinding))
       throw new Error("invalid findings");
+    if (!isEnvironmentNames(value.secretEnvironment))
+      throw new Error("invalid secret environment metadata");
     if (value.modeKind !== undefined && value.modeKind !== "compose" && value.modeKind !== "dockerfile" && value.modeKind !== "image") {
       throw new Error("invalid mode kind");
     }
@@ -7743,6 +7770,13 @@ function validatePersistedRuntime(lab, runtime) {
   if (!Array.isArray(config.forwardEnvironment) || config.forwardEnvironment.length > 64 || !config.forwardEnvironment.every((key) => typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) || new Set(config.forwardEnvironment).size !== config.forwardEnvironment.length) {
     throw new Error("invalid forwarded environment");
   }
+  const forwardedEnvironment = new Set(config.forwardEnvironment);
+  if (!isEnvironmentNames(config.secretEnvironment) || config.secretEnvironment.some((key) => forwardedEnvironment.has(key))) {
+    throw new Error("invalid secret environment");
+  }
+  if (JSON.stringify(config.secretEnvironment) !== JSON.stringify(lab.secretEnvironment)) {
+    throw new Error("secret environment metadata mismatch");
+  }
   const runtimeRoot = lab.runtimeRoot;
   const expectedOverride = join(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join(runtimeRoot, "base.compose.yaml");
@@ -7755,6 +7789,20 @@ function validatePersistedRuntime(lab, runtime) {
   });
   if (!Array.isArray(runtime.composeArgs) || runtime.composeArgs.length !== expectedArgs.length || !runtime.composeArgs.every((arg, index) => arg === expectedArgs[index]))
     throw new Error("invalid Compose arguments");
+}
+function normalizeSecretEnvironment(lab) {
+  let runtimeNames;
+  if (isRecord3(lab.runtime) && isRecord3(lab.runtime.config)) {
+    if (lab.runtime.config.secretEnvironment === undefined)
+      lab.runtime.config.secretEnvironment = [];
+    runtimeNames = lab.runtime.config.secretEnvironment;
+  }
+  if (lab.secretEnvironment === undefined) {
+    lab.secretEnvironment = Array.isArray(runtimeNames) ? [...runtimeNames] : [];
+  }
+}
+function isEnvironmentNames(value) {
+  return Array.isArray(value) && value.length <= 64 && value.every((key) => typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) && new Set(value).size === value.length;
 }
 function isPathInside(root, candidate, allowRoot = false) {
   if (typeof candidate !== "string" || !isNormalizedAbsolute(candidate))

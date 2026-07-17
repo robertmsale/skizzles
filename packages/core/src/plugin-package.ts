@@ -19,7 +19,7 @@ const TEMPLATE_PATH = "packages/core/plugin-template";
 const GENERATED_PATH = `plugins/${PLUGIN_NAME}`;
 const MARKETPLACE_PATH = ".agents/plugins/marketplace.json";
 const CONTAINER_LAB_SOURCE_PATH = "packages/codex-container-lab";
-const CONTAINER_LAB_PROVENANCE = "fba6ce29e96b663ba4ddb16b66e12992b9e62ba0";
+const CONTAINER_LAB_PROVENANCE = "a2f44416ef467d9f54b3cb228e3bd050987a3c4c";
 
 const CONTAINER_LAB_ENTRYPOINTS = [
   "cli/src/cli.ts",

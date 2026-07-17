@@ -16,8 +16,10 @@ afterEach(async () => { await Promise.all(temporary.splice(0).map((path) => rm(p
 
 class EmptyDocker implements DockerRunner {
   calls: string[][] = [];
-  async run(args: string[], _options?: RunOptions): Promise<CommandResult> {
+  runCalls: Array<{ args: string[]; options?: RunOptions }> = [];
+  async run(args: string[], options?: RunOptions): Promise<CommandResult> {
     this.calls.push(args);
+    this.runCalls.push({ args, options });
     return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   }
   spawn(): ChildProcessWithoutNullStreams { throw new Error("reaper never spawns"); }
@@ -131,6 +133,28 @@ describe("archive reaper", () => {
     await held;
     expect((await reaping).archivedOwnersCleaned).toEqual([lab.ownerKey]);
   });
+
+  test("cleanup scrubs persisted secret names from every reaper Docker subprocess", async () => {
+    const fixture = await roots();
+    const secretName = "CODEX_CONTAINER_LAB_REAPER_TEST_SECRET";
+    const previous = process.env[secretName];
+    process.env[secretName] = "sentinel-reaper-token";
+    try {
+      const lab = await createLabFixture(fixture, "thread-secret-reaper", [secretName]);
+      const dbPath = join(fixture.root, "state.sqlite");
+      const db = createDatabase(dbPath);
+      db.run("INSERT INTO threads VALUES (?, 1, 10)", [lab.owner]);
+      db.close();
+      const docker = new EmptyDocker();
+
+      expect((await reapArchivedOwners({ dbPath, roots: fixture, docker })).archivedOwnersCleaned).toEqual([lab.ownerKey]);
+      expect(docker.runCalls.length).toBeGreaterThan(0);
+      expect(docker.runCalls.every((call) => !Object.hasOwn(call.options?.env ?? {}, secretName))).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env[secretName];
+      else process.env[secretName] = previous;
+    }
+  });
 });
 
 function createDatabase(path: string): Database {
@@ -145,7 +169,11 @@ async function roots() {
   return { root, stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
 }
 
-async function createLabFixture(rootsValue: Awaited<ReturnType<typeof roots>>, owner: string): Promise<LabMetadata> {
+async function createLabFixture(
+  rootsValue: Awaited<ReturnType<typeof roots>>,
+  owner: string,
+  secretEnvironment: string[] = [],
+): Promise<LabMetadata> {
   await ensureOwner(rootsValue.stateRoot, owner);
   const key = ownerKey(owner);
   const runtimeRoot = join(rootsValue.runtimeRoot, key, "lab-1");
@@ -157,6 +185,7 @@ async function createLabFixture(rootsValue: Awaited<ReturnType<typeof roots>>, o
     composeProject: "ccl-reaper", state: "failed", sourceRoot, runtimeRoot, workspace: join(runtimeRoot, "workspace"),
     manifestPath: join(sourceRoot, ".codex-container-lab.yaml"), commandService: "dev", modeKind: "image",
     createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), endpoints: [], findings: [],
+    secretEnvironment,
   };
   await writeLab(rootsValue, lab);
   return lab;

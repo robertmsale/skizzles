@@ -39,6 +39,7 @@ interface ParsedManifest {
   runtime: RuntimeConfig;
   ports: Record<string, PortManifest>;
   environment: string[];
+  secret_environment: string[];
 }
 
 function isValidContainerPath(value: string, allowRoot: boolean): boolean {
@@ -247,7 +248,7 @@ function validateManifest(document: unknown): ParsedManifest {
   const issues: ValidationIssue[] = [];
   const manifest = asObject(document, [], issues);
   if (!manifest) throw new Error(`invalid ${manifestName}: ${issues.map(formatIssue).join("; ")}`);
-  rejectUnknownKeys(manifest, ["compose", "dockerfile", "image", "runtime", "ports", "environment"], [], issues);
+  rejectUnknownKeys(manifest, ["compose", "dockerfile", "image", "runtime", "ports", "environment", "secret_environment"], [], issues);
 
   const compose = hasOwn(manifest, "compose") ? parseCompose(manifest.compose, ["compose"], issues) : undefined;
   const dockerfile = hasOwn(manifest, "dockerfile") ? parseDockerfile(manifest.dockerfile, ["dockerfile"], issues) : undefined;
@@ -269,13 +270,21 @@ function validateManifest(document: unknown): ParsedManifest {
   if (new Set(environment).size !== environment.length) {
     addIssue(issues, ["environment"], "environment forwarding names must be unique");
   }
+  const secretEnvironment = parseEnvironment(manifest.secret_environment, ["secret_environment"], issues);
+  if (new Set(secretEnvironment).size !== secretEnvironment.length) {
+    addIssue(issues, ["secret_environment"], "secret environment names must be unique");
+  }
+  const overlappingEnvironment = environment.filter((name) => secretEnvironment.includes(name));
+  if (overlappingEnvironment.length > 0) {
+    addIssue(issues, ["secret_environment"], `must not overlap environment: ${overlappingEnvironment.join(", ")}`);
+  }
   const portTargets = Object.values(ports).map((port) => `${port.service}:${port.target}`);
   if (new Set(portTargets).size !== portTargets.length) {
     addIssue(issues, ["ports"], "service and target pairs must be unique");
   }
 
   if (issues.length > 0) throw new Error(`invalid ${manifestName}: ${issues.map(formatIssue).join("; ")}`);
-  return { compose, dockerfile, image, runtime, ports, environment };
+  return { compose, dockerfile, image, runtime, ports, environment, secret_environment: secretEnvironment };
 }
 
 /** Resolve a project-owned path and reject lexical traversal outside the repository. */
@@ -332,6 +341,7 @@ export interface LabConfig {
   runtime: RuntimeConfig;
   ports: DeclaredPort[];
   forwardEnvironment: string[];
+  secretEnvironment: string[];
 }
 
 export function parseLabConfig(source: string, repoRoot: string, sourcePath = resolve(repoRoot, manifestName)): LabConfig {
@@ -372,6 +382,7 @@ export function parseLabConfig(source: string, repoRoot: string, sourcePath = re
     runtime: value.runtime,
     ports: Object.entries(value.ports).map(([name, port]) => ({ name, ...port })),
     forwardEnvironment: [...value.environment],
+    secretEnvironment: [...value.secret_environment],
   };
 }
 

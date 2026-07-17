@@ -183,6 +183,83 @@ export function inspectComposeModel(model: ComposeModel): ComposeInspectionFindi
   return findings;
 }
 
+/**
+ * Validate environment-backed Compose secret sources without inspecting or
+ * retaining their values. The no-interpolation model also lets us reject
+ * source-name references from plaintext service environment definitions.
+ */
+export function validateSecretEnvironmentModel(
+  model: ComposeModel,
+  declaredNames: readonly string[],
+  environment: NodeJS.ProcessEnv,
+): void {
+  const declared = new Set(declaredNames);
+  for (const definition of Object.values(model.secrets ?? {})) {
+    if (!isRecord(definition) || typeof definition.environment !== "string") continue;
+    const source = definition.environment;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(source)) {
+      throw new Error("Compose secret environment source is invalid or undeclared");
+    }
+    if (!declared.has(source)) throw new Error(`Compose secret environment source is not declared: ${source}`);
+    if (!Object.hasOwn(environment, source) || typeof environment[source] !== "string") {
+      throw new Error(`Compose secret environment source is unavailable: ${source}`);
+    }
+  }
+
+  for (const [serviceName, service] of Object.entries(model.services ?? {})) {
+    const serviceEnvironment = service.environment;
+    if (Array.isArray(serviceEnvironment)) {
+      for (const entry of serviceEnvironment) {
+        if (typeof entry !== "string") continue;
+        const separator = entry.indexOf("=");
+        const key = separator < 0 ? entry : entry.slice(0, separator);
+        const value = separator < 0 ? "" : entry.slice(separator + 1);
+        const referenced = declared.has(key) ? key : referencedSecretName(value, declaredNames);
+        if (referenced) throw plaintextSecretEnvironmentError(serviceName, referenced);
+      }
+    } else if (isRecord(serviceEnvironment)) {
+      for (const [key, value] of Object.entries(serviceEnvironment)) {
+        const referenced = declared.has(key) ? key : referencedSecretName(value, declaredNames);
+        if (referenced) throw plaintextSecretEnvironmentError(serviceName, referenced);
+      }
+    }
+  }
+
+  const referenced = referencedSecretNameInModel(model, declaredNames);
+  if (referenced) throw new Error(`Compose model references declared secret environment source: ${referenced}`);
+}
+
+function referencedSecretName(value: unknown, names: readonly string[]): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return names.find((name) => {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\$${escaped}(?![A-Za-z0-9_])|\\$\\{${escaped}(?![A-Za-z0-9_])`).test(value);
+  });
+}
+
+function referencedSecretNameInModel(model: ComposeModel, names: readonly string[]): string | undefined {
+  const pending: unknown[] = [model];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    const direct = referencedSecretName(value, names);
+    if (direct) return direct;
+    if (Array.isArray(value)) {
+      for (const nested of value) pending.push(nested);
+    } else if (isRecord(value)) {
+      for (const [key, nested] of Object.entries(value)) {
+        const keyReference = referencedSecretName(key, names);
+        if (keyReference) return keyReference;
+        pending.push(nested);
+      }
+    }
+  }
+  return undefined;
+}
+
+function plaintextSecretEnvironmentError(service: string, source: string): Error {
+  return new Error(`Compose service plaintext environment references declared secret source: ${service}:${source}`);
+}
+
 function inspectVolume(findings: ComposeInspectionFinding[], service: string, volume: unknown): void {
   let isBind = false;
   let source = "";

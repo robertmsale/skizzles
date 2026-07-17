@@ -2,7 +2,7 @@
 
 Outcome: a complete, version-controlled Skizzles workspace package and stable-plugin runtime that gives each exact Codex thread multiple disposable Docker Compose labs with isolated Git clones, one attached command path, guarded bidirectional synchronization, deterministic exact-label cleanup, and archive-aware crash recovery.
 
-Approved implementation path: Bun, TypeScript, Git, host-side Docker Compose, atomic durable JSON lab manifests, synchronous attached CLI execution, and Bun's SQLite reader in strict read-only mode. A consuming repository commits `.codex-container-lab.yaml`. Compose mode uses project-owned topology; Dockerfile and image modes share the same generated Compose lifecycle.
+Approved implementation path: Bun, TypeScript, Git, host-side Docker Compose, atomic durable JSON lab manifests, synchronous attached CLI execution, and Bun's SQLite reader in strict read-only mode. A consuming repository commits `.codex-container-lab.yaml`. Compose mode uses project-owned topology; Dockerfile and image modes share the same generated Compose lifecycle. The manifest keeps explicit command-service `environment` forwarding separate from opt-in `secret_environment` Compose sources.
 
 Non-negotiable constraints:
 
@@ -14,7 +14,9 @@ Non-negotiable constraints:
 - Provision synchronously while persisting recoverable lab lifecycle transitions; retain no secondary lifecycle protocol.
 - Preserve conflict-aware push and pull preview/apply with expiring single-use tokens, stale rejection, and transactional recovery.
 - Generate overrides without rewriting project Compose files. Add only the workspace mount, exact labels, init behavior, declared random loopback ports, and non-sensitive metadata.
-- Never synthesize Docker sockets, credentials, sensitive mounts, privilege escalation, language toolchains, databases, object stores, caches, or project ports.
+- Keep `environment` as explicit command-service list-form forwarding. Treat each `secret_environment` name as authorization for a project-owned Compose top-level source `{ environment: VAR }`; require every allowlisted name to be present and every normalized environment-backed source to be allowlisted at create/provision time, reject overlap between the two fields, and pass values only ephemerally to Compose config/up.
+- Persist secret names only. Never place secret values in generated YAML, argv, durable state, metadata, findings, errors, or public output; check them against plaintext service environment values and redact Compose diagnostics.
+- Never synthesize Docker sockets, credentials, sensitive mounts, privilege escalation, language toolchains, databases, object stores, caches, or project ports; explicit `secret_environment` sources are the sole credential opt-in.
 - Inspect notable privilege surfaces without rejecting intentional trusted-project configuration.
 - Make cleanup idempotent, bounded, and exact-label scoped. Never use Docker prune, broad prefixes, or unrelated resources.
 - Open Codex's SQLite state database read-only, coexist with WAL, validate schema, require a consistent exact archived owner row, recheck before cleanup, and retain resources on missing rows or uncertainty.

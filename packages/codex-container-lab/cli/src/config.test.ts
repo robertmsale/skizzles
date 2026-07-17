@@ -23,6 +23,7 @@ ports:
     service: api
     target: 5353
 environment: [TERM, DEBUG]
+secret_environment: [REGISTRY_TOKEN]
 `, root);
 
     expect(config.mode).toEqual({
@@ -36,6 +37,7 @@ environment: [TERM, DEBUG]
       { name: "dns", service: "api", target: 5353 },
     ]);
     expect(config.forwardEnvironment).toEqual(["TERM", "DEBUG"]);
+    expect(config.secretEnvironment).toEqual(["REGISTRY_TOKEN"]);
   });
 
   test("normalizes dockerfile and image shorthand modes", () => {
@@ -88,6 +90,10 @@ runtime: { shell: [/bin/sh, -lc], timeout: 10 }
 image: { name: node:24, service: dev }
 unexpected: true
 `, root)).toThrow("unexpected: unknown key");
+    expect(() => parseLabConfig(`
+image: { name: node:24, service: dev }
+secret_environments: [TOKEN]
+`, root)).toThrow("secret_environments: unknown key");
   });
 
   test("rejects repository traversal and absolute project paths", () => {
@@ -110,6 +116,19 @@ environment: [TERM, TERM]
 image: { name: node:24, service: dev }
 environment: [BAD-NAME]
 `, root)).toThrow("environment variable name");
+    expect(() => parseLabConfig(`
+image: { name: node:24, service: dev }
+secret_environment: [TOKEN, TOKEN]
+`, root)).toThrow("secret environment names must be unique");
+    expect(() => parseLabConfig(`
+image: { name: node:24, service: dev }
+secret_environment: [BAD-NAME]
+`, root)).toThrow("environment variable name");
+    expect(() => parseLabConfig(`
+image: { name: node:24, service: dev }
+environment: [TOKEN]
+secret_environment: [TOKEN]
+`, root)).toThrow("must not overlap environment: TOKEN");
     expect(() => parseLabConfig(`
 image: { name: node:24, service: dev }
 ports:

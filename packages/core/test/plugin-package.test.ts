@@ -365,7 +365,7 @@ async function fixture(): Promise<string> {
     ownership: {
       runtimeOwner: "skizzles",
       canonicalSource: "packages/codex-container-lab",
-      provenanceCommit: "fba6ce29e96b663ba4ddb16b66e12992b9e62ba0",
+      provenanceCommit: "a2f44416ef467d9f54b3cb228e3bd050987a3c4c",
     },
     bundled: {
       operationalEntrypoint: "packages/codex-container-lab/cli/src/cli.ts",

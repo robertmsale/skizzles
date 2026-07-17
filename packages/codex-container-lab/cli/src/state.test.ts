@@ -85,5 +85,6 @@ function fixtureLab(root: string, owner: string): LabMetadata {
     updatedAt: new Date(0).toISOString(),
     endpoints: [],
     findings: [],
+    secretEnvironment: [],
   };
 }

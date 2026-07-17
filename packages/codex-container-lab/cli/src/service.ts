@@ -53,6 +53,7 @@ export class ContainerLabService {
     owner: string,
     roots = resolveRoots(),
     private readonly docker: DockerRunner = defaultDockerRunner,
+    private readonly environment: NodeJS.ProcessEnv = process.env,
   ) {
     this.owner = owner;
     this.roots = roots;
@@ -61,9 +62,10 @@ export class ContainerLabService {
   async health(): Promise<{ ok: true; dockerAvailable: boolean; labs: number }> {
     await this.reconcileOwner();
     const labs = await listLabs(this.roots, this.owner);
+    const secretEnvironment = [...new Set(labs.flatMap((lab) => lab.secretEnvironment))];
     return {
       ok: true,
-      dockerAvailable: await dockerAvailable(this.docker).catch(() => false),
+      dockerAvailable: await dockerAvailable(this.docker, secretEnvironment, this.environment).catch(() => false),
       labs: labs.length,
     };
   }
@@ -105,6 +107,7 @@ export class ContainerLabService {
         updatedAt: new Date().toISOString(),
         endpoints: [],
         findings: [],
+        secretEnvironment: [],
       };
       await withFileLock(this.labLock(id), async () => await writeLab(this.roots, lab));
       await this.provisionLab(id, signal);
@@ -146,7 +149,7 @@ export class ContainerLabService {
         if (!runtime.config.forwardEnvironment.includes(key)) throw new Error(`run environment is not declared by the manifest: ${key}`);
       }
       const identity = { runId: crypto.randomUUID(), cwd, argv, environment };
-      const child = launchDockerRun(runtime, identity, this.docker);
+      const child = launchDockerRun(runtime, identity, this.docker, this.environment);
       child.stdout.on("data", output.stdout);
       child.stderr.on("data", output.stderr);
       output.stdin?.pipe(child.stdin);
@@ -166,7 +169,7 @@ export class ContainerLabService {
             try {
               const final = await terminateDockerRun(runtime, identity, "KILL", this.docker);
               if (!final.confirmed) {
-                await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker);
+                await destroyLabStack(runtime, this.docker);
                 await withFileLock(this.labLock(id), async () => {
                   const current = await readLab(this.roots, this.owner, id);
                   if (current.state === "ready") {
@@ -256,7 +259,7 @@ export class ContainerLabService {
     }, { attempts: 600, delayMs: 50 });
     if (!exists || !claimed) return { labId: id, destroyed: false };
     if (claimed.runtime) await destroyLabStack(runtimeFromLab(claimed), this.docker);
-    else await cleanupLabLabels(claimed, claimed.modeKind === "dockerfile", this.docker);
+    else await cleanupLabLabels(claimed, claimed.modeKind === "dockerfile", this.docker, this.environment);
     return await withFileLock(this.activityLock(id), async () => await withFileLock(this.labLock(id), async () => {
       let lab: LabMetadata;
       try { lab = await readLab(this.roots, this.owner, id); }
@@ -267,7 +270,7 @@ export class ContainerLabService {
       const runtimePresent = await this.assertDestroyFilesystem(lab);
       await recoverLabSync(this.roots, lab);
       if (lab.runtime) await destroyLabStack(runtimeFromLab(lab), this.docker);
-      else await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker);
+      else await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker, this.environment);
       if (runtimePresent) {
         if (!await exactDirectoryChain(this.roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory")) {
           throw new Error("lab runtime directory changed during cleanup");
@@ -292,22 +295,29 @@ export class ContainerLabService {
   private async provisionLab(id: string, signal?: AbortSignal): Promise<void> {
     let lab = await readLab(this.roots, this.owner, id);
     let runtime: Awaited<ReturnType<typeof prepareLabRuntime>> | undefined;
+    let dockerMaterializationStarted = false;
+    let provisioningEnvironment: NodeJS.ProcessEnv | undefined;
+    let secretEnvironmentNames: string[] = [];
     let failure: unknown;
     try {
         await this.assertProvisioning(id, signal);
         await mkdir(lab.runtimeRoot, { recursive: true, mode: 0o700 });
         const config = await loadLabConfig(lab.sourceRoot);
-        await this.assertProvisioning(id, signal);
+        secretEnvironmentNames = [...config.secretEnvironment];
         lab.manifestPath = config.manifestPath;
         lab.commandService = config.mode.commandService;
         lab.modeKind = config.mode.kind;
+        lab.secretEnvironment = secretEnvironmentNames;
         if (config.mode.kind === "dockerfile") lab.managedImage = internalImageTag(lab.ownerKey, lab.id);
         lab = await this.updateProvisioning(id, (current) => {
           current.manifestPath = lab!.manifestPath;
           current.commandService = lab!.commandService;
           current.modeKind = lab!.modeKind;
+          current.secretEnvironment = [...lab!.secretEnvironment];
           current.managedImage = lab!.managedImage;
         });
+        provisioningEnvironment = resolveProvisioningEnvironment(secretEnvironmentNames, this.environment);
+        await this.assertProvisioning(id, signal);
         const head = (await runCommand("git", ["-C", lab.sourceRoot, "rev-parse", "HEAD"], { timeoutMs: 10_000, signal })).stdout.toString().trim();
         await runCommand("git", ["clone", "--no-checkout", "--no-tags", "--no-hardlinks", lab.sourceRoot, lab.workspace], { timeoutMs: 120_000, signal });
         await runCommand("git", ["-C", lab.workspace, "remote", "remove", "origin"], { timeoutMs: 10_000, signal });
@@ -335,7 +345,8 @@ export class ContainerLabService {
           allowedTargetRoots: [lab.sourceRoot, lab.workspace],
         });
         await this.assertProvisioning(id, signal);
-        runtime = await prepareLabRuntime(lab, config, this.docker);
+        dockerMaterializationStarted = true;
+        runtime = await prepareLabRuntime(lab, config, this.docker, provisioningEnvironment);
         lab.findings = runtime.findings;
         lab.runtime = {
           config: runtime.config,
@@ -349,12 +360,17 @@ export class ContainerLabService {
           current.runtime = lab!.runtime;
         });
         await this.assertProvisioning(id, signal);
-        lab.endpoints = await provisionLabStack(runtime, signal, this.docker);
+        lab.endpoints = await provisionLabStack(runtime, signal, this.docker, provisioningEnvironment);
         await this.assertProvisioning(id, signal);
       } catch (error) {
         failure = error;
         if (runtime) await destroyLabStack(runtime, this.docker).catch(() => undefined);
-        else await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker).catch(() => undefined);
+        else if (dockerMaterializationStarted) await cleanupLabLabels(
+          lab,
+          lab.modeKind === "dockerfile",
+          this.docker,
+          provisioningEnvironment,
+        ).catch(() => undefined);
       }
     await withFileLock(this.labLock(id), async () => {
       let current: LabMetadata;
@@ -521,6 +537,18 @@ async function assertSourceRepositoryIdentity(lab: LabMetadata): Promise<void> {
 
 function compactError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).split("\n").slice(-8).join("\n").slice(-4000);
+}
+
+function resolveProvisioningEnvironment(names: readonly string[], environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const resolved = { ...environment };
+  for (const name of names) {
+    delete resolved[name];
+    if (!Object.hasOwn(environment, name) || typeof environment[name] !== "string") {
+      throw new Error(`secret environment variable is unavailable: ${name}`);
+    }
+    resolved[name] = environment[name];
+  }
+  return resolved;
 }
 
 function compactLabStatus(lab: LabMetadata, stack: unknown): unknown {

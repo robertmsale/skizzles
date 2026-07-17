@@ -47,6 +47,8 @@ For intentional manual use outside Codex, place `--owner THREAD_ID` before the c
 
 The command service must be a normal distro-based container with the configured absolute shell, `setsid`, a writable workspace, and a long-running process. Image and Dockerfile shorthand receive a generated long-running command. Distroless images are unsupported.
 
+If the consuming manifest uses `secret_environment`, treat it as an explicit allowlist for project-owned Compose secret sources backed by the invoking CLI environment. Keep `environment` and `secret_environment` disjoint; provide only names in the manifest, never copy secret values into commands or files, and rely on the CLI's fixed redaction when Compose reports an error.
+
 Docker runs only on the host. Generated configuration never adds a Docker socket, host credential, privileged mode, device, capability, secret, or arbitrary host mount. A trusted project's intentional Compose configuration is preserved and reported. Forwarded environment variables must be explicitly named in the manifest; pass run-specific values only through `run --env KEY=VALUE`.
 
 The current thread owns its stack across CLI invocations, process exits, and stopped-but-unarchived task state. Explicit destroy is the normal lifecycle. A fail-closed periodic reaper removes only exact-labeled owners whose own Codex database row is consistently archived; missing, active, inconsistent, or unreadable state is retained.

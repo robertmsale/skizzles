@@ -6,3 +6,4 @@ runtime:
   shell: [/bin/bash, -lc]
 ports: {}
 environment: []
+secret_environment: []

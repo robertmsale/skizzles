@@ -230,6 +230,7 @@ export function assertLabMetadata(
     resolveOwner(owner, {});
     if (!isRecord(value) || value.version !== 1 || value.id !== labId || value.owner !== owner ||
         value.ownerKey !== ownerKey(owner)) throw new Error("identity mismatch");
+    normalizeSecretEnvironment(value);
     if (typeof value.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value.name)) throw new Error("invalid name");
     if (typeof value.repoHash !== "string" || !/^[a-f0-9]{12}$/.test(value.repoHash)) throw new Error("invalid repository hash");
     if (typeof value.composeProject !== "string" || !/^ccl-[a-z0-9][a-z0-9-]{0,62}$/.test(value.composeProject)) throw new Error("invalid Compose project");
@@ -245,6 +246,7 @@ export function assertLabMetadata(
     if (!isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)) throw new Error("invalid timestamps");
     if (!Array.isArray(value.endpoints) || !value.endpoints.every(isEndpoint)) throw new Error("invalid endpoints");
     if (!Array.isArray(value.findings) || !value.findings.every(isFinding)) throw new Error("invalid findings");
+    if (!isEnvironmentNames(value.secretEnvironment)) throw new Error("invalid secret environment metadata");
     if (value.modeKind !== undefined && value.modeKind !== "compose" && value.modeKind !== "dockerfile" && value.modeKind !== "image") {
       throw new Error("invalid mode kind");
     }
@@ -296,6 +298,14 @@ function validatePersistedRuntime(lab: Record<string, unknown>, runtime: unknown
       new Set(config.forwardEnvironment).size !== config.forwardEnvironment.length) {
     throw new Error("invalid forwarded environment");
   }
+  const forwardedEnvironment = new Set(config.forwardEnvironment as string[]);
+  if (!isEnvironmentNames(config.secretEnvironment) ||
+      config.secretEnvironment.some((key) => forwardedEnvironment.has(key))) {
+    throw new Error("invalid secret environment");
+  }
+  if (JSON.stringify(config.secretEnvironment) !== JSON.stringify(lab.secretEnvironment)) {
+    throw new Error("secret environment metadata mismatch");
+  }
   const runtimeRoot = lab.runtimeRoot as string;
   const expectedOverride = join(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join(runtimeRoot, "base.compose.yaml");
@@ -309,6 +319,23 @@ function validatePersistedRuntime(lab: Record<string, unknown>, runtime: unknown
   });
   if (!Array.isArray(runtime.composeArgs) || runtime.composeArgs.length !== expectedArgs.length ||
       !runtime.composeArgs.every((arg, index) => arg === expectedArgs[index])) throw new Error("invalid Compose arguments");
+}
+
+function normalizeSecretEnvironment(lab: Record<string, unknown>): void {
+  let runtimeNames: unknown;
+  if (isRecord(lab.runtime) && isRecord(lab.runtime.config)) {
+    if (lab.runtime.config.secretEnvironment === undefined) lab.runtime.config.secretEnvironment = [];
+    runtimeNames = lab.runtime.config.secretEnvironment;
+  }
+  if (lab.secretEnvironment === undefined) {
+    lab.secretEnvironment = Array.isArray(runtimeNames) ? [...runtimeNames] : [];
+  }
+}
+
+function isEnvironmentNames(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 64 &&
+    value.every((key) => typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) &&
+    new Set(value).size === value.length;
 }
 
 function isPathInside(root: string, candidate: unknown, allowRoot = false): boolean {

@@ -9,6 +9,7 @@ import {
   generateOverrideCompose,
   internalImageTag,
   inspectComposeModel,
+  validateSecretEnvironmentModel,
   type ComposeInspectionFinding,
   type ComposeModel,
 } from "./compose";
@@ -20,8 +21,10 @@ export type LabRuntime = PersistedLabRuntime & { metadata: LabMetadata };
 
 export interface DockerRunner {
   run(args: string[], options?: RunOptions): Promise<CommandResult>;
-  spawn(args: string[]): ChildProcessWithoutNullStreams;
+  spawn(args: string[], options?: DockerSpawnOptions): ChildProcessWithoutNullStreams;
 }
+
+export type DockerSpawnOptions = { env?: NodeJS.ProcessEnv };
 
 export type DockerRunTerminationResult =
   | { confirmed: true; status: "signaled" | "absent" }
@@ -29,12 +32,21 @@ export type DockerRunTerminationResult =
 
 export const defaultDockerRunner: DockerRunner = {
   run: async (args, options = {}) => await runCommand("docker", args, options),
-  spawn: (args) => spawn("docker", args, { env: process.env, stdio: ["pipe", "pipe", "pipe"] }),
+  spawn: (args, options = {}) => spawn("docker", args, {
+    env: options.env ?? process.env,
+    stdio: ["pipe", "pipe", "pipe"],
+  }),
 };
 
-export async function dockerAvailable(runner: DockerRunner = defaultDockerRunner): Promise<boolean> {
+export async function dockerAvailable(
+  runner: DockerRunner = defaultDockerRunner,
+  secretEnvironment: readonly string[] = [],
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
   return (await runner.run(["info", "--format", "{{.ServerVersion}}"], {
-    allowFailure: true, timeoutMs: 10_000,
+    allowFailure: true,
+    timeoutMs: 10_000,
+    env: scrubSecretEnvironment(secretEnvironment, environment),
   })).code === 0;
 }
 
@@ -42,6 +54,7 @@ export async function prepareLabRuntime(
   metadata: LabMetadata,
   config: LabConfig,
   runner: DockerRunner = defaultDockerRunner,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LabRuntime> {
   await mkdir(metadata.runtimeRoot, { recursive: true, mode: 0o700 });
   const base = generateBaseCompose(config);
@@ -50,7 +63,9 @@ export async function prepareLabRuntime(
   const overrideFile = join(metadata.runtimeRoot, "override.compose.yaml");
   await writeFile(overrideFile, "{}\n", { mode: 0o600 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
-  const sourceModel = await normalizedModel(composeArgs, runner);
+  const composeEnvironment = secretComposeEnvironment(config.secretEnvironment, environment);
+  const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
+  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
   const findings = inspectComposeModel(sourceModel);
   const override = generateOverrideCompose(config, sourceModel, {
     workspaceHostPath: metadata.workspace,
@@ -59,20 +74,36 @@ export async function prepareLabRuntime(
     labId: metadata.id,
   });
   await writeFile(overrideFile, override, { mode: 0o600 });
-  await normalizedModel(composeArgs, runner);
+  const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
+  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
   return { metadata, config, composeArgs, baseFile, overrideFile, findings };
 }
 
-async function normalizedModel(composeArgs: string[], runner: DockerRunner): Promise<ComposeModel> {
-  const result = await runner.run([...composeArgs, "config", "--format", "json"], {
-    timeoutMs: 30_000, maxOutputBytes: 16 * 1024 * 1024, allowFailure: true,
-  });
+async function normalizedModel(
+  composeArgs: string[],
+  runner: DockerRunner,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<ComposeModel> {
+  let result: CommandResult;
+  try {
+    result = await runner.run([...composeArgs, "config", "--no-interpolate", "--format", "json"], {
+      timeoutMs: 30_000, maxOutputBytes: 16 * 1024 * 1024, allowFailure: true, env: environment,
+    });
+  } catch {
+    throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
+  }
   if (result.code === 0) {
     try { return JSON.parse(result.stdout.toString()) as ComposeModel; } catch {}
   }
-  const yaml = await runner.run([...composeArgs, "config"], {
-    timeoutMs: 30_000, maxOutputBytes: 16 * 1024 * 1024,
-  });
+  let yaml: CommandResult;
+  try {
+    yaml = await runner.run([...composeArgs, "config", "--no-interpolate"], {
+      timeoutMs: 30_000, maxOutputBytes: 16 * 1024 * 1024, allowFailure: true, env: environment,
+    });
+  } catch {
+    throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
+  }
+  if (yaml.code !== 0) throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
   return parseYaml(yaml.stdout.toString()) as ComposeModel;
 }
 
@@ -87,6 +118,7 @@ export async function composeCommand(
     allowFailure: options.allowFailure,
     maxOutputBytes: 4 * 1024 * 1024,
     signal: options.signal,
+    env: scrubSecretEnvironment(runtime.config.secretEnvironment, process.env),
   });
 }
 
@@ -94,8 +126,23 @@ export async function provisionLabStack(
   runtime: LabRuntime,
   signal?: AbortSignal,
   runner: DockerRunner = defaultDockerRunner,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<Endpoint[]> {
-  await composeCommand(runtime, ["up", "-d", "--wait", "--wait-timeout", "180"], { timeoutMs: 30 * 60_000, signal }, runner);
+  let provisioned: CommandResult;
+  try {
+    provisioned = await runner.run([...runtime.composeArgs, "up", "-d", "--wait", "--wait-timeout", "180"], {
+      timeoutMs: 30 * 60_000,
+      signal,
+      allowFailure: true,
+      maxOutputBytes: 4 * 1024 * 1024,
+      env: secretComposeEnvironment(runtime.config.secretEnvironment, environment),
+    });
+  } catch {
+    throw new Error(signal?.aborted
+      ? "Docker Compose up aborted; secret-bearing diagnostics redacted"
+      : "Docker Compose up failed; secret-bearing diagnostics redacted");
+  }
+  if (provisioned.code !== 0) throw new Error("Docker Compose up failed; secret-bearing diagnostics redacted");
   const compatibility = [
     `test -d ${shellQuote(runtime.config.runtime.workspace)}`,
     `test -w ${shellQuote(runtime.config.runtime.workspace)}`,
@@ -148,7 +195,11 @@ export async function stackLogs(
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<{ text: string; truncated: boolean }> {
   if (tailLines < 1 || tailLines > 500) throw new Error("tail-lines must be 1..500");
-  const model = await normalizedModel(runtime.composeArgs, runner);
+  const model = await normalizedModel(
+    runtime.composeArgs,
+    runner,
+    scrubSecretEnvironment(runtime.config.secretEnvironment, process.env),
+  );
   if (!Object.hasOwn(model.services ?? {}, service)) throw new Error(`unknown Compose service: ${service}`);
   const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
     allowFailure: true, timeoutMs: 20_000,
@@ -164,7 +215,9 @@ export async function cleanupLabLabels(
   metadata: LabMetadata,
   removeInternalImage: boolean,
   runner: DockerRunner = defaultDockerRunner,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
+  runner = scrubDockerRunnerEnvironment(runner, metadata.secretEnvironment, environment);
   const exactFilters = [
     "--filter", "label=io.openai.codex-container-lab.managed=true",
     "--filter", `label=io.openai.codex-container-lab.owner=${metadata.owner}`,
@@ -290,6 +343,7 @@ export function launchDockerRun(
   runtime: LabRuntime,
   invocation: DockerRunIdentity,
   runner: DockerRunner = defaultDockerRunner,
+  environment: NodeJS.ProcessEnv = process.env,
 ): ChildProcessWithoutNullStreams {
   const workdir = invocation.cwd === "." ? runtime.config.runtime.workspace : posix.join(runtime.config.runtime.workspace, invocation.cwd);
   const pidFile = `/tmp/.codex-container-lab-run-${invocation.runId}.pid`;
@@ -313,7 +367,7 @@ export function launchDockerRun(
     runtime.config.mode.commandService, ...runtime.config.runtime.shell, wrapper,
     "codex-container-lab-run", ...invocation.argv,
   ];
-  return runner.spawn(args);
+  return runner.spawn(args, { env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment) });
 }
 
 export async function terminateDockerRun(
@@ -403,6 +457,38 @@ function shellQuote(value: string): string {
 
 function compactError(value: string): string {
   return redactPublicText(value.trim(), 2_000, 6);
+}
+
+function secretComposeEnvironment(names: readonly string[], environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result = scrubSecretEnvironment(names, environment);
+  for (const name of names) {
+    if (Object.hasOwn(environment, name) && typeof environment[name] === "string") result[name] = environment[name];
+  }
+  return result;
+}
+
+function scrubSecretEnvironment(names: readonly string[], environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result = { ...environment };
+  for (const name of names) delete result[name];
+  return result;
+}
+
+function scrubDockerRunnerEnvironment(
+  runner: DockerRunner,
+  names: readonly string[],
+  environment: NodeJS.ProcessEnv,
+): DockerRunner {
+  if (names.length === 0) return runner;
+  return {
+    run: async (args, options = {}) => await runner.run(args, {
+      ...options,
+      env: scrubSecretEnvironment(names, options.env ?? environment),
+    }),
+    spawn: (args, options = {}) => runner.spawn(args, {
+      ...options,
+      env: scrubSecretEnvironment(names, options.env ?? environment),
+    }),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
