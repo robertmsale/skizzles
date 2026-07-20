@@ -10,5 +10,6 @@ Adopt this policy only when a project owner explicitly chooses it. Copy or link 
 - Keep live installation, hooks, environment variables, service managers, and external runtimes behind an explicit owner-approved cutover. Validate first in an isolated project fixture where practical.
 - Preserve user and collaborator changes. The integration owner makes Git checkpoints only for coherent, validated slices and excludes unrelated metadata or work-in-progress files.
 - Use the project’s own validation commands and record the command/result with each meaningful handoff.
+- Use local compute for builds, tests, linting, packaging, security scans, and validation by default. Do not create, modify, enable, trigger, or require GitHub Actions or another hosted CI system unless the owner explicitly requests hosted CI in the current task. If local validation is blocked, report the gap instead of silently moving it to a cloud runner.
 
 Remove or rewrite rules that do not match the adopting project. This profile is a portable starting point, not an authority over that project’s existing instructions.

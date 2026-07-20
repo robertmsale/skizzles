@@ -20,6 +20,8 @@ Skizzles is a packaging project, not a live installation. Keep its canonical sou
 
 ## Validate the boundary you changed
 
+All Skizzles build, test, package, release, and drift validation is local-first. Do not create, modify, enable, trigger, or require GitHub Actions or another hosted CI system unless the owner explicitly requests hosted CI in the current task. An existing workflow is not authorization to use or expand hosted execution; run the equivalent repository commands on the local machine.
+
 Run the narrowest useful check first, then use the complete package boundary when inputs or packaging change:
 
 ```sh
