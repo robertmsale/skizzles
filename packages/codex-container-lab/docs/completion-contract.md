@@ -6,7 +6,7 @@ Approved implementation path: Bun, TypeScript, Git, host-side Docker Compose, at
 
 Non-negotiable constraints:
 
-- Provide bundled operational and reaper entrypoints with no MCP transport, registration, compatibility wrapper, or session lifecycle. PATH binaries are optional explicit host wiring, not a runtime prerequisite.
+- Provide bundled operational and reaper entrypoints with no Skizzles-owned MCP transport, registration, compatibility wrapper, or session lifecycle. PATH binaries are optional explicit host wiring, not a runtime prerequisite. This does not prohibit a consuming repository from documenting its own wrapper when project-specific setup such as `secret_environment` materialization is required; agents prefer that documented interface without making it part of the generic runtime.
 - Resolve ownership from `CODEX_THREAD_ID`, with an explicit owner override for manual use and no generated fallback identity.
 - Keep small authoritative owner/lab manifests durable across reboot; keep disposable workspaces, generated files, and sync state under an injectable temporary root.
 - Preserve the consuming Codex task checkout, including Desktop linked worktrees, and support multiple isolated labs per owner.

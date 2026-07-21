@@ -2,15 +2,19 @@
 
 Container Lab is included in Skizzles. The canonical source package is `packages/codex-container-lab/cli`, the root Skizzles `bun.lock` is its only lockfile, and a stable plugin carries dependency-self-contained CLI and reaper bundles. There is no MCP execution server or registration.
 
-## Use the bundled launcher now
+## Select the project wrapper or generic launcher
 
-From a Skizzles source checkout or installed full plugin, use its resolved public skill launcher without touching `PATH`. The literal outer launcher path lets the managed-output hook recognize attached `run` commands; do not hide it behind a shell variable:
+First inspect the consuming repository's committed agent guidance, development documentation, and manifest-adjacent scripts. If it documents a required project-owned Container Lab wrapper, prefer that wrapper consistently for lifecycle, run, logs, sync, and destroy operations. A wrapper may be required to safely materialize values allowlisted by the manifest's `secret_environment`; bypassing it with the generic launcher can omit that setup. Follow the wrapper's documented interface without extracting secret values or reproducing its secret-loading implementation. The wrapper must preserve attached-run argv, stdin, signals, and exit status plus sync preview/apply token semantics. An arbitrary wrapper is not recognized as the generic launcher by Container Lab-specific managed-output classification, so its output may remain normal passthrough.
+
+When no project wrapper is documented, use the resolved public skill launcher from a Skizzles source checkout or installed full plugin without touching `PATH`. The literal outer launcher path lets the managed-output hook recognize attached `run` commands; do not hide it behind a shell variable:
 
 ```sh
 /absolute/path/to/skills/codex-container-lab/scripts/codex-container-lab --help
 /absolute/path/to/skills/codex-container-lab/scripts/codex-container-lab health
-/absolute/path/to/skills/codex-container-lab/scripts/codex-container-lab --owner thread-id --state-root /tmp/ccl-state --runtime-root /tmp/ccl-runtime run --lab lab-id -- echo hello
+/absolute/path/to/skills/codex-container-lab/scripts/codex-container-lab --owner thread-id --state-root /tmp/ccl-state --runtime-root /tmp/ccl-runtime run --lab lab-id --cwd packages/api -- bun test
 ```
+
+`run --cwd` is always relative to the isolated repository workspace root. Use `.` or a repository path such as `packages/api`; never pass the configured absolute container workspace (for example `/workspace`) or any other absolute container path.
 
 The launcher resolves `../../../packages/codex-container-lab/cli/src/cli.ts` from the skill's scripts directory. That relative contract is identical in a source checkout and an installed plugin: source uses the canonical workspace CLI; the plugin uses its bundled, self-contained CLI. For a plugin snapshot, invoke its own `skills/codex-container-lab/scripts/codex-container-lab` file.
 

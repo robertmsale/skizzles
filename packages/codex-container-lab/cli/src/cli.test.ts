@@ -8,13 +8,47 @@ import { ensureOwner, ownerKey, writeLab } from "./state";
 import type { LabMetadata } from "./types";
 import { runCommand } from "./process";
 import { withFileLock } from "./locks";
-import { serializePublicJson } from "./cli";
+import { cliMain, serializePublicJson } from "./cli";
 import { initializeSyncBaseline } from "./sync";
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 
 describe("CLI process boundary", () => {
+  test("help defines --cwd as repository-relative and shows a valid example", async () => {
+    const output: string[] = [];
+    const errors: string[] = [];
+    expect(await cliMain(["--help"], {}, {
+      stdout: (value) => output.push(value),
+      stderr: (value) => errors.push(value),
+    })).toBe(0);
+    expect(errors).toEqual([]);
+    const help = JSON.parse(output.join("")).help as string;
+    expect(help).toContain("--cwd REPO_RELATIVE_PATH");
+    expect(help).toContain("relative to the repository workspace root");
+    expect(help).toContain("never pass /workspace or another absolute container path");
+    expect(help).toContain("run --lab ID --cwd packages/api -- bun test");
+  });
+
+  test("run rejects non-repository-relative --cwd values before touching lab state", async () => {
+    for (const cwd of ["/workspace/packages/api", "../api", "packages\\api", "C:/workspace", ""]) {
+      const child = Bun.spawn([
+        process.execPath, join(import.meta.dir, "cli.ts"), "--owner", "thread-cwd",
+        "run", "--lab", "lab-1", "--cwd", cwd, "--", "pwd",
+      ], { stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
+      expect(JSON.parse(stderr).error.message).toBe(
+        "run --cwd must be a repository-relative workspace path, never an absolute container path",
+      );
+    }
+  });
+
   test("real public serialization clips worst-case escaped transcripts to 16 KiB", () => {
     const encoded = serializePublicJson({ labId: "lab-1", service: "dev", transcript: {
       text: '\\"'.repeat(8 * 1024), bytes: 16 * 1024, lines: 1, truncated: false,

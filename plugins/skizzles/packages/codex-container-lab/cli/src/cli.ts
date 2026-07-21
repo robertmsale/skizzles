@@ -9738,8 +9738,8 @@ function publicError(value) {
 function validateRun(argv, cwd, environment, timeoutSeconds) {
   if (argv.length === 0 || argv.length > 256 || argv.some((arg) => arg.includes("\x00")) || Buffer.byteLength(argv.join("\x00")) > 64 * 1024)
     throw new Error("run argv must contain 1..256 bounded arguments");
-  if (cwd.includes("\x00") || cwd !== "." && (cwd.startsWith("/") || cwd.split(/[\\/]/).includes(".."))) {
-    throw new Error("run cwd must be a relative path inside the workspace");
+  if (cwd.length === 0 || cwd.includes("\x00") || cwd.startsWith("/") || cwd.includes("\\") || /^[A-Za-z]:/.test(cwd) || cwd.split("/").includes("..")) {
+    throw new Error("run --cwd must be a repository-relative workspace path, never an absolute container path");
   }
   const entries = Object.entries(environment);
   if (entries.length > 64 || entries.some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value.includes("\x00")) || Buffer.byteLength(JSON.stringify(environment)) > 64 * 1024)
@@ -9977,7 +9977,9 @@ function helpText() {
     "health",
     "lab create [--name NAME] [--source PATH]",
     "lab list | lab status --lab ID | lab destroy --lab ID | lab destroy-all",
-    "run --lab ID [--cwd PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...",
+    "run --lab ID [--cwd REPO_RELATIVE_PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...",
+    "  --cwd is relative to the repository workspace root (default: .); never pass /workspace or another absolute container path",
+    "  example: run --lab ID --cwd packages/api -- bun test",
     "logs --lab ID --service SERVICE [--tail-lines N]",
     "sync preview --lab ID --direction push|pull",
     "sync apply --lab ID --direction push|pull --token TOKEN"
