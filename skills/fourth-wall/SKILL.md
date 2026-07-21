@@ -23,13 +23,13 @@ Choose the cheapest route likely to succeed. Complexity selects the model class;
 
 | Route | Complexity / horizon | Preferred model | Effort | Availability fallback |
 |---|---|---|---|---|
-| Mechanical | Tiny, repetitive, short | `gpt-5.6-luna` | low | `gpt-5.6-terra` low |
-| Scoped | Conventional, bounded, short | `gpt-5.6-luna` | medium | `gpt-5.6-terra` low |
-| Broad | Straightforward reasoning, long context | `gpt-5.6-terra` | low | — |
+| Mechanical | Tiny, repetitive, short | `gpt-5.6-luna` | medium | `gpt-5.6-terra` low |
+| Scoped | Conventional, bounded, short | `gpt-5.6-luna` | high | `gpt-5.6-terra` low |
+| Broad | Straightforward reasoning, long context | `gpt-5.6-terra` | medium | — |
 | Standard | Normal debugging or implementation | `gpt-5.6-terra` | medium | — |
-| Complex | Ambiguous but bounded cross-boundary reasoning | `gpt-5.6-sol` | low | — |
-| Specialized | Architecture, security, migrations, or long horizon | `gpt-5.6-sol` | medium | — |
-| Critical | Adversarial acceptance, irreversible work, or repeated failure | `gpt-5.6-sol` | high | — |
+| Complex | Ambiguous but bounded cross-boundary reasoning | `gpt-5.6-sol` | medium | — |
+| Specialized | Architecture, security, migrations, or long horizon | `gpt-5.6-sol` | high | — |
+| Critical | Adversarial acceptance, irreversible work, or repeated failure | `gpt-5.6-sol` | xhigh | — |
 
 Use Luna only when the active `spawn_agent` schema offers it and the assignment is short-lived, self-contained, cheaply verifiable, and comfortably below long-context territory. If Luna is unavailable, use the listed Terra fallback. Prefer Terra as context insurance when broad repository history must remain coherent even if reasoning is conventional. Use Sol when ambiguity, specialization, runtime-only behavior, cross-boundary architecture, platform lifecycle, or defect-escape cost dominates. A small difficult task may need Sol, while a large straightforward mapping task may fit Terra.
 
@@ -68,7 +68,7 @@ For a long or replacement-heavy root task, keep one durable task packet under `/
 Example:
 
 ```text
-You are dispatched as a Scoped Worker using gpt-5.6-luna at medium effort
+You are dispatched as a Scoped Worker using gpt-5.6-luna at high effort
 (or the advertised Terra-low fallback). Read $fourth-wall and follow
 resources/roles/worker.md. You are a bounded leaf and must not spawn subagents.
 
@@ -148,7 +148,7 @@ When observed behavior reveals a reusable routing or lifecycle caveat, follow [r
 ## Hard Boundaries
 
 - Triage, Designer, QA, Review, Deployment, and bounded Luna/Terra-low Workers are leaves. A depth-1 Terra/Sol Worker may have at most one active bounded Worker grandchild; all other delegation proposals return to the root.
-- Worker grandchildren must be named `worker__...`, use explicit Luna low/medium routing when available or Terra low as the bounded fallback, set `fork_turns = "none"`, own a disjoint complete implementation loop, and never spawn again. The parent and root enforce the one-active-grandchild limit through lifecycle discipline.
+- Worker grandchildren must be named `worker__...`, use explicit Luna medium/high routing when available or Terra low as the bounded fallback, set `fork_turns = "none"`, own a disjoint complete implementation loop, and never spawn again. The parent and root enforce the one-active-grandchild limit through lifecycle discipline.
 - Reactivate a completed child only when its prior role, route, context, and ownership still fit the next action. Spawn a fresh sibling when independent review, clean context, changed ownership, or escalation is valuable.
 - Do not let two implementation tasks own overlapping files without explicit coordination.
 - The root owns Git integration, decides when parallel edits are stable, and accepts the final result. Once stable, delegate serialized project-wide verification, integration repair loops, and live proof when a leaf can own them coherently; run them at the root only when delegation overhead would exceed the work.

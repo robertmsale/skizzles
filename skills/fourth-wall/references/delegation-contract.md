@@ -39,7 +39,7 @@ Complexity and horizon select model, effort, and fork depth; the role selects be
 
 A depth-1 Terra/Sol Worker may dispatch at most one active bounded Worker when all of these hold:
 
-- The child is named `worker__...` and uses Luna low/medium when available or Terra low as the bounded fallback.
+- The child is named `worker__...` and uses Luna medium/high when available or Terra low as the bounded fallback.
 - The slice is small, disjoint from the parent's continuing edits, and comfortably short-context.
 - The child owns inspection, implementation, focused validation, in-scope fixes, and completion evidence together.
 - The parent has genuinely independent implementation to continue while the child works.
