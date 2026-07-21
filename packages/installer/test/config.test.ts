@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   configureCodex,
@@ -89,6 +89,24 @@ describe("Codex configuration lifecycle", () => {
     ]);
   });
 
+  test("Skizzles instructions configure distinct root and default-subagent prompts", () => {
+    expect(desiredConfigEdits("passive", {
+      sourceRoot: "/skizzles",
+      rootInstructions: "/skizzles/assets/root.md",
+      subagentInstructions: "/skizzles/assets/subagent.md",
+      subagentConfig: "/skizzles/assets/subagent.toml",
+    })).toEqual([
+      { keyPath: "features.hooks", value: true, mergeStrategy: "replace" },
+      { keyPath: "model_instructions_file", value: "/skizzles/assets/root.md", mergeStrategy: "replace" },
+      {
+        keyPath: "agents.default.description",
+        value: "Skizzles execution subagent with a compact developer-focused instruction set.",
+        mergeStrategy: "replace",
+      },
+      { keyPath: "agents.default.config_file", value: "/skizzles/assets/subagent.toml", mergeStrategy: "replace" },
+    ]);
+  });
+
   test("aggressive orchestration uses concise Fourth Wall hints", () => {
     const edits = desiredConfigEdits("aggressive");
     expect(edits.map(({ keyPath }) => keyPath)).toEqual([
@@ -138,6 +156,57 @@ describe("Codex configuration lifecycle", () => {
       rpcFactory: factory(f.rpc),
     });
     expect(receipt.values).toEqual([{ keyPath: "features.hooks", beforePresent: true, before: false, after: true }]);
+    expect(f.rpc.writes).toBe(0);
+    expect(existsSync(configReceiptPath(f.codexHome))).toBe(false);
+  });
+
+  test("configures and restores Skizzles instruction paths without disturbing sibling agent config", async () => {
+    const f = fixture({
+      model_instructions_file: "/personal/root.md",
+      agents: { default: { description: "Personal default", config_file: "/personal/agent.toml", nickname_candidates: ["Ada"] } },
+    });
+    const sourceRoot = join(f.codexHome, "skizzles");
+    mkdirSync(join(sourceRoot, "assets"), { recursive: true });
+    for (const file of ["skizzles_instructions.md", "skizzles_subagent_instructions.md", "skizzles_subagent.toml"]) {
+      writeFileSync(join(sourceRoot, "assets", file), file);
+    }
+    const canonicalSourceRoot = realpathSync(sourceRoot);
+    await configureCodex({
+      ...f,
+      orchestration: "passive",
+      instructions: "skizzles",
+      sourceRoot,
+      rpcFactory: factory(f.rpc),
+    });
+    expect(f.rpc.config).toMatchObject({
+      model_instructions_file: join(canonicalSourceRoot, "assets", "skizzles_instructions.md"),
+      agents: {
+        default: {
+          description: "Skizzles execution subagent with a compact developer-focused instruction set.",
+          config_file: join(canonicalSourceRoot, "assets", "skizzles_subagent.toml"),
+          nickname_candidates: ["Ada"],
+        },
+      },
+    });
+
+    f.rpc.closed = false;
+    await unconfigureCodex({ ...f, rpcFactory: factory(f.rpc) });
+    expect(f.rpc.config).toEqual({
+      model_instructions_file: "/personal/root.md",
+      agents: { default: { description: "Personal default", config_file: "/personal/agent.toml", nickname_candidates: ["Ada"] } },
+      features: {},
+    });
+  });
+
+  test("fails closed when a Skizzles instruction asset is missing", async () => {
+    const f = fixture({});
+    await expect(configureCodex({
+      ...f,
+      orchestration: "passive",
+      instructions: "skizzles",
+      sourceRoot: join(f.codexHome, "missing-skizzles"),
+      rpcFactory: factory(f.rpc),
+    })).rejects.toThrow("Skizzles rootInstructions asset is missing");
     expect(f.rpc.writes).toBe(0);
     expect(existsSync(configReceiptPath(f.codexHome))).toBe(false);
   });

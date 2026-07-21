@@ -3,7 +3,12 @@ import { resolve } from "node:path";
 import { installSkills, receiptSummary, uninstallSkills, type Transfer } from "./core";
 import { installHarness, uninstallHarness } from "./harness";
 import { doctor } from "./doctor";
-import { configureCodex, unconfigureCodex, type OrchestrationMode } from "./config";
+import {
+  configureCodex,
+  unconfigureCodex,
+  type InstructionMode,
+  type OrchestrationMode,
+} from "./config";
 
 type Parsed = {
   command: "install" | "uninstall" | "doctor" | "configure" | "unconfigure";
@@ -11,14 +16,16 @@ type Parsed = {
   codexHome: string | undefined;
   codexBinary: string | undefined;
   orchestration: OrchestrationMode | undefined;
+  instructions: InstructionMode | undefined;
   home: string | undefined;
   sourceRoot: string;
+  sourceRootProvided: boolean;
   transfer: Transfer;
   dryRun: boolean;
 };
 
 function usage(): never {
-  console.error("usage: bun packages/installer/src/cli.ts <install|uninstall> --surface <skills|harness> [--codex-home PATH] [--home PATH] [--source-root PATH] [--transfer link|copy] [--dry-run] | configure --codex-home PATH --codex-binary PATH --orchestration <aggressive|passive> [--dry-run] | unconfigure --codex-home PATH --codex-binary PATH [--dry-run] | doctor --home PATH --codex-home PATH");
+  console.error("usage: bun packages/installer/src/cli.ts <install|uninstall> --surface <skills|harness> [--codex-home PATH] [--home PATH] [--source-root PATH] [--transfer link|copy] [--dry-run] | configure --codex-home PATH --codex-binary PATH --orchestration <aggressive|passive> [--instructions <native|skizzles>] [--source-root PATH] [--dry-run] | unconfigure --codex-home PATH --codex-binary PATH [--dry-run] | doctor --home PATH --codex-home PATH");
   process.exit(2);
 }
 
@@ -28,8 +35,10 @@ function parse(argv: string[]): Parsed {
   let codexHome: string | undefined;
   let codexBinary: string | undefined;
   let orchestration: OrchestrationMode | undefined;
+  let instructions: InstructionMode | undefined;
   let home: string | undefined;
   let sourceRoot = resolve(import.meta.dir, "../../..");
+  let sourceRootProvided = false;
   let transfer: Transfer = "link";
   let surface: "skills" | "harness" | undefined;
   let dryRun = false;
@@ -43,8 +52,16 @@ function parse(argv: string[]): Parsed {
       if (value !== "aggressive" && value !== "passive") usage();
       orchestration = value;
     }
+    else if (flag === "--instructions") {
+      const value = argv.shift();
+      if (value !== "native" && value !== "skizzles") usage();
+      instructions = value;
+    }
     else if (flag === "--home") home = argv.shift();
-    else if (flag === "--source-root") sourceRoot = resolve(argv.shift() ?? usage());
+    else if (flag === "--source-root") {
+      sourceRoot = resolve(argv.shift() ?? usage());
+      sourceRootProvided = true;
+    }
     else if (flag === "--transfer" || flag === "--mode") {
       const mode = argv.shift();
       if (mode !== "link" && mode !== "copy") usage();
@@ -57,20 +74,29 @@ function parse(argv: string[]): Parsed {
     else usage();
   }
   if (command === "doctor") {
-    if (!home || !codexHome || surface || codexBinary || orchestration) usage();
+    if (!home || !codexHome || surface || codexBinary || orchestration || instructions) usage();
   } else if (command === "configure") {
-    if (!codexHome || !codexBinary || !orchestration || surface || home) usage();
+    if (
+      !codexHome ||
+      !codexBinary ||
+      !orchestration ||
+      surface ||
+      home ||
+      (instructions === "skizzles" && !sourceRootProvided)
+    ) usage();
   } else if (command === "unconfigure") {
-    if (!codexHome || !codexBinary || orchestration || surface || home) usage();
-  } else if (!surface || (surface === "skills" && !codexHome) || (surface === "harness" && !home)) usage();
+    if (!codexHome || !codexBinary || orchestration || instructions || surface || home) usage();
+  } else if (instructions || !surface || (surface === "skills" && !codexHome) || (surface === "harness" && !home)) usage();
   return {
     command: command as Parsed["command"],
     surface,
     codexHome: codexHome && resolve(codexHome),
     codexBinary,
     orchestration,
+    instructions,
     home: home && resolve(home),
     sourceRoot,
+    sourceRootProvided,
     transfer,
     dryRun,
   };
@@ -90,6 +116,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         codexHome: parsed.codexHome!,
         codexBinary: parsed.codexBinary!,
         orchestration: parsed.orchestration!,
+        sourceRoot: parsed.sourceRoot,
+        ...(parsed.instructions ? { instructions: parsed.instructions } : {}),
         dryRun: parsed.dryRun,
       })
       : await unconfigureCodex({
@@ -102,6 +130,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       dryRun: parsed.dryRun,
       surface: "config",
       orchestration: receipt.orchestration,
+      instructions: receipt.instructions ?? "native",
       configPath: receipt.configPath,
       keys: receipt.values.map(({ keyPath }) => keyPath),
     }));

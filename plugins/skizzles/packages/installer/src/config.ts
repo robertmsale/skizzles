@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { assertManagedParentsAreReal, pathEntryExists } from "./core";
 
 export type OrchestrationMode = "aggressive" | "passive";
+export type InstructionMode = "native" | "skizzles";
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export interface ConfigEdit {
@@ -49,6 +50,8 @@ export interface ConfigReceipt {
   version: 1;
   state: "pending" | "active" | "restoring";
   orchestration: OrchestrationMode;
+  instructions?: InstructionMode;
+  sourceRoot?: string;
   codexBinary: string;
   configPath: string;
   values: OwnedValue[];
@@ -58,6 +61,8 @@ export interface ConfigureOptions {
   codexHome: string;
   codexBinary: string;
   orchestration: OrchestrationMode;
+  instructions?: InstructionMode;
+  sourceRoot?: string;
   dryRun?: boolean;
   rpcFactory?: (codexHome: string, codexBinary: string) => Promise<ConfigRpc>;
 }
@@ -67,6 +72,15 @@ const aggressiveModeHint =
 const rootHint = "Fourth Wall applies. Read and follow $fourth-wall before this task's first orchestration action.";
 const subagentHint =
   "Fourth Wall applies. Read and follow $fourth-wall and the behavioral role resource named in your assignment.";
+const defaultAgentDescription =
+  "Skizzles execution subagent with a compact developer-focused instruction set.";
+
+interface InstructionAssets {
+  sourceRoot: string;
+  rootInstructions: string;
+  subagentInstructions: string;
+  subagentConfig: string;
+}
 
 export function configReceiptPath(codexHome: string): string {
   return join(canonicalExistingPath(codexHome), ".skizzles", "config-receipt.json");
@@ -77,10 +91,46 @@ function canonicalExistingPath(path: string): string {
   return existsSync(absolute) ? realpathSync(absolute) : absolute;
 }
 
-export function desiredConfigEdits(orchestration: OrchestrationMode): ConfigEdit[] {
+function resolveInstructionAssets(sourceRootInput: string): InstructionAssets {
+  const sourceRoot = canonicalExistingPath(sourceRootInput);
+  const assets = {
+    sourceRoot,
+    rootInstructions: join(sourceRoot, "assets", "skizzles_instructions.md"),
+    subagentInstructions: join(sourceRoot, "assets", "skizzles_subagent_instructions.md"),
+    subagentConfig: join(sourceRoot, "assets", "skizzles_subagent.toml"),
+  };
+  for (const [label, path] of Object.entries(assets).filter(([label]) => label !== "sourceRoot")) {
+    if (!existsSync(path)) throw new Error(`Skizzles ${label} asset is missing: ${path}`);
+  }
+  return assets;
+}
+
+export function desiredConfigEdits(
+  orchestration: OrchestrationMode,
+  instructionAssets?: InstructionAssets,
+): ConfigEdit[] {
   const edits: ConfigEdit[] = [
     { keyPath: "features.hooks", value: true, mergeStrategy: "replace" },
   ];
+  if (instructionAssets) {
+    edits.push(
+      {
+        keyPath: "model_instructions_file",
+        value: instructionAssets.rootInstructions,
+        mergeStrategy: "replace",
+      },
+      {
+        keyPath: "agents.default.description",
+        value: defaultAgentDescription,
+        mergeStrategy: "replace",
+      },
+      {
+        keyPath: "agents.default.config_file",
+        value: instructionAssets.subagentConfig,
+        mergeStrategy: "replace",
+      },
+    );
+  }
   if (orchestration === "aggressive") {
     edits.push(
       { keyPath: "features.multi_agent_v2.enabled", value: true, mergeStrategy: "replace" },
@@ -162,6 +212,7 @@ function readReceipt(codexHome: string): ConfigReceipt {
     receipt.version !== 1 ||
     !["pending", "active", "restoring"].includes(receipt.state ?? "") ||
     !["aggressive", "passive"].includes(receipt.orchestration ?? "") ||
+    (receipt.instructions !== undefined && !["native", "skizzles"].includes(receipt.instructions)) ||
     !Array.isArray(receipt.values)
   ) {
     throw new Error(`invalid Skizzles config receipt: ${path}`);
@@ -179,6 +230,13 @@ function validateBinary(codexBinary: string): string {
 export async function configureCodex(options: ConfigureOptions): Promise<ConfigReceipt> {
   const codexHome = canonicalExistingPath(options.codexHome);
   const codexBinary = validateBinary(options.codexBinary);
+  const instructions = options.instructions ?? "native";
+  if (instructions === "skizzles" && !options.sourceRoot) {
+    throw new Error("--source-root is required with --instructions skizzles");
+  }
+  const instructionAssets = instructions === "skizzles"
+    ? resolveInstructionAssets(options.sourceRoot!)
+    : undefined;
   assertManagedParentsAreReal(codexHome, [".skizzles"]);
   const receiptPath = configReceiptPath(codexHome);
   if (pathEntryExists(receiptPath)) throw new Error(`Skizzles config receipt already exists: ${receiptPath}`);
@@ -187,7 +245,7 @@ export async function configureCodex(options: ConfigureOptions): Promise<ConfigR
   const rpc = await (options.rpcFactory ?? AppServerRpc.create)(codexHome, codexBinary);
   try {
     const layer = userLayer(await rpc.read(), configPath);
-    const edits = desiredConfigEdits(options.orchestration);
+    const edits = desiredConfigEdits(options.orchestration, instructionAssets);
     const values = edits.map(({ keyPath, value }) => {
       const before = valueAt(layer.config, keyPath);
       return { keyPath, beforePresent: before.present, before: before.value, after: value };
@@ -196,6 +254,8 @@ export async function configureCodex(options: ConfigureOptions): Promise<ConfigR
       version: 1,
       state: "pending",
       orchestration: options.orchestration,
+      instructions,
+      ...(instructionAssets ? { sourceRoot: instructionAssets.sourceRoot } : {}),
       codexBinary,
       configPath,
       values,

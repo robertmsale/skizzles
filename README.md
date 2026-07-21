@@ -11,6 +11,7 @@ Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
+- **Two brains, one harness** — an opt-in developer-focused root prompt keeps the conversation delightful while compact subagent instructions keep workers focused on execution. 🧠✨
 - **A practical skill shelf** — auth semantics, Cargo optimization, completion contracts, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
 - **A polite config handshake** — enable the hooks, then choose passive native orchestration or the full proactive Fourth Wall experience without trampling the rest of `config.toml`. 🤝
@@ -49,8 +50,22 @@ After installing the complete plugin surface, Skizzles can safely finish the Cod
 
 - **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
 - **Aggressive orchestration** also enables MultiAgentV2, keeps seven task slots available, and adds tiny root/subagent pointers to `$fourth-wall` plus the proactive quality-and-speed trigger. 🚀
+- **Native instructions** (the default) leave Codex's model instructions untouched.
+- **Skizzles instructions** install distinct source-linked prompts for roots and default subagents. Roots keep the developer-facing personality and GUI niceties; subagents get a smaller execution-oriented contract with minimal commentary. Use numbered or context-free forks so Codex applies the subagent role—a large number safely means “up to this many turns,” not full-history mode.
 
-The configuration lifecycle previews before writing, uses Codex’s own atomic config editor, preserves comments and unrelated settings, and records only the keys it owns for drift-safe restoration. It never edits `AGENTS.md`, personal instructions, approvals, permissions, goals, model defaults, or MCP registrations. See [install-skizzles](skills/install-skizzles/SKILL.md) for the exact commands.
+Preview the full developer setup from the checkout:
+
+```sh
+bun run packages/installer/src/cli.ts configure \
+  --codex-home /absolute/target/codex-home \
+  --codex-binary /absolute/path/to/codex \
+  --orchestration aggressive \
+  --instructions skizzles \
+  --source-root /absolute/path/to/skizzles \
+  --dry-run
+```
+
+Review the reported keys, then repeat without `--dry-run`. The lifecycle uses Codex’s own atomic config editor, preserves comments and unrelated settings, and records only the keys it owns for drift-safe restoration. It never edits `AGENTS.md`, approvals, permissions, goals, model defaults, or MCP registrations. Prompt replacement happens only with the explicit `--instructions skizzles` option. See [install-skizzles](skills/install-skizzles/SKILL.md) for restoration and the complete contract.
 
 The optional Luna V2 overlay lives in `runtime/model-catalog.ts`. It regenerates a complete static catalog from the newest valid normal cache or the installed Codex binary, changes only Luna's compatibility marker, and becomes a no-op when upstream enables V2 officially. Its launchd template watches both sources and runs every five minutes; catalog changes take effect after the next app-server restart. See `assets/model-catalog-installation.md` before activating it. 🚀
 

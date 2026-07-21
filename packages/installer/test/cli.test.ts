@@ -42,4 +42,25 @@ describe("installer CLI target gates", () => {
     expect(JSON.parse(result.stdout.toString())).toMatchObject({ ok: false, installs: { skills: "absent", harness: "absent" } });
     expect(existsSync(root)).toBe(false);
   });
+
+  test("Skizzles instructions require an explicit durable source root", () => {
+    const result = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        resolve(import.meta.dir, "../src/cli.ts"),
+        "configure",
+        "--codex-home",
+        "/tmp/codex-home",
+        "--codex-binary",
+        process.execPath,
+        "--orchestration",
+        "aggressive",
+        "--instructions",
+        "skizzles",
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(2);
+  });
 });

@@ -41,9 +41,9 @@ Choose `fork_turns` deliberately:
 
 - Use `"none"` for self-contained packets, isolated implementation, sensitive stale context, and Worker grandchildren.
 - Prefer a small positive integer string such as `"1"` or `"2"` when recent owner intent or an established plan would prevent rediscovery.
-- Use `"all"` only when the complete conversation is genuinely required and bounded enough to justify its context cost.
+- Do not use `"all"` when the active default or named agent role supplies child-specific configuration. Full-history forks skip role application; under the Skizzles instruction profile, that would also bypass the compact subagent base instructions. A positive number larger than the available turn count keeps every available fork turn without becoming full-history.
 
-Codex 0.145.0-alpha.18 supports explicit model/reasoning overrides with positive and full-history forks. Full-history forks still inherit the parent `agent_type`, so do not combine `fork_turns="all"` with an `agent_type` override. Do not claim an effective model or effort merely from a successful call; use host-visible task settings or rollout evidence when verification matters.
+Codex 0.145.0-alpha.18 supports explicit model/reasoning overrides with positive and full-history forks. Full-history forks still inherit the parent `agent_type` and bypass role application. Prefer a sufficiently large positive number when broad recent context is needed. Do not claim an effective model or effort merely from a successful call; use host-visible task settings or rollout evidence when verification matters.
 
 Choose the independent behavioral role that best matches the duty:
 
