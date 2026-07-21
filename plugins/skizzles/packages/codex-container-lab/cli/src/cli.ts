@@ -9738,7 +9738,7 @@ function publicError(value) {
 function validateRun(argv, cwd, environment, timeoutSeconds) {
   if (argv.length === 0 || argv.length > 256 || argv.some((arg) => arg.includes("\x00")) || Buffer.byteLength(argv.join("\x00")) > 64 * 1024)
     throw new Error("run argv must contain 1..256 bounded arguments");
-  if (cwd.length === 0 || cwd.includes("\x00") || cwd.startsWith("/") || cwd.includes("\\") || /^[A-Za-z]:/.test(cwd) || cwd.split("/").includes("..")) {
+  if (!isRepositoryRelativeRunCwd(cwd)) {
     throw new Error("run --cwd must be a repository-relative workspace path, never an absolute container path");
   }
   const entries = Object.entries(environment);
@@ -9747,6 +9747,9 @@ function validateRun(argv, cwd, environment, timeoutSeconds) {
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 0 || timeoutSeconds > 7200) {
     throw new Error("timeout-seconds must be 0..7200");
   }
+}
+function isRepositoryRelativeRunCwd(cwd) {
+  return cwd.length > 0 && !cwd.includes("\x00") && !cwd.startsWith("/") && !cwd.includes("\\") && !/^[A-Za-z]:/.test(cwd) && !cwd.split("/").includes("..");
 }
 function onceClosed(child) {
   if (child.exitCode !== null)
@@ -9944,9 +9947,13 @@ function parseRun(args) {
   const argv = args.slice(separator + 1);
   if (argv.length === 0)
     throw new UsageError("run requires a command after --");
+  const cwd = flags.one("--cwd") ?? ".";
+  if (!isRepositoryRelativeRunCwd(cwd)) {
+    throw new UsageError("run --cwd must be a repository-relative workspace path, never an absolute container path");
+  }
   return {
     lab: flags.required("--lab"),
-    cwd: flags.one("--cwd") ?? ".",
+    cwd,
     environment: Object.fromEntries(flags.many("--env").map(parseEnvironment2)),
     timeoutSeconds: integerFlag(flags.one("--timeout-seconds"), "--timeout-seconds", 1800),
     argv

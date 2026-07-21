@@ -577,8 +577,7 @@ function publicError(value: string): string {
 function validateRun(argv: string[], cwd: string, environment: Record<string, string>, timeoutSeconds: number): void {
   if (argv.length === 0 || argv.length > 256 || argv.some((arg) => arg.includes("\0")) ||
       Buffer.byteLength(argv.join("\0")) > 64 * 1024) throw new Error("run argv must contain 1..256 bounded arguments");
-  if (cwd.length === 0 || cwd.includes("\0") || cwd.startsWith("/") || cwd.includes("\\") ||
-      /^[A-Za-z]:/.test(cwd) || cwd.split("/").includes("..")) {
+  if (!isRepositoryRelativeRunCwd(cwd)) {
     throw new Error("run --cwd must be a repository-relative workspace path, never an absolute container path");
   }
   const entries = Object.entries(environment);
@@ -587,6 +586,11 @@ function validateRun(argv: string[], cwd: string, environment: Record<string, st
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 0 || timeoutSeconds > 7200) {
     throw new Error("timeout-seconds must be 0..7200");
   }
+}
+
+export function isRepositoryRelativeRunCwd(cwd: string): boolean {
+  return cwd.length > 0 && !cwd.includes("\0") && !cwd.startsWith("/") && !cwd.includes("\\") &&
+    !/^[A-Za-z]:/.test(cwd) && !cwd.split("/").includes("..");
 }
 
 function onceClosed(child: ReturnType<DockerRunner["spawn"]>): Promise<number> {

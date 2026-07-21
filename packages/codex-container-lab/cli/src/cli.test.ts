@@ -41,11 +41,12 @@ describe("CLI process boundary", () => {
         new Response(child.stderr).text(),
         child.exited,
       ]);
-      expect(code).toBe(1);
+      expect(code).toBe(2);
       expect(stdout).toBe("");
-      expect(JSON.parse(stderr).error.message).toBe(
-        "run --cwd must be a repository-relative workspace path, never an absolute container path",
-      );
+      expect(JSON.parse(stderr).error).toEqual({
+        code: "USAGE",
+        message: "run --cwd must be a repository-relative workspace path, never an absolute container path",
+      });
     }
   });
 
