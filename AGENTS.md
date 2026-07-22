@@ -14,7 +14,7 @@ Skizzles is a packaging project, not a live installation. Keep its canonical sou
 ## Safe working rules
 
 - Do not mutate `~/.codex`, an installed plugin, live hooks, `PATH`, launchd, or another host environment while developing this repository. A live-install or cutover requires an explicit owner decision after validation.
-- Preserve the tracked root `.DS_Store`; never stage, normalize, or distribute it. Finder metadata anywhere in package inputs or `plugins/skizzles/` is a defect.
+- Never stage or distribute Finder metadata. Canonical tree staging uses Git's tracked-plus-nonignored file set, so ignored `.DS_Store` files do not affect packaging; tracked forbidden metadata and Finder metadata inside generated `plugins/skizzles/` remain defects.
 - Keep distributable content free of machine-specific paths, credentials, symlinks, cache directories, logs, databases, and local runtime state.
 - Make version changes in canonical metadata, then regenerate. Keep plugin manifest and root package versions aligned.
 

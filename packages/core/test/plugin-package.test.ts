@@ -203,13 +203,34 @@ describe("deterministic plugin packaging", () => {
     );
   });
 
-  test("rejects Finder metadata in canonical package inputs", async () => {
+  test("honors Git ignore rules in canonical package inputs", async () => {
     const root = await fixture();
     await write(root, "skills/.DS_Store", "local metadata");
+    const staged = join(root, "stage");
+
+    await stagePlugin(root, staged);
+
+    expect(await Bun.file(join(staged, "skills/.DS_Store")).exists()).toBe(false);
+  });
+
+  test("still rejects tracked forbidden metadata", async () => {
+    const root = await fixture();
+    await write(root, "skills/.DS_Store", "local metadata");
+    git(root, "add", "-f", "skills/.DS_Store");
 
     expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
       "skills/.DS_Store looks like local or live state",
     );
+  });
+
+  test("packages uncommitted tracked content from the working tree", async () => {
+    const root = await fixture();
+    await write(root, "skills/example/SKILL.md", "uncommitted edit\n");
+    const staged = join(root, "stage");
+
+    await stagePlugin(root, staged);
+
+    expect(await readFile(join(staged, "skills/example/SKILL.md"), "utf8")).toBe("uncommitted edit\n");
   });
 
   test("rejects Finder metadata in generated output", async () => {
@@ -364,7 +385,15 @@ async function fixture(): Promise<string> {
       ],
     },
   }));
+  await write(root, ".gitignore", ".DS_Store\n");
+  git(root, "init", "-q");
+  git(root, "add", ".");
   return root;
+}
+
+function git(root: string, ...args: string[]): void {
+  const result = Bun.spawnSync(["git", "-C", root, ...args], { stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString("utf8"));
 }
 
 async function write(root: string, relativePath: string, content: string): Promise<void> {

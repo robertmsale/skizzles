@@ -106,12 +106,12 @@ export async function stagePlugin(repoRoot: string, destination: string): Promis
   const paths = packagePaths(repoRoot);
   await rm(destination, { force: true, recursive: true });
   await mkdir(destination, { recursive: true });
-  await copyCanonicalTree(paths.templateRoot, destination, "plugin template");
+  await copyGitSelectedTree(paths.repoRoot, TEMPLATE_PATH, destination, "plugin template");
 
   for (const [sourcePath, destinationPath] of CANONICAL_INPUTS) {
     const source = join(paths.repoRoot, sourcePath);
     if (!(await exists(source))) continue;
-    await copyCanonicalTree(source, join(destination, destinationPath), sourcePath);
+    await copyGitSelectedTree(paths.repoRoot, sourcePath, join(destination, destinationPath), sourcePath);
   }
 
   for (const path of INSTALLER_INPUTS) {
@@ -429,30 +429,66 @@ async function rejectForbiddenDistributableContent(pluginRoot: string): Promise<
   }
 }
 
-async function copyCanonicalTree(sourceRoot: string, destinationRoot: string, label: string): Promise<void> {
+async function copyGitSelectedTree(
+  repoRoot: string,
+  sourcePath: string,
+  destinationRoot: string,
+  label: string,
+): Promise<void> {
+  const sourceRoot = join(repoRoot, sourcePath);
   const sourceStat = await lstat(sourceRoot);
   if (!sourceStat.isDirectory()) throw new PackagingError(`${label} must be a directory.`);
   await mkdir(destinationRoot, { recursive: true });
 
-  const entries = await readdir(sourceRoot, { withFileTypes: true });
-  entries.sort((left, right) => left.name.localeCompare(right.name, "en"));
-  for (const entry of entries) {
-    assertDistributableName(entry.name, `${label}/${entry.name}`);
-    const source = join(sourceRoot, entry.name);
-    const destination = join(destinationRoot, entry.name);
-    const sourceMetadata = await lstat(source);
+  const prefix = `${sourcePath}/`;
+  for (const path of gitSelectedFiles(repoRoot, sourcePath)) {
+    if (!path.startsWith(prefix)) {
+      throw new PackagingError(`Git returned a path outside ${label}: ${path}.`);
+    }
+    const relativePath = path.slice(prefix.length);
+    assertDistributablePath(relativePath, `${label}/${relativePath}`);
+    const source = join(repoRoot, path);
+    const destination = join(destinationRoot, ...relativePath.split("/"));
+    let sourceMetadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      sourceMetadata = await lstat(source);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") continue;
+      throw error;
+    }
     if (sourceMetadata.isSymbolicLink()) {
-      throw new PackagingError(`${label}/${entry.name} is a symlink; distributable inputs must be self-contained.`);
+      throw new PackagingError(`${label}/${relativePath} is a symlink; distributable inputs must be self-contained.`);
     }
-    if (sourceMetadata.isDirectory()) {
-      await copyCanonicalTree(source, destination, `${label}/${entry.name}`);
-    } else if (sourceMetadata.isFile()) {
-      await mkdir(dirname(destination), { recursive: true });
-      await copyFile(source, destination);
-    } else {
-      throw new PackagingError(`${label}/${entry.name} is not a regular file or directory.`);
+    if (!sourceMetadata.isFile()) {
+      throw new PackagingError(`${label}/${relativePath} is not a regular file.`);
     }
+    await mkdir(dirname(destination), { recursive: true });
+    await copyFile(source, destination);
+    await chmod(destination, sourceMetadata.mode & 0o777);
   }
+}
+
+function gitSelectedFiles(repoRoot: string, sourcePath: string): string[] {
+  const result = Bun.spawnSync([
+    "git",
+    "-C",
+    repoRoot,
+    "ls-files",
+    "-z",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+    "--",
+    sourcePath,
+  ], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    const details = result.stderr.toString("utf8").trim();
+    throw new PackagingError(`Unable to enumerate Git-selected files for ${sourcePath}: ${details}`);
+  }
+  return result.stdout.toString("utf8").split("\0").filter((path) => path !== "").sort((left, right) => left.localeCompare(right, "en"));
 }
 
 async function copyCanonicalFile(source: string, destination: string, label: string): Promise<void> {
@@ -480,6 +516,10 @@ function assertDistributableName(name: string, path: string): void {
       BLOCKED_CREDENTIAL_NAMES.has(lowerName) || BLOCKED_SUFFIXES.some((suffix) => lowerName.endsWith(suffix))) {
     throw new PackagingError(`${path} looks like local or live state and cannot be packaged.`);
   }
+}
+
+function assertDistributablePath(relativePath: string, label: string): void {
+  for (const name of relativePath.split("/")) assertDistributableName(name, label);
 }
 
 async function listFiles(root: string): Promise<string[]> {
