@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { StringDecoder } from "node:string_decoder";
-import { ContainerLabService } from "./service";
+import { ContainerLabService, isRepositoryRelativeRunCwd } from "./service";
 import { serializePublicJson } from "./public-json";
 import { redactPublicText } from "./public-output";
 import { resolveOwner, resolveRoots } from "./state";
@@ -204,9 +204,13 @@ function parseRun(args: string[]): {
   const flags = parseFlags(args.slice(0, separator), new Set(["--lab", "--cwd", "--env", "--timeout-seconds"]), new Set(["--env"]));
   const argv = args.slice(separator + 1);
   if (argv.length === 0) throw new UsageError("run requires a command after --");
+  const cwd = flags.one("--cwd") ?? ".";
+  if (!isRepositoryRelativeRunCwd(cwd)) {
+    throw new UsageError("run --cwd must be a repository-relative workspace path, never an absolute container path");
+  }
   return {
     lab: flags.required("--lab"),
-    cwd: flags.one("--cwd") ?? ".",
+    cwd,
     environment: Object.fromEntries(flags.many("--env").map(parseEnvironment)),
     timeoutSeconds: integerFlag(flags.one("--timeout-seconds"), "--timeout-seconds", 1800),
     argv,
@@ -239,7 +243,9 @@ function helpText(): string {
     "health",
     "lab create [--name NAME] [--source PATH]",
     "lab list | lab status --lab ID | lab destroy --lab ID | lab destroy-all",
-    "run --lab ID [--cwd PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...",
+    "run --lab ID [--cwd REPO_RELATIVE_PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...",
+    "  --cwd is relative to the repository workspace root (default: .); never pass /workspace or another absolute container path",
+    "  example: run --lab ID --cwd packages/api -- bun test",
     "logs --lab ID --service SERVICE [--tail-lines N]",
     "sync preview --lab ID --direction push|pull",
     "sync apply --lab ID --direction push|pull --token TOKEN",

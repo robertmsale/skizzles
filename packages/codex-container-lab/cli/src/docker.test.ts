@@ -125,6 +125,19 @@ secret_environment: [REGISTRY_TOKEN]
 });
 
 describe("exact Docker cleanup", () => {
+  test("maps a repository-relative run cwd beneath the configured container workspace", () => {
+    const docker = new MockDocker();
+    launchDockerRun(runtime(), {
+      runId: "00000000-0000-4000-8000-000000000000",
+      cwd: "packages/api",
+      argv: ["pwd"],
+      environment: {},
+    }, docker);
+    const spawned = docker.spawnCalls[0]!;
+    const workdir = spawned.indexOf("--workdir");
+    expect(spawned[workdir + 1]).toBe("/workspace/packages/api");
+  });
+
   test("uses managed + exact owner + exact lab filters and Compose ownership filters", async () => {
     const docker = new MockDocker();
     await cleanupLabLabels(lab(), false, docker);
