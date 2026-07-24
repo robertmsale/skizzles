@@ -11,7 +11,7 @@ Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
-- **Two brains, six job descriptions** — an opt-in developer-focused root prompt keeps the conversation delightful, while every native Triage/Worker/Designer/QA/Review/Deployment role shares a compact execution base and receives only its specialized duty. 🧠✨
+- **Durable role brains** — an opt-in developer-focused root prompt keeps the conversation delightful, while generated Triage/Worker/Designer/QA/Review/Deployment roles bind each duty to a model/reasoning pair that survives eviction and rework. Luna can keep painting instead of waking up convinced it is Sol. 🧠✨
 - **A practical skill shelf** — auth semantics, Cargo optimization, completion contracts, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
 - **A polite config handshake** — enable the hooks, then choose passive native orchestration or the full proactive Fourth Wall experience without trampling the rest of `config.toml`. 🤝
@@ -51,7 +51,7 @@ After installing the complete plugin surface, Skizzles can safely finish the Cod
 - **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
 - **Aggressive orchestration** also enables MultiAgentV2, keeps seven task slots available, and adds tiny root/subagent pointers to `$fourth-wall` plus the proactive quality-and-speed trigger. 🚀
 - **Native instructions** (the default) leave Codex's model instructions untouched.
-- **Skizzles instructions** install a developer-facing root prompt plus native `default`, `triage`, `worker`, `designer`, `qa`, `review`, and `deployment` roles. Every role shares the smaller execution-oriented subagent base; role-specific `developer_instructions` add only the specialized duty. Use numbered or context-free forks so Codex applies the selected role—a large number safely means “up to this many turns,” not full-history mode.
+- **Skizzles instructions** install a developer-facing root prompt plus generated capability-bearing native roles. Unsuffixed names provide the normal defaults (`worker` is Luna high, `triage` is Terra medium, and design/review/deployment are Sol high); advertised variants provide durable gradual escalation such as `worker_luna_xhigh`, `worker_terra_medium`, and `review_sol_xhigh`. Every role shares the smaller execution-oriented subagent base and adds only its specialized duty. Select the generated `agent_type` without separate model overrides, and use numbered or context-free forks so Codex applies it—a large number safely means “up to this many turns,” not full-history mode.
 
 Preview the full developer setup from the checkout:
 
@@ -77,6 +77,8 @@ Build and verify the generated plugin from source with:
 bun install --frozen-lockfile
 bun run verify
 ```
+
+Agent roles are generated too: edit `assets/agent-role-spec.json` for capability pairs or `assets/agent-role-templates/` for duties, then run `bun run agents:build`. The checked-in `assets/agents/` directory is derived output and `bun run agents:check` guards it from hand-edited goblin drift. 👹
 
 Plugins and new tasks use cached, versioned content, so start a fresh task after an update. For ownership, release rules, and safety details, see [AGENTS.md](AGENTS.md).
 

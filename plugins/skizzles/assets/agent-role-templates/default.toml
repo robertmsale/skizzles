@@ -1,0 +1,2 @@
+model_instructions_file = "../skizzles_subagent_instructions.md"
+developer_instructions = "You are the Default execution role. Follow the bounded assignment and shared subagent contract without adding a specialized duty."

@@ -71,25 +71,22 @@ const aggressiveModeHint =
   "Proactive complexity-aware delegation is active. Follow $fourth-wall whenever orchestration would materially improve speed or quality.";
 const rootHint = "Fourth Wall applies. Read and follow $fourth-wall before this task's first orchestration action.";
 const subagentHint =
-  "Fourth Wall applies. Read and follow $fourth-wall; your native agent role defines your duty.";
+  "Fourth Wall applies. Read and follow $fourth-wall; your native agent role defines your duty and durable capability.";
 
-const agentRoles = {
-  default: "General Skizzles subagent with a compact developer-focused execution contract.",
-  triage: "Focused read-only codebase research, diagnosis, and current-shape mapping.",
-  worker: "Bounded implementation ownership through focused validation and evidence.",
-  designer: "Frontend and product UI implementation with visual and accessibility proof.",
-  qa: "Runtime piloting and evidence-rich product verification without silent fixes.",
-  review: "Independent adversarial review, verification, and acceptance assessment.",
-  deployment: "Authorized deployment and production-adjacent procedures with rollback discipline.",
-} as const;
+interface AgentManifest {
+  version: 1;
+  agents: Array<{
+    agentType: string;
+    description: string;
+    configFile: string;
+  }>;
+}
 
-type AgentRole = keyof typeof agentRoles;
-
-interface InstructionAssets {
+export interface InstructionAssets {
   sourceRoot: string;
   rootInstructions: string;
   subagentInstructions: string;
-  agentConfigs: Record<AgentRole, string>;
+  agents: Record<string, { description: string; configFile: string }>;
 }
 
 export function configReceiptPath(codexHome: string): string {
@@ -105,18 +102,34 @@ function resolveInstructionAssets(sourceRootInput: string): InstructionAssets {
   const sourceRoot = canonicalExistingPath(sourceRootInput);
   const rootInstructions = join(sourceRoot, "assets", "skizzles_instructions.md");
   const subagentInstructions = join(sourceRoot, "assets", "skizzles_subagent_instructions.md");
-  const agentConfigs = Object.fromEntries(
-    Object.keys(agentRoles).map((role) => [role, join(sourceRoot, "assets", "agents", `${role}.toml`)]),
-  ) as Record<AgentRole, string>;
+  const manifestPath = join(sourceRoot, "assets", "agents", "manifest.json");
   const requiredAssets: Array<[string, string]> = [
     ["rootInstructions", rootInstructions],
     ["subagentInstructions", subagentInstructions],
-    ...Object.entries(agentConfigs).map(([role, path]): [string, string] => [`agents.${role}`, path]),
+    ["agents.manifest", manifestPath],
   ];
   for (const [label, path] of requiredAssets) {
     if (!existsSync(path)) throw new Error(`Skizzles ${label} asset is missing: ${path}`);
   }
-  return { sourceRoot, rootInstructions, subagentInstructions, agentConfigs };
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as AgentManifest;
+  if (manifest.version !== 1 || !Array.isArray(manifest.agents) || manifest.agents.length === 0) {
+    throw new Error(`Skizzles agent manifest is invalid: ${manifestPath}`);
+  }
+  const agents: InstructionAssets["agents"] = {};
+  for (const agent of manifest.agents) {
+    if (
+      !/^[a-z][a-z0-9_]*$/.test(agent.agentType) ||
+      !agent.description?.trim() ||
+      !/^[a-z][a-z0-9_]*\.toml$/.test(agent.configFile) ||
+      agents[agent.agentType]
+    ) {
+      throw new Error(`Skizzles agent manifest contains an invalid entry: ${manifestPath}`);
+    }
+    const configFile = join(sourceRoot, "assets", "agents", agent.configFile);
+    if (!existsSync(configFile)) throw new Error(`Skizzles agents.${agent.agentType} asset is missing: ${configFile}`);
+    agents[agent.agentType] = { description: agent.description, configFile };
+  }
+  return { sourceRoot, rootInstructions, subagentInstructions, agents };
 }
 
 export function desiredConfigEdits(
@@ -136,25 +149,25 @@ export function desiredConfigEdits(
       },
     );
     const configuredRoles = Object.fromEntries(
-      Object.entries(agentRoles).map(([role, description]) => [role, {
-        description,
-        config_file: instructionAssets.agentConfigs[role as AgentRole],
+      Object.entries(instructionAssets.agents).map(([agentType, agent]) => [agentType, {
+        description: agent.description,
+        config_file: agent.configFile,
       }]),
     ) as JsonValue;
     const existingAgents = valueAt(currentConfig, "agents");
     if (!existingAgents.present) {
       edits.push({ keyPath: "agents", value: configuredRoles, mergeStrategy: "replace" });
     } else {
-      for (const [role, description] of Object.entries(agentRoles)) {
+      for (const [role, agent] of Object.entries(instructionAssets.agents)) {
         const roleConfig = {
-          description,
-          config_file: instructionAssets.agentConfigs[role as AgentRole],
+          description: agent.description,
+          config_file: agent.configFile,
         };
         if (!valueAt(currentConfig, `agents.${role}`).present) {
           edits.push({ keyPath: `agents.${role}`, value: roleConfig, mergeStrategy: "replace" });
         } else {
           edits.push(
-            { keyPath: `agents.${role}.description`, value: description, mergeStrategy: "replace" },
+            { keyPath: `agents.${role}.description`, value: agent.description, mergeStrategy: "replace" },
             { keyPath: `agents.${role}.config_file`, value: roleConfig.config_file, mergeStrategy: "replace" },
           );
         }

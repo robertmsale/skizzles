@@ -1,0 +1,230 @@
+{
+  "version": 1,
+  "routes": {
+    "mechanical": "luna_medium",
+    "scoped": "luna_high",
+    "broad": "terra_medium",
+    "standard": "terra_medium",
+    "complex": "sol_medium",
+    "specialized": "sol_high",
+    "critical": "sol_xhigh"
+  },
+  "agents": [
+    {
+      "agentType": "default",
+      "behavior": "default",
+      "capability": "terra_medium",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "medium",
+      "description": "General Skizzles subagent with a compact developer-focused execution contract. Default capability: gpt-5.6-terra at medium effort.",
+      "configFile": "default.toml"
+    },
+    {
+      "agentType": "triage",
+      "behavior": "triage",
+      "capability": "terra_medium",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "medium",
+      "description": "Focused read-only codebase research, diagnosis, and current-shape mapping. Default capability: gpt-5.6-terra at medium effort.",
+      "configFile": "triage.toml"
+    },
+    {
+      "agentType": "triage_sol_medium",
+      "behavior": "triage",
+      "capability": "sol_medium",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "medium",
+      "description": "Focused read-only codebase research, diagnosis, and current-shape mapping. Capability variant: gpt-5.6-sol at medium effort.",
+      "configFile": "triage_sol_medium.toml"
+    },
+    {
+      "agentType": "worker_luna_medium",
+      "behavior": "worker",
+      "capability": "luna_medium",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "medium",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-luna at medium effort.",
+      "configFile": "worker_luna_medium.toml"
+    },
+    {
+      "agentType": "worker",
+      "behavior": "worker",
+      "capability": "luna_high",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "high",
+      "description": "Bounded implementation ownership through focused validation and evidence. Default capability: gpt-5.6-luna at high effort.",
+      "configFile": "worker.toml"
+    },
+    {
+      "agentType": "worker_luna_xhigh",
+      "behavior": "worker",
+      "capability": "luna_xhigh",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "xhigh",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-luna at xhigh effort.",
+      "configFile": "worker_luna_xhigh.toml"
+    },
+    {
+      "agentType": "worker_luna_max",
+      "behavior": "worker",
+      "capability": "luna_max",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "max",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-luna at max effort.",
+      "configFile": "worker_luna_max.toml"
+    },
+    {
+      "agentType": "worker_terra_medium",
+      "behavior": "worker",
+      "capability": "terra_medium",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "medium",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-terra at medium effort.",
+      "configFile": "worker_terra_medium.toml"
+    },
+    {
+      "agentType": "worker_terra_high",
+      "behavior": "worker",
+      "capability": "terra_high",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "high",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-terra at high effort.",
+      "configFile": "worker_terra_high.toml"
+    },
+    {
+      "agentType": "worker_terra_xhigh",
+      "behavior": "worker",
+      "capability": "terra_xhigh",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "xhigh",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-terra at xhigh effort.",
+      "configFile": "worker_terra_xhigh.toml"
+    },
+    {
+      "agentType": "worker_terra_max",
+      "behavior": "worker",
+      "capability": "terra_max",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "max",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-terra at max effort.",
+      "configFile": "worker_terra_max.toml"
+    },
+    {
+      "agentType": "worker_sol_medium",
+      "behavior": "worker",
+      "capability": "sol_medium",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "medium",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-sol at medium effort.",
+      "configFile": "worker_sol_medium.toml"
+    },
+    {
+      "agentType": "worker_sol_high",
+      "behavior": "worker",
+      "capability": "sol_high",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "high",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-sol at high effort.",
+      "configFile": "worker_sol_high.toml"
+    },
+    {
+      "agentType": "worker_sol_xhigh",
+      "behavior": "worker",
+      "capability": "sol_xhigh",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "xhigh",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-sol at xhigh effort.",
+      "configFile": "worker_sol_xhigh.toml"
+    },
+    {
+      "agentType": "worker_sol_max",
+      "behavior": "worker",
+      "capability": "sol_max",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "max",
+      "description": "Bounded implementation ownership through focused validation and evidence. Capability variant: gpt-5.6-sol at max effort.",
+      "configFile": "worker_sol_max.toml"
+    },
+    {
+      "agentType": "designer",
+      "behavior": "designer",
+      "capability": "sol_high",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "high",
+      "description": "Frontend and product UI implementation with visual and accessibility proof. Default capability: gpt-5.6-sol at high effort.",
+      "configFile": "designer.toml"
+    },
+    {
+      "agentType": "designer_sol_xhigh",
+      "behavior": "designer",
+      "capability": "sol_xhigh",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "xhigh",
+      "description": "Frontend and product UI implementation with visual and accessibility proof. Capability variant: gpt-5.6-sol at xhigh effort.",
+      "configFile": "designer_sol_xhigh.toml"
+    },
+    {
+      "agentType": "qa",
+      "behavior": "qa",
+      "capability": "luna_high",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "high",
+      "description": "Runtime piloting and evidence-rich product verification without silent fixes. Default capability: gpt-5.6-luna at high effort.",
+      "configFile": "qa.toml"
+    },
+    {
+      "agentType": "qa_terra_medium",
+      "behavior": "qa",
+      "capability": "terra_medium",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "medium",
+      "description": "Runtime piloting and evidence-rich product verification without silent fixes. Capability variant: gpt-5.6-terra at medium effort.",
+      "configFile": "qa_terra_medium.toml"
+    },
+    {
+      "agentType": "review",
+      "behavior": "review",
+      "capability": "sol_high",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "high",
+      "description": "Independent adversarial review, verification, and acceptance assessment. Default capability: gpt-5.6-sol at high effort.",
+      "configFile": "review.toml"
+    },
+    {
+      "agentType": "review_sol_xhigh",
+      "behavior": "review",
+      "capability": "sol_xhigh",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "xhigh",
+      "description": "Independent adversarial review, verification, and acceptance assessment. Capability variant: gpt-5.6-sol at xhigh effort.",
+      "configFile": "review_sol_xhigh.toml"
+    },
+    {
+      "agentType": "review_sol_max",
+      "behavior": "review",
+      "capability": "sol_max",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "max",
+      "description": "Independent adversarial review, verification, and acceptance assessment. Capability variant: gpt-5.6-sol at max effort.",
+      "configFile": "review_sol_max.toml"
+    },
+    {
+      "agentType": "deployment",
+      "behavior": "deployment",
+      "capability": "sol_high",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "high",
+      "description": "Authorized deployment and production-adjacent procedures with rollback discipline. Default capability: gpt-5.6-sol at high effort.",
+      "configFile": "deployment.toml"
+    },
+    {
+      "agentType": "deployment_sol_xhigh",
+      "behavior": "deployment",
+      "capability": "sol_xhigh",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "xhigh",
+      "description": "Authorized deployment and production-adjacent procedures with rollback discipline. Capability variant: gpt-5.6-sol at xhigh effort.",
+      "configFile": "deployment_sol_xhigh.toml"
+    }
+  ]
+}

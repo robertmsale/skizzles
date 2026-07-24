@@ -82,6 +82,20 @@ function factory(rpc: FakeRpc) {
   return async () => rpc;
 }
 
+function writeInstructionFixture(sourceRoot: string): void {
+  mkdirSync(join(sourceRoot, "assets", "agents"), { recursive: true });
+  for (const file of ["skizzles_instructions.md", "skizzles_subagent_instructions.md"]) {
+    writeFileSync(join(sourceRoot, "assets", file), file);
+  }
+  const agents = [
+    { agentType: "default", description: "Fixture default", configFile: "default.toml" },
+    { agentType: "worker", description: "Fixture worker", configFile: "worker.toml" },
+    { agentType: "worker_luna_xhigh", description: "Fixture upgraded worker", configFile: "worker_luna_xhigh.toml" },
+  ];
+  for (const agent of agents) writeFileSync(join(sourceRoot, "assets", "agents", agent.configFile), agent.agentType);
+  writeFileSync(join(sourceRoot, "assets", "agents", "manifest.json"), JSON.stringify({ version: 1, agents }));
+}
+
 describe("Codex configuration lifecycle", () => {
   test("passive orchestration leaves native MultiAgentV2 defaults untouched", () => {
     expect(desiredConfigEdits("passive")).toEqual([
@@ -89,16 +103,17 @@ describe("Codex configuration lifecycle", () => {
     ]);
   });
 
-  test("Skizzles instructions configure a shared subagent base with native behavioral roles", () => {
-    const roles = ["default", "triage", "worker", "designer", "qa", "review", "deployment"] as const;
-    const agentConfigs = Object.fromEntries(
-      roles.map((role) => [role, `/skizzles/assets/agents/${role}.toml`]),
-    ) as Record<(typeof roles)[number], string>;
+  test("Skizzles instructions configure capability-bearing generated roles", () => {
+    const agents = {
+      default: { description: "Default Terra", configFile: "/skizzles/assets/agents/default.toml" },
+      worker: { description: "Worker Luna", configFile: "/skizzles/assets/agents/worker.toml" },
+      worker_luna_xhigh: { description: "Worker Luna xhigh", configFile: "/skizzles/assets/agents/worker_luna_xhigh.toml" },
+    };
     const edits = desiredConfigEdits("passive", {
       sourceRoot: "/skizzles",
       rootInstructions: "/skizzles/assets/root.md",
       subagentInstructions: "/skizzles/assets/subagent.md",
-      agentConfigs,
+      agents,
     });
 
     expect(edits.slice(0, 2)).toEqual([
@@ -107,24 +122,32 @@ describe("Codex configuration lifecycle", () => {
     ]);
     expect(edits.slice(2)).toEqual([{
       keyPath: "agents",
-      value: Object.fromEntries(roles.map((role) => [role, {
-        description: expect.any(String),
-        config_file: agentConfigs[role],
+      value: Object.fromEntries(Object.entries(agents).map(([agentType, agent]) => [agentType, {
+        description: agent.description,
+        config_file: agent.configFile,
       }])),
       mergeStrategy: "replace",
     }]);
   });
 
-  test("native role configs share one compact base and specialize through developer instructions", () => {
+  test("generated roles bind durable capability while templates remain model agnostic", () => {
     const roleRoot = resolve(import.meta.dir, "../../../assets/agents");
-    for (const role of ["default", "triage", "worker", "designer", "qa", "review", "deployment"]) {
-      const contents = readFileSync(join(roleRoot, `${role}.toml`), "utf8");
+    const templateRoot = resolve(import.meta.dir, "../../../assets/agent-role-templates");
+    const manifest = JSON.parse(readFileSync(join(roleRoot, "manifest.json"), "utf8")) as {
+      agents: Array<{ agentType: string; behavior: string; model: string; reasoningEffort: string; configFile: string }>;
+    };
+    expect(manifest.agents.map(({ agentType }) => agentType)).toContain("worker_luna_xhigh");
+    for (const agent of manifest.agents) {
+      const contents = readFileSync(join(roleRoot, agent.configFile), "utf8");
       expect(contents).toContain('model_instructions_file = "../skizzles_subagent_instructions.md"');
-      const parsed = Bun.TOML.parse(contents) as { developer_instructions?: string };
+      const parsed = Bun.TOML.parse(contents) as { model?: string; model_reasoning_effort?: string; developer_instructions?: string };
+      expect(parsed.model).toBe(agent.model);
+      expect(parsed.model_reasoning_effort).toBe(agent.reasoningEffort);
       expect(parsed.developer_instructions?.trim().length).toBeGreaterThan(0);
-      if (role !== "default") {
-        expect(contents).toContain(`You are the ${role === "qa" ? "QA" : role[0]!.toUpperCase() + role.slice(1)} role.`);
-      }
+    }
+    for (const behavior of ["default", "triage", "worker", "designer", "qa", "review", "deployment"]) {
+      const template = readFileSync(join(templateRoot, `${behavior}.toml`), "utf8");
+      expect(template).not.toMatch(/^model(?:_reasoning_effort)?\s*=/m);
     }
   });
 
@@ -187,14 +210,7 @@ describe("Codex configuration lifecycle", () => {
       agents: { default: { description: "Personal default", config_file: "/personal/agent.toml", nickname_candidates: ["Ada"] } },
     });
     const sourceRoot = join(f.codexHome, "skizzles");
-    mkdirSync(join(sourceRoot, "assets"), { recursive: true });
-    for (const file of ["skizzles_instructions.md", "skizzles_subagent_instructions.md"]) {
-      writeFileSync(join(sourceRoot, "assets", file), file);
-    }
-    mkdirSync(join(sourceRoot, "assets", "agents"), { recursive: true });
-    for (const role of ["default", "triage", "worker", "designer", "qa", "review", "deployment"]) {
-      writeFileSync(join(sourceRoot, "assets", "agents", `${role}.toml`), role);
-    }
+    writeInstructionFixture(sourceRoot);
     const canonicalSourceRoot = realpathSync(sourceRoot);
     await configureCodex({
       ...f,
@@ -207,7 +223,7 @@ describe("Codex configuration lifecycle", () => {
       model_instructions_file: join(canonicalSourceRoot, "assets", "skizzles_instructions.md"),
       agents: {
         default: {
-          description: "General Skizzles subagent with a compact developer-focused execution contract.",
+          description: "Fixture default",
           config_file: join(canonicalSourceRoot, "assets", "agents", "default.toml"),
           nickname_candidates: ["Ada"],
         },
@@ -228,13 +244,7 @@ describe("Codex configuration lifecycle", () => {
   test("restores an initially absent agents table without role tombstones", async () => {
     const f = fixture({});
     const sourceRoot = join(f.codexHome, "skizzles");
-    mkdirSync(join(sourceRoot, "assets", "agents"), { recursive: true });
-    for (const file of ["skizzles_instructions.md", "skizzles_subagent_instructions.md"]) {
-      writeFileSync(join(sourceRoot, "assets", file), file);
-    }
-    for (const role of ["default", "triage", "worker", "designer", "qa", "review", "deployment"]) {
-      writeFileSync(join(sourceRoot, "assets", "agents", `${role}.toml`), role);
-    }
+    writeInstructionFixture(sourceRoot);
 
     await configureCodex({
       ...f,

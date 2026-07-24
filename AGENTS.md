@@ -5,6 +5,7 @@ Skizzles is a packaging project, not a live installation. Keep its canonical sou
 ## Ownership and architecture
 
 - Treat `skills/`, `hooks/`, `runtime/`, `scripts/`, `assets/`, and `packages/codex-container-lab/` as canonical distributable inputs; `packages/core/plugin-template/` and `.agents/plugins/marketplace.json` define the plugin contract.
+- Treat `assets/agent-role-spec.json` and `assets/agent-role-templates/` as the canonical agent-role inputs. `assets/agents/` is generated output; rebuild it with `bun run agents:build` and never repair generated role files in place.
 - Treat `plugins/skizzles/` as generated output. Change the canonical source, rebuild, and check drift; never repair generated files in place.
 - Keep repo-local `.codex/skills/` as maintainer guidance, separate from the public skill collection unless packaging intentionally includes it.
 - Treat `packages/codex-container-lab/cli` as the canonical Bun workspace package. Keep `bun.lock` at the Skizzles root as its sole lockfile; do not restore a nested lock.

@@ -5,7 +5,7 @@ description: Coordinate work through a bounded native Codex MultiAgentV2 task gr
 
 # Fourth Wall
 
-Use native MultiAgentV2 with two independent dispatch choices: complexity and horizon select explicit model/effort fields, while a behavioral role selects the duty and task-name prefix. Terra maps broad context, Luna owns well-specified implementation loops, and Sol resolves ambiguity and judges quality. Keep the graph bounded: the root dispatches every role, and eligible Terra/Sol Workers may dispatch one active bounded Worker for a complete disjoint slice.
+Use native MultiAgentV2 with capability-bearing agent roles. Complexity and horizon select a model/effort pair, while behavioral duty selects the role family; the installed composite `agent_type` durably carries both choices across eviction and reactivation. Terra maps broad context, Luna owns well-specified implementation loops, and Sol resolves ambiguity and judges quality. Keep the graph bounded: the root dispatches every role, and eligible Terra/Sol Workers may dispatch one active bounded Worker for a complete disjoint slice.
 
 ## Scope
 
@@ -17,7 +17,7 @@ Use native MultiAgentV2 with two independent dispatch choices: complexity and ho
 
 ## Dispatch Contract
 
-Name every child `<role>__<objective>`. Double underscores separate the behavioral role from the objective; use single underscores inside the objective. Examples: `worker__implement_filters`, `triage__map_sync_flow`, and `review__audit_auth_change`. Capability belongs in native spawn fields and the handoff, not in the task name.
+Name every child `<role>__<objective>`. Double underscores separate the behavioral role from the objective; use single underscores inside the objective. Examples: `worker__implement_filters`, `triage__map_sync_flow`, and `review__audit_auth_change`. Capability belongs in the selected native `agent_type`, not in the task name.
 
 Choose the cheapest route likely to succeed. Complexity selects the model class; horizon selects reasoning effort and how much recent context to fork:
 
@@ -35,7 +35,7 @@ Use Luna as the default Worker once the objective, ownership, established decisi
 
 Do not spend model turns merely polling commands or children. The owner of a long-running command uses the native bounded wait/session primitive, stores verbose output outside model context, and reports only completion state, relevant deltas, error signatures, and artifact paths. Delegate an engineering outcome only when the child can interpret and act on the result.
 
-Pass `model` and `reasoning_effort` explicitly on every spawn. Under the Skizzles instruction profile, also pass the matching `agent_type`; each native role shares the compact subagent base and adds role-specific developer instructions, so do not repeat that stable role contract in the message. Use only roles and models advertised by the active tool schema. If a native-instructions installation does not advertise the matching role, omit `agent_type` and include one concise duty sentence rather than inventing an unavailable role.
+Under the Skizzles instruction profile, select the advertised capability-bearing `agent_type` and omit independent `model` and `reasoning_effort` overrides. Each generated role config owns its model, effort, compact subagent base, and role-specific developer instructions; this is what makes reactivation durable after process eviction. Do not repeat that stable role contract in the message. If the matching generated role is unavailable, use an advertised role with the closest sufficient capability. Only when Skizzles roles are not installed should you omit `agent_type`, pass explicit model/effort fields, and add one concise duty sentence.
 
 Choose `fork_turns` deliberately:
 
@@ -45,20 +45,22 @@ Choose `fork_turns` deliberately:
 
 Codex 0.145.0-alpha.18 supports explicit model/reasoning overrides with positive and full-history forks, and exposes `agent_type` when roles are configured. Skizzles role dispatch requires `fork_turns="none"` or a positive integer because full-history forks inherit the parent `agent_type` and bypass role application. A positive integer larger than available history retains all available turns without becoming full-history mode. Do not claim an effective role, model, or effort merely from a successful call; use host-visible task settings or rollout evidence when verification matters.
 
-Choose the independent behavioral role that best matches the duty:
+Choose the behavioral family that best matches the duty, then select an advertised capability variant. Unsuffixed names are the normal defaults:
 
-| Role | Native `agent_type` | Use |
-|---|---|---|
-| Triage | `triage` | Focused codebase research and current-shape mapping |
-| Worker | `worker` | Well-defined implementation with explicit ownership |
-| Designer | `designer` | Frontend and product UI implementation |
-| QA | `qa` | Runtime piloting and evidence-rich product verification |
-| Review | `review` | Independent adversarial judgment and acceptance assessment |
-| Deployment | `deployment` | Careful procedural deployment and production operations |
+| Role | Default `agent_type` | Installed variants | Use |
+|---|---|---|---|
+| Triage | `triage` = Terra medium | `triage_sol_medium` | Focused codebase research and current-shape mapping |
+| Worker | `worker` = Luna high | `worker_<model>_<effort>` across the Luna, Terra, and Sol ladders; `worker_luna_medium` is Mechanical | Well-defined implementation with explicit ownership |
+| Designer | `designer` = Sol high | `designer_sol_xhigh` | Frontend and product UI implementation |
+| QA | `qa` = Luna high | `qa_terra_medium` | Runtime piloting and evidence-rich product verification |
+| Review | `review` = Sol high | `review_sol_xhigh`, `review_sol_max` | Independent adversarial judgment and acceptance assessment |
+| Deployment | `deployment` = Sol high | `deployment_sol_xhigh` | Careful procedural deployment and production operations |
+
+The generated manifest at `assets/agents/manifest.json` is the source of truth for exact installed names and capability pairs. Typical Worker routing is Mechanical -> `worker_luna_medium`, Scoped -> `worker`, Broad/Standard -> `worker_terra_medium`, Complex -> `worker_sol_medium`, Specialized -> `worker_sol_high`, and Critical -> `worker_sol_xhigh`.
 
 In every spawn message:
 
-1. Name the selected route and role. Under the Skizzles profile, set the matching native `agent_type`; otherwise set it only when the active schema advertises that role.
+1. Name the selected route and role. Under the Skizzles profile, set the matching capability-bearing native `agent_type` and do not independently override its model or effort.
 2. Provide the complete objective, ownership, constraints, established decisions, relevant skill obligations, and expected proof.
 3. Add only assignment-specific role constraints; the configured role already injects its stable duty through `developer_instructions`.
 4. Choose the smallest useful `fork_turns` value so the handoff remains explicit without forcing the child to rediscover recent decisions.
@@ -68,8 +70,8 @@ For a long or replacement-heavy root task, keep one durable task packet under `/
 Example:
 
 ```text
-You are dispatched as a Scoped Worker using gpt-5.6-luna at high effort
-(or the advertised Terra-low fallback). The native Worker role applies.
+You are dispatched as a Scoped Worker. The native `worker` role supplies
+gpt-5.6-luna at high effort and the stable Worker contract.
 
 Assignment: ...
 Ownership: ...
@@ -79,7 +81,7 @@ Expected proof: ...
 
 ## Execution Discipline
 
-Roles describe duties and remain valid under every model and effort combination. Explicit spawn fields carry the capability decision.
+Generated roles combine a stable behavioral duty with one durable model/effort pair. The role manifest carries the capability decision.
 
 - Act decisively when the path is clear and evidence is sufficient.
 - Keep mechanical and reversible work direct.
@@ -98,7 +100,9 @@ Roles describe duties and remain valid under every model and effort combination.
 
 Start each assignment at the cheapest model floor that fits its remaining uncertainty: Luna high for explicit implementation, Terra medium for broad mapping or context-heavy coordination, and Sol medium for unresolved judgment. Specialized design and independent review may begin above the floor when the risk justifies it. Cap deliberate escalation at `max` reasoning.
 
-Increase capability one step at a time:
+The full gradual ladder below is a **Worker correction policy**. Worker owns implementation rework and therefore has every generated step. Other roles use only the finite variants listed in the role table: Triage may move from Terra medium to Sol medium when mapping becomes judgment-heavy; QA may move from Luna high to Terra medium when runtime investigation becomes context-heavy; Designer, Review, and Deployment may move through their listed Sol variants. Do not invent a missing role variant or imply a one-step transition that the manifest does not provide.
+
+For Worker, increase capability one step at a time:
 
 | Model | Reasoning ladder |
 |---|---|
@@ -112,20 +116,20 @@ After a model reaches `max`, the next step is the next model at its floor: Luna 
 - **Adjacent healing:** review found an existing or surrounding defect not introduced by the Worker and not reasonably implied by its contract. Return bounded in-scope work without counting it against the Worker.
 - **Contract discovery:** review exposed a new architectural invariant or ambiguity. Sol resolves the decision, then the clarified implementation normally returns to the same Worker without treating discovery as its capability failure.
 
-Current tools cannot apply the attributable-rework reasoning increase to an existing child. Preserve context for the first bounded correction with `followup_task` at the current route; if the same explicit contract is missed again, spawn a successor at the next ladder step. Increase capability immediately only for sustained context pressure or a clearly demonstrated reasoning failure where retaining the current route would predictably repeat the mistake.
+Current tools cannot change the capability-bearing role of an existing child. Preserve context for the first bounded correction with `followup_task` at the current role; if the same explicit contract is missed again, spawn a successor using the next generated capability variant. Increase capability immediately only for sustained context pressure or a clearly demonstrated reasoning failure where retaining the current route would predictably repeat the mistake.
 
 Keep escalation local to the current ownership slice and reason. A later explicit implementation assignment starts from the normal Luna floor; it does not inherit a repository-wide or task-family penalty. There is no cooldown ritual. Past escalation is evidence for future dispatch, not a permanent capability tax.
 
 Before every capability increase or availability fallback, the root appends one compact JSON object to `routing-decisions.jsonl` beside the durable `/tmp` task packet. Include `agent_path`, `ownership`, `from`, `to`, `reason`, and a bounded `evidence` summary; never include secrets or raw transcripts. Record attributable rework even when the current tool limitation defers its in-place increase, using the unchanged route for `to` and noting that one same-owner repair is pending. Also state an applied increase reason in the successor handoff so it is persisted in rollout history. This makes model changes auditable and lets later analysis distinguish capability failures from bad contracts, adjacent healing, missing context, environment failures, and availability routing.
 
-Current MultiAgentV2 `followup_task` preserves task identity, model, reasoning effort, and accumulated context but does not accept model or reasoning overrides. Reuse the same Worker for corrections at its current route. When a true capability increase is required, spawn a successor with the next ladder step, the smallest useful positive fork, and the recorded reason. If native reactivation later exposes capability overrides, prefer upgrading the same owner so its accumulated knowledge survives without a handoff.
+Current MultiAgentV2 `followup_task` preserves task identity and accumulated context but does not accept capability overrides. Official reload reconstructs the persisted `agent_type` and reapplies its generated model/effort config, so reuse the same Worker safely for corrections at its current route. When a true capability increase is required, spawn a successor with the next generated role variant, the smallest useful positive fork, and the recorded reason. If native reactivation later exposes role or capability overrides, prefer upgrading the same owner so its accumulated knowledge survives without a handoff.
 
 ## Native Primitives
 
-- `spawn_agent`: dispatch a bounded task with the matching native `agent_type`, explicit capability fields, and a clear handoff; only eligible Workers may use it below the root.
+- `spawn_agent`: dispatch a bounded task with the matching capability-bearing native `agent_type` and a clear handoff; only eligible Workers may use it below the root.
 - `list_agents`: inspect live task paths, statuses, and latest assignments.
 - `send_message`: queue context or corrections to running work without starting a new turn.
-- `followup_task`: reactivate an idle or completed child for another turn while preserving its task identity, current model, reasoning effort, and accumulated context; it cannot currently change capability.
+- `followup_task`: reactivate an idle or completed child while preserving task identity and accumulated context; after eviction, the persisted generated `agent_type` reapplies its durable model/effort pair. It cannot currently change capability.
 - `wait_agent`: wait for mailbox activity, user steering, or a bounded timeout.
 - `interrupt_agent`: stop obsolete or unsafe work without destroying task identity.
 
@@ -163,7 +167,7 @@ When observed behavior reveals a reusable routing or lifecycle caveat, follow [r
 ## Hard Boundaries
 
 - Triage, Designer, QA, Review, Deployment, and bounded Luna/Terra-medium Workers are leaves. A depth-1 Terra/Sol Worker may have at most one active bounded Worker grandchild; all other delegation proposals return to the root.
-- Worker grandchildren must be named `worker__...`, set `agent_type = "worker"`, use explicit Luna high routing when available or Terra medium as the bounded fallback, set `fork_turns = "none"`, own a disjoint complete implementation loop, and never spawn again. The parent and root enforce the one-active-grandchild limit through lifecycle discipline.
+- Worker grandchildren must be named `worker__...`, set `agent_type = "worker"` for durable Luna-high routing or `worker_terra_medium` as the bounded fallback, omit independent model/effort overrides, set `fork_turns = "none"`, own a disjoint complete implementation loop, and never spawn again. The parent and root enforce the one-active-grandchild limit through lifecycle discipline.
 - Reactivate a completed child when its role, current route, context, and ownership still fit the next action. Spawn a fresh sibling for independent review, changed ownership, a clean context, or a recorded capability increase that current `followup_task` cannot apply in place.
 - Do not let two implementation tasks own overlapping files without explicit coordination.
 - The root owns Git integration, decides when parallel edits are stable, and accepts the final result. Once stable, delegate serialized project-wide verification, integration repair loops, and live proof when a leaf can own them coherently; run them at the root only when delegation overhead would exceed the work.

@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "capabilities": {
+    "luna_medium": { "model": "gpt-5.6-luna", "reasoningEffort": "medium" },
+    "luna_high": { "model": "gpt-5.6-luna", "reasoningEffort": "high" },
+    "luna_xhigh": { "model": "gpt-5.6-luna", "reasoningEffort": "xhigh" },
+    "luna_max": { "model": "gpt-5.6-luna", "reasoningEffort": "max" },
+    "terra_medium": { "model": "gpt-5.6-terra", "reasoningEffort": "medium" },
+    "terra_high": { "model": "gpt-5.6-terra", "reasoningEffort": "high" },
+    "terra_xhigh": { "model": "gpt-5.6-terra", "reasoningEffort": "xhigh" },
+    "terra_max": { "model": "gpt-5.6-terra", "reasoningEffort": "max" },
+    "sol_medium": { "model": "gpt-5.6-sol", "reasoningEffort": "medium" },
+    "sol_high": { "model": "gpt-5.6-sol", "reasoningEffort": "high" },
+    "sol_xhigh": { "model": "gpt-5.6-sol", "reasoningEffort": "xhigh" },
+    "sol_max": { "model": "gpt-5.6-sol", "reasoningEffort": "max" }
+  },
+  "routes": {
+    "mechanical": "luna_medium",
+    "scoped": "luna_high",
+    "broad": "terra_medium",
+    "standard": "terra_medium",
+    "complex": "sol_medium",
+    "specialized": "sol_high",
+    "critical": "sol_xhigh"
+  },
+  "roles": [
+    {
+      "behavior": "default",
+      "description": "General Skizzles subagent with a compact developer-focused execution contract.",
+      "defaultCapability": "terra_medium",
+      "capabilities": ["terra_medium"]
+    },
+    {
+      "behavior": "triage",
+      "description": "Focused read-only codebase research, diagnosis, and current-shape mapping.",
+      "defaultCapability": "terra_medium",
+      "capabilities": ["terra_medium", "sol_medium"]
+    },
+    {
+      "behavior": "worker",
+      "description": "Bounded implementation ownership through focused validation and evidence.",
+      "defaultCapability": "luna_high",
+      "capabilities": [
+        "luna_medium", "luna_high", "luna_xhigh", "luna_max",
+        "terra_medium", "terra_high", "terra_xhigh", "terra_max",
+        "sol_medium", "sol_high", "sol_xhigh", "sol_max"
+      ]
+    },
+    {
+      "behavior": "designer",
+      "description": "Frontend and product UI implementation with visual and accessibility proof.",
+      "defaultCapability": "sol_high",
+      "capabilities": ["sol_high", "sol_xhigh"]
+    },
+    {
+      "behavior": "qa",
+      "description": "Runtime piloting and evidence-rich product verification without silent fixes.",
+      "defaultCapability": "luna_high",
+      "capabilities": ["luna_high", "terra_medium"]
+    },
+    {
+      "behavior": "review",
+      "description": "Independent adversarial review, verification, and acceptance assessment.",
+      "defaultCapability": "sol_high",
+      "capabilities": ["sol_high", "sol_xhigh", "sol_max"]
+    },
+    {
+      "behavior": "deployment",
+      "description": "Authorized deployment and production-adjacent procedures with rollback discipline.",
+      "defaultCapability": "sol_high",
+      "capabilities": ["sol_high", "sol_xhigh"]
+    }
+  ]
+}
