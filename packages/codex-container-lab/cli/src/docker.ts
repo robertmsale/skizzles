@@ -142,7 +142,19 @@ export async function provisionLabStack(
       ? "Docker Compose up aborted; secret-bearing diagnostics redacted"
       : "Docker Compose up failed; secret-bearing diagnostics redacted");
   }
-  if (provisioned.code !== 0) throw new Error("Docker Compose up failed; secret-bearing diagnostics redacted");
+  if (provisioned.code !== 0) {
+    let diagnostic = `${provisioned.stdout.toString()}\n${provisioned.stderr.toString()}`;
+    for (const name of runtime.config.secretEnvironment) {
+      const value = environment[name];
+      if (value) diagnostic = diagnostic.split(value).join("[secret-value-redacted]");
+    }
+    await writeFile(
+      "/tmp/ccl-compose-failure-redacted.log",
+      redactPublicText(diagnostic),
+      { mode: 0o600 },
+    );
+    throw new Error("Docker Compose up failed; secret-bearing diagnostics redacted");
+  }
   const compatibility = [
     `test -d ${shellQuote(runtime.config.runtime.workspace)}`,
     `test -w ${shellQuote(runtime.config.runtime.workspace)}`,
