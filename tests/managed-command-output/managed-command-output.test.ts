@@ -29,7 +29,15 @@ function text(output: Uint8Array | undefined): string {
 }
 
 function encode(script: string): string {
-  return Buffer.from(script).toString("base64url");
+  return JSON.stringify(script);
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function rewrittenCommand(script: string): string {
+  return `${runnerCommand} run --json ${shellSingleQuote(encode(script))}`;
 }
 
 function artifactPath(output: string): string {
@@ -51,28 +59,31 @@ describe("managed command output hook", () => {
     }
   });
 
-  test("rewrites through a portable PLUGIN_ROOT runner with a round-trippable encoding", () => {
-    const cmd = "flutter test --reporter expanded && echo complete > result.txt";
+  test("rewrites through a portable PLUGIN_ROOT runner with a visible, shell-safe JSON encoding", () => {
+    const cmd = "flutter test --name \"it's literal: $HOME `uname`\" && echo complete > result.txt";
     const result = invoke(hook, [], { stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { cmd, workdir: "/tmp" } }) });
     const payload = JSON.parse(text(result.stdout));
     const rewritten = payload.hookSpecificOutput.updatedInput.cmd as string;
-    expect(rewritten).toStartWith(`${runnerCommand} run --base64url `);
-    expect(Buffer.from(rewritten.split(" ").at(-1)!, "base64url").toString()).toBe(cmd);
+    expect(rewritten).toBe(rewrittenCommand(cmd));
+    expect(rewritten).toContain("flutter test");
+    expect(rewritten).toContain("$HOME");
     expect(payload.hookSpecificOutput.updatedInput.workdir).toBe("/tmp");
     expect(rewritten).not.toContain("/Users/");
   });
 
-  test("the placeholder resolves to this package when the rewritten command reaches a shell", () => {
+  test("the placeholder resolves without expanding the encoded script in the outer shell", () => {
     const root = temporaryDirectory();
-    const encoded = encode("echo portable-runner");
-    const command = `${runnerCommand} run --base64url ${encoded}`;
+    const script = "printf '%s\\n' 'literal $HOME `uname`'";
+    const command = rewrittenCommand(script);
     const result = Bun.spawnSync(["/bin/sh", "-c", command], {
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env, PLUGIN_ROOT: packageRoot, CODEX_COMMAND_OUTPUT_DIR: root },
     });
     expect(result.exitCode).toBe(0);
-    expect(text(result.stdout)).toContain("portable-runner");
+    expect(text(result.stdout)).toContain("literal $HOME `uname`");
+    const path = artifactPath(text(result.stdout));
+    expect(JSON.parse(readFileSync(join(path, "status.json"), "utf8")).command).toBe(script);
   });
 
   test("finds a recognized command after leading commands and preserves the entire script", () => {
@@ -84,7 +95,7 @@ describe("managed command output hook", () => {
     }) });
     const payload = JSON.parse(text(result.stdout));
     const rewritten = payload.hookSpecificOutput.updatedInput.command as string;
-    expect(Buffer.from(rewritten.split(" ").at(-1)!, "base64url").toString()).toBe(command);
+    expect(rewritten).toBe(rewrittenCommand(command));
     expect(payload.hookSpecificOutput.updatedInput.timeout).toBe(120_000);
   });
 
@@ -168,7 +179,7 @@ describe("managed command output hook", () => {
 describe("managed command output runner", () => {
   test("preserves exit code and captures externally visible output", () => {
     const root = temporaryDirectory();
-    const result = invoke(runner, ["run", "--base64url", encode("echo visible; echo failure >&2; exit 23")], { env: { CODEX_COMMAND_OUTPUT_DIR: root } });
+    const result = invoke(runner, ["run", "--json", encode("echo visible; echo failure >&2; exit 23")], { env: { CODEX_COMMAND_OUTPUT_DIR: root } });
     expect(result.exitCode).toBe(23);
     const path = artifactPath(text(result.stdout));
     expect(readFileSync(join(path, "stdout.log"), "utf8")).toContain("visible");
@@ -184,7 +195,7 @@ describe("managed command output runner", () => {
   test("keeps explicit shell redirections out of captured output", () => {
     const root = temporaryDirectory();
     const redirected = join(root, "redirected.txt");
-    const result = invoke(runner, ["run", "--base64url", encode(`echo redirected > '${redirected}'; echo captured`)], { env: { CODEX_COMMAND_OUTPUT_DIR: root } });
+    const result = invoke(runner, ["run", "--json", encode(`echo redirected > '${redirected}'; echo captured`)], { env: { CODEX_COMMAND_OUTPUT_DIR: root } });
     expect(result.exitCode).toBe(0);
     const path = artifactPath(text(result.stdout));
     expect(readFileSync(redirected, "utf8")).toBe("redirected\n");
@@ -193,7 +204,7 @@ describe("managed command output runner", () => {
 
   test("caps artifacts and emits heartbeat status", () => {
     const root = temporaryDirectory();
-    const result = invoke(runner, ["run", "--base64url", encode("for i in 1 2 3; do printf 1234567890; sleep 0.04; done")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, CODEX_COMMAND_MAX_BYTES: "12", CODEX_COMMAND_HEARTBEAT_MS: "25" } });
+    const result = invoke(runner, ["run", "--json", encode("for i in 1 2 3; do printf 1234567890; sleep 0.04; done")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, CODEX_COMMAND_MAX_BYTES: "12", CODEX_COMMAND_HEARTBEAT_MS: "25" } });
     const path = artifactPath(text(result.stdout));
     const status = JSON.parse(readFileSync(join(path, "status.json"), "utf8"));
     expect(readFileSync(join(path, "stdout.log")).length).toBe(12);
@@ -206,7 +217,7 @@ describe("managed command output runner", () => {
   test("bounds drain time when a background process keeps output descriptors open", () => {
     const root = temporaryDirectory();
     const startedAt = performance.now();
-    const result = invoke(runner, ["run", "--base64url", encode("sleep 2 &")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, CODEX_COMMAND_DRAIN_MS: "25" } });
+    const result = invoke(runner, ["run", "--json", encode("sleep 2 &")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, CODEX_COMMAND_DRAIN_MS: "25" } });
     expect(result.exitCode).toBe(0);
     expect(performance.now() - startedAt).toBeLessThan(500);
     const path = artifactPath(text(result.stdout));
@@ -219,7 +230,7 @@ describe("managed command output runner", () => {
     const blocked = join(root, "not-a-directory");
     writeFileSync(blocked, "file");
     chmodSync(blocked, 0o400);
-    const result = invoke(runner, ["run", "--base64url", encode("echo still-runs; echo visible-error >&2; exit 7")], { env: { CODEX_COMMAND_OUTPUT_DIR: blocked } });
+    const result = invoke(runner, ["run", "--json", encode("echo still-runs; echo visible-error >&2; exit 7")], { env: { CODEX_COMMAND_OUTPUT_DIR: blocked } });
     expect(result.exitCode).toBe(7);
     expect(text(result.stderr)).toContain("artifact capture unavailable");
     expect(text(result.stdout)).toContain("artifact: unavailable");
@@ -230,7 +241,7 @@ describe("managed command output runner", () => {
   test("uses the invoking zsh and supports process substitution", () => {
     if (!Bun.file("/bin/zsh").size) return;
     const root = temporaryDirectory();
-    const result = invoke(runner, ["run", "--base64url", encode("cat <(printf process-substitution)")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, SHELL: "/bin/zsh" } });
+    const result = invoke(runner, ["run", "--json", encode("cat <(printf process-substitution)")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, SHELL: "/bin/zsh" } });
     expect(result.exitCode).toBe(0);
     const path = artifactPath(text(result.stdout));
     expect(readFileSync(join(path, "stdout.log"), "utf8")).toBe("process-substitution");
@@ -239,7 +250,7 @@ describe("managed command output runner", () => {
 
   test("prints one artifact path, change-only progress, full small output, and compact completion", () => {
     const root = temporaryDirectory();
-    const result = invoke(runner, ["run", "--base64url", encode("sleep 0.08; printf compact; printf warning >&2")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, CODEX_COMMAND_HEARTBEAT_MS: "25" } });
+    const result = invoke(runner, ["run", "--json", encode("sleep 0.08; printf compact; printf warning >&2")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, CODEX_COMMAND_HEARTBEAT_MS: "25" } });
     const output = text(result.stdout);
     expect(output.match(/\[codex-command\] artifact:/g)).toHaveLength(1);
     expect(output).toContain("| seconds | out | err |");
@@ -252,7 +263,7 @@ describe("managed command output runner", () => {
 
   test("prints tails instead of the full transcript above the inline threshold", () => {
     const root = temporaryDirectory();
-    const result = invoke(runner, ["run", "--base64url", encode("printf 1234567890")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, CODEX_COMMAND_INLINE_BYTES: "5" } });
+    const result = invoke(runner, ["run", "--json", encode("printf 1234567890")], { env: { CODEX_COMMAND_OUTPUT_DIR: root, CODEX_COMMAND_INLINE_BYTES: "5" } });
     const output = text(result.stdout);
     expect(output).toContain("[codex-command] stdout tail:\n1234567890");
     expect(output).not.toContain("[codex-command] stdout:\n");

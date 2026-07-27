@@ -65,16 +65,18 @@ function runId(): string {
 }
 
 function usage(): never {
-  console.error("usage: codex-command run --base64url <script> | status <run-id> | tail <run-id> [stdout|stderr] | errors <run-id> | search <text> [run-id]");
+  console.error("usage: codex-command run --json <script-json> | status <run-id> | tail <run-id> [stdout|stderr] | errors <run-id> | search <text> [run-id]");
   process.exit(64);
 }
 
 function decodeScript(value: string): string {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("encoded script is not base64url");
-  const result = Buffer.from(value, "base64url").toString("utf8");
-  if (!result || Buffer.from(result, "utf8").toString("base64url") !== value) {
-    throw new Error("encoded script is invalid");
+  let result: unknown;
+  try {
+    result = JSON.parse(value);
+  } catch {
+    throw new Error("script is not valid JSON");
   }
+  if (typeof result !== "string" || !result || JSON.stringify(result) !== value) throw new Error("script JSON must be a canonical non-empty string");
   return result;
 }
 
@@ -397,7 +399,7 @@ function searchCommand(needle: string, id: string | undefined): void {
 try {
   const [subcommand, ...arguments_] = process.argv.slice(2);
   if (subcommand === "run") {
-    if (arguments_.length !== 2 || arguments_[0] !== "--base64url") usage();
+    if (arguments_.length !== 2 || arguments_[0] !== "--json") usage();
     process.exit(await run(decodeScript(arguments_[1]!)));
   }
   if (subcommand === "status" && arguments_.length === 1) statusCommand(arguments_[0]!);

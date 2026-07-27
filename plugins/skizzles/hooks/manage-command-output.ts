@@ -286,8 +286,18 @@ function isGradleBuildOrTestTask(word: string): boolean {
   );
 }
 
-function base64Url(value: string): string {
-  return Buffer.from(value, "utf8").toString("base64url");
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+/**
+ * Keeps the original script visible to permission reviewers while protecting
+ * it from expansion by the outer shell that launches the supervisor. The
+ * runner parses the canonical JSON string before handing the exact script to
+ * the invoking shell.
+ */
+function encodedScriptArgument(value: string): string {
+  return shellSingleQuote(JSON.stringify(value));
 }
 
 const raw = await Bun.stdin.text();
@@ -309,7 +319,7 @@ if (
   process.exit(0);
 }
 
-const encoded = base64Url(command.value);
+const encoded = encodedScriptArgument(command.value);
 console.log(
   JSON.stringify({
     hookSpecificOutput: {
@@ -317,7 +327,7 @@ console.log(
       permissionDecision: "allow",
       updatedInput: {
         ...event.tool_input,
-        [command.key]: `${runner()} run --base64url ${encoded}`,
+        [command.key]: `${runner()} run --json ${encoded}`,
       },
     },
   }),
