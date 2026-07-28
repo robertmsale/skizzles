@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { guardedPath, safeRelativePath } from "./files";
-import { buildGitManifest } from "./git-manifest";
+import { buildGitManifest, eligibleGitPaths } from "./git-manifest";
 
 const temporary: string[] = [];
 
@@ -20,6 +20,29 @@ async function repository(): Promise<string> {
 }
 
 describe("Git manifests", () => {
+  test("rejects truncated Git path output instead of accepting a complete-looking prefix", async () => {
+    const root = await repository();
+    const bin = await mkdtemp(path.join(os.tmpdir(), "container-lab-git-bin-"));
+    temporary.push(bin);
+    const git = path.join(bin, "git");
+    await writeFile(git, [
+      "#!/usr/bin/env bun",
+      "process.stdout.write(Buffer.alloc(64 * 1024 * 1024 + 1, 97));",
+      "setTimeout(() => {}, 2_000);",
+    ].join("\n"));
+    await chmod(git, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+    try {
+      await expect(eligibleGitPaths(root)).rejects.toThrow(
+        "git stdout exceeded 67108864 byte output limit",
+      );
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
   test("includes tracked and nonignored untracked regular files and symlinks", async () => {
     const root = await repository();
     await writeFile(path.join(root, ".gitignore"), "ignored.txt\n");

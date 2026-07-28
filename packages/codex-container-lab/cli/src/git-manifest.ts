@@ -1,9 +1,6 @@
-import { execFile } from "node:child_process";
 import { lstat } from "node:fs/promises";
-import { promisify } from "node:util";
 import { canonicalRoot, describeSyncFile, guardedPath, safeRelativePath, sha256, type SyncFile } from "./files";
-
-const execFileAsync = promisify(execFile);
+import { runCommand } from "./process";
 
 export interface GitManifest {
   root: string;
@@ -16,10 +13,10 @@ const MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024;
 
 export async function eligibleGitPaths(root: string): Promise<string[]> {
   const canonical = await canonicalRoot(root);
-  const { stdout } = await execFileAsync(
+  const { stdout } = await runCommand(
     "git",
     ["-C", canonical, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-    { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+    { maxOutputBytes: 64 * 1024 * 1024, rejectOnOutputLimit: true },
   );
   const values = stdout.toString("utf8").split("\0").filter(Boolean).map(safeRelativePath);
   const unique = [...new Set(values)].sort((a, b) => a.localeCompare(b));
