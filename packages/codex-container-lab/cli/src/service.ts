@@ -319,7 +319,8 @@ export class ContainerLabService {
         provisioningEnvironment = resolveProvisioningEnvironment(secretEnvironmentNames, this.environment);
         await this.assertProvisioning(id, signal);
         const head = (await runCommand("git", ["-C", lab.sourceRoot, "rev-parse", "HEAD"], { timeoutMs: 10_000, signal })).stdout.toString().trim();
-        await runCommand("git", ["clone", "--no-checkout", "--no-tags", "--no-hardlinks", lab.sourceRoot, lab.workspace], { timeoutMs: 120_000, signal });
+        await runCommand("git", ["clone", "--no-checkout", "--no-tags", "--no-hardlinks", "--dissociate", lab.sourceRoot, lab.workspace], { timeoutMs: 120_000, signal });
+        await assertCloneHasNoAlternates(lab.workspace, signal);
         await runCommand("git", ["-C", lab.workspace, "remote", "remove", "origin"], { timeoutMs: 10_000, signal });
         await runCommand("git", ["-C", lab.workspace, "checkout", "--detach", head], { timeoutMs: 120_000, signal });
         await this.assertProvisioning(id, signal);
@@ -533,6 +534,21 @@ async function assertSourceRepositoryIdentity(lab: LabMetadata): Promise<void> {
   ], { timeoutMs: 10_000 })).stdout.toString().trim();
   const actual = createHash("sha256").update(await realpath(commonGit)).digest("hex").slice(0, 12);
   if (actual !== lab.repoHash) throw new Error("lab source repository identity no longer matches durable state");
+}
+
+async function assertCloneHasNoAlternates(workspace: string, signal?: AbortSignal): Promise<void> {
+  const commonGit = (await runCommand("git", [
+    "-C", workspace, "rev-parse", "--path-format=absolute", "--git-common-dir",
+  ], { timeoutMs: 10_000, signal })).stdout.toString().trim();
+  for (const name of ["alternates", "http-alternates"]) {
+    try {
+      await lstat(join(commonGit, "objects", "info", name));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    throw new Error(`cloned workspace retained Git object alternates: ${name}`);
+  }
 }
 
 function compactError(error: unknown): string {

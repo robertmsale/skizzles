@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { readFileSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
@@ -78,6 +78,33 @@ class DestructiveDocker extends RecordingDocker {
   }
 }
 
+class AlternatesInspectingDocker extends RecordingDocker {
+  alternatesAtFirstCall?: string[];
+
+  constructor(
+    private readonly runtimeRoot: string,
+    private readonly owner: string,
+  ) {
+    super();
+  }
+
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    if (!this.alternatesAtFirstCall) {
+      const labs = await readdir(join(this.runtimeRoot, ownerKey(this.owner)));
+      const workspace = join(this.runtimeRoot, ownerKey(this.owner), labs[0]!, "workspace");
+      const commonGit = (await runCommand("git", [
+        "-C", workspace, "rev-parse", "--path-format=absolute", "--git-common-dir",
+      ])).stdout.toString().trim();
+      const info = join(commonGit, "objects", "info");
+      this.alternatesAtFirstCall = [];
+      for (const name of ["alternates", "http-alternates"]) {
+        if (await Bun.file(join(info, name)).exists()) this.alternatesAtFirstCall.push(name);
+      }
+    }
+    return await super.run(args, options);
+  }
+}
+
 describe("attached service lifecycle", () => {
   test("create provisions synchronously and returns only lab identity and terminal state", async () => {
     const root = await mkdtemp(join(tmpdir(), "container-lab-create-"));
@@ -92,6 +119,40 @@ describe("attached service lifecycle", () => {
     expect(Object.keys(result).sort()).toEqual(["labId", "state"]);
     expect(result.state).toBe("ready");
     expect((await readLab(roots, "thread-create", result.labId)).state).toBe("ready");
+  });
+
+  test("creates a self-contained workspace from an alternates-backed linked worktree before Docker runs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-dissociate-"));
+    temporary.push(root);
+    const origin = join(root, "origin");
+    const shared = join(root, "shared");
+    const source = join(root, "source");
+    await runCommand("git", ["init", origin]);
+    await writeFile(join(origin, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\n");
+    await writeFile(join(origin, "fixture.bin"), Buffer.alloc(1024 * 1024, 0x5a));
+    await runCommand("git", ["-C", origin, "add", "."]);
+    await runCommand("git", ["-C", origin, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    await runCommand("git", ["clone", "--shared", origin, shared]);
+    await runCommand("git", ["-C", shared, "worktree", "add", "-b", "linked-fixture", source]);
+    expect(await Bun.file(join(shared, ".git", "objects", "info", "alternates")).exists()).toBe(true);
+
+    const owner = "thread-dissociate";
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const docker = new AlternatesInspectingDocker(roots.runtimeRoot, owner);
+    const created = await new ContainerLabService(owner, roots, docker).createLab("independent", source);
+    const lab = await readLab(roots, owner, created.labId);
+
+    expect(created.state).toBe("ready");
+    expect(docker.alternatesAtFirstCall).toEqual([]);
+    const workspaceGit = (await runCommand("git", [
+      "-C", lab.workspace, "rev-parse", "--path-format=absolute", "--git-common-dir",
+    ])).stdout.toString().trim();
+    expect(await Bun.file(join(workspaceGit, "objects", "info", "alternates")).exists()).toBe(false);
+    expect(await Bun.file(join(workspaceGit, "objects", "info", "http-alternates")).exists()).toBe(false);
+
+    await rename(origin, join(root, "origin-moved"));
+    expect((await runCommand("git", ["-C", lab.workspace, "fsck", "--full"])).code).toBe(0);
+    expect((await runCommand("git", ["-C", lab.workspace, "show", "HEAD:fixture.bin"])).stdout.byteLength).toBe(1024 * 1024);
   });
 
   test("persists only secret names and never exposes the provisioning value", async () => {
