@@ -399,7 +399,7 @@ function serializableRawUsage(usage: Usage, inferences: number) {
 }
 function serializableCredit(credit: CreditEquivalent) {
   return {
-    pricedCredits: credit.pricedCredits,
+    pricedCredits: Number(credit.pricedCredits.toFixed(9)),
     fullyPricedInferences: credit.fullyPricedInferences,
     partiallyPricedInferences: credit.partiallyPricedInferences,
     unpricedInferences: credit.unpricedInferences,
