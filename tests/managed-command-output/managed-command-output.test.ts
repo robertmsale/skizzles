@@ -204,6 +204,8 @@ describe("managed command output hook", () => {
       "env --chdir=./tmp A=1 /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab run --lab experiment -- xcodebuild -scheme App test",
       "A= /tmp/source/skills/codex-container-lab/scripts/codex-container-lab run --lab experiment -- cargo nextest run",
       "env A= /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab run --lab experiment -- bun run test",
+      "codex-container-lab run --lab experiment -- cargo test -- --nocapture",
+      "codex-container-lab run --lab experiment -- cargo test --package \"api tests\"",
     ]) {
       const result = invokeHook(command);
       expect(text(result.stdout), command).not.toBe("");
@@ -263,7 +265,6 @@ describe("managed command output hook", () => {
       "codex-container-lab run --lab experiment -- xcodebuild -scheme App archive",
       "codex-container-lab run --lab experiment -- deploy-production",
       "codex-container-lab run --lab experiment -- npm test",
-      "codex-container-lab run --lab experiment -- cargo test -- --nocapture",
     ]) {
       const result = invokeHook(command);
       expect(text(result.stdout), command).toBe("");

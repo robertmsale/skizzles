@@ -151,29 +151,35 @@ function isRecognized(command: SimpleCommand | undefined): boolean {
 }
 
 function isKnownManagedCommand(command: SimpleCommand): boolean {
-  const { words } = command;
+  const { words, uncertain } = command;
   const [program, subcommand, third] = words;
+  const isCertain = (index: number) => uncertain[index] === false;
+
+  if (!isCertain(0)) return false;
 
   if (program === "bun") {
-    return subcommand === "test" || (subcommand === "run" && third === "test");
+    return (subcommand === "test" && isCertain(1))
+      || (subcommand === "run" && isCertain(1) && third === "test" && isCertain(2));
   }
-  if (program === "just") return subcommand === "test";
+  if (program === "just") return subcommand === "test" && isCertain(1);
   if (program === "flutter") {
-    return ["test", "analyze", "drive", "build"].includes(subcommand!);
+    return isCertain(1) && ["test", "analyze", "drive", "build"].includes(subcommand!);
   }
   if (program === "dart") {
-    return ["test", "analyze"].includes(subcommand!);
+    return isCertain(1) && ["test", "analyze"].includes(subcommand!);
   }
   if (program === "cargo") {
-    const action = subcommand?.startsWith("+") ? third : subcommand;
+    const actionIndex = subcommand?.startsWith("+") ? 2 : 1;
+    if ((actionIndex === 2 && !isCertain(1)) || !isCertain(actionIndex)) return false;
+    const action = words[actionIndex];
     return action === "nextest"
-      ? words[words.indexOf(action) + 1] === "run"
+      ? words[actionIndex + 1] === "run" && isCertain(actionIndex + 1)
       : ["build", "b", "check", "c", "test", "t", "clippy", "bench", "doc", "llvm-cov"].includes(action!);
   }
   if (program === "xcodebuild") return isXcodeBuildOrTest(words);
   if (program === "swift") return ["build", "test"].includes(subcommand!);
   if (program === "gradle" || program === "gradlew") {
-    return words.slice(1).some(isGradleBuildOrTestTask);
+    return words.slice(1).some((word, index) => isCertain(index + 1) && isGradleBuildOrTestTask(word));
   }
   return false;
 }
@@ -212,7 +218,6 @@ function isContainerLabRun(command: SimpleCommand): boolean {
   const separator = words.indexOf("--", index + 1);
   if (
     separator < 0
-    || separator !== words.lastIndexOf("--")
     || uncertain[separator]
     || separator === words.length - 1
   ) {
@@ -243,7 +248,6 @@ function isContainerLabRun(command: SimpleCommand): boolean {
     words: words.slice(separator + 1),
     uncertain: uncertain.slice(separator + 1),
   };
-  if (innerCommand.uncertain.some(Boolean)) return false;
   const normalizedInner = normalizeCommand(innerCommand);
   return normalizedInner !== undefined && isKnownManagedCommand(normalizedInner);
 }

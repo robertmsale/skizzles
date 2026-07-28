@@ -24,7 +24,7 @@ Include only context the child cannot cheaply inspect. Name every child `<role>_
 }
 ```
 
-When generated roles are advertised, use `agent_type` and omit separate model or reasoning overrides. Otherwise use only explicit model and effort values offered by the active spawn tool.
+When generated roles are advertised, use `agent_type` and omit separate model or reasoning overrides. When they are unavailable, do not invent model or effort substitutes for those roles. Use the active spawn schema only when the task does not depend on configured Skizzles routing; otherwise report the missing configured-role surface.
 
 Do not use `fork_turns="all"` with a selected role. Use `"none"` or a bounded positive count.
 
