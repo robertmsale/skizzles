@@ -7579,10 +7579,12 @@ import { join, posix as posix2 } from "path";
 import { spawn } from "child_process";
 async function runCommand(command, args, options = {}) {
   return await new Promise((resolve2, reject) => {
+    const ownsProcessGroup = process.platform !== "win32";
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: ownsProcessGroup
     });
     const cap = options.maxOutputBytes ?? 4 * 1024 * 1024;
     const stdout = [];
@@ -7590,30 +7592,95 @@ async function runCommand(command, args, options = {}) {
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let timedOut = false;
-    const collect = (chunks, chunk, current) => {
+    let cleanupStarted = false;
+    let cleanupSignalSent = false;
+    let forceKillSent = false;
+    let cleanupError;
+    let outputOverflow;
+    let forceKill;
+    const signalTree = (signal) => {
+      try {
+        if (ownsProcessGroup && child.pid !== undefined) {
+          process.kill(-child.pid, signal);
+          return true;
+        }
+        return child.kill(signal);
+      } catch (error) {
+        if (error.code === "ESRCH")
+          return false;
+        cleanupError = new Error(`${command} cleanup failed sending ${signal}: ${error.message}`);
+        return false;
+      }
+    };
+    const terminate = () => {
+      if (cleanupStarted)
+        return;
+      cleanupStarted = true;
+      if (!ownsProcessGroup) {
+        forceKillSent = true;
+        signalTree("SIGKILL");
+        return;
+      }
+      if (signalTree("SIGTERM")) {
+        cleanupSignalSent = true;
+        forceKill = setTimeout(() => {
+          forceKillSent = true;
+          signalTree("SIGKILL");
+        }, 100);
+      }
+    };
+    const collect = (stream, chunks, chunk, current) => {
       const remaining = cap - current;
       if (remaining > 0)
         chunks.push(chunk.subarray(0, remaining));
-      return current + chunk.byteLength;
+      const next = current + chunk.byteLength;
+      if (options.rejectOnOutputLimit && next > cap && outputOverflow === undefined) {
+        outputOverflow = stream;
+        terminate();
+      }
+      return next;
     };
     child.stdout.on("data", (chunk) => {
-      stdoutBytes = collect(stdout, chunk, stdoutBytes);
+      stdoutBytes = collect("stdout", stdout, chunk, stdoutBytes);
     });
     child.stderr.on("data", (chunk) => {
-      stderrBytes = collect(stderr, chunk, stderrBytes);
+      stderrBytes = collect("stderr", stderr, chunk, stderrBytes);
     });
-    const abort = () => child.kill("SIGKILL");
+    const abort = () => terminate();
     options.signal?.addEventListener("abort", abort, { once: true });
     const timeout = options.timeoutMs ? setTimeout(() => {
       timedOut = true;
       abort();
     }, options.timeoutMs) : undefined;
-    child.once("error", reject);
+    child.once("error", (error) => {
+      if (timeout)
+        clearTimeout(timeout);
+      if (forceKill)
+        clearTimeout(forceKill);
+      options.signal?.removeEventListener("abort", abort);
+      reject(error);
+    });
+    child.once("exit", terminate);
     child.once("close", (code) => {
       if (timeout)
         clearTimeout(timeout);
+      if (forceKill)
+        clearTimeout(forceKill);
+      if (cleanupSignalSent && !forceKillSent) {
+        forceKillSent = true;
+        signalTree("SIGKILL");
+      }
       options.signal?.removeEventListener("abort", abort);
-      const result = { code: code ?? (timedOut ? 124 : 1), stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
+      if (cleanupError)
+        return reject(cleanupError);
+      if (outputOverflow) {
+        return reject(new Error(`${command} ${outputOverflow} exceeded ${cap} byte output limit`));
+      }
+      const result = {
+        code: code ?? (timedOut ? 124 : 1),
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr)
+      };
       if (options.signal?.aborted)
         return reject(new Error(`${command} aborted`));
       if (result.code !== 0 && !options.allowFailure) {
@@ -8750,15 +8817,12 @@ import { chmod, copyFile, lstat as lstat5, mkdir as mkdir5, readlink as readlink
 import path2 from "path";
 
 // packages/codex-container-lab/cli/src/git-manifest.ts
-import { execFile } from "child_process";
 import { lstat as lstat4 } from "fs/promises";
-import { promisify } from "util";
-var execFileAsync = promisify(execFile);
 var MAX_SYNC_FILES = 20000;
 var MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024;
 async function eligibleGitPaths(root) {
   const canonical = await canonicalRoot(root);
-  const { stdout } = await execFileAsync("git", ["-C", canonical, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 });
+  const { stdout } = await runCommand("git", ["-C", canonical, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { maxOutputBytes: 64 * 1024 * 1024, rejectOnOutputLimit: true });
   const values = stdout.toString("utf8").split("\x00").filter(Boolean).map(safeRelativePath);
   const unique = [...new Set(values)].sort((a, b) => a.localeCompare(b));
   if (unique.length > MAX_SYNC_FILES)
@@ -9478,7 +9542,8 @@ class ContainerLabService {
       provisioningEnvironment = resolveProvisioningEnvironment(secretEnvironmentNames, this.environment);
       await this.assertProvisioning(id, signal);
       const head = (await runCommand("git", ["-C", lab.sourceRoot, "rev-parse", "HEAD"], { timeoutMs: 1e4, signal })).stdout.toString().trim();
-      await runCommand("git", ["clone", "--no-checkout", "--no-tags", "--no-hardlinks", lab.sourceRoot, lab.workspace], { timeoutMs: 120000, signal });
+      await runCommand("git", ["clone", "--no-checkout", "--no-tags", "--no-hardlinks", "--dissociate", lab.sourceRoot, lab.workspace], { timeoutMs: 120000, signal });
+      await assertCloneHasNoAlternates(lab.workspace, signal);
       await runCommand("git", ["-C", lab.workspace, "remote", "remove", "origin"], { timeoutMs: 1e4, signal });
       await runCommand("git", ["-C", lab.workspace, "checkout", "--detach", head], { timeoutMs: 120000, signal });
       await this.assertProvisioning(id, signal);
@@ -9701,6 +9766,25 @@ async function assertSourceRepositoryIdentity(lab) {
   const actual = createHash3("sha256").update(await realpath4(commonGit)).digest("hex").slice(0, 12);
   if (actual !== lab.repoHash)
     throw new Error("lab source repository identity no longer matches durable state");
+}
+async function assertCloneHasNoAlternates(workspace, signal) {
+  const commonGit = (await runCommand("git", [
+    "-C",
+    workspace,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir"
+  ], { timeoutMs: 1e4, signal })).stdout.toString().trim();
+  for (const name of ["alternates", "http-alternates"]) {
+    try {
+      await lstat6(join3(commonGit, "objects", "info", name));
+    } catch (error) {
+      if (error.code === "ENOENT")
+        continue;
+      throw error;
+    }
+    throw new Error(`cloned workspace retained Git object alternates: ${name}`);
+  }
 }
 function compactError2(error) {
   return (error instanceof Error ? error.message : String(error)).split(`
