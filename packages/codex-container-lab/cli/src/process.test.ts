@@ -94,6 +94,19 @@ describe("runCommand", () => {
     await expectProcessGone(pid);
   });
 
+  posixTest("timeout remains authoritative when the child handles TERM with success", async () => {
+    const started = performance.now();
+    const result = await runCommand("sh", [
+      "-c",
+      "trap 'exit 0' TERM; while :; do sleep 10; done",
+    ], {
+      timeoutMs: 100,
+      allowFailure: true,
+    });
+    expect(result.code).toBe(124);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   posixTest("abort reaps a TERM-resistant descendant", async () => {
     const fixture = await processTreeScript();
     const controller = new AbortController();

@@ -294,10 +294,49 @@ const safeXcodeActions = new Set([
   "test-without-building",
 ]);
 
+const xcodeOptionsWithValues = new Set([
+  "-arch",
+  "-clonedsourcepackagesdirpath",
+  "-configuration",
+  "-deriveddatapath",
+  "-destination",
+  "-destination-timeout",
+  "-enumerate-tests-format",
+  "-enumerate-tests-output-path",
+  "-enumerate-tests-style",
+  "-maximum-concurrent-test-device-destinations",
+  "-maximum-concurrent-test-simulator-destinations",
+  "-only-testing",
+  "-packageauthorizationprovider",
+  "-parallel-testing-worker-count",
+  "-project",
+  "-resultbundlepath",
+  "-resultstreampath",
+  "-scheme",
+  "-sdk",
+  "-skip-testing",
+  "-target",
+  "-testlanguage",
+  "-testplan",
+  "-testregion",
+  "-toolchain",
+  "-workspace",
+  "-xcconfig",
+]);
+
 function isXcodeBuildOrTest(command: SimpleCommand): boolean {
+  let skipOptionValue = false;
   for (const [index, word] of command.words.entries()) {
     const normalized = word.toLowerCase();
+    if (skipOptionValue) {
+      skipOptionValue = false;
+      continue;
+    }
     if (xcodeApprovalActions.has(normalized)) return false;
+    if (xcodeOptionsWithValues.has(normalized)) {
+      skipOptionValue = true;
+      continue;
+    }
     if (xcodeActions.has(normalized) && (command.uncertain[index] || !safeXcodeActions.has(normalized))) {
       return false;
     }

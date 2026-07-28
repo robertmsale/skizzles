@@ -104,7 +104,7 @@ export async function runCommand(command: string, args: string[], options: RunOp
         return reject(new Error(`${command} ${outputOverflow} exceeded ${cap} byte output limit`));
       }
       const result = {
-        code: code ?? (timedOut ? 124 : 1),
+        code: timedOut ? 124 : (code ?? 1),
         stdout: Buffer.concat(stdout),
         stderr: Buffer.concat(stderr),
       };

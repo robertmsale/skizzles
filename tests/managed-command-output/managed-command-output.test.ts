@@ -183,7 +183,7 @@ describe("managed command output hook", () => {
 
   test("recognizes high-value build and test commands through common launchers", () => {
     for (const command of [
-      "cargo build --workspace", "cargo +nightly test --workspace", "cargo nextest run", "cargo llvm-cov --workspace", "RUST_LOG=debug cargo clippy --workspace", "env RUST_BACKTRACE=1 cargo check", "rustup run nightly cargo test", "xcodebuild -workspace App.xcworkspace -scheme App test", "xcrun --sdk iphonesimulator xcodebuild -scheme App build", "/usr/bin/xcodebuild -scheme App build", "swift build", "xcrun swift test", "gradle build", "./gradlew :app:testDebugUnitTest --no-daemon", "./gradlew connectedDebugAndroidTest", "fvm flutter test",
+      "cargo build --workspace", "cargo +nightly test --workspace", "cargo nextest run", "cargo llvm-cov --workspace", "RUST_LOG=debug cargo clippy --workspace", "env RUST_BACKTRACE=1 cargo check", "rustup run nightly cargo test", "xcodebuild -workspace App.xcworkspace -scheme App test", "xcodebuild -scheme \"test\" build", "xcrun --sdk iphonesimulator xcodebuild -scheme App build", "/usr/bin/xcodebuild -scheme App build", "swift build", "xcrun swift test", "gradle build", "./gradlew :app:testDebugUnitTest --no-daemon", "./gradlew connectedDebugAndroidTest", "fvm flutter test",
     ]) {
       const result = invokeHook(command);
       expect(text(result.stdout), command).not.toBe("");
@@ -208,6 +208,7 @@ describe("managed command output hook", () => {
       "codex-container-lab run --lab experiment -- cargo test --package \"api tests\"",
       "codex-container-lab run --lab experiment -- rustup run \"nightly\" cargo test",
       "codex-container-lab run --lab experiment -- xcodebuild -scheme \"App Tests\" test",
+      "codex-container-lab run --lab experiment -- xcodebuild -scheme \"test\" build",
     ]) {
       const result = invokeHook(command);
       expect(text(result.stdout), command).not.toBe("");
