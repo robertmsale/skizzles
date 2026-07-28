@@ -27,7 +27,20 @@ Children are leaves. A Luna Worker should send an intermediate message only for 
 
 ## Triage And Worker Cooperation
 
-When Triage exists, the root gives affected Workers the accepted report path and canonical Triage task name. A running Worker uses `send_message` for a narrow clarification when Triage is active and `followup_task` to reactivate a completed Triage owner. Include the exact command, expected and observed result, attempts, evidence path, and one question. Triage updates the report when its assumptions change; the Worker retains implementation ownership. Material cross-slice changes also go to the root.
+At dispatch, root gives each relevant peer the canonical task paths it may contact:
+
+- Workers receive the named Triage path and relevant neighboring Worker paths.
+- Triage receives affected Worker paths.
+- Review receives Triage and every Worker it reviews.
+- QA/Designer receive owners only when clarification or rework may need them.
+
+Paths are callable peer identities, not ownership transfer. A running Worker uses `send_message` for a narrow clarification and `followup_task` only to reactivate a completed Triage owner. Include the exact command, expected and observed result, attempts, evidence path, and one question. Triage updates the report when its assumptions change; the Worker retains implementation ownership. Material cross-slice changes also go to the root.
+
+Claims carry assurance labels: Worker completion claims are unverified; accepted Triage evidence is provisional causal authority after root verification; an independent Reviewer verdict is the highest independent-assurance recommendation, while a Reviewer that supplied midstream Triage adjudication must mark later verdicts reduced-independence/advisory. Root retains final acceptance and uses a fresh Reviewer when consequential independent final acceptance is required.
+
+Review may request one concrete existing artifact or one bounded missing runtime observation from a named Worker that still owns the relevant Lab or slice. The Worker runs it in that boundary and returns command, result, and artifact path. Review neither takes the Lab nor edits implementation; root routes repairs.
+
+Triage-to-Review is a guarded adjudication escape hatch, authorized only by root after two bounded diagnostic passes (or equivalent contradictory/high-consequence impasse). Triage's packet includes alternatives, evidence, Worker attempts, why another pass is unlikely to resolve the question, and one narrow decision request. Count every root-authorized dispatch, even when unanswered; record the outcome separately and keep rejected preauthorization attempts as context only. Review adjudicates only and never becomes a Sol implementation owner. Flag every dispatched use as a red-flag KPI; difficult tests or slow builds do not qualify.
 
 ## Privileged Steps
 
@@ -76,3 +89,7 @@ When orchestration drifts:
 6. Spawn a replacement only after its role, handoff packet, and ownership boundary are ready.
 
 Canonical paths are the routing graph. A task can use a short relative name for nearby tasks; use the full canonical path when communicating across branches of the tree or when names may be ambiguous.
+
+## Campaign Closeout
+
+After aggregate validation and an explicit decision when possible, root records the campaign terminal disposition (`accepted`, `rejected`, `blocked`, or `abandoned`) and finalizes `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` for every substantial campaign, including zero or `not observed` KPI values. Finalize on every terminal path, not only acceptance. Keep the packet bounded, split repository friction from harness candidates, and forward only to an explicitly configured consumer. Observation/reporting may be automated; policy, hooks, roles, routing, tasks, configuration, and installs never change automatically.

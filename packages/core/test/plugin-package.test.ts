@@ -50,6 +50,41 @@ describe("deterministic plugin packaging", () => {
     });
   });
 
+  test("stages mandatory closeout, KPI, and consumer safety contracts", async () => {
+    const repoRoot = resolve(import.meta.dir, "../../..");
+    const root = await mkdtemp(join(tmpdir(), "skizzles-learning-contract-"));
+    temporaryRoots.push(root);
+    const staged = join(root, "staged");
+    await stagePlugin(repoRoot, staged);
+
+    const canonicalLearning = await readFile(
+      join(repoRoot, "skills/fourth-wall/references/learning-loop.md"),
+      "utf8",
+    );
+    const stagedLearning = await readFile(
+      join(staged, "skills/fourth-wall/references/learning-loop.md"),
+      "utf8",
+    );
+    expect(stagedLearning).toBe(canonicalLearning);
+    expect(stagedLearning).toContain("any terminal disposition");
+    expect(stagedLearning).toContain("accepted`, `rejected`, `blocked`, or `abandoned");
+    for (const field of [
+      "worker_shots",
+      "worker_to_triage_consultations",
+      "attributable_reviewer_product_blockers",
+      "triage_to_review_adjudications",
+    ]) {
+      expect(stagedLearning).toContain(`\`${field}\``);
+    }
+    expect(stagedLearning).toContain("never auto-promote or auto-mutate harness policy");
+
+    const stagedInstaller = await readFile(join(staged, "skills/install-skizzles/SKILL.md"), "utf8");
+    expect(stagedInstaller).toContain("must not clone or modify a repository");
+    expect(stagedInstaller).toContain("edit `AGENTS.md`");
+    expect(stagedInstaller).toContain("create or message tasks");
+    expect(stagedInstaller).toContain("absent or ambiguous");
+  });
+
   test("stages only allowlisted canonical inputs deterministically", async () => {
     const root = await fixture();
     await write(root, "skills/example/SKILL.md", "---\nname: example\ndescription: Example skill.\n---\n");

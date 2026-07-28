@@ -15,6 +15,10 @@ Define:
 
 When Triage exists, also define its canonical task name, accepted report path, report revision, and the narrow conditions under which the recipient should reactivate it.
 
+For consequential or multi-owner work, include a **peer map** with only relevant canonical task paths and ownership/contact conditions. Workers receive Triage and relevant neighboring Workers; Triage receives affected Workers; Review receives Triage and reviewed Workers; QA/Designer receive owners when clarification or rework may need them. Paths are callable peer identities, not ownership transfer, and child contact never authorizes spawning.
+
+State assurance explicitly: a Worker completion claim is unverified; accepted Triage evidence is provisional causal authority after root checks plausibility/source support; an independent Reviewer verdict is the highest independent-assurance recommendation; a Reviewer that supplied midstream Triage adjudication must label later verdicts reduced-independence/advisory; root owns final acceptance and uses a fresh Reviewer when consequential independent acceptance is required. Do not infer assurance from numeric model effort.
+
 ## Complete Slice Test
 
 Prefer a handoff that gives one child the complete causal loop: inspect the owned surface, implement the change, run focused validation, correct in-scope failures, and collect relevant runtime proof. A code-only handoff is too narrow when it predictably leaves the root with the longer test, integration, or proof campaign.
@@ -72,6 +76,8 @@ Require the task to report:
 - What validation ran and its result.
 - What did not run and why.
 - Remaining risks, decisions, or downstream work.
+
+After aggregate validation and an explicit decision when possible, root records the campaign terminal disposition (`accepted`, `rejected`, `blocked`, or `abandoned`) and finalizes a bounded learning packet at `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` on every terminal path, with the KPI schema and denominators in [learning-loop.md](learning-loop.md), even when values are zero or not observed. Separate repository friction from harness candidates. Forwarding is optional and explicit; observations never auto-mutate harness policy, roles, routing, hooks, tasks, configuration, or installs.
 
 The root verifies this claim before integration or completion.
 

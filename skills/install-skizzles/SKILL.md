@@ -91,6 +91,16 @@ Configuration upgrades are an explicit restore-and-reapply lifecycle because `co
 
 Maintainers edit `assets/agent-role-spec.json` for model/reasoning pairs and `assets/agent-role-templates/*.toml` for behavioral duties. Run `bun run agents:build` to regenerate `assets/agents/`, and `bun run agents:check` to detect drift. Never hand-edit generated role TOML or its manifest.
 
+## Optionally configure a learning consumer
+
+Fourth Wall emits a bounded campaign-close learning packet under `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md`. This is evidence, not an automatic harness change. If the user explicitly wants harness learning forwarded, guide them to:
+
+1. Choose an existing local project whose owner can evaluate orchestration behavior. A versioned checkout of the official OpenAI Codex repository is a useful recommendation when the consumer must inspect harness implementation, but it is never a prerequisite.
+2. Choose a stable consumer naming or epoch convention and record the routing in machine-local instructions (for example, `AGENTS.md`) by an explicit user action.
+3. Forward only the bounded packet or its path after the user confirms the unique consumer and destination.
+
+The installer must not clone or modify a repository, edit `AGENTS.md`, create or message tasks, or guess when a consumer is absent or ambiguous. Report the packet to the human owner instead. Consumer review may propose changes, but promotion into Skizzles skills, roles, routing, hooks, configuration, or installs always requires separate owner deliberation.
+
 ## Use Container Lab deliberately
 
 A skill-only installation contains Container Lab guidance and its launcher, not the runnable CLI. Its launcher uses a distinct installed `codex-container-lab` PATH binary when one exists; otherwise it exits with a compact instruction to obtain the full Skizzles plugin or source checkout. The stable Skizzles plugin includes the dependency-self-contained operational and reaper bundles; a selected source checkout includes the canonical workspace package.

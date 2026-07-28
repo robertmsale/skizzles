@@ -55,6 +55,26 @@ Every assignment states:
 
 Do not repeat stable role instructions or paste a shared report into every prompt. Pass the artifact path plus slice-specific deltas.
 
+For consequential or multi-owner work, add a relevant **peer map** to the dispatch packet:
+
+```md
+## Peer map
+- Triage: `/root/triage__map_checkout` (contact: narrow clarification; accepted report: `/tmp/.../report.md`, rev 2)
+- Workers: `/root/worker__api`, `/root/worker__migration` (contact: relevant cross-slice clarification; neighboring ownership)
+- Review: `/root/review__acceptance` (contact: evidence requests/findings after assignment; when assigned)
+```
+
+Canonical task paths are callable peer identities, not ownership transfer. Share only the paths needed for contact: Workers receive named Triage and relevant neighboring Workers; Triage receives affected Workers; Review receives Triage and every reviewed Worker; QA/Designer receive owners when clarification or rework may be needed. Use `send_message` while a peer is active and `followup_task` only to reactivate an appropriate persistent owner. Peer contact never permits a child to spawn or change ownership.
+
+Use these assurance labels in claims and handoffs:
+
+- **Worker completion claim** — unverified until root or Review accepts its evidence.
+- **Accepted Triage evidence** — provisional causal authority after root verifies plausibility and source support; implementation may falsify it.
+- **Independent Reviewer verdict** — the highest independent-assurance recommendation; root still accepts or rejects completion.
+- **Reduced-independence Reviewer verdict** — an advisory recommendation when that Reviewer supplied midstream Triage adjudication; root uses a fresh Reviewer for consequential independent final acceptance.
+
+Do not equate assurance with numeric model effort or treat Review as infallible.
+
 ## Evidence-First Triage
 
 Triage keeps product source and durable project configuration read-only, but it is not runtime-read-only. Terra may build, run focused tests, start services, operate disposable Container Labs, query databases or networks, inspect logs, create temporary diagnostics or fixtures, and reproduce behavior when those actions are safe and necessary to establish the causal chain. Triage cleans up disposable resources and never turns an experiment into an unreviewed product fix.
@@ -108,6 +128,10 @@ Use `send_message` for a running owner and `followup_task` to reactivate an idle
 
 If implementation evidence falsifies the accepted diagnosis, stop forcing the proposed solution and return the contradiction for renewed Triage. Material RCA changes update the report and go to the root; narrow environment or command clarifications may remain peer-to-peer.
 
+Review may ask a named Worker for one concrete existing artifact or one bounded missing runtime observation when the Worker still owns the relevant Lab or slice. The Worker runs it in that ownership boundary and returns the command, result, and artifact path; Review evaluates it without taking Lab ownership or editing implementation. Root coordinates any repair assignment.
+
+Triage may request Review adjudication only through the root and only after two bounded diagnostic passes (or equivalent contradictory evidence) leave a high-consequence architectural, security, migration, concurrency, or repeating-causal-model impasse. The packet must include competing explanations, supporting/rejecting evidence, Worker attempts, why another Triage pass is unlikely to resolve it, and one narrow decision request. Review supplies adjudication, never Sol implementation. Each use is counted and flagged as a red-flag KPI; slow builds, difficult tests, or incomplete implementation are not sufficient.
+
 ## Persistent Ownership And Review
 
 Task completion releases active execution, not identity or accumulated context.
@@ -122,7 +146,7 @@ Before spawning, inspect existing task paths for the same role and ownership. On
 
 Review treats both the Triage report and implementation as fallible. Sol compares the causal model with source and runtime evidence, checks the touched and adjacent surfaces, judges architecture, correctness, security, migration completeness, and evidence sufficiency, and hunts deeper explanations. It does not routinely repeat formatting, compilation, static analysis, or tests already run successfully by the Worker. Run a targeted probe only for a concrete suspicion, contradictory proof, high-consequence boundary, or integrated-state drift.
 
-Return bounded findings to the same Worker. Use a fresh Reviewer only when independent final acceptance adds real value after the original Reviewer materially shaped the solution.
+Return bounded findings to the same Worker. If a Reviewer supplied midstream Triage adjudication, mark later verdicts reduced-independence/advisory; use a fresh Reviewer when consequential independent final acceptance is required.
 
 ## QA, Design, And Deployment
 
@@ -148,7 +172,8 @@ Read [references/coordination-loop.md](references/coordination-loop.md) for exac
 6. After parallel edits stabilize, give one Worker the integrated build/test/fix lane when necessary. The root retains Git mutations and acceptance.
 7. Inspect completion claims and evidence. Dispatch persistent Review or QA when risk warrants it; return findings to the same owner.
 8. Commit stable forward progress after a coherent slice has focused proof and no known breakage, excluding unrelated shared-worktree changes.
-9. Finish with an aggregate validation and explicit acceptance decision.
+9. Finish aggregate validation and make the explicit decision when possible; record the campaign terminal disposition as `accepted`, `rejected`, `blocked`, or `abandoned`.
+10. Once the campaign reaches any terminal disposition, finalize the bounded campaign-close learning packet described in [references/learning-loop.md](references/learning-loop.md) for every substantial campaign, even when KPIs are zero or not observed. Separate repository friction, which belongs in the task-owner completion handoff, from harness candidates; forward only to an explicitly configured consumer. Learning packets are evidence only: never automatically change policy, roles, routing, hooks, tasks, configuration, or installs.
 
 Read [references/delegation-contract.md](references/delegation-contract.md) before consequential fan-out and [references/handoff-packet.md](references/handoff-packet.md) before replacing ownership or renewing long context.
 
@@ -168,5 +193,6 @@ Read [references/delegation-contract.md](references/delegation-contract.md) befo
 - Do not accept completion prose as proof.
 - Do not route ordinary implementation to Sol or invent unconfigured role variants.
 - Do not treat repository size, difficult code, failing tests, or more investigation as blockers.
+- Do not let learning observations self-modify the harness. Reporting is automatic; policy promotion requires explicit owner deliberation.
 - The root owns Git integration, task-graph shape, cross-slice decisions, evidence acceptance, and final completion.
 - Native task messaging stays within one root tree. Unrelated top-level Desktop tasks require app-level coordination.

@@ -1,6 +1,6 @@
 # Fourth Wall Learning Candidates
 
-Append only evidence-backed candidates from completed orchestration work. This is not normative policy; curate accepted findings into the skill deliberately.
+This is a curated historical record, not the per-campaign event sink. Substantial campaigns emit bounded packets under `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md`; append here only after owner review of an evidence-backed candidate. This is not normative policy; curate accepted findings into the skill deliberately.
 
 ## 2026-07-13 - Complete-slice delegation
 - Status: promoted
