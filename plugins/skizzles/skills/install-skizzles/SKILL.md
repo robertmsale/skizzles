@@ -56,12 +56,12 @@ Only run this lifecycle after the complete plugin surface—and therefore its pa
 Ask the user to choose an orchestration mode:
 
 - `passive` writes only `features.hooks = true`. It does not write any MultiAgentV2 setting or hint, so Codex retains its model-specific native defaults.
-- `aggressive` also enables MultiAgentV2, sets `max_concurrent_threads_per_session = 7`, adds one concise proactive mode hint, and gives roots and subagents short pointers to `$fourth-wall`. Use this only when the user wants autonomous quality-and-speed delegation.
+- `aggressive` also enables MultiAgentV2, sets `max_concurrent_threads_per_session = 14`, adds one concise proactive mode hint, and gives roots and subagents short pointers to `$fourth-wall`. Fourteen is a ceiling for bounded parallel ownership, not a target. Use this only when the user wants autonomous quality-and-speed delegation.
 
 Also ask whether Codex should keep its native model instructions or use the Skizzles split:
 
 - `native` is the default and does not write instruction or agent-role config.
-- `skizzles` writes the canonical root prompt to `model_instructions_file` and configures every capability-bearing native role advertised by `assets/agents/manifest.json`. Generated role files combine one behavioral duty with one durable model/reasoning pair, share `skizzles_subagent_instructions.md`, and add duty-specific `developer_instructions`. This mode requires an absolute `--source-root` whose assets remain available after installation.
+- `skizzles` writes the canonical root prompt to `model_instructions_file` and configures the seven fixed native roles advertised by `assets/agents/manifest.json`. Generated role files combine one behavioral duty with one durable model/reasoning pair, share `skizzles_subagent_instructions.md`, and add duty-specific `developer_instructions`. This mode requires an absolute `--source-root` whose assets remain available after installation.
 
 With the Skizzles split, select the generated `agent_type`, omit independent model/reasoning overrides, and use `fork_turns="none"` or a positive integer. A positive integer larger than the available history retains all available turns without becoming full-history mode. Do not use `fork_turns="all"`: full-history spawning inherits the parent role and deliberately bypasses selected-role application.
 

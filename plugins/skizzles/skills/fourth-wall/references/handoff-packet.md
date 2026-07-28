@@ -25,9 +25,9 @@ Unfinished items, valid blockers, dependencies, and remaining gates.
 ## Next Action
 The first concrete action the successor should take.
 
-## Routing State
-The active owner and route, any bounded capability adjustment reason, and the
-path to `routing-decisions.jsonl` beside this packet.
+## Evidence State
+The accepted Triage owner, report path and revision, material clarifications,
+and any assumption that implementation or review has falsified.
 ```
 
 Do not include motivational framing, a chronological transcript, stable base instructions, or facts the successor can cheaply inspect.
@@ -40,7 +40,7 @@ Use a parent-mediated sibling replacement so the root preserves the task graph a
 
 1. The outgoing task sends the packet to the root with `send_message` and stops taking new ownership.
 2. The root inspects the packet and current tree.
-3. The root spawns a fresh sibling named `<role>__<objective>`, passes explicit model/reasoning controls, sets the matching native `agent_type` and names the behavioral role in its handoff, and chooses the smallest useful bounded history fork.
+3. The root spawns a fresh sibling named `<role>__<objective>`, selects the fixed native `agent_type` without model/reasoning overrides, names the behavioral role and evidence path in its handoff, and chooses the smallest useful bounded history fork.
 4. The root confirms the successor exists and has the right ownership boundary.
 5. The predecessor returns or is interrupted only after the successor is established.
 
@@ -48,7 +48,7 @@ Prefer no-history forks. Quote the relevant completed decisions in the handoff p
 
 ## Reactivation Or Replacement
 
-Use `followup_task` when a completed child remains the right owner and its accumulated context reduces rediscovery; current native MultiAgentV2 preserves its original model and reasoning settings but cannot change them. Spawn a fresh sibling when the next action benefits from independent judgment, a clean context, changed ownership, or a recorded capability increase. Use the smallest useful positive fork plus the packet so the successor retains relevant knowledge without inheriting an unbounded transcript.
+Use `followup_task` when a completed child remains the right owner and its accumulated context reduces rediscovery; native MultiAgentV2 preserves its role, model, reasoning settings, and context. Spawn a fresh sibling only for changed ownership, poisoned context, a genuinely independent second opinion, or a materially new slice. Use the smallest useful positive fork plus the packet so a necessary successor retains relevant knowledge without inheriting an unbounded transcript.
 
 ## Root Handoff Limitation
 

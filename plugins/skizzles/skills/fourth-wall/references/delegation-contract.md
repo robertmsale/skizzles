@@ -13,6 +13,8 @@ Define:
 5. **Evidence:** exact checks, artifacts, screenshots, or source inspection expected at completion.
 6. **Return shape:** changed areas, validation performed, unresolved risks, and the next recommended action.
 
+When Triage exists, also define its canonical task name, accepted report path, report revision, and the narrow conditions under which the recipient should reactivate it.
+
 ## Complete Slice Test
 
 Prefer a handoff that gives one child the complete causal loop: inspect the owned surface, implement the change, run focused validation, correct in-scope failures, and collect relevant runtime proof. A code-only handoff is too narrow when it predictably leaves the root with the longer test, integration, or proof campaign.
@@ -21,32 +23,18 @@ Keep shared Git mutations and final acceptance at the root. When parallel edits 
 
 ## Spawn Shape
 
-Encode the role and objective in the task name; carry capability explicitly:
+Encode the role and objective in the task name; the fixed role carries capability:
 
 ```json
 {
   "task_name": "worker__backend_contract",
   "fork_turns": "1",
   "agent_type": "worker",
-  "model": "gpt-5.6-luna",
-  "reasoning_effort": "high",
-  "message": "You are dispatched as a Scoped Worker. Own the bounded backend contract through implementation, focused validation, in-scope fixes, and compact evidence..."
+  "message": "Own the bounded backend contract through implementation, focused validation, in-scope fixes, and compact evidence. Triage owner: triage__map_backend. Accepted report: /tmp/skizzles-orchestration/.../report.md ..."
 }
 ```
 
-Complexity and horizon select model, effort, and fork depth; the role selects behavior. Under the Skizzles profile, set the matching native `agent_type`; under native instructions, set it only when the active schema advertises that role. Name the route and role in the message and pass explicit model and reasoning overrides from the active tool schema. The installed role config already supplies the shared subagent base plus role-specific developer instructions, so repeat only assignment-specific constraints.
-
-## Worker Grandchildren
-
-A depth-1 Terra/Sol Worker may dispatch at most one active bounded Worker when all of these hold:
-
-- The child is named `worker__...` and uses Luna high when available or Terra medium as the bounded fallback.
-- The slice is small, disjoint from the parent's continuing edits, and comfortably short-context.
-- The child owns inspection, implementation, focused validation, in-scope fixes, and completion evidence together.
-- The parent has genuinely independent implementation to continue while the child works.
-- The child uses `fork_turns = "none"`, remains a leaf, and may be reactivated only for coherent follow-on work within the same ownership boundary.
-
-Do not create a command runner by another name. If the parent must interpret every result or modify the same surface before validation is meaningful, keep that loop with the parent. Non-Worker roles return delegation proposals to the root.
+Duty selects the fixed model/effort pair. Set the matching native `agent_type`, omit independent model and reasoning overrides, and repeat only assignment-specific constraints. Every child is a leaf; further decomposition returns to the root.
 
 Include directly relevant skill names and obligations in the message. Skills available to the parent are not a substitute for telling the recipient which domain contract governs its work.
 
@@ -61,6 +49,8 @@ Spawn tasks in parallel only when all are true:
 - The expected speed or quality gain exceeds coordination cost.
 
 Prefer dependency order over maximum concurrency. Contracts, schemas, and shared interfaces usually stabilize before broad implementation fan-out.
+
+For a large, well-planned implementation, prefer 2-6 parallel Luna Workers with disjoint complete slices over one exhausted Worker or a Sol implementation substitute. The installed limit of 14 active children is a ceiling, not a target.
 
 ## Blockers
 
@@ -85,6 +75,6 @@ Require the task to report:
 
 The root verifies this claim before integration or completion.
 
-Completion releases active ownership but does not destroy the child. Use `followup_task` for reviewer-directed corrections or coherent next work by the same owner at its current capability. Classify review findings before treating them as routing evidence: an explicit-contract miss is attributable rework, an adjacent existing defect is healing rather than failure, and a newly discovered invariant requires clarification rather than blame. Use a fresh task with a compact handoff when independent judgment, context reset, changed ownership, or a recorded higher route is required.
+Completion releases active ownership but does not destroy the child. Use `followup_task` for reviewer-directed corrections or coherent next work by the same owner. Classify review findings: an explicit-contract miss is attributable rework, an adjacent existing defect is healing rather than failure, and a newly discovered invariant returns to Triage for clarification. Use a fresh task only for changed ownership, poisoned context, a genuinely independent second opinion, or a materially new slice.
 
-When a durable `/tmp` task packet exists, pass its path rather than repeating stable cross-task context. The spawn message must still contain the child's selected route, role, concrete objective, ownership, constraints, and expected proof so the packet supplements rather than hides the assignment. Do not put secrets, raw transcripts, or unbounded build logs in the packet.
+When a durable `/tmp` report exists, pass its path rather than repeating stable cross-task context. The spawn message must still contain the role, concrete objective, ownership, constraints, Triage owner, report revision, and expected proof so the artifact supplements rather than hides the assignment. Do not put secrets, raw transcripts, or unbounded build logs in the packet.

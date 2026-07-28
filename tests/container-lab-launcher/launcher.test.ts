@@ -20,15 +20,17 @@ describe("Container Lab bundled launcher", () => {
       stdin: "payload\n",
     });
 
-    const waiting = fixtureTarget("process.on('SIGTERM', () => { console.log('terminated'); process.exit(143); }); setInterval(() => {}, 1_000);");
+    const waiting = fixtureTarget("const { writeFileSync, writeSync } = await import('node:fs'); process.on('SIGTERM', () => { writeSync(1, 'terminated\\n'); process.exit(143); }); writeFileSync(process.env.READY_FILE!, 'ready'); setInterval(() => {}, 1_000);");
+    const readyFile = join(temporaryRoot(), "ready");
     const child = Bun.spawn(["bun", waiting], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env },
+      env: { ...process.env, READY_FILE: readyFile },
     });
     child.stdin.end();
-    await Bun.sleep(50);
+    for (let attempt = 0; attempt < 100 && !existsSync(readyFile); attempt++) await Bun.sleep(10);
+    expect(existsSync(readyFile)).toBe(true);
     child.kill("SIGTERM");
     const [exitCode, stdout, stderr] = await Promise.all([
       child.exited,

@@ -68,10 +68,10 @@ export interface ConfigureOptions {
 }
 
 const aggressiveModeHint =
-  "Proactive complexity-aware delegation is active. Follow $fourth-wall whenever orchestration would materially improve speed or quality.";
+  "Proactive role-directed delegation is active. Follow $fourth-wall whenever orchestration would materially improve speed or quality.";
 const rootHint = "Fourth Wall applies. Read and follow $fourth-wall before this task's first orchestration action.";
 const subagentHint =
-  "Fourth Wall applies. Read and follow $fourth-wall; your native agent role defines your duty and durable capability.";
+  "Fourth Wall applies. Follow $fourth-wall; stay within your fixed native role and persistent ownership.";
 
 interface AgentManifest {
   version: 1;
@@ -179,7 +179,7 @@ export function desiredConfigEdits(
       { keyPath: "features.multi_agent_v2.enabled", value: true, mergeStrategy: "replace" },
       {
         keyPath: "features.multi_agent_v2.max_concurrent_threads_per_session",
-        value: 7,
+        value: 14,
         mergeStrategy: "replace",
       },
       {

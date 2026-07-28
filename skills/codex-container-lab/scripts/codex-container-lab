@@ -42,17 +42,21 @@ export async function runContainerLab(args = process.argv.slice(2)): Promise<num
     console.error("Skizzles Container Lab runtime is unavailable: a skill-only install contains guidance. Install the full Skizzles plugin or use a Skizzles checkout, or install a codex-container-lab PATH binary.");
     return 1;
   }
-  const child = Bun.spawn([...resolvedCommand, ...args], {
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
+  let child: Bun.Subprocess<"inherit", "inherit", "inherit"> | undefined;
+  let pendingSignal: "SIGINT" | "SIGTERM" | undefined;
   const forward = (signal: "SIGINT" | "SIGTERM") => {
-    if (child.exitCode === null) child.kill(signal);
+    pendingSignal = signal;
+    if (child?.exitCode === null) child.kill(signal);
   };
   process.on("SIGINT", forward);
   process.on("SIGTERM", forward);
   try {
+    child = Bun.spawn([...resolvedCommand, ...args], {
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    if (pendingSignal && child.exitCode === null) child.kill(pendingSignal);
     return await child.exited;
   } finally {
     process.removeListener("SIGINT", forward);

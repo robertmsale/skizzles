@@ -16,30 +16,29 @@ afterEach(async () => {
 });
 
 describe("capability-bearing agent role generation", () => {
-  test("renders the preferred routing pairs and gradual Worker ladder", async () => {
+  test("renders exactly the fixed role matrix without capability variants", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const files = await renderAgentRoles(repoRoot);
     const manifest = JSON.parse(files.get("manifest.json")!) as {
       routes: Record<string, string>;
-      agents: Array<{ agentType: string; behavior: string; capability: string }>;
+      agents: Array<{ agentType: string; behavior: string; model: string; reasoningEffort: string }>;
     };
 
-    expect(manifest.routes).toEqual({
-      mechanical: "luna_medium",
-      scoped: "luna_high",
-      broad: "terra_medium",
-      standard: "terra_medium",
-      complex: "sol_medium",
-      specialized: "sol_high",
-      critical: "sol_xhigh",
-    });
-    expect(manifest.agents.filter(({ behavior }) => behavior === "worker").map(({ capability }) => capability)).toEqual([
-      "luna_medium", "luna_high", "luna_xhigh", "luna_max",
-      "terra_medium", "terra_high", "terra_xhigh", "terra_max",
-      "sol_medium", "sol_high", "sol_xhigh", "sol_max",
+    expect(manifest.routes).toEqual({});
+    expect(manifest.agents.map(({ agentType, model, reasoningEffort }) => ({ agentType, model, reasoningEffort }))).toEqual([
+      { agentType: "default", model: "gpt-5.6-luna", reasoningEffort: "high" },
+      { agentType: "triage", model: "gpt-5.6-terra", reasoningEffort: "medium" },
+      { agentType: "worker", model: "gpt-5.6-luna", reasoningEffort: "xhigh" },
+      { agentType: "designer", model: "gpt-5.6-sol", reasoningEffort: "medium" },
+      { agentType: "qa", model: "gpt-5.6-terra", reasoningEffort: "medium" },
+      { agentType: "review", model: "gpt-5.6-sol", reasoningEffort: "high" },
+      { agentType: "deployment", model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
     ]);
-    expect(files.get("worker.toml")).toContain('model = "gpt-5.6-luna"\nmodel_reasoning_effort = "high"');
-    expect(files.get("review_sol_xhigh.toml")).toContain('model = "gpt-5.6-sol"\nmodel_reasoning_effort = "xhigh"');
+    expect([...files.keys()].sort()).toEqual([
+      "default.toml", "deployment.toml", "designer.toml", "manifest.json",
+      "qa.toml", "review.toml", "triage.toml", "worker.toml",
+    ]);
+    expect(files.get("worker.toml")).toContain('model = "gpt-5.6-luna"\nmodel_reasoning_effort = "xhigh"');
   });
 
   test("build and check reject generated drift", async () => {

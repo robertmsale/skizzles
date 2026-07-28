@@ -90,7 +90,7 @@ function writeInstructionFixture(sourceRoot: string): void {
   const agents = [
     { agentType: "default", description: "Fixture default", configFile: "default.toml" },
     { agentType: "worker", description: "Fixture worker", configFile: "worker.toml" },
-    { agentType: "worker_luna_xhigh", description: "Fixture upgraded worker", configFile: "worker_luna_xhigh.toml" },
+    { agentType: "triage", description: "Fixture triage", configFile: "triage.toml" },
   ];
   for (const agent of agents) writeFileSync(join(sourceRoot, "assets", "agents", agent.configFile), agent.agentType);
   writeFileSync(join(sourceRoot, "assets", "agents", "manifest.json"), JSON.stringify({ version: 1, agents }));
@@ -103,11 +103,11 @@ describe("Codex configuration lifecycle", () => {
     ]);
   });
 
-  test("Skizzles instructions configure capability-bearing generated roles", () => {
+  test("Skizzles instructions configure fixed capability-bearing generated roles", () => {
     const agents = {
-      default: { description: "Default Terra", configFile: "/skizzles/assets/agents/default.toml" },
-      worker: { description: "Worker Luna", configFile: "/skizzles/assets/agents/worker.toml" },
-      worker_luna_xhigh: { description: "Worker Luna xhigh", configFile: "/skizzles/assets/agents/worker_luna_xhigh.toml" },
+      default: { description: "Default Luna", configFile: "/skizzles/assets/agents/default.toml" },
+      worker: { description: "Worker Luna xhigh", configFile: "/skizzles/assets/agents/worker.toml" },
+      triage: { description: "Triage Terra", configFile: "/skizzles/assets/agents/triage.toml" },
     };
     const edits = desiredConfigEdits("passive", {
       sourceRoot: "/skizzles",
@@ -136,7 +136,9 @@ describe("Codex configuration lifecycle", () => {
     const manifest = JSON.parse(readFileSync(join(roleRoot, "manifest.json"), "utf8")) as {
       agents: Array<{ agentType: string; behavior: string; model: string; reasoningEffort: string; configFile: string }>;
     };
-    expect(manifest.agents.map(({ agentType }) => agentType)).toContain("worker_luna_xhigh");
+    expect(manifest.agents.map(({ agentType }) => agentType).sort()).toEqual([
+      "default", "deployment", "designer", "qa", "review", "triage", "worker",
+    ]);
     for (const agent of manifest.agents) {
       const contents = readFileSync(join(roleRoot, agent.configFile), "utf8");
       expect(contents).toContain('model_instructions_file = "../skizzles_subagent_instructions.md"');
@@ -164,6 +166,7 @@ describe("Codex configuration lifecycle", () => {
     const hints = edits.slice(3).map(({ value }) => value as string);
     expect(hints.every((hint) => hint.includes("$fourth-wall"))).toBe(true);
     expect(hints.every((hint) => hint.length < 180)).toBe(true);
+    expect(edits[2]?.value).toBe(14);
   });
 
   test("configures and restores only receipt-owned keys", async () => {

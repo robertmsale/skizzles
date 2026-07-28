@@ -7,7 +7,7 @@ Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks
 ## What’s inside
 
 - **Command-output management** — classifies useful build/test commands, keeps output bounded, and leaves a useful artifact when a command gets noisy.
-- **Fourth Wall orchestration** — Terra maps the terrain, Luna owns implementation-through-proof, and Sol supplies design taste plus adversarial judgment. Reusable owners keep their context through rework instead of rediscovering the codebase from scratch. 🗺️🎨🤌
+- **Fourth Wall orchestration** — Terra proves the terrain and records a shared execution map, parallel Luna owners implement and validate disjoint slices, and Sol supplies design taste plus adversarial judgment. Persistent teammates clarify and repair without rediscovering the campaign from scratch. 🗺️🌙🎨🤌
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
@@ -49,9 +49,9 @@ Container Lab is fully included in this repository—not merely documented here.
 After installing the complete plugin surface, Skizzles can safely finish the Codex-side handshake:
 
 - **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
-- **Aggressive orchestration** also enables MultiAgentV2, keeps seven task slots available, and adds tiny root/subagent pointers to `$fourth-wall` plus the proactive quality-and-speed trigger. 🚀
+- **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for bounded parallel teams, and adds tiny root/subagent pointers to `$fourth-wall` plus the proactive quality-and-speed trigger. 🚀
 - **Native instructions** (the default) leave Codex's model instructions untouched.
-- **Skizzles instructions** install a developer-facing root prompt plus generated capability-bearing native roles. Unsuffixed names provide the normal defaults (`worker` is Luna high, `triage` is Terra medium, and design/review/deployment are Sol high); advertised variants provide durable gradual escalation such as `worker_luna_xhigh`, `worker_terra_medium`, and `review_sol_xhigh`. Every role shares the smaller execution-oriented subagent base and adds only its specialized duty. Select the generated `agent_type` without separate model overrides, and use numbered or context-free forks so Codex applies it—a large number safely means “up to this many turns,” not full-history mode.
+- **Skizzles instructions** install a developer-facing root prompt plus seven fixed capability-bearing roles: Worker is Luna xhigh, Triage and QA are Terra medium, Default is Luna high, Designer is Sol medium, Review is Sol high, and Deployment is Sol xhigh. There are no implementation escalation variants: Terra supplies verified evidence and commands, multiple persistent Luna Workers own clear slices, and Sol judges the result. Select the generated `agent_type` without separate model overrides, and use numbered or context-free forks so Codex applies it—a large number safely means “up to this many turns,” not full-history mode.
 
 Preview the full developer setup from the checkout:
 
@@ -78,7 +78,7 @@ bun install --frozen-lockfile
 bun run verify
 ```
 
-Agent roles are generated too: edit `assets/agent-role-spec.json` for capability pairs or `assets/agent-role-templates/` for duties, then run `bun run agents:build`. The checked-in `assets/agents/` directory is derived output and `bun run agents:check` guards it from hand-edited goblin drift. 👹
+Agent roles are generated too: edit `assets/agent-role-spec.json` for the fixed capability pairs or `assets/agent-role-templates/` for duties, then run `bun run agents:build`. The checked-in `assets/agents/` directory is derived output and `bun run agents:check` guards it from hand-edited goblin drift. 👹
 
 Plugins and new tasks use cached, versioned content, so start a fresh task after an update. For ownership, release rules, and safety details, see [AGENTS.md](AGENTS.md).
 

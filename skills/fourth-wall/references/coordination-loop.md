@@ -4,7 +4,7 @@
 
 | Tool | Use | Important behavior |
 | --- | --- | --- |
-| `spawn_agent` | Create bounded work | Use `<role>__<objective>`, pass explicit model/effort plus the advertised matching `agent_type`, and choose the smallest useful `fork_turns` value. Below the root, only eligible Workers may dispatch one active bounded Worker. |
+| `spawn_agent` | Create bounded work | Root-only. Use `<role>__<objective>`, select the fixed native `agent_type`, omit model/effort overrides, and choose the smallest useful `fork_turns` value. |
 | `list_agents` | Inspect the live tree | Can filter by task-path prefix. Use before intervention or reassignment. |
 | `send_message` | Deliver context or a correction to running work | Queues the message and does not trigger a new turn. |
 | `followup_task` | Continue prior ownership | Reactivates an idle or completed child while preserving its task identity, model, reasoning effort, and accumulated context. |
@@ -16,14 +16,18 @@
 1. Inspect the task graph with `list_agents` only at meaningful coordination points.
 2. Compare active ownership and status with the overall outcome.
 3. Use `send_message` for information the target should receive without waking it.
-4. Use `followup_task` when completed work needs another concrete action from the same owner at its current capability. Spawn a fresh sibling when clean context, independence, changed ownership, or a recorded capability increase is required.
+4. Use `followup_task` when completed work needs another concrete action from the same owner. Spawn a fresh sibling only for changed ownership, poisoned context, a genuinely independent second opinion, or a materially new slice.
 5. Continue high-leverage root decisions and integration inspection instead of duplicating child work.
-6. Use `wait_agent` only when mailbox activity is the next useful synchronization point. Prefer one appropriately long bounded wait over repeated short waits, and do not poll merely to narrate progress.
+6. Use `wait_agent` only when mailbox activity is the next useful synchronization point. Its timeout is an upper bound: prefer one 5-15 minute event-driven wait matched to the expected horizon over repeated short waits, and do not poll merely to narrate progress.
 7. Verify returned evidence before accepting or routing the result.
 
 The child that owns a long-running command also owns its terminal polling and reports the useful outcome. The root should not mirror that polling or repeatedly request status from a task that is still within its expected runtime.
 
-A delegating Worker follows the same event-driven loop: continue independent implementation, do not poll the Luna Worker repeatedly, and do not edit its assigned surface. The Luna Worker should send an intermediate message only for a material blocker or ownership collision; normal progress arrives in its compact final report.
+Children are leaves. A Luna Worker should send an intermediate message only for a material blocker, ownership collision, or falsified assumption; normal progress arrives in its compact final report.
+
+## Triage And Worker Cooperation
+
+When Triage exists, the root gives affected Workers the accepted report path and canonical Triage task name. A running Worker uses `send_message` for a narrow clarification when Triage is active and `followup_task` to reactivate a completed Triage owner. Include the exact command, expected and observed result, attempts, evidence path, and one question. Triage updates the report when its assumptions change; the Worker retains implementation ownership. Material cross-slice changes also go to the root.
 
 ## Privileged Steps
 
@@ -56,9 +60,9 @@ The root retains Git mutations, resolves cross-owner decisions, inspects the ret
 1. Worker returns its completion claim and evidence.
 2. Root inspects the diff and selects the relevant proof obligations.
 3. Spawn a `review` task for adversarial correctness, architecture, security, risk, and quality judgment, or `qa` for runnable product proof. The reviewer assesses whether Worker evidence is sufficient and does not routinely repeat the same build, test, formatting, or static-analysis commands. Implementation-time QA proof complements rather than replaces a later independent product QA handoff.
-4. Classify a bounded finding as attributable rework, adjacent healing, or contract discovery. Reactivate the owning Worker so it retains its research and implementation context; with today's tools, one same-owner attributable repair precedes a capability-increased successor. Spawn a fresh Worker only when independence, changed ownership, context reset, or a recorded capability increase is required.
+4. Classify a bounded finding as attributable rework, adjacent healing, or contract discovery. Reactivate the owning Worker so it retains its research and implementation context. A contract-discovery finding returns to persistent Triage before the same Worker continues.
 5. Re-review the corrected state when the risk warrants it.
-6. The root integrates and decides completion; the reviewer does not silently broaden scope, repair the code, duplicate validation without cause, or relax the owner outcome.
+6. Reactivate the same Reviewer for re-review of the same slice. The root integrates and decides completion; the reviewer does not silently broaden scope, repair the code, duplicate validation without cause, or relax the owner outcome.
 
 ## Recovery Loop
 
