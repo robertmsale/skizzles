@@ -50,39 +50,78 @@ describe("deterministic plugin packaging", () => {
     });
   });
 
-  test("stages mandatory closeout, KPI, and consumer safety contracts", async () => {
+  test("stages active orchestration and installation contracts without learning artifacts", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
-    const root = await mkdtemp(join(tmpdir(), "skizzles-learning-contract-"));
+    const root = await mkdtemp(join(tmpdir(), "skizzles-orchestration-contract-"));
     temporaryRoots.push(root);
     const staged = join(root, "staged");
     await stagePlugin(repoRoot, staged);
 
-    const canonicalLearning = await readFile(
-      join(repoRoot, "skills/fourth-wall/references/learning-loop.md"),
-      "utf8",
-    );
-    const stagedLearning = await readFile(
-      join(staged, "skills/fourth-wall/references/learning-loop.md"),
-      "utf8",
-    );
-    expect(stagedLearning).toBe(canonicalLearning);
-    expect(stagedLearning).toContain("any terminal disposition");
-    expect(stagedLearning).toContain("accepted`, `rejected`, `blocked`, or `abandoned");
-    for (const field of [
-      "worker_shots",
-      "worker_to_triage_consultations",
-      "attributable_reviewer_product_blockers",
-      "triage_to_review_adjudications",
-    ]) {
-      expect(stagedLearning).toContain(`\`${field}\``);
-    }
-    expect(stagedLearning).toContain("never auto-promote or auto-mutate harness policy");
+    const canonicalFourthWall = await readFile(join(repoRoot, "skills/fourth-wall/SKILL.md"), "utf8");
+    const stagedFourthWall = await readFile(join(staged, "skills/fourth-wall/SKILL.md"), "utf8");
+    expect(stagedFourthWall).toBe(canonicalFourthWall);
+    expect(stagedFourthWall).toContain("$skizzles:fourth-wall");
+    expect(stagedFourthWall).toContain('never `"all"` when selecting a child role');
+    expect(stagedFourthWall).toContain("Reactivation does not prove that an evicted child's role");
+    expect(stagedFourthWall).toContain("| `worker` | `gpt-5.6-luna` | xhigh |");
+    expect(stagedFourthWall).toContain("| `review` | `gpt-5.6-sol` | high |");
+    expect(stagedFourthWall).toContain("There are no capability variants or model-escalation ladder");
+    expect(stagedFourthWall).toContain("Do not invent fallback role mappings, lower routing floors, or capability variants");
+    expect(stagedFourthWall).not.toContain("blob/main/docs/compatibility.md");
+    expect(await Bun.file(join(staged, "skills/fourth-wall/references/learning-loop.md")).exists()).toBe(false);
+    expect(await Bun.file(join(staged, "skills/fourth-wall/resources/learning-log.md")).exists()).toBe(false);
 
+    const canonicalInstaller = await readFile(join(repoRoot, "skills/install-skizzles/SKILL.md"), "utf8");
     const stagedInstaller = await readFile(join(staged, "skills/install-skizzles/SKILL.md"), "utf8");
-    expect(stagedInstaller).toContain("must not clone or modify a repository");
-    expect(stagedInstaller).toContain("edit `AGENTS.md`");
-    expect(stagedInstaller).toContain("create or message tasks");
-    expect(stagedInstaller).toContain("absent or ambiguous");
+    expect(stagedInstaller).toBe(canonicalInstaller);
+    expect(stagedInstaller).toContain("codex plugin marketplace add https://github.com/robertmsale/skizzles");
+    expect(stagedInstaller).toContain("codex plugin add skizzles@skizzles");
+    expect(stagedInstaller).toContain("Plugin and direct-skill copies are alternatives");
+    expect(stagedInstaller).toContain("CLI `0.145.0` is portable/partial");
+    expect(stagedInstaller).not.toContain("blob/main/docs/compatibility.md");
+    expect(stagedInstaller).not.toMatch(/reviewed local source|reviewed local marketplace|unpublished local fix/i);
+
+    const manifest = JSON.parse(await readFile(join(staged, ".codex-plugin/plugin.json"), "utf8")) as {
+      homepage: string;
+      repository: string;
+    };
+    expect(manifest.homepage).toBe("https://github.com/robertmsale/skizzles");
+    expect(manifest.repository).toBe("https://github.com/robertmsale/skizzles");
+
+    for (const path of [
+      "assets/skizzles_instructions.md",
+      "assets/skizzles_subagent_instructions.md",
+    ]) {
+      const contents = await readFile(join(staged, path), "utf8");
+      expect(contents).toContain("A short Python or other script is appropriate when safer or clearer");
+      expect(contents).toContain("do not script trivial changes");
+    }
+
+    for (const path of [
+      "assets/skizzles_instructions.md",
+      "assets/skizzles_subagent_instructions.md",
+      "skills/fourth-wall/references/coordination-loop.md",
+      "skills/fourth-wall/references/delegation-contract.md",
+      "skills/fourth-wall/references/handoff-packet.md",
+    ]) {
+      const contents = await readFile(join(staged, path), "utf8");
+      expect(contents).not.toMatch(/campaign-close|learning log|guarded adjudication|red-flag KPI/i);
+    }
+  });
+
+  test("records the supplied compatibility boundary without local-review prose", async () => {
+    const repoRoot = resolve(import.meta.dir, "../../..");
+    const compatibility = await readFile(join(repoRoot, "docs/compatibility.md"), "utf8");
+
+    expect(compatibility).toContain("CLI `0.145.0`: portable/partial");
+    expect(compatibility).toContain("CLI `>= 0.146.0-alpha.3`: full same-root core");
+    expect(compatibility).toContain("Supported when generated roles are configured");
+    expect(compatibility).toContain("Cross-root task operations");
+    expect(compatibility).toContain("Desktop-only extras when advertised");
+    expect(compatibility).toContain('`fork_turns="all"` bypasses selected-role configuration');
+    expect(compatibility).toContain("Eviction or reload ends the continuity guarantee");
+    expect(compatibility).toContain("plugin and a plain-skill copy are alternative installation surfaces");
+    expect(compatibility).not.toMatch(/reviewed local source|reviewed local marketplace|unpublished local fix/i);
   });
 
   test("stages only allowlisted canonical inputs deterministically", async () => {

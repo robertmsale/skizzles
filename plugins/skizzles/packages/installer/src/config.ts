@@ -68,10 +68,10 @@ export interface ConfigureOptions {
 }
 
 const aggressiveModeHint =
-  "Proactive role-directed delegation is active. Follow $fourth-wall whenever orchestration would materially improve speed or quality.";
-const rootHint = "Fourth Wall applies. Read and follow $fourth-wall before this task's first orchestration action.";
-const subagentHint =
-  "Fourth Wall applies. Follow $fourth-wall; stay within your fixed native role and persistent ownership.";
+  "Proactive delegation is active. Follow the Fourth Wall skill advertised in the active inventory when orchestration would improve speed or quality.";
+const rootHint =
+  "Fourth Wall applies. Read the Fourth Wall skill advertised in the active inventory before your first orchestration action.";
+const subagentHint = "Fourth Wall applies. Follow the Fourth Wall skill advertised in the active inventory for this assignment.";
 
 interface AgentManifest {
   version: 1;

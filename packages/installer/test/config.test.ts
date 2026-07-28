@@ -130,7 +130,7 @@ describe("Codex configuration lifecycle", () => {
     }]);
   });
 
-  test("generated roles bind durable capability while templates remain model agnostic", () => {
+  test("generated roles bind one capability while templates remain model agnostic", () => {
     const roleRoot = resolve(import.meta.dir, "../../../assets/agents");
     const templateRoot = resolve(import.meta.dir, "../../../assets/agent-role-templates");
     const manifest = JSON.parse(readFileSync(join(roleRoot, "manifest.json"), "utf8")) as {
@@ -153,7 +153,7 @@ describe("Codex configuration lifecycle", () => {
     }
   });
 
-  test("aggressive orchestration uses concise Fourth Wall hints", () => {
+  test("aggressive orchestration uses concise installation-neutral Fourth Wall hints", () => {
     const edits = desiredConfigEdits("aggressive");
     expect(edits.map(({ keyPath }) => keyPath)).toEqual([
       "features.hooks",
@@ -164,7 +164,10 @@ describe("Codex configuration lifecycle", () => {
       "features.multi_agent_v2.subagent_usage_hint_text",
     ]);
     const hints = edits.slice(3).map(({ value }) => value as string);
-    expect(hints.every((hint) => hint.includes("$fourth-wall"))).toBe(true);
+    expect(hints.every((hint) => hint.includes("Fourth Wall skill"))).toBe(true);
+    expect(hints.every((hint) => hint.includes("active inventory"))).toBe(true);
+    expect(hints.every((hint) => !hint.includes("$skizzles:fourth-wall"))).toBe(true);
+    expect(hints.every((hint) => !hint.includes("$fourth-wall"))).toBe(true);
     expect(hints.every((hint) => hint.length < 180)).toBe(true);
     expect(edits[2]?.value).toBe(14);
   });

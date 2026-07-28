@@ -7,11 +7,11 @@ Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks
 ## What’s inside
 
 - **Command-output management** — classifies useful build/test commands, keeps output bounded, and leaves a useful artifact when a command gets noisy.
-- **Fourth Wall orchestration** — Terra proves the terrain and records a shared execution map, parallel Luna owners implement and validate disjoint slices, and Sol supplies design taste plus adversarial judgment. Persistent teammates clarify and repair without rediscovering the campaign from scratch. 🗺️🌙🎨🤌
+- **Fourth Wall orchestration** — Terra proves the terrain, parallel Luna owners implement and validate disjoint slices, and Sol supplies design taste plus adversarial judgment. 🗺️🌙🎨🤌
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
-- **Durable role brains** — an opt-in developer-focused root prompt keeps the conversation delightful, while generated Triage/Worker/Designer/QA/Review/Deployment roles bind each duty to a model/reasoning pair that survives eviction and rework. Luna can keep painting instead of waking up convinced it is Sol. 🧠✨
+- **Configured role brains** — an opt-in developer-focused root prompt keeps the conversation delightful, while generated Triage/Worker/Designer/QA/Review/Deployment roles bind each duty to a model/reasoning pair while the child remains resident. 🧠✨
 - **A practical skill shelf** — auth semantics, Cargo optimization, completion contracts, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
 - **A polite config handshake** — enable the hooks, then choose passive native orchestration or the full proactive Fourth Wall experience without trampling the rest of `config.toml`. 🤝
@@ -22,24 +22,26 @@ Everything is maintained once in the canonical roots and workspace packages, the
 
 ### Stable plugin
 
-**WIP:** Use the official Codex marketplace/plugin flow to install a released `skizzles` plugin. It packages the skills, hooks, runtime helpers, branding, and runnable Container Lab CLI/reaper together.
+**WIP:** Use the official Codex marketplace/plugin flow to install a released `skizzles` plugin. It packages the skills, hooks, runtime helpers, branding, and runnable Container Lab CLI/reaper together. Plugin skills are namespaced.
 
 ### Individual skills
 
 Install just the skills you want with the Skills CLI:
 
 ```sh
-bunx skills add https://github.com/robertsale/skizzles --skill install-skizzles
+bunx skills add https://github.com/robertmsale/skizzles --skill install-skizzles
 ```
 
 Add `--skill <name>` for another public skill, or omit it to choose interactively. Skill-only installs do not activate Skizzles hooks or runtime helpers; [install-skizzles](skills/install-skizzles/SKILL.md) explains the optional next steps.
+
+The plugin and a direct copy are alternative installation surfaces for the same skill. Remove an existing direct Skizzles skill before installing or enabling the plugin, and do not directly install a skill already supplied by the enabled plugin.
 
 ### Source-linked development
 
 For maintainer work, use a local checkout and point the Skills CLI at its canonical `skills/` directory:
 
 ```sh
-git clone https://github.com/robertsale/skizzles.git
+git clone https://github.com/robertmsale/skizzles.git
 cd skizzles
 bunx skills add ./skills --skill install-skizzles
 ```
@@ -49,9 +51,9 @@ Container Lab is fully included in this repository—not merely documented here.
 After installing the complete plugin surface, Skizzles can safely finish the Codex-side handshake:
 
 - **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
-- **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for bounded parallel teams, and adds tiny root/subagent pointers to `$fourth-wall` plus the proactive quality-and-speed trigger. 🚀
+- **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for bounded parallel teams, and adds identifier-neutral pointers to the Fourth Wall skill advertised in the active inventory. 🚀
 - **Native instructions** (the default) leave Codex's model instructions untouched.
-- **Skizzles instructions** install a developer-facing root prompt plus seven fixed capability-bearing roles: Worker is Luna xhigh, Triage and QA are Terra medium, Default is Luna high, Designer is Sol medium, Review is Sol high, and Deployment is Sol xhigh. There are no implementation escalation variants: Terra supplies verified evidence and commands, multiple persistent Luna Workers own clear slices, and Sol judges the result. Select the generated `agent_type` without separate model overrides, and use numbered or context-free forks so Codex applies it—a large number safely means “up to this many turns,” not full-history mode.
+- **Skizzles instructions** install a developer-facing root prompt plus seven fixed capability-bearing roles: Worker is Luna xhigh, Triage and QA are Terra medium, Default is Luna high, Designer is Sol medium, Review is Sol high, and Deployment is Sol xhigh. There are no implementation escalation variants: Terra supplies verified evidence and commands, Luna Workers own clear slices, and Sol judges the result. Select the generated `agent_type` without separate model overrides, and use numbered or context-free forks so Codex applies it. `fork_turns="all"` bypasses selected-role application. Eviction or reload ends the continuity guarantee.
 
 Preview the full developer setup from the checkout:
 
@@ -66,6 +68,8 @@ bun run packages/installer/src/cli.ts configure \
 ```
 
 Review the reported keys, then repeat without `--dry-run`. The lifecycle uses Codex’s own atomic config editor, preserves comments and unrelated settings, and records only the keys it owns for drift-safe restoration. It never edits `AGENTS.md`, approvals, permissions, goals, model defaults, or MCP registrations. Prompt replacement happens only with the explicit `--instructions skizzles` option. See [install-skizzles](skills/install-skizzles/SKILL.md) for restoration and the complete contract.
+
+See [Codex compatibility](docs/compatibility.md) for the supplied CLI/Desktop matrix, active-inventory boundary, configured-role condition, and non-Desktop fallback.
 
 The optional Luna V2 overlay lives in `runtime/model-catalog.ts`. It regenerates a complete static catalog from the newest valid normal cache or the installed Codex binary, changes only Luna's compatibility marker, and becomes a no-op when upstream enables V2 officially. Its launchd template watches both sources and runs every five minutes; catalog changes take effect after the next app-server restart. See `assets/model-catalog-installation.md` before activating it. 🚀
 

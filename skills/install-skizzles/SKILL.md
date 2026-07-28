@@ -10,7 +10,7 @@ Keep installation deliberate and reversible. Never mutate a live Codex home, plu
 ## Choose the installation
 
 - Use plain-skill mode when the user only wants skills. It manages selected directories below an explicit `CODEX_HOME/skills` and never activates hooks or runtime helpers.
-- Use full-harness mode only when the user wants the generated Skizzles plugin and accepts that its hooks may become available through the target marketplace.
+- Use the official plugin flow when the user wants the complete Skizzles surface and accepts that its hooks may become available through the target marketplace.
 - After the complete plugin surface is installed, choose `passive` orchestration to enable hooks without overriding Codex's native MultiAgentV2 defaults, or `aggressive` orchestration to activate proactive Fourth Wall routing.
 - Use `link` for a trusted local checkout that should hot-reload source updates. Use `copy` for an isolated snapshot.
 - Prefer a versioned release checkout for stable use. Treat `plugins/skizzles` as generated output and build it before a full-harness install.
@@ -19,7 +19,21 @@ Confirm the source checkout, absolute target `HOME`, absolute target `CODEX_HOME
 
 The complete plugin bundles the installer at `packages/installer/`; run the commands below from the plugin root or a selected source checkout. If this skill was installed by itself with the Skills CLI, do not assume that package exists beside it. Ask the user to select a Skizzles release or commit, obtain and verify that versioned checkout, then run the installer from its root.
 
-## Run the lifecycle
+## Install the plugin
+
+Plugin and direct-skill copies are alternatives for the same skill. Before installing or enabling the plugin, inspect the active skill inventory and remove any direct Skizzles copy through the tool that installed it. Conversely, do not directly install a skill already supplied by the enabled plugin.
+
+Use the official Codex plugin lifecycle for normal installation:
+
+```sh
+codex plugin marketplace add https://github.com/robertmsale/skizzles
+codex plugin add skizzles@skizzles
+codex plugin list
+```
+
+Plugin skills are namespaced, such as `$skizzles:fourth-wall`; direct skills use plain identifiers, such as `$fourth-wall`. Codex installs a cached snapshot, so start a new task after installation or update. Use the official plugin and marketplace removal commands for normal installed plugins.
+
+## Run the source-development lifecycle
 
 From the selected Skizzles checkout, preview first:
 
@@ -47,7 +61,7 @@ bun run packages/installer/src/cli.ts uninstall --surface skills --codex-home /a
 bun run packages/installer/src/cli.ts uninstall --surface harness --home /absolute/target/home --dry-run
 ```
 
-The custom harness surface is for isolated development and test fixtures. Install, update, or uninstall a stable versioned plugin through the official Codex plugin/marketplace flow instead; plugin installs are cached snapshots and a new task may be required. The installer fails closed on foreign targets. Skills receipts live below `CODEX_HOME/.skizzles/`; harness receipts live below `HOME/.skizzles/`. Uninstall verifies receipt-listed links or copied content and restores the exact marketplace state it owned. Do not bypass conflicts by deleting or overwriting paths for the user.
+The custom harness surface is for isolated development and test fixtures, not a second stable plugin installer. Install, update, or uninstall a stable versioned plugin through the official Codex plugin/marketplace flow instead. The installer fails closed on foreign targets. Skills receipts live below `CODEX_HOME/.skizzles/`; harness receipts live below `HOME/.skizzles/`. Uninstall verifies receipt-listed links or copied content and restores the exact marketplace state it owned. Do not bypass conflicts by deleting or overwriting paths for the user.
 
 ## Complete the Codex configuration
 
@@ -56,14 +70,18 @@ Only run this lifecycle after the complete plugin surface—and therefore its pa
 Ask the user to choose an orchestration mode:
 
 - `passive` writes only `features.hooks = true`. It does not write any MultiAgentV2 setting or hint, so Codex retains its model-specific native defaults.
-- `aggressive` also enables MultiAgentV2, sets `max_concurrent_threads_per_session = 14`, adds one concise proactive mode hint, and gives roots and subagents short pointers to `$fourth-wall`. Fourteen is a ceiling for bounded parallel ownership, not a target. Use this only when the user wants autonomous quality-and-speed delegation.
+- `aggressive` also enables MultiAgentV2, sets `max_concurrent_threads_per_session = 14`, and adds concise pointers to the Fourth Wall skill advertised in the active inventory. Fourteen is a ceiling for bounded parallel ownership, not a target. Use this only when the user wants autonomous quality-and-speed delegation.
 
 Also ask whether Codex should keep its native model instructions or use the Skizzles split:
 
 - `native` is the default and does not write instruction or agent-role config.
-- `skizzles` writes the canonical root prompt to `model_instructions_file` and configures the seven fixed native roles advertised by `assets/agents/manifest.json`. Generated role files combine one behavioral duty with one durable model/reasoning pair, share `skizzles_subagent_instructions.md`, and add duty-specific `developer_instructions`. This mode requires an absolute `--source-root` whose assets remain available after installation.
+- `skizzles` writes the canonical root prompt to `model_instructions_file` and configures the seven fixed native roles advertised by `assets/agents/manifest.json`. Generated role files combine one behavioral duty with one selected model/reasoning pair, share `skizzles_subagent_instructions.md`, and add duty-specific `developer_instructions`. This mode requires an absolute `--source-root` whose assets remain available after installation; plugin presence alone does not configure the roles.
 
 With the Skizzles split, select the generated `agent_type`, omit independent model/reasoning overrides, and use `fork_turns="none"` or a positive integer. A positive integer larger than the available history retains all available turns without becoming full-history mode. Do not use `fork_turns="all"`: full-history spawning inherits the parent role and deliberately bypasses selected-role application.
+
+Role/model/reasoning continuity is guaranteed only while the selected child remains resident. Eviction or reload ends that guarantee, and reactivation alone does not prove the prior settings survived. When continuity matters, create a fresh sibling with explicit role selection and a compact handoff.
+
+Compatibility: CLI `0.145.0` is portable/partial; CLI `>=0.146.0-alpha.3` provides the full configured-role same-root core; Desktop extras remain inventory-scoped and cross-root operations are available only when advertised.
 
 Preview against an explicit `CODEX_HOME` and absolute Codex binary:
 
@@ -90,16 +108,6 @@ Repeat restoration without `--dry-run` only after previewing it. The lifecycle l
 Configuration upgrades are an explicit restore-and-reapply lifecycle because `configure` refuses to overwrite an active receipt. Preview `unconfigure` with the absolute Codex binary recorded in the receipt, run it only when the owned values are drift-free, preview the new `configure`, then apply it. Do not delete or rewrite the receipt by hand; that discards the exact restoration boundary Skizzles uses to preserve unrelated config.
 
 Maintainers edit `assets/agent-role-spec.json` for model/reasoning pairs and `assets/agent-role-templates/*.toml` for behavioral duties. Run `bun run agents:build` to regenerate `assets/agents/`, and `bun run agents:check` to detect drift. Never hand-edit generated role TOML or its manifest.
-
-## Optionally configure a learning consumer
-
-Fourth Wall emits a bounded campaign-close learning packet under `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md`. This is evidence, not an automatic harness change. If the user explicitly wants harness learning forwarded, guide them to:
-
-1. Choose an existing local project whose owner can evaluate orchestration behavior. A versioned checkout of the official OpenAI Codex repository is a useful recommendation when the consumer must inspect harness implementation, but it is never a prerequisite.
-2. Choose a stable consumer naming or epoch convention and record the routing in machine-local instructions (for example, `AGENTS.md`) by an explicit user action.
-3. Forward only the bounded packet or its path after the user confirms the unique consumer and destination.
-
-The installer must not clone or modify a repository, edit `AGENTS.md`, create or message tasks, or guess when a consumer is absent or ambiguous. Report the packet to the human owner instead. Consumer review may propose changes, but promotion into Skizzles skills, roles, routing, hooks, configuration, or installs always requires separate owner deliberation.
 
 ## Use Container Lab deliberately
 
