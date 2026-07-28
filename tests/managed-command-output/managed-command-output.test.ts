@@ -206,6 +206,8 @@ describe("managed command output hook", () => {
       "env A= /tmp/plugin/skills/codex-container-lab/scripts/codex-container-lab run --lab experiment -- bun run test",
       "codex-container-lab run --lab experiment -- cargo test -- --nocapture",
       "codex-container-lab run --lab experiment -- cargo test --package \"api tests\"",
+      "codex-container-lab run --lab experiment -- rustup run \"nightly\" cargo test",
+      "codex-container-lab run --lab experiment -- xcodebuild -scheme \"App Tests\" test",
     ]) {
       const result = invokeHook(command);
       expect(text(result.stdout), command).not.toBe("");
@@ -296,6 +298,26 @@ describe("managed command output hook", () => {
       "xcodebuild -scheme App archive",
       "xcodebuild -exportArchive -archivePath App.xcarchive",
       "xcodebuild -scheme App install",
+    ]) {
+      const result = invokeHook(command);
+      expect(text(result.stdout), command).toBe("");
+    }
+  });
+
+  test("requires literal launcher and action tokens for direct and attached commands", () => {
+    for (const command of [
+      "\"rustup\" run nightly cargo test",
+      "rustup \"run\" nightly cargo test",
+      "\"fvm\" flutter test",
+      "\"xcrun\" --sdk iphonesimulator xcodebuild test",
+      "swift \"test\" --parallel",
+      "xcodebuild -scheme App \"test\"",
+      "codex-container-lab run --lab experiment -- \"rustup\" run nightly cargo test",
+      "codex-container-lab run --lab experiment -- rustup \"run\" nightly cargo test",
+      "codex-container-lab run --lab experiment -- \"fvm\" flutter test",
+      "codex-container-lab run --lab experiment -- \"xcrun\" --sdk iphonesimulator xcodebuild test",
+      "codex-container-lab run --lab experiment -- swift \"test\" --parallel",
+      "codex-container-lab run --lab experiment -- xcodebuild -scheme App \"test\"",
     ]) {
       const result = invokeHook(command);
       expect(text(result.stdout), command).toBe("");

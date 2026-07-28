@@ -71,6 +71,14 @@ describe("deterministic plugin packaging", () => {
     expect(await Bun.file(join(staged, "skills/fourth-wall/references/learning-loop.md")).exists()).toBe(false);
     expect(await Bun.file(join(staged, "skills/fourth-wall/resources/learning-log.md")).exists()).toBe(false);
 
+    const delegationPath = "skills/fourth-wall/references/delegation-contract.md";
+    const canonicalDelegation = await readFile(join(repoRoot, delegationPath), "utf8");
+    const stagedDelegation = await readFile(join(staged, delegationPath), "utf8");
+    expect(stagedDelegation).toBe(canonicalDelegation);
+    expect(stagedDelegation).toContain("do not invent model or effort substitutes for those roles");
+    expect(stagedDelegation).toContain("report the missing configured-role surface");
+    expect(stagedDelegation).not.toContain("use only explicit model and effort values offered by the active spawn tool");
+
     const canonicalInstaller = await readFile(join(repoRoot, "skills/install-skizzles/SKILL.md"), "utf8");
     const stagedInstaller = await readFile(join(staged, "skills/install-skizzles/SKILL.md"), "utf8");
     expect(stagedInstaller).toBe(canonicalInstaller);

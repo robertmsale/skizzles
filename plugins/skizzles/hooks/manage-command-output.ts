@@ -170,14 +170,14 @@ function isKnownManagedCommand(command: SimpleCommand): boolean {
   }
   if (program === "cargo") {
     const actionIndex = subcommand?.startsWith("+") ? 2 : 1;
-    if ((actionIndex === 2 && !isCertain(1)) || !isCertain(actionIndex)) return false;
+    if (!isCertain(actionIndex)) return false;
     const action = words[actionIndex];
     return action === "nextest"
       ? words[actionIndex + 1] === "run" && isCertain(actionIndex + 1)
       : ["build", "b", "check", "c", "test", "t", "clippy", "bench", "doc", "llvm-cov"].includes(action!);
   }
-  if (program === "xcodebuild") return isXcodeBuildOrTest(words);
-  if (program === "swift") return ["build", "test"].includes(subcommand!);
+  if (program === "xcodebuild") return isXcodeBuildOrTest(command);
+  if (program === "swift") return isCertain(1) && ["build", "test"].includes(subcommand!);
   if (program === "gradle" || program === "gradlew") {
     return words.slice(1).some((word, index) => isCertain(index + 1) && isGradleBuildOrTestTask(word));
   }
@@ -275,8 +275,34 @@ const xcodeApprovalActions = new Set([
   "install",
 ]);
 
-function isXcodeBuildOrTest(words: string[]): boolean {
-  return !words.some((word) => xcodeApprovalActions.has(word.toLowerCase()));
+const xcodeActions = new Set([
+  "analyze",
+  "archive",
+  "build",
+  "build-for-testing",
+  "clean",
+  "install",
+  "test",
+  "test-without-building",
+]);
+
+const safeXcodeActions = new Set([
+  "analyze",
+  "build",
+  "build-for-testing",
+  "test",
+  "test-without-building",
+]);
+
+function isXcodeBuildOrTest(command: SimpleCommand): boolean {
+  for (const [index, word] of command.words.entries()) {
+    const normalized = word.toLowerCase();
+    if (xcodeApprovalActions.has(normalized)) return false;
+    if (xcodeActions.has(normalized) && (command.uncertain[index] || !safeXcodeActions.has(normalized))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function basename(program: string): string {
@@ -331,9 +357,16 @@ function normalizeCommand(command: SimpleCommand): SimpleCommand | undefined {
   }
 
   const launcher = basename(words[index] ?? "");
-  if (launcher === "fvm") index += 1;
-  else if (launcher === "rustup" && words[index + 1] === "run" && words[index + 2]) index += 3;
+  if (launcher === "fvm") {
+    if (!isCertain(index)) return undefined;
+    index += 1;
+  }
+  else if (launcher === "rustup" && words[index + 1] === "run" && words[index + 2]) {
+    if (!isCertain(index) || !isCertain(index + 1)) return undefined;
+    index += 3;
+  }
   else if (launcher === "xcrun") {
+    if (!isCertain(index)) return undefined;
     index += 1;
     while (index < words.length) {
       const option = words[index]!;
