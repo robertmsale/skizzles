@@ -21,10 +21,12 @@ describe("capability-bearing agent role generation", () => {
     const files = await renderAgentRoles(repoRoot);
     const manifest = JSON.parse(files.get("manifest.json")!) as {
       routes: Record<string, string>;
+      nativeRoleAliases: Record<string, string>;
       agents: Array<{ agentType: string; behavior: string; model: string; reasoningEffort: string }>;
     };
 
     expect(manifest.routes).toEqual({});
+    expect(manifest.nativeRoleAliases).toEqual({ explorer: "triage" });
     expect(manifest.agents.map(({ agentType, model, reasoningEffort }) => ({ agentType, model, reasoningEffort }))).toEqual([
       { agentType: "default", model: "gpt-5.6-luna", reasoningEffort: "high" },
       { agentType: "triage", model: "gpt-5.6-terra", reasoningEffort: "medium" },
@@ -39,6 +41,32 @@ describe("capability-bearing agent role generation", () => {
       "qa.toml", "review.toml", "triage.toml", "worker.toml",
     ]);
     expect(files.get("worker.toml")).toContain('model = "gpt-5.6-luna"\nmodel_reasoning_effort = "xhigh"');
+  });
+
+  test("rejects native aliases that target an unknown generated role", async () => {
+    const sourceRoot = resolve(import.meta.dir, "../../..");
+    const root = await mkdtemp(join(tmpdir(), "skizzles-agent-roles-"));
+    roots.push(root);
+    await mkdir(join(root, "assets"), { recursive: true });
+    const spec = JSON.parse(await Bun.file(join(sourceRoot, "assets", "agent-role-spec.json")).text());
+    spec.nativeRoleAliases.explorer = "missing";
+    await writeFile(join(root, "assets", "agent-role-spec.json"), `${JSON.stringify(spec)}\n`);
+    await cp(join(sourceRoot, "assets", "agent-role-templates"), join(root, "assets", "agent-role-templates"), { recursive: true });
+
+    expect(renderAgentRoles(root)).rejects.toThrow("targets unknown generated agent type missing");
+  });
+
+  test("rejects native aliases that collide with generated roles", async () => {
+    const sourceRoot = resolve(import.meta.dir, "../../..");
+    const root = await mkdtemp(join(tmpdir(), "skizzles-agent-roles-"));
+    roots.push(root);
+    await mkdir(join(root, "assets"), { recursive: true });
+    const spec = JSON.parse(await Bun.file(join(sourceRoot, "assets", "agent-role-spec.json")).text());
+    spec.nativeRoleAliases.triage = "triage";
+    await writeFile(join(root, "assets", "agent-role-spec.json"), `${JSON.stringify(spec)}\n`);
+    await cp(join(sourceRoot, "assets", "agent-role-templates"), join(root, "assets", "agent-role-templates"), { recursive: true });
+
+    expect(renderAgentRoles(root)).rejects.toThrow("collides with generated agent type");
   });
 
   test("renders peer coordination, assurance, and guarded learning behavior", async () => {

@@ -75,6 +75,7 @@ const subagentHint =
 
 interface AgentManifest {
   version: 1;
+  nativeRoleAliases: Record<string, string>;
   agents: Array<{
     agentType: string;
     description: string;
@@ -112,7 +113,12 @@ function resolveInstructionAssets(sourceRootInput: string): InstructionAssets {
     if (!existsSync(path)) throw new Error(`Skizzles ${label} asset is missing: ${path}`);
   }
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as AgentManifest;
-  if (manifest.version !== 1 || !Array.isArray(manifest.agents) || manifest.agents.length === 0) {
+  if (
+    manifest.version !== 1 ||
+    !Array.isArray(manifest.agents) ||
+    manifest.agents.length === 0 ||
+    !isRecord(manifest.nativeRoleAliases)
+  ) {
     throw new Error(`Skizzles agent manifest is invalid: ${manifestPath}`);
   }
   const agents: InstructionAssets["agents"] = {};
@@ -121,7 +127,7 @@ function resolveInstructionAssets(sourceRootInput: string): InstructionAssets {
       !/^[a-z][a-z0-9_]*$/.test(agent.agentType) ||
       !agent.description?.trim() ||
       !/^[a-z][a-z0-9_]*\.toml$/.test(agent.configFile) ||
-      agents[agent.agentType]
+      Object.hasOwn(agents, agent.agentType)
     ) {
       throw new Error(`Skizzles agent manifest contains an invalid entry: ${manifestPath}`);
     }
@@ -129,7 +135,25 @@ function resolveInstructionAssets(sourceRootInput: string): InstructionAssets {
     if (!existsSync(configFile)) throw new Error(`Skizzles agents.${agent.agentType} asset is missing: ${configFile}`);
     agents[agent.agentType] = { description: agent.description, configFile };
   }
+  const generatedAgentTypes = new Set(Object.keys(agents));
+  for (const [alias, target] of Object.entries(manifest.nativeRoleAliases)) {
+    if (!/^[a-z][a-z0-9_]*$/.test(alias) || !/^[a-z][a-z0-9_]*$/.test(target)) {
+      throw new Error(`Skizzles agent manifest contains an invalid native role alias ${alias}: ${manifestPath}`);
+    }
+    if (generatedAgentTypes.has(alias)) {
+      throw new Error(`Skizzles agent manifest contains an invalid native role alias ${alias}; it collides with generated agent type: ${manifestPath}`);
+    }
+    if (!generatedAgentTypes.has(target)) {
+      throw new Error(`Skizzles agent manifest contains an invalid native role alias ${alias}; it targets unknown generated agent type ${target}: ${manifestPath}`);
+    }
+    const targetAgent = agents[target]!;
+    agents[alias] = { description: targetAgent.description, configFile: targetAgent.configFile };
+  }
   return { sourceRoot, rootInstructions, subagentInstructions, agents };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export function desiredConfigEdits(

@@ -1,6 +1,9 @@
 {
   "version": 1,
   "routes": {},
+  "nativeRoleAliases": {
+    "explorer": "triage"
+  },
   "agents": [
     {
       "agentType": "default",

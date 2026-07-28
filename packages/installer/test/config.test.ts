@@ -82,7 +82,7 @@ function factory(rpc: FakeRpc) {
   return async () => rpc;
 }
 
-function writeInstructionFixture(sourceRoot: string): void {
+function writeInstructionFixture(sourceRoot: string, nativeRoleAliases: Record<string, string> = { explorer: "triage" }): void {
   mkdirSync(join(sourceRoot, "assets", "agents"), { recursive: true });
   for (const file of ["skizzles_instructions.md", "skizzles_subagent_instructions.md"]) {
     writeFileSync(join(sourceRoot, "assets", file), file);
@@ -93,7 +93,7 @@ function writeInstructionFixture(sourceRoot: string): void {
     { agentType: "triage", description: "Fixture triage", configFile: "triage.toml" },
   ];
   for (const agent of agents) writeFileSync(join(sourceRoot, "assets", "agents", agent.configFile), agent.agentType);
-  writeFileSync(join(sourceRoot, "assets", "agents", "manifest.json"), JSON.stringify({ version: 1, agents }));
+  writeFileSync(join(sourceRoot, "assets", "agents", "manifest.json"), JSON.stringify({ version: 1, nativeRoleAliases, agents }));
 }
 
 describe("Codex configuration lifecycle", () => {
@@ -210,7 +210,10 @@ describe("Codex configuration lifecycle", () => {
   test("configures and restores Skizzles instruction paths without disturbing sibling agent config", async () => {
     const f = fixture({
       model_instructions_file: "/personal/root.md",
-      agents: { default: { description: "Personal default", config_file: "/personal/agent.toml", nickname_candidates: ["Ada"] } },
+      agents: {
+        default: { description: "Personal default", config_file: "/personal/agent.toml", nickname_candidates: ["Ada"] },
+        explorer: { description: "Personal explorer", config_file: "/personal/explorer.toml", nickname_candidates: ["Grace"] },
+      },
     });
     const sourceRoot = join(f.codexHome, "skizzles");
     writeInstructionFixture(sourceRoot);
@@ -230,6 +233,12 @@ describe("Codex configuration lifecycle", () => {
           config_file: join(canonicalSourceRoot, "assets", "agents", "default.toml"),
           nickname_candidates: ["Ada"],
         },
+        triage: { description: "Fixture triage", config_file: join(canonicalSourceRoot, "assets", "agents", "triage.toml") },
+        explorer: {
+          description: "Fixture triage",
+          config_file: join(canonicalSourceRoot, "assets", "agents", "triage.toml"),
+          nickname_candidates: ["Grace"],
+        },
       },
     });
 
@@ -239,6 +248,7 @@ describe("Codex configuration lifecycle", () => {
       model_instructions_file: "/personal/root.md",
       agents: {
         default: { description: "Personal default", config_file: "/personal/agent.toml", nickname_candidates: ["Ada"] },
+        explorer: { description: "Personal explorer", config_file: "/personal/explorer.toml", nickname_candidates: ["Grace"] },
       },
       features: {},
     });
@@ -272,6 +282,38 @@ describe("Codex configuration lifecycle", () => {
       sourceRoot: join(f.codexHome, "missing-skizzles"),
       rpcFactory: factory(f.rpc),
     })).rejects.toThrow("Skizzles rootInstructions asset is missing");
+    expect(f.rpc.writes).toBe(0);
+    expect(existsSync(configReceiptPath(f.codexHome))).toBe(false);
+  });
+
+  test("fails closed when a native role alias targets a missing generated role", async () => {
+    const f = fixture({});
+    const sourceRoot = join(f.codexHome, "skizzles");
+    writeInstructionFixture(sourceRoot, { explorer: "missing" });
+
+    await expect(configureCodex({
+      ...f,
+      orchestration: "passive",
+      instructions: "skizzles",
+      sourceRoot,
+      rpcFactory: factory(f.rpc),
+    })).rejects.toThrow("invalid native role alias");
+    expect(f.rpc.writes).toBe(0);
+    expect(existsSync(configReceiptPath(f.codexHome))).toBe(false);
+  });
+
+  test("fails closed when a native role alias collides with a generated role", async () => {
+    const f = fixture({});
+    const sourceRoot = join(f.codexHome, "skizzles");
+    writeInstructionFixture(sourceRoot, { triage: "triage" });
+
+    await expect(configureCodex({
+      ...f,
+      orchestration: "passive",
+      instructions: "skizzles",
+      sourceRoot,
+      rpcFactory: factory(f.rpc),
+    })).rejects.toThrow("invalid native role alias");
     expect(f.rpc.writes).toBe(0);
     expect(existsSync(configReceiptPath(f.codexHome))).toBe(false);
   });

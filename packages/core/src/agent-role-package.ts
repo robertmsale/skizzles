@@ -20,6 +20,7 @@ interface AgentRoleSpec {
   version: 1;
   capabilities: Record<string, Capability>;
   routes: Record<string, string>;
+  nativeRoleAliases: Record<string, string>;
   roles: RoleSpec[];
 }
 
@@ -36,6 +37,7 @@ export interface GeneratedAgentDefinition {
 interface GeneratedAgentsManifest {
   version: 1;
   routes: Record<string, string>;
+  nativeRoleAliases: Record<string, string>;
   agents: GeneratedAgentDefinition[];
 }
 
@@ -51,7 +53,12 @@ export async function renderAgentRoles(repoRoot = defaultRepoRoot()): Promise<Ma
   const root = resolve(repoRoot);
   const spec = await readSpec(join(root, SPEC_PATH));
   const files = new Map<string, string>();
-  const manifest: GeneratedAgentsManifest = { version: 1, routes: spec.routes, agents: [] };
+  const manifest: GeneratedAgentsManifest = {
+    version: 1,
+    routes: spec.routes,
+    nativeRoleAliases: spec.nativeRoleAliases,
+    agents: [],
+  };
   const seenAgentTypes = new Set<string>();
 
   for (const role of spec.roles) {
@@ -101,6 +108,14 @@ export async function renderAgentRoles(repoRoot = defaultRepoRoot()): Promise<Ma
   for (const [route, capability] of Object.entries(spec.routes)) {
     if (!spec.capabilities[capability]) throw new AgentRolePackagingError(`Route ${route} uses unknown capability ${capability}`);
   }
+  for (const [alias, target] of Object.entries(spec.nativeRoleAliases)) {
+    if (seenAgentTypes.has(alias)) {
+      throw new AgentRolePackagingError(`Native role alias ${alias} collides with generated agent type`);
+    }
+    if (!seenAgentTypes.has(target)) {
+      throw new AgentRolePackagingError(`Native role alias ${alias} targets unknown generated agent type ${target}`);
+    }
+  }
   files.set("manifest.json", `${JSON.stringify(manifest, null, 2)}\n`);
   return files;
 }
@@ -137,7 +152,13 @@ export async function checkAgentRoles(repoRoot = defaultRepoRoot()): Promise<voi
 
 async function readSpec(path: string): Promise<AgentRoleSpec> {
   const spec = JSON.parse(await readFile(path, "utf8")) as AgentRoleSpec;
-  if (spec.version !== 1 || !spec.capabilities || !spec.routes || !Array.isArray(spec.roles)) {
+  if (
+    spec.version !== 1 ||
+    !isRecord(spec.capabilities) ||
+    !isRecord(spec.routes) ||
+    !isRecord(spec.nativeRoleAliases) ||
+    !Array.isArray(spec.roles)
+  ) {
     throw new AgentRolePackagingError(`Invalid agent role specification: ${path}`);
   }
   for (const [name, capability] of Object.entries(spec.capabilities)) {
@@ -149,6 +170,10 @@ async function readSpec(path: string): Promise<AgentRoleSpec> {
   for (const [route, capability] of Object.entries(spec.routes)) {
     assertIdentifier(route, `route ${route}`);
     assertIdentifier(capability, `route capability ${capability}`);
+  }
+  for (const [alias, target] of Object.entries(spec.nativeRoleAliases)) {
+    assertIdentifier(alias, `native role alias ${alias}`);
+    assertIdentifier(target, `native role alias target ${target}`);
   }
   const seenBehaviors = new Set<string>();
   for (const role of spec.roles) {
@@ -165,6 +190,10 @@ async function readSpec(path: string): Promise<AgentRoleSpec> {
     role.capabilities.forEach((capability) => assertIdentifier(capability, `role capability ${capability}`));
   }
   return spec;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function assertIdentifier(value: unknown, label: string): asserts value is string {
