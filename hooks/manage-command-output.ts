@@ -2,11 +2,13 @@
 
 /**
  * Routes only confidently-recognized, potentially noisy commands through the
- * command-output supervisor. This is intentionally a classifier, not a shell
- * parser or a security policy: uncertainty always means passthrough.
+ * command-output supervisor. The classifier handles a conservative shell
+ * subset and rewrites only after Codex explicitly bypasses native approvals.
+ * Uncertainty always means passthrough.
  */
 type HookEvent = {
   hook_event_name?: unknown;
+  permission_mode?: unknown;
   tool_name?: unknown;
   tool_input?: Record<string, unknown>;
 };
@@ -14,6 +16,7 @@ type HookEvent = {
 export {};
 
 const maximumScriptLength = 64 * 1024;
+const bypassPermissionsMode = "bypassPermissions";
 
 /**
  * Plugin hooks run with PLUGIN_ROOT set by Codex. Keeping the placeholder in
@@ -28,10 +31,12 @@ function commandFrom(input: Record<string, unknown> | undefined):
   | { key: "cmd" | "command"; value: string }
   | undefined {
   if (!input) return undefined;
-  for (const key of ["cmd", "command"] as const) {
-    const value = input[key];
-    if (typeof value === "string") return { key, value };
-  }
+  const hasCmd = Object.hasOwn(input, "cmd");
+  const hasCommand = Object.hasOwn(input, "command");
+  if (hasCmd === hasCommand) return undefined;
+  const key = hasCmd ? "cmd" : "command";
+  const value = input[key];
+  return typeof value === "string" ? { key, value } : undefined;
 }
 
 /**
@@ -142,11 +147,13 @@ function isRecognized(command: SimpleCommand | undefined): boolean {
   if (!command || command.words.length < 2) return false;
   const normalized = normalizeCommand(command);
   if (!normalized || normalized.words.length === 0) return false;
-  const { words, uncertain } = normalized;
+  return isContainerLabRun(normalized) || isKnownManagedCommand(normalized);
+}
 
+function isKnownManagedCommand(command: SimpleCommand): boolean {
+  const { words } = command;
   const [program, subcommand, third] = words;
 
-  if (isContainerLabRun(normalized)) return true;
   if (program === "bun") {
     return subcommand === "test" || (subcommand === "run" && third === "test");
   }
@@ -161,9 +168,9 @@ function isRecognized(command: SimpleCommand | undefined): boolean {
     const action = subcommand?.startsWith("+") ? third : subcommand;
     return action === "nextest"
       ? words[words.indexOf(action) + 1] === "run"
-      : ["build", "b", "check", "c", "test", "t", "clippy", "bench", "doc", "install", "llvm-cov"].includes(action!);
+      : ["build", "b", "check", "c", "test", "t", "clippy", "bench", "doc", "llvm-cov"].includes(action!);
   }
-  if (program === "xcodebuild") return true;
+  if (program === "xcodebuild") return isXcodeBuildOrTest(words);
   if (program === "swift") return ["build", "test"].includes(subcommand!);
   if (program === "gradle" || program === "gradlew") {
     return words.slice(1).some(isGradleBuildOrTestTask);
@@ -176,6 +183,13 @@ const containerLabGlobalOptions = new Set([
   "--state-root",
   "--runtime-root",
 ]);
+const containerLabRunOptions = new Set([
+  "--lab",
+  "--cwd",
+  "--env",
+  "--timeout-seconds",
+]);
+const repeatableContainerLabRunOptions = new Set(["--env"]);
 
 /**
  * Container Lab accepts a small set of global options before its command.
@@ -193,7 +207,72 @@ function isContainerLabRun(command: SimpleCommand): boolean {
     if (uncertain[index] || words[index + 1] === undefined || words[index + 1]!.startsWith("--") || uncertain[index + 1]) return false;
     index += 2;
   }
-  return words[index] === "run" && !uncertain[index];
+  if (words[index] !== "run" || uncertain[index]) return false;
+
+  const separator = words.indexOf("--", index + 1);
+  if (
+    separator < 0
+    || separator !== words.lastIndexOf("--")
+    || uncertain[separator]
+    || separator === words.length - 1
+  ) {
+    return false;
+  }
+
+  const seenOptions = new Set<string>();
+  for (let optionIndex = index + 1; optionIndex < separator; optionIndex += 2) {
+    const option = words[optionIndex]!;
+    const value = words[optionIndex + 1];
+    if (
+      !containerLabRunOptions.has(option)
+      || uncertain[optionIndex]
+      || value === undefined
+      || optionIndex + 1 >= separator
+      || value.startsWith("--")
+      || uncertain[optionIndex + 1]
+      || (seenOptions.has(option) && !repeatableContainerLabRunOptions.has(option))
+      || !isValidContainerLabRunOption(option, value)
+    ) {
+      return false;
+    }
+    seenOptions.add(option);
+  }
+  if (!seenOptions.has("--lab")) return false;
+
+  const innerCommand = {
+    words: words.slice(separator + 1),
+    uncertain: uncertain.slice(separator + 1),
+  };
+  if (innerCommand.uncertain.some(Boolean)) return false;
+  const normalizedInner = normalizeCommand(innerCommand);
+  return normalizedInner !== undefined && isKnownManagedCommand(normalizedInner);
+}
+
+function isValidContainerLabRunOption(option: string, value: string): boolean {
+  if (option === "--cwd") {
+    return value.length > 0
+      && !value.startsWith("/")
+      && !value.includes("\\")
+      && !/^[A-Za-z]:/.test(value)
+      && !value.split("/").includes("..");
+  }
+  if (option === "--env") return /^[A-Za-z_][A-Za-z0-9_]*=/.test(value);
+  if (option === "--timeout-seconds") {
+    return /^[0-9]+$/.test(value) && Number(value) <= 7_200;
+  }
+  return value.length > 0;
+}
+
+const xcodeApprovalActions = new Set([
+  "archive",
+  "-archivepath",
+  "-exportarchive",
+  "-exportpath",
+  "install",
+]);
+
+function isXcodeBuildOrTest(words: string[]): boolean {
+  return !words.some((word) => xcodeApprovalActions.has(word.toLowerCase()));
 }
 
 function basename(program: string): string {
@@ -308,13 +387,19 @@ try {
   process.exit(0);
 }
 
-if (event.hook_event_name !== "PreToolUse") process.exit(0);
+if (
+  event.hook_event_name !== "PreToolUse"
+  || event.permission_mode !== bypassPermissionsMode
+) {
+  process.exit(0);
+}
 const command = commandFrom(event.tool_input);
+const commands = command ? simpleCommands(command.value) : undefined;
 if (
   !command ||
   command.value.length === 0 ||
   command.value.length > maximumScriptLength ||
-  !simpleCommands(command.value)?.some(isRecognized)
+  !commands?.every(isRecognized)
 ) {
   process.exit(0);
 }

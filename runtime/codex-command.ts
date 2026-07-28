@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 type StreamName = "stdout" | "stderr";
+type SupervisedSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
+type ManagedChild = Bun.Subprocess<"inherit", "pipe", "pipe">;
 
 type RunStatus = {
   id: string;
@@ -29,11 +31,21 @@ const defaultMaximumDiskBytes = 256 * 1024 * 1024;
 const defaultHeartbeatMilliseconds = 30_000;
 const defaultDrainMilliseconds = 750;
 const defaultInlineBytes = 10 * 1024;
+const defaultSignalGraceMilliseconds = 750;
+const maximumSignalGraceMilliseconds = 60_000;
+const forcedExitWaitMilliseconds = 500;
+const captureCancellationMilliseconds = 25;
 const tailBytes = 1_200;
+const supervisedSignals: readonly SupervisedSignal[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+const signalExitCodes = new Map<SupervisedSignal, number>([
+  ["SIGHUP", 129],
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+]);
 
-function integerEnvironment(name: string, fallback: number, minimum: number): number {
+function integerEnvironment(name: string, fallback: number, minimum: number, maximum = Number.MAX_SAFE_INTEGER): number {
   const value = Number.parseInt(process.env[name] ?? "", 10);
-  return Number.isSafeInteger(value) && value >= minimum ? value : fallback;
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum ? value : fallback;
 }
 
 function runRoot(): string {
@@ -207,6 +219,127 @@ function printCaptured(label: string, content: string): void {
   if (!content.endsWith("\n")) process.stdout.write("\n");
 }
 
+function missingProcess(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ESRCH";
+}
+
+function signalProcessTree(child: ManagedChild, signal: SupervisedSignal | "SIGKILL"): void {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if (missingProcess(error)) return;
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The process may have exited between observation and delivery.
+  }
+}
+
+function processTreeExists(child: ManagedChild): boolean {
+  try {
+    process.kill(process.platform === "win32" ? child.pid : -child.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessTreeExit(child: ManagedChild, timeoutMilliseconds: number): Promise<boolean> {
+  const deadline = performance.now() + timeoutMilliseconds;
+  while (processTreeExists(child)) {
+    if (performance.now() >= deadline) return false;
+    await Bun.sleep(10);
+  }
+  return true;
+}
+
+async function terminateProcessTree(child: ManagedChild, signalGraceMilliseconds: number): Promise<void> {
+  if (!processTreeExists(child)) return;
+  signalProcessTree(child, "SIGTERM");
+  if (await waitForProcessTreeExit(child, signalGraceMilliseconds)) return;
+  signalProcessTree(child, "SIGKILL");
+  await waitForProcessTreeExit(child, forcedExitWaitMilliseconds);
+}
+
+function superviseSignals(child: ManagedChild, signalGraceMilliseconds: number) {
+  let receivedSignal: SupervisedSignal | undefined;
+  let signalAfterShellExit = false;
+  let shellExited = false;
+  let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+  let escalationComplete = false;
+  let resolveEscalation: () => void = () => {};
+  const escalation = new Promise<void>((resolve) => {
+    resolveEscalation = resolve;
+  });
+
+  const finishEscalation = () => {
+    if (escalationComplete) return;
+    escalationComplete = true;
+    if (escalationTimer) clearTimeout(escalationTimer);
+    escalationTimer = undefined;
+    resolveEscalation();
+  };
+  const forceExit = () => {
+    if (escalationComplete) return;
+    signalProcessTree(child, "SIGKILL");
+    finishEscalation();
+  };
+  const handlers = new Map<SupervisedSignal, () => void>();
+  for (const supervisedSignal of supervisedSignals) {
+    const handler = () => {
+      if (receivedSignal !== undefined) {
+        forceExit();
+        return;
+      }
+      receivedSignal = supervisedSignal;
+      signalAfterShellExit = shellExited;
+      signalProcessTree(child, supervisedSignal);
+      escalationTimer = setTimeout(forceExit, signalGraceMilliseconds);
+    };
+    handlers.set(supervisedSignal, handler);
+    process.on(supervisedSignal, handler);
+  }
+
+  return {
+    get receivedSignal() {
+      return receivedSignal;
+    },
+    markShellExited() {
+      shellExited = true;
+    },
+    async finish(shellExitCode: number): Promise<number> {
+      await Bun.sleep(0);
+      if (receivedSignal === undefined) {
+        await terminateProcessTree(child, signalGraceMilliseconds);
+      } else {
+        if (processTreeExists(child)) {
+          const exitedBeforeEscalation = await Promise.race([
+            waitForProcessTreeExit(child, signalGraceMilliseconds + 25),
+            escalation.then(() => false),
+          ]);
+          if (exitedBeforeEscalation) finishEscalation();
+          else await escalation;
+        } else {
+          finishEscalation();
+        }
+        await waitForProcessTreeExit(child, forcedExitWaitMilliseconds);
+      }
+      const exitCode = receivedSignal !== undefined && signalAfterShellExit
+        ? (signalExitCodes.get(receivedSignal) ?? shellExitCode)
+        : shellExitCode;
+      return exitCode;
+    },
+    close() {
+      finishEscalation();
+      for (const [supervisedSignal, handler] of handlers) process.off(supervisedSignal, handler);
+    },
+  };
+}
+
 async function run(script: string): Promise<number> {
   const root = runRoot();
   const id = runId();
@@ -214,6 +347,12 @@ async function run(script: string): Promise<number> {
   const heartbeatMilliseconds = integerEnvironment("CODEX_COMMAND_HEARTBEAT_MS", defaultHeartbeatMilliseconds, 25);
   const drainMilliseconds = integerEnvironment("CODEX_COMMAND_DRAIN_MS", defaultDrainMilliseconds, 0);
   const inlineBytes = integerEnvironment("CODEX_COMMAND_INLINE_BYTES", defaultInlineBytes, 0);
+  const signalGraceMilliseconds = integerEnvironment(
+    "CODEX_COMMAND_SIGNAL_GRACE_MS",
+    defaultSignalGraceMilliseconds,
+    0,
+    maximumSignalGraceMilliseconds,
+  );
   let directory: string | undefined;
   let stdoutFile: number | undefined;
   let stderrFile: number | undefined;
@@ -256,7 +395,7 @@ async function run(script: string): Promise<number> {
   console.log(`[codex-command] artifact: ${visiblePath}`);
   console.log("| seconds | out | err |");
 
-  let child: Bun.Subprocess<"inherit", "pipe", "pipe">;
+  let child: ManagedChild;
   const processStartedAt = performance.now();
   try {
     child = Bun.spawn([shell, "-c", script], {
@@ -265,6 +404,7 @@ async function run(script: string): Promise<number> {
       stdin: "inherit",
       stdout: "pipe",
       stderr: "pipe",
+      detached: process.platform !== "win32",
     });
   } catch (error) {
     status.completedAt = new Date().toISOString();
@@ -276,16 +416,7 @@ async function run(script: string): Promise<number> {
     return 127;
   }
 
-  let signal: "SIGINT" | "SIGTERM" | "SIGHUP" | undefined;
-  const forwardSignal = (received: typeof signal) => {
-    signal = received;
-    try {
-      child.kill(received);
-    } catch {}
-  };
-  process.on("SIGINT", () => forwardSignal("SIGINT"));
-  process.on("SIGTERM", () => forwardSignal("SIGTERM"));
-  process.on("SIGHUP", () => forwardSignal("SIGHUP"));
+  const signals = superviseSignals(child, signalGraceMilliseconds);
 
   const shouldForward = !artifactsAvailable || Boolean(process.stdout.isTTY || process.stderr.isTTY);
   const stdoutState = { observedBytes: 0, storedBytes: 0, truncated: false, finished: false };
@@ -316,18 +447,27 @@ async function run(script: string): Promise<number> {
   }, heartbeatMilliseconds);
   heartbeat.unref();
 
-  const exitCode = await child.exited;
+  const shellExitCode = await child.exited;
+  signals.markShellExited();
   await Promise.race([
     Promise.all([stdoutCapture.done, stderrCapture.done]),
     new Promise<void>((resolve) => setTimeout(resolve, drainMilliseconds)),
   ]);
-  status.drainIncomplete = !stdoutState.finished || !stderrState.finished;
-  if (status.drainIncomplete) {
+  const drainedNaturally = stdoutState.finished && stderrState.finished;
+  const exitCode = await signals.finish(shellExitCode);
+  if (!stdoutState.finished || !stderrState.finished) {
+    await Promise.race([
+      Promise.all([stdoutCapture.done, stderrCapture.done]),
+      Bun.sleep(captureCancellationMilliseconds),
+    ]);
+  }
+  if (!stdoutState.finished || !stderrState.finished) {
     await Promise.all([stdoutCapture.cancel(), stderrCapture.cancel()]);
   }
+  status.drainIncomplete = !drainedNaturally;
   status.completedAt = new Date().toISOString();
   status.exitCode = exitCode;
-  status.signal = signal;
+  status.signal = signals.receivedSignal;
   status.stdoutObservedBytes = stdoutState.observedBytes;
   status.stderrObservedBytes = stderrState.observedBytes;
   status.stdoutStoredBytes = stdoutState.storedBytes;
@@ -335,6 +475,7 @@ async function run(script: string): Promise<number> {
   status.stdoutTruncated = stdoutState.truncated;
   status.stderrTruncated = stderrState.truncated;
   clearInterval(heartbeat);
+  signals.close();
   closeArtifact(stdoutFile);
   closeArtifact(stderrFile);
   if (statusPath) writeStatus(statusPath, status);
