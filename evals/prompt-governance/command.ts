@@ -20,7 +20,14 @@ export interface CodexCommandOptions {
 }
 
 export function buildCodexCommand(options: CodexCommandOptions): string[] {
-  const command = [
+  const command = canonicalCodexCommand(options);
+  assertSafeCodexCommand(command);
+  return command;
+}
+
+function canonicalCodexCommand(options: CodexCommandOptions): string[] {
+  const fixtureRoot = resolve(options.fixtureRoot);
+  return [
     options.codexBinary ?? "codex",
     "--ask-for-approval",
     "never",
@@ -37,7 +44,7 @@ export function buildCodexCommand(options: CodexCommandOptions): string[] {
     "-c",
     'model_reasoning_effort="high"',
     "-c",
-    `model_instructions_file="${resolve(options.instructionFile)}"`,
+    `model_instructions_file=${JSON.stringify(resolve(options.instructionFile))}`,
     "-c",
     "sandbox_workspace_write.network_access=false",
     "-c",
@@ -47,14 +54,14 @@ export function buildCodexCommand(options: CodexCommandOptions): string[] {
     "-c",
     'web_search="disabled"',
     "-c",
-    'shell_environment_policy.include_only=["PATH","HOME","TMPDIR"]',
+    `shell_environment_policy.set={HOME=${JSON.stringify(fixtureRoot)}}`,
+    "-c",
+    'shell_environment_policy.include_only=["PATH","TMPDIR"]',
     "--cd",
-    resolve(options.fixtureRoot),
+    fixtureRoot,
     "-o",
     resolve(options.finalMessagePath),
   ];
-  assertSafeCodexCommand(command);
-  return command;
 }
 
 export function assertSafeCodexCommand(command: readonly string[]): void {
@@ -73,14 +80,28 @@ export function assertSafeCodexCommand(command: readonly string[]): void {
   if (!command.includes("--sandbox") || command[command.indexOf("--sandbox") + 1] !== "workspace-write") {
     throw new Error("prompt evaluation requires workspace-write sandbox");
   }
-  for (const required of [
-    "sandbox_workspace_write.network_access=false",
-    "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-    "sandbox_workspace_write.exclude_slash_tmp=true",
-    'web_search="disabled"',
-    'shell_environment_policy.include_only=["PATH","HOME","TMPDIR"]',
-  ]) {
-    if (!command.includes(required)) throw new Error(`prompt evaluation requires ${required}`);
+  const fixtureRoot = valueAfter(command, "--cd");
+  const finalMessagePath = valueAfter(command, "-o");
+  const instructionOverride = command.find((argument) => argument.startsWith("model_instructions_file="));
+  const instructionFile = parseJsonString(instructionOverride?.slice("model_instructions_file=".length));
+  if (!fixtureRoot || !finalMessagePath || !instructionFile) throw new Error("prompt evaluation requires the canonical command layout");
+  const expected = canonicalCodexCommand({ fixtureRoot, instructionFile, finalMessagePath, ...(command[0] ? { codexBinary: command[0] } : {}) });
+  if (command.length !== expected.length || command.some((argument, index) => argument !== expected[index])) {
+    throw new Error("prompt evaluation requires the canonical command and config override list");
+  }
+}
+
+function valueAfter(command: readonly string[], flag: string): string | undefined {
+  const index = command.indexOf(flag);
+  return index >= 0 ? command[index + 1] : undefined;
+}
+
+function parseJsonString(value: string | undefined): string | undefined {
+  try {
+    const parsed = JSON.parse(value ?? "");
+    return typeof parsed === "string" && parsed.length > 0 ? parsed : undefined;
+  } catch {
+    return undefined;
   }
 }
 

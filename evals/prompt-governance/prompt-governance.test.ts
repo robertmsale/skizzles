@@ -28,7 +28,6 @@ async function tempRoot(prefix: string): Promise<string> {
   roots.push(root);
   return root;
 }
-
 test("materializes frozen overlays with full hashes and opaque paths", async () => {
   const root = await tempRoot("skizzles-prompt-eval-overlay-");
   const pair = await materializeInstructionOverlays(join(import.meta.dir, "../.."), root);
@@ -50,7 +49,6 @@ test("fixtures are fresh, resettable, and leave the product tree untouched", asy
   expect(await readFile(join(fixture.root, "src/counter.mjs"), "utf8")).toContain("return value;\n");
   expect(await readFile(join(import.meta.dir, "../../assets/skizzles_instructions.md"), "utf8")).toContain("You are Codex");
 });
-
 test("immutable baseline catches committed forbidden files and moved HEAD", async () => {
   const root = await tempRoot("skizzles-prompt-eval-immutable-");
   const fixture = await createFixture("bounded-fix", join(root, "fixture"));
@@ -78,14 +76,16 @@ test("Codex command pins the verified isolation profile and rejects bypass flags
     "sandbox_workspace_write.exclude_tmpdir_env_var=true",
     "sandbox_workspace_write.exclude_slash_tmp=true",
     'web_search="disabled"',
-    'shell_environment_policy.include_only=["PATH","HOME","TMPDIR"]',
+    'shell_environment_policy.set={HOME="/tmp/fixture"}',
+    'shell_environment_policy.include_only=["PATH","TMPDIR"]',
   ]) expect(command).toContain(config);
   expect(() => assertSafeCodexCommand(["codex", "exec", "--ask-for-approval", "never", ...command.slice(4)])).toThrow("top-level --ask-for-approval");
   expect(() => assertSafeCodexCommand([...command, "--dangerously-bypass-hook-trust"])).toThrow("dangerous Codex flag");
+  const setConfig = command.find((argument) => argument.startsWith("shell_environment_policy.set="))!; const withExtra = command.map((argument) => argument === setConfig ? `${setConfig.slice(0, -1)},CODEX_HOME=\"/ambient/auth\"}` : argument); const withWrongHome = command.map((argument) => argument === setConfig ? setConfig.replace("/tmp/fixture", "/tmp/wrong") : argument); const withWhitespaceExtra = [...command, 'shell_environment_policy.set = {HOME="/tmp/fixture",CODEX_HOME="/ambient/auth"}']; const withDottedExtra = [...command, 'shell_environment_policy.set.CODEX_HOME="/ambient/auth"']; const withQuotedExtra = [...command, '"shell_environment_policy"."set".CODEX_HOME="/ambient/auth"'];
+  expect(() => assertSafeCodexCommand(command.filter((argument) => argument !== setConfig))).toThrow("canonical"); expect(() => assertSafeCodexCommand(withExtra)).toThrow("canonical"); expect(() => assertSafeCodexCommand(withWrongHome)).toThrow("canonical"); expect(() => assertSafeCodexCommand(withWhitespaceExtra)).toThrow("canonical"); expect(() => assertSafeCodexCommand(withDottedExtra)).toThrow("canonical"); expect(() => assertSafeCodexCommand(withQuotedExtra)).toThrow("canonical");
   const home = await tempRoot("skizzles-prompt-eval-auth-home-"); await mkdir(join(home, ".codex"));
-  expect(buildEvaluationEnvironment({ CODEX_HOME: "/auth/codex", HOME: "/host", PATH: "/bin", TMPDIR: "/tmp" }, "/fixture/home")).toMatchObject({ CODEX_HOME: "/auth/codex", HOME: "/fixture/home" }); expect(buildEvaluationEnvironment({ HOME: home, PATH: "/bin", TMPDIR: "/tmp" }, "/fixture/home")).toMatchObject({ CODEX_HOME: join(home, ".codex"), HOME: "/fixture/home" }); expect(buildEvaluationEnvironment({ HOME: join(home, "missing"), PATH: "/bin", TMPDIR: "/tmp" }, "/fixture/home")).not.toHaveProperty("CODEX_HOME");
+  expect(buildEvaluationEnvironment({ CODEX_HOME: "/auth/codex", HOME: "/host", PATH: "/bin", TMPDIR: "/tmp" })).toMatchObject({ CODEX_HOME: "/auth/codex", HOME: "/host" }); expect(buildEvaluationEnvironment({ HOME: home, PATH: "/bin", TMPDIR: "/tmp" })).toMatchObject({ CODEX_HOME: join(home, ".codex"), HOME: home }); expect(buildEvaluationEnvironment({ HOME: join(home, "missing"), PATH: "/bin", TMPDIR: "/tmp" })).not.toHaveProperty("CODEX_HOME");
 });
-
 test("installed Codex accepts the approval policy only before exec", () => {
   const codex = Bun.which("codex");
   if (!codex) return;
