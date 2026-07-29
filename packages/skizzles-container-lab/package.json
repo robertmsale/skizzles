@@ -1,5 +1,5 @@
 {
-  "name": "codex-container-lab",
+  "name": "@skizzles/container-lab",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,14 +11,9 @@
     "start": "bun run src/cli.ts --help",
     "reaper": "bun run src/reaper-cli.ts --help",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
-    "test:safe": "bun test"
+    "test": "bun test"
   },
   "dependencies": {
     "yaml": "^2.8.0"
-  },
-  "devDependencies": {
-    "@types/bun": "^1.2.0",
-    "typescript": "^5.8.0"
   }
 }

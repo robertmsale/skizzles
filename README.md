@@ -58,7 +58,7 @@ After installing the complete plugin surface, Skizzles can safely finish the Cod
 Preview the full developer setup from the checkout:
 
 ```sh
-bun run packages/installer/src/cli.ts configure \
+bun run packages/skizzles-installer/src/cli.ts configure \
   --codex-home /absolute/target/codex-home \
   --codex-binary /absolute/path/to/codex \
   --orchestration aggressive \

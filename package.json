@@ -5,18 +5,17 @@
   "type": "module",
   "packageManager": "bun@1.3.14",
   "workspaces": [
-    "packages/*",
-    "packages/codex-container-lab/cli"
+    "packages/skizzles-*"
   ],
   "scripts": {
     "build": "bun run plugin:build",
-    "agents:build": "bun run packages/core/src/agent-role-package.ts build",
-    "agents:check": "bun run packages/core/src/agent-role-package.ts check",
-    "plugin:build": "bun run agents:build && bun run packages/core/src/plugin-package.ts build",
-    "plugin:check": "bun run agents:check && bun run packages/core/src/plugin-package.ts check",
-    "typecheck": "bunx tsc --noEmit && bun run --cwd packages/codex-container-lab/cli typecheck",
+    "agents:build": "bun run packages/skizzles-plugin/src/agent-role-package.ts build",
+    "agents:check": "bun run packages/skizzles-plugin/src/agent-role-package.ts check",
+    "plugin:build": "bun run agents:build && bun run packages/skizzles-plugin/src/plugin-package.ts build",
+    "plugin:check": "bun run agents:check && bun run packages/skizzles-plugin/src/plugin-package.ts check",
+    "typecheck": "bunx tsc --noEmit && bun run --cwd packages/skizzles-container-lab typecheck",
     "test": "bun test",
-    "test:packaging": "bun test packages/core/test/plugin-package.test.ts",
+    "test:packaging": "bun test packages/skizzles-plugin/test/plugin-package.test.ts",
     "verify": "bun run typecheck && bun run plugin:check && bun test"
   },
   "devDependencies": {

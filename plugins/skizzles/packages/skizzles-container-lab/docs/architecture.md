@@ -1,6 +1,6 @@
 # Architecture
 
-Container Lab is canonical Skizzles source at `packages/codex-container-lab/cli`. The root Skizzles workspace and `bun.lock` own its dependency graph. Stable plugins stage dependency-self-contained Bun bundles at `packages/codex-container-lab/cli/src/{cli,reaper-cli}.ts`; the public skill launcher resolves those same relative paths before any PATH activation.
+Container Lab is canonical Skizzles source at `packages/skizzles-container-lab`. The root Skizzles workspace and `bun.lock` own its dependency graph. Stable plugins stage dependency-self-contained Bun bundles at `packages/skizzles-container-lab/src/{cli,reaper-cli}.ts`; the public skill launcher resolves those same relative paths before any PATH activation.
 
 Codex Container Lab consists of two Skizzles-bundled Bun entrypoints and no MCP server. The PATH binaries are optional explicit host conveniences:
 

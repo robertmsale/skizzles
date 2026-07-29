@@ -2,7 +2,7 @@
 
 Codex Container Lab is Skizzles' canonical Bun/TypeScript package for disposable Docker Compose development environments. Each Codex thread owns isolated Git workspace clones, guarded synchronization, and exact-label cleanup. There is no MCP execution server or secondary command scheduler.
 
-The root `bun.lock` is authoritative for `cli/`; do not create a nested lockfile. Stable Skizzles plugins carry dependency-self-contained CLI and reaper bundles, and the public skill launcher works before PATH wiring exists.
+The root `bun.lock` is authoritative for this package; do not create a nested lockfile. Stable Skizzles plugins carry dependency-self-contained CLI and reaper bundles, and the public skill launcher works before PATH wiring exists.
 
 Project topology belongs to the consuming repository. A committed `.codex-container-lab.yaml` selects existing Compose files and a command service, or uses Dockerfile/image shorthand normalized into the same one-service Compose lifecycle. The engine adds only the isolated workspace mount, exact ownership labels, init behavior, and declared random loopback ports.
 

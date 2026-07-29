@@ -64,10 +64,10 @@ describe("Container Lab doctor", () => {
     const sourceRoot = resolve(import.meta.dir, "../../..");
     const paths = bundledContainerLabPaths(sourceRoot);
     expect(paths).toMatchObject({
-      operational: join(sourceRoot, "packages/codex-container-lab/cli/src/cli.ts"),
-      reaper: join(sourceRoot, "packages/codex-container-lab/cli/src/reaper-cli.ts"),
+      operational: join(sourceRoot, "packages/skizzles-container-lab/src/cli.ts"),
+      reaper: join(sourceRoot, "packages/skizzles-container-lab/src/reaper-cli.ts"),
       launcher: join(sourceRoot, "skills/codex-container-lab/scripts/codex-container-lab"),
-      launchAgentTemplate: join(sourceRoot, "packages/codex-container-lab/cli/install/com.openai.codex-container-lab-reaper.plist"),
+      launchAgentTemplate: join(sourceRoot, "packages/skizzles-container-lab/install/com.openai.codex-container-lab-reaper.plist"),
     });
     expect(doctorBundledContainerLab(sourceRoot)).toMatchObject({
       installed: true,

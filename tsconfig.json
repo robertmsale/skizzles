@@ -17,7 +17,7 @@
     ]
   },
   "include": [
-    "packages/core/**/*.ts",
-    "packages/installer/**/*.ts"
+    "packages/skizzles-plugin/**/*.ts",
+    "packages/skizzles-installer/**/*.ts"
   ]
 }

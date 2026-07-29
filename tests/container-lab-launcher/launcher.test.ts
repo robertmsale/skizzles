@@ -90,7 +90,7 @@ describe("Container Lab bundled launcher", () => {
 function fixtureTarget(body: string): string {
   const root = temporaryRoot();
   const launcher = join(root, "skills/codex-container-lab/scripts/codex-container-lab");
-  const target = join(root, "packages/codex-container-lab/cli/src/cli.ts");
+  const target = join(root, "packages/skizzles-container-lab/src/cli.ts");
   mkdirSync(dirname(launcher), { recursive: true });
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(launcher, readFileSync(canonicalLauncher));

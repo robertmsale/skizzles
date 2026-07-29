@@ -15,20 +15,20 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PLUGIN_NAME = "skizzles";
-const TEMPLATE_PATH = "packages/core/plugin-template";
+const TEMPLATE_PATH = "packages/skizzles-plugin/plugin-template";
 const GENERATED_PATH = `plugins/${PLUGIN_NAME}`;
 const MARKETPLACE_PATH = ".agents/plugins/marketplace.json";
-const CONTAINER_LAB_SOURCE_PATH = "packages/codex-container-lab";
+const CONTAINER_LAB_SOURCE_PATH = "packages/skizzles-container-lab";
 const CONTAINER_LAB_PROVENANCE = "a2f44416ef467d9f54b3cb228e3bd050987a3c4c";
 
 const CONTAINER_LAB_ENTRYPOINTS = [
-  "cli/src/cli.ts",
-  "cli/src/reaper-cli.ts",
+  "src/cli.ts",
+  "src/reaper-cli.ts",
 ] as const;
 
 const CONTAINER_LAB_STATIC_INPUTS = [
   "LICENSE",
-  "cli/install/com.openai.codex-container-lab-reaper.plist",
+  "install/com.openai.codex-container-lab-reaper.plist",
   "docs/architecture.md",
   "docs/completion-contract.md",
   "docs/installation.md",
@@ -116,9 +116,9 @@ export async function stagePlugin(repoRoot: string, destination: string): Promis
 
   for (const path of INSTALLER_INPUTS) {
     await copyCanonicalFile(
-      join(paths.repoRoot, "packages/installer", path),
-      join(destination, "packages/installer", path),
-      `packages/installer/${path}`,
+      join(paths.repoRoot, "packages/skizzles-installer", path),
+      join(destination, "packages/skizzles-installer", path),
+      `packages/skizzles-installer/${path}`,
     );
   }
 
@@ -230,7 +230,7 @@ async function validateGeneratedPlugin(
 async function stageContainerLabRuntime(repoRoot: string, pluginRoot: string): Promise<void> {
   const sourceRoot = join(repoRoot, CONTAINER_LAB_SOURCE_PATH);
   const destinationRoot = join(pluginRoot, CONTAINER_LAB_SOURCE_PATH);
-  const bundleRoot = join(destinationRoot, "cli", "src");
+  const bundleRoot = join(destinationRoot, "src");
   await mkdir(bundleRoot, { recursive: true });
 
   for (const path of CONTAINER_LAB_ENTRYPOINTS) {
@@ -292,7 +292,7 @@ async function validateContainerLabRuntime(pluginRoot: string): Promise<void> {
 async function validateContainerLabDescriptor(repoRoot: string, pluginRoot: string): Promise<void> {
   const descriptor = await readJsonObject(join(repoRoot, "integrations/container-lab.json"), "Container Lab descriptor");
   const packageMetadata = await readJsonObject(
-    join(repoRoot, CONTAINER_LAB_SOURCE_PATH, "cli/package.json"),
+    join(repoRoot, CONTAINER_LAB_SOURCE_PATH, "package.json"),
     "Container Lab package metadata",
   );
   const bundled = descriptor.bundled;
@@ -301,10 +301,10 @@ async function validateContainerLabDescriptor(repoRoot: string, pluginRoot: stri
     .filter((path) => path.startsWith("docs/"))
     .map((path) => `${CONTAINER_LAB_SOURCE_PATH}/${path}`);
   const expected = {
-    operationalEntrypoint: `${CONTAINER_LAB_SOURCE_PATH}/cli/src/cli.ts`,
-    reaperEntrypoint: `${CONTAINER_LAB_SOURCE_PATH}/cli/src/reaper-cli.ts`,
+    operationalEntrypoint: `${CONTAINER_LAB_SOURCE_PATH}/src/cli.ts`,
+    reaperEntrypoint: `${CONTAINER_LAB_SOURCE_PATH}/src/reaper-cli.ts`,
     launcher: CONTAINER_LAB_LAUNCHER,
-    launchAgentTemplate: `${CONTAINER_LAB_SOURCE_PATH}/cli/install/com.openai.codex-container-lab-reaper.plist`,
+    launchAgentTemplate: `${CONTAINER_LAB_SOURCE_PATH}/install/com.openai.codex-container-lab-reaper.plist`,
   };
 
   if (
@@ -591,7 +591,7 @@ async function main(): Promise<void> {
     console.log(`${GENERATED_PATH} matches canonical sources.`);
     return;
   }
-  throw new PackagingError("Usage: bun run packages/core/src/plugin-package.ts <build|check>");
+  throw new PackagingError("Usage: bun run packages/skizzles-plugin/src/plugin-package.ts <build|check>");
 }
 
 if (import.meta.main) {

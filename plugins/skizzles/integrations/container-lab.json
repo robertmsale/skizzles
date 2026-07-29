@@ -6,20 +6,20 @@
   "versionVerification": "contract-fingerprint-only",
   "ownership": {
     "runtimeOwner": "skizzles",
-    "canonicalSource": "packages/codex-container-lab",
+    "canonicalSource": "packages/skizzles-container-lab",
     "provenanceCommit": "a2f44416ef467d9f54b3cb228e3bd050987a3c4c"
   },
   "bundled": {
-    "operationalEntrypoint": "packages/codex-container-lab/cli/src/cli.ts",
-    "reaperEntrypoint": "packages/codex-container-lab/cli/src/reaper-cli.ts",
+    "operationalEntrypoint": "packages/skizzles-container-lab/src/cli.ts",
+    "reaperEntrypoint": "packages/skizzles-container-lab/src/reaper-cli.ts",
     "launcher": "skills/codex-container-lab/scripts/codex-container-lab",
-    "launchAgentTemplate": "packages/codex-container-lab/cli/install/com.openai.codex-container-lab-reaper.plist",
+    "launchAgentTemplate": "packages/skizzles-container-lab/install/com.openai.codex-container-lab-reaper.plist",
     "documentation": [
-      "packages/codex-container-lab/docs/architecture.md",
-      "packages/codex-container-lab/docs/completion-contract.md",
-      "packages/codex-container-lab/docs/installation.md",
-      "packages/codex-container-lab/docs/manifest.md",
-      "packages/codex-container-lab/docs/safety.md"
+      "packages/skizzles-container-lab/docs/architecture.md",
+      "packages/skizzles-container-lab/docs/completion-contract.md",
+      "packages/skizzles-container-lab/docs/installation.md",
+      "packages/skizzles-container-lab/docs/manifest.md",
+      "packages/skizzles-container-lab/docs/safety.md"
     ]
   },
   "binaries": {

@@ -20,10 +20,10 @@ describe("deterministic plugin packaging", () => {
   test("uses the root lockfile for the Container Lab workspace", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const rootPackage = await Bun.file(join(repoRoot, "package.json")).json() as { workspaces?: unknown };
-    expect(rootPackage.workspaces).toContain("packages/codex-container-lab/cli");
-    expect(await Bun.file(join(repoRoot, "packages/codex-container-lab/cli/bun.lock")).exists()).toBe(false);
+    expect(rootPackage.workspaces).toEqual(["packages/skizzles-*"]);
+    expect(await Bun.file(join(repoRoot, "packages/skizzles-container-lab/bun.lock")).exists()).toBe(false);
     expect(await readFile(join(repoRoot, "bun.lock"), "utf8")).toContain(
-      '"codex-container-lab@workspace:packages/codex-container-lab/cli"',
+      '"@skizzles/container-lab@workspace:packages/skizzles-container-lab"',
     );
   });
 
@@ -150,7 +150,7 @@ describe("deterministic plugin packaging", () => {
 
     expect(await compareTrees(first, second)).toEqual([]);
     expect(await readFile(join(first, "runtime/hook.ts"), "utf8")).toBe("console.log('hook');\n");
-    expect(await readFile(join(first, "packages/installer/src/cli.ts"), "utf8")).toContain("fixture cli");
+    expect(await readFile(join(first, "packages/skizzles-installer/src/cli.ts"), "utf8")).toContain("fixture cli");
     expect(await Bun.file(join(first, "README.md")).exists()).toBe(false);
   });
 
@@ -178,12 +178,12 @@ describe("deterministic plugin packaging", () => {
     await buildPlugin(root);
     await write(
       root,
-      "packages/codex-container-lab/cli/src/cli.ts",
+      "packages/skizzles-container-lab/src/cli.ts",
       "#!/usr/bin/env bun\nconsole.log(JSON.stringify({ help: 'changed' }));\n",
     );
 
     expect(checkPlugin(root)).rejects.toThrow(
-      "changed packages/codex-container-lab/cli/src/cli.ts",
+      "changed packages/skizzles-container-lab/src/cli.ts",
     );
   });
 
@@ -196,20 +196,20 @@ describe("deterministic plugin packaging", () => {
     await stagePlugin(repoRoot, stagedPlugin);
     await cp(stagedPlugin, isolatedPlugin, { recursive: true });
 
-    const runtimeRoot = join(isolatedPlugin, "packages/codex-container-lab");
+    const runtimeRoot = join(isolatedPlugin, "packages/skizzles-container-lab");
     expect(await filesUnder(runtimeRoot)).toEqual([
       "LICENSE",
-      "cli/install/com.openai.codex-container-lab-reaper.plist",
-      "cli/src/cli.ts",
-      "cli/src/reaper-cli.ts",
       "docs/architecture.md",
       "docs/completion-contract.md",
       "docs/installation.md",
       "docs/manifest.md",
       "docs/safety.md",
+      "install/com.openai.codex-container-lab-reaper.plist",
+      "src/cli.ts",
+      "src/reaper-cli.ts",
     ]);
 
-    for (const entrypoint of ["cli/src/cli.ts", "cli/src/reaper-cli.ts"]) {
+    for (const entrypoint of ["src/cli.ts", "src/reaper-cli.ts"]) {
       const path = join(runtimeRoot, entrypoint);
       expect((await stat(path)).mode & 0o111).not.toBe(0);
       const result = Bun.spawnSync(["bun", path, "--help"], {
@@ -245,7 +245,7 @@ describe("deterministic plugin packaging", () => {
     Bun.spawnSync(["git", "-C", source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]);
 
     const result = Bun.spawnSync([
-      "bun", join(plugin, "packages/codex-container-lab/cli/src/cli.ts"),
+      "bun", join(plugin, "packages/skizzles-container-lab/src/cli.ts"),
       "--owner", "bundle-yaml", "--state-root", stateRoot, "--runtime-root", runtimeRoot,
       "lab", "create", "--name", "yaml", "--source", source,
     ], { stdout: "pipe", stderr: "pipe", env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } });
@@ -342,7 +342,7 @@ describe("deterministic plugin packaging", () => {
 
   test("validates creator-required manifest metadata", async () => {
     const root = await fixture();
-    const manifestPath = join(root, "packages/core/plugin-template/.codex-plugin/plugin.json");
+    const manifestPath = join(root, "packages/skizzles-plugin/plugin-template/.codex-plugin/plugin.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     manifest.version = "not-semver";
     await writeFile(manifestPath, JSON.stringify(manifest));
@@ -378,7 +378,7 @@ async function fixture(): Promise<string> {
   await write(root, "skills/example/SKILL.md", "---\nname: example\ndescription: Fixture skill.\n---\n");
   await write(
     root,
-    "packages/core/plugin-template/.codex-plugin/plugin.json",
+    "packages/skizzles-plugin/plugin-template/.codex-plugin/plugin.json",
     JSON.stringify(
       {
         name: "skizzles",
@@ -421,28 +421,28 @@ async function fixture(): Promise<string> {
   );
   await write(
     root,
-    "packages/codex-container-lab/cli/src/cli.ts",
+    "packages/skizzles-container-lab/src/cli.ts",
     "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture cli' }));\n",
   );
   for (const path of ["config.ts", "core.ts", "doctor.ts", "harness.ts"]) {
-    await write(root, `packages/installer/src/${path}`, `export const fixture = "${path}";\n`);
+    await write(root, `packages/skizzles-installer/src/${path}`, `export const fixture = "${path}";\n`);
   }
-  await write(root, "packages/installer/src/cli.ts", "console.log('fixture cli');\n");
-  await write(root, "packages/installer/package.json", JSON.stringify({ name: "@skizzles/installer", version: "0.1.0" }));
+  await write(root, "packages/skizzles-installer/src/cli.ts", "console.log('fixture cli');\n");
+  await write(root, "packages/skizzles-installer/package.json", JSON.stringify({ name: "@skizzles/installer", version: "0.1.0" }));
   await write(
     root,
-    "packages/codex-container-lab/cli/src/reaper-cli.ts",
+    "packages/skizzles-container-lab/src/reaper-cli.ts",
     "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture reaper' }));\n",
   );
-  await write(root, "packages/codex-container-lab/cli/package.json", JSON.stringify({ name: "codex-container-lab", version: "0.1.0" }));
+  await write(root, "packages/skizzles-container-lab/package.json", JSON.stringify({ name: "@skizzles/container-lab", version: "0.1.0" }));
   await write(
     root,
-    "packages/codex-container-lab/cli/install/com.openai.codex-container-lab-reaper.plist",
+    "packages/skizzles-container-lab/install/com.openai.codex-container-lab-reaper.plist",
     "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>\n",
   );
-  await write(root, "packages/codex-container-lab/LICENSE", "fixture license\n");
+  await write(root, "packages/skizzles-container-lab/LICENSE", "fixture license\n");
   for (const document of ["architecture", "completion-contract", "installation", "manifest", "safety"]) {
-    await write(root, `packages/codex-container-lab/docs/${document}.md`, `# ${document}\n`);
+    await write(root, `packages/skizzles-container-lab/docs/${document}.md`, `# ${document}\n`);
   }
   await write(root, "skills/codex-container-lab/scripts/codex-container-lab", "#!/usr/bin/env bun\nconsole.log('fixture');\n");
   await chmod(join(root, "skills/codex-container-lab/scripts/codex-container-lab"), 0o755);
@@ -450,20 +450,20 @@ async function fixture(): Promise<string> {
     configuredRuntime: "0.1.0",
     ownership: {
       runtimeOwner: "skizzles",
-      canonicalSource: "packages/codex-container-lab",
+      canonicalSource: "packages/skizzles-container-lab",
       provenanceCommit: "a2f44416ef467d9f54b3cb228e3bd050987a3c4c",
     },
     bundled: {
-      operationalEntrypoint: "packages/codex-container-lab/cli/src/cli.ts",
-      reaperEntrypoint: "packages/codex-container-lab/cli/src/reaper-cli.ts",
+      operationalEntrypoint: "packages/skizzles-container-lab/src/cli.ts",
+      reaperEntrypoint: "packages/skizzles-container-lab/src/reaper-cli.ts",
       launcher: "skills/codex-container-lab/scripts/codex-container-lab",
-      launchAgentTemplate: "packages/codex-container-lab/cli/install/com.openai.codex-container-lab-reaper.plist",
+      launchAgentTemplate: "packages/skizzles-container-lab/install/com.openai.codex-container-lab-reaper.plist",
       documentation: [
-        "packages/codex-container-lab/docs/architecture.md",
-        "packages/codex-container-lab/docs/completion-contract.md",
-        "packages/codex-container-lab/docs/installation.md",
-        "packages/codex-container-lab/docs/manifest.md",
-        "packages/codex-container-lab/docs/safety.md",
+        "packages/skizzles-container-lab/docs/architecture.md",
+        "packages/skizzles-container-lab/docs/completion-contract.md",
+        "packages/skizzles-container-lab/docs/installation.md",
+        "packages/skizzles-container-lab/docs/manifest.md",
+        "packages/skizzles-container-lab/docs/safety.md",
       ],
     },
   }));

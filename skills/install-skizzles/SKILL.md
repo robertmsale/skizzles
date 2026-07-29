@@ -17,7 +17,7 @@ Keep installation deliberate and reversible. Never mutate a live Codex home, plu
 
 Confirm the source checkout, absolute target `HOME`, absolute target `CODEX_HOME`, surface, and transfer method before running a non-dry-run command. Use temporary targets for demonstrations and validation. The current skills surface installs every public skill as one owned set.
 
-The complete plugin bundles the installer at `packages/installer/`; run the commands below from the plugin root or a selected source checkout. If this skill was installed by itself with the Skills CLI, do not assume that package exists beside it. Ask the user to select a Skizzles release or commit, obtain and verify that versioned checkout, then run the installer from its root.
+The complete plugin bundles the installer at `packages/skizzles-installer/`; run the commands below from the plugin root or a selected source checkout. If this skill was installed by itself with the Skills CLI, do not assume that package exists beside it. Ask the user to select a Skizzles release or commit, obtain and verify that versioned checkout, then run the installer from its root.
 
 ## Install the plugin
 
@@ -38,7 +38,7 @@ Plugin skills are namespaced, such as `$skizzles:fourth-wall`; direct skills use
 From the selected Skizzles checkout, preview first:
 
 ```sh
-bun run packages/installer/src/cli.ts install \
+bun run packages/skizzles-installer/src/cli.ts install \
   --source-root /absolute/path/to/skizzles \
   --codex-home /absolute/target/codex-home \
   --surface skills --transfer link --dry-run
@@ -47,7 +47,7 @@ bun run packages/installer/src/cli.ts install \
 For an isolated source-linked development harness, build and check `plugins/skizzles` first, then preview the custom harness surface against an explicit disposable home:
 
 ```sh
-bun run packages/installer/src/cli.ts install \
+bun run packages/skizzles-installer/src/cli.ts install \
   --source-root /absolute/path/to/skizzles \
   --home /absolute/target/home \
   --surface harness --transfer link --dry-run
@@ -56,9 +56,9 @@ bun run packages/installer/src/cli.ts install \
 Run the preview again without `--dry-run` only after reviewing its exact targets. Diagnose or remove the receipt-owned install with the same explicit roots:
 
 ```sh
-bun run packages/installer/src/cli.ts doctor --home /absolute/target/home --codex-home /absolute/target/codex-home
-bun run packages/installer/src/cli.ts uninstall --surface skills --codex-home /absolute/target/codex-home --dry-run
-bun run packages/installer/src/cli.ts uninstall --surface harness --home /absolute/target/home --dry-run
+bun run packages/skizzles-installer/src/cli.ts doctor --home /absolute/target/home --codex-home /absolute/target/codex-home
+bun run packages/skizzles-installer/src/cli.ts uninstall --surface skills --codex-home /absolute/target/codex-home --dry-run
+bun run packages/skizzles-installer/src/cli.ts uninstall --surface harness --home /absolute/target/home --dry-run
 ```
 
 The custom harness surface is for isolated development and test fixtures, not a second stable plugin installer. Install, update, or uninstall a stable versioned plugin through the official Codex plugin/marketplace flow instead. The installer fails closed on foreign targets. Skills receipts live below `CODEX_HOME/.skizzles/`; harness receipts live below `HOME/.skizzles/`. Uninstall verifies receipt-listed links or copied content and restores the exact marketplace state it owned. Do not bypass conflicts by deleting or overwriting paths for the user.
@@ -86,7 +86,7 @@ Compatibility: CLI `0.145.0` is portable/partial; CLI `>=0.146.0-alpha.3` provid
 Preview against an explicit `CODEX_HOME` and absolute Codex binary:
 
 ```sh
-bun run packages/installer/src/cli.ts configure \
+bun run packages/skizzles-installer/src/cli.ts configure \
   --codex-home /absolute/target/codex-home \
   --codex-binary /absolute/path/to/codex \
   --orchestration aggressive \
@@ -98,7 +98,7 @@ bun run packages/installer/src/cli.ts configure \
 Review the reported key list, then repeat without `--dry-run`. Restore the exact prior values with:
 
 ```sh
-bun run packages/installer/src/cli.ts unconfigure \
+bun run packages/skizzles-installer/src/cli.ts unconfigure \
   --codex-home /absolute/target/codex-home \
   --codex-binary /absolute/path/to/codex --dry-run
 ```
@@ -115,7 +115,7 @@ A skill-only installation contains Container Lab guidance and its launcher, not 
 
 Use the `scripts/codex-container-lab` launcher beside the public `codex-container-lab` skill before relying on any `PATH` command. `doctorContainerLab` reports only the optional PATH convenience; bundled ownership paths and source provenance come from `integrations/container-lab.json`. Host PATH and LaunchAgent activation remain explicit, reversible wiring, not part of a skill-only or plugin install.
 
-Read the canonical [Container Lab installation and optional host-wiring guide](../../packages/codex-container-lab/docs/installation.md) from the selected checkout or plugin snapshot. Keep doctor health probes on disposable owner/state/runtime roots. Never wrap an attached `run`, invoke live reaping, edit `PATH`, or load launchd as part of a skill/plugin install; host wiring is separate, explicit, reversible, and machine-local.
+Read the canonical [Container Lab installation and optional host-wiring guide](../../packages/skizzles-container-lab/docs/installation.md) from the selected checkout or plugin snapshot. Keep doctor health probes on disposable owner/state/runtime roots. Never wrap an attached `run`, invoke live reaping, edit `PATH`, or load launchd as part of a skill/plugin install; host wiring is separate, explicit, reversible, and machine-local.
 
 An installed bundle with an unavailable Docker daemon is `installed-not-ready`, not proof that Container Lab is broken. The configured `0.1.0` compatibility is unverified until a release fingerprint is supplied.
 

@@ -3,7 +3,7 @@
 import { accessSync, constants, lstatSync, realpathSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 
-const entrypoint = resolve(import.meta.dir, "../../../packages/codex-container-lab/cli/src/cli.ts");
+const entrypoint = resolve(import.meta.dir, "../../../packages/skizzles-container-lab/src/cli.ts");
 const launcherPath = realpathSync(import.meta.path);
 
 /**

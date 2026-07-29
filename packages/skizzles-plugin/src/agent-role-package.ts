@@ -218,7 +218,7 @@ async function main(): Promise<void> {
   const command = process.argv[2];
   if (command === "build") await buildAgentRoles();
   else if (command === "check") await checkAgentRoles();
-  else throw new AgentRolePackagingError("usage: bun packages/core/src/agent-role-package.ts <build|check>");
+  else throw new AgentRolePackagingError("usage: bun packages/skizzles-plugin/src/agent-role-package.ts <build|check>");
 }
 
 if (import.meta.main) {
