@@ -69,7 +69,8 @@ export interface ConfigureOptions {
 
 const aggressiveModeHint =
   "Proactive role-directed delegation is active. Follow $fourth-wall whenever orchestration would materially improve speed or quality.";
-const rootHint = "Fourth Wall applies. Read and follow $fourth-wall before this task's first orchestration action.";
+const rootHint =
+  "Fourth Wall applies. Read and follow $fourth-wall before this task's first orchestration action. Before update_goal(blocked) or ending a substantial campaign, inspect acceptance evidence and active/pending owners. Failed local proof, unverified runtime, or plausible in-scope branch/base/config defect: continue, route repair, and get fresh proof. Blocked only for verified external dependency/permission, contradictory requirement, owner-only decision, or safety boundary.";
 const subagentHint =
   "Fourth Wall applies. Follow $fourth-wall; stay within your fixed native role and persistent ownership.";
 
