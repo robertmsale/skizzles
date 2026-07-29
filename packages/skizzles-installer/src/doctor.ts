@@ -2,9 +2,9 @@ import { accessSync, constants, existsSync, lstatSync, mkdtempSync, readFileSync
 import { delimiter, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { harnessReceiptPath } from "./harness";
-import { skillsReceiptPath } from "./core";
+import { skillsReceiptPath } from "./skills-installation";
 import { uninstallHarness } from "./harness";
-import { uninstallSkills } from "./core";
+import { uninstallSkills } from "./skills-installation";
 
 interface ContainerLabContract {
   configuredRuntime: string;

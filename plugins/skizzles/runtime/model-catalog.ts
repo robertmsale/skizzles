@@ -312,14 +312,16 @@ async function main(args: string[]): Promise<void> {
   if (command === "refresh" || command === "service") {
     const codexHome = required(args, "--codex-home");
     const status = value(args, "--status") ?? join(resolve(codexHome), "skizzles", "model-catalog-status.json");
+    const output = value(args, "--output");
+    const cache = value(args, "--cache");
     let result: CatalogRefreshResult;
     try {
       result = await refreshCatalog({
         codexHome,
         codexBinary: required(args, "--codex-binary"),
-        output: value(args, "--output"),
         status,
-        cache: value(args, "--cache"),
+        ...(output === undefined ? {} : { output }),
+        ...(cache === undefined ? {} : { cache }),
       });
     } catch (error) {
       if (command === "service") {

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { copyDirectoryExclusive, installSkills, skillsReceiptPath, uninstallSkills } from "../src/core";
+import { copyDirectoryExclusive } from "../src/managed-filesystem";
+import { installSkills, skillsReceiptPath, uninstallSkills } from "../src/skills-installation";
 
 const roots: string[] = [];
 

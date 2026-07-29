@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:
 import { join, resolve } from "node:path";
 import { bundledContainerLabPaths, doctorBundledContainerLab, doctorContainerLab } from "../src/doctor";
 import { doctor } from "../src/doctor";
-import { installSkills } from "../src/core";
+import { installSkills } from "../src/skills-installation";
 import { installHarness } from "../src/harness";
 
 const roots: string[] = [];

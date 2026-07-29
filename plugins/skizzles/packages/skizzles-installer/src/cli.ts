@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { resolve } from "node:path";
-import { installSkills, receiptSummary, uninstallSkills, type Transfer } from "./core";
+import { installSkills, receiptSummary, uninstallSkills } from "./skills-installation";
+import type { Transfer } from "./managed-filesystem";
 import { installHarness, uninstallHarness } from "./harness";
 import { doctor } from "./doctor";
 import {

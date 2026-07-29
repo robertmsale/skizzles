@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./run-contract": "./run-contract.ts"
+  },
   "bin": {
     "codex-container-lab": "./src/cli.ts",
     "codex-container-lab-reaper": "./src/reaper-cli.ts"

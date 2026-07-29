@@ -224,7 +224,8 @@ Entrypoint → argument/event parsing → semantic validation → coordinator �
 - **Role packager**: owns template/spec validation and generated role projections; templates cannot define undeclared capabilities.
 - **Installer**: owns explicit target roots and receipts; uninstall/configuration rollback touches only receipt-owned state.
 - **Container Lab coordinator**: owns lifecycle ordering; Docker, Git, filesystem, and persisted-state modules do not decide workflow policy.
-- **Managed command hook**: classifies only literal supported commands and preserves native approval unless explicitly bypassed.
+- **Container Lab run contract**: owns global/run option names, parsing, repository-relative working-directory rules, environment encoding, and timeout ceilings; the CLI and managed-command hook consume the same contract.
+- **Managed command hook**: classifies only literal supported commands, recognizes only Container Lab runs accepted by the shared run contract, and preserves native approval unless explicitly bypassed.
 - **Command supervisor**: owns process-tree signaling, bounded capture, status persistence, and public output.
 - **Usage analyzer**: parses immutable rollout inputs, aggregates typed usage/credit state, and renders JSON or human projections without modifying inputs.
 

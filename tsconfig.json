@@ -17,7 +17,11 @@
     ]
   },
   "include": [
+    "hooks/**/*.ts",
     "packages/skizzles-plugin/**/*.ts",
-    "packages/skizzles-installer/**/*.ts"
+    "packages/skizzles-installer/**/*.ts",
+    "runtime/**/*.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.ts"
   ]
 }

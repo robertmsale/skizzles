@@ -4,13 +4,20 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
-  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { assertManagedParentsAreReal, copyDirectoryExclusive, pathEntryExists, sameTree, type Transfer } from "./core";
+import {
+  assertManagedParentsAreReal,
+  copyDirectoryExclusive,
+  pathEntryExists,
+  removeOwnedPathsTransactionally,
+  sameTree,
+  type MovePath,
+  type Transfer,
+} from "./managed-filesystem";
 
 interface Marketplace {
   name: string;
@@ -107,7 +114,7 @@ export function installHarness(options: HarnessOptions): HarnessReceipt {
 export function uninstallHarness(
   homeInput: string,
   dryRun = false,
-  move: (from: string, to: string) => void = renameSync,
+  move?: MovePath,
 ): HarnessReceipt {
   const home = resolve(homeInput);
   assertManagedParentsAreReal(home, ["plugins", ".agents", ".agents/plugins", ".skizzles"]);
@@ -130,26 +137,15 @@ export function uninstallHarness(
     throw new Error("marketplace changed after Skizzles installation");
   }
   if (dryRun) return receipt;
-  const quarantine = join(home, ".skizzles", `harness-uninstall-${crypto.randomUUID()}`);
-  mkdirSync(quarantine);
-  const moved: Array<{ from: string; to: string }> = [];
-  try {
-    for (const [from, name] of [
-      [receipt.marketplacePath, "marketplace.json"],
-      [receipt.pluginTarget, "plugin"],
-      [harnessReceiptPath(home), "receipt.json"],
-    ] as const) {
-      const to = join(quarantine, name);
-      move(from, to);
-      moved.push({ from, to });
-    }
-  } catch (error) {
-    for (const item of moved.reverse()) {
-      if (pathEntryExists(item.to) && !pathEntryExists(item.from)) renameSync(item.to, item.from);
-    }
-    rmSync(quarantine, { recursive: true, force: true });
-    throw error;
-  }
-  try { rmSync(quarantine, { recursive: true, force: true }); } catch {}
+  removeOwnedPathsTransactionally(
+    join(home, ".skizzles"),
+    "harness-uninstall",
+    [
+      { source: receipt.marketplacePath, name: "marketplace.json" },
+      { source: receipt.pluginTarget, name: "plugin" },
+      { source: harnessReceiptPath(home), name: "receipt.json" },
+    ],
+    move,
+  );
   return receipt;
 }
