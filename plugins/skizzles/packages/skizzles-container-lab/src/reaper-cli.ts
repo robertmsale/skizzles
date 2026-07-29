@@ -6945,13 +6945,13 @@ var require_public_api = __commonJS((exports) => {
 });
 
 // packages/skizzles-container-lab/src/commands/reaper.ts
-import { join as join5 } from "path";
+import { join as join7 } from "path";
 import { homedir as homedir2 } from "os";
 
 // packages/skizzles-container-lab/src/reaper/archive.ts
 import { Database } from "bun:sqlite";
-import { lstat as lstat7, readdir as readdir3, rm as rm5 } from "fs/promises";
-import { join as join4, resolve as resolve3 } from "path";
+import { readdir as readdir4 } from "fs/promises";
+import { join as join6 } from "path";
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/index.js
 var composer = require_composer();
@@ -7659,6 +7659,7 @@ async function writeJsonAtomic(file, value) {
 }
 
 // packages/skizzles-container-lab/src/storage/state.ts
+var DEFAULT_LAB_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 var LAB_STATES = new Set(["provisioning", "ready", "failed", "destroying"]);
 var FINDING_SURFACES = new Set([
   "host-bind",
@@ -7815,6 +7816,9 @@ function assertLabMetadata(value, roots, owner, labId) {
     }
     if (!isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt))
       throw new Error("invalid timestamps");
+    if (value.lastActivityAt !== undefined && (typeof value.lastActivityAt !== "string" || !isBoundedString(value.lastActivityAt, 256))) {
+      throw new Error("invalid activity lease");
+    }
     if (!Array.isArray(value.endpoints) || !value.endpoints.every(isEndpoint))
       throw new Error("invalid endpoints");
     if (!Array.isArray(value.findings) || !value.findings.every(isFinding))
@@ -8099,10 +8103,174 @@ async function assertSourceRepositoryIdentity(lab) {
   }
 }
 
+// packages/skizzles-container-lab/src/reaper/cleanup-utils.ts
+import { lstat as lstat7, readdir as readdir3, rm as rm5 } from "fs/promises";
+import { join as join4 } from "path";
+async function boundedRemove(root, maxEntries) {
+  let count = 0;
+  async function scan(path3) {
+    let info;
+    try {
+      info = await lstat7(path3);
+    } catch (error) {
+      if (error.code === "ENOENT")
+        return;
+      throw error;
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      return;
+    }
+    for (const name of await readdir3(path3)) {
+      if (++count > maxEntries)
+        throw new Error("cleanup path exceeds bounded entry limit");
+      await scan(join4(path3, name));
+    }
+  }
+  await scan(root);
+  await rm5(root, { recursive: true, force: true });
+}
+
+// packages/skizzles-container-lab/src/reaper/retention.ts
+import { mkdir as mkdir5 } from "fs/promises";
+import { join as join5, resolve as resolve3 } from "path";
+function isExpiredActivity(value, clock, ttlMs) {
+  const now = (clock ?? (() => new Date))();
+  const nowMs = now instanceof Date ? now.getTime() : Number.NaN;
+  const ttl = ttlMs ?? DEFAULT_LAB_TTL_MS;
+  if (!Number.isFinite(nowMs))
+    throw new Error("retention clock returned an invalid date");
+  if (!Number.isFinite(ttl) || ttl <= 0)
+    throw new Error("retention TTL is invalid");
+  if (typeof value !== "string")
+    return false;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value)
+    return false;
+  return nowMs - timestamp > ttl;
+}
+async function cleanupExpiredLab(roots, snapshot, docker, database, options, owner, stateReader) {
+  await ensureOwnerSafetyDirectories(roots, snapshot.ownerKey);
+  const activityLock = join5(ownerDirectory(roots.stateRoot, owner), ".locks", `activity-${snapshot.id}`);
+  const labLock = join5(ownerDirectory(roots.stateRoot, owner), ".locks", `lab-${snapshot.id}`);
+  let previous;
+  let claimed;
+  await withFileLock(activityLock, async () => {
+    await ensureOwnerSafetyDirectories(roots, snapshot.ownerKey);
+    await withFileLock(labLock, async () => {
+      await ensureOwnerSafetyDirectories(roots, snapshot.ownerKey);
+      const current = await readLab(roots, owner, snapshot.id);
+      await validateReaperLab(roots, owner, current.ownerKey, current);
+      if (!isExpiredActivity(current.lastActivityAt, options.now, options.ttlMs)) {
+        throw new Error("lab activity was refreshed before cleanup");
+      }
+      let state;
+      try {
+        state = stateReader(database, owner);
+      } catch {
+        throw new Error("thread row could not be rechecked before cleanup");
+      }
+      if (state !== "active")
+        throw new Error("thread archival state changed before cleanup");
+      previous = { state: current.state, updatedAt: current.updatedAt, error: current.error };
+      current.state = "destroying";
+      current.updatedAt = new Date().toISOString();
+      await writeLab(roots, current);
+      claimed = current;
+    }, { attempts: 600, delayMs: 50 });
+    try {
+      await options.beforeRecheck?.(snapshot.ownerKey);
+      await withFileLock(labLock, async () => {
+        await ensureOwnerSafetyDirectories(roots, snapshot.ownerKey);
+        const current = await readLab(roots, owner, snapshot.id);
+        await validateReaperLab(roots, owner, current.ownerKey, current);
+        if (!isExpiredActivity(current.lastActivityAt, options.now, options.ttlMs)) {
+          throw new Error("lab activity was refreshed before cleanup");
+        }
+        let state;
+        try {
+          state = stateReader(database, owner);
+        } catch {
+          throw new Error("thread row could not be rechecked immediately before cleanup");
+        }
+        if (state !== "active")
+          throw new Error("thread archival state changed before cleanup");
+        claimed = current;
+      }, { attempts: 600, delayMs: 50 });
+      if (!claimed)
+        throw new Error("lab claim disappeared before cleanup");
+      await cleanupLabLabels(claimed, claimed.modeKind === "dockerfile", docker);
+      await withFileLock(labLock, async () => {
+        await ensureOwnerSafetyDirectories(roots, snapshot.ownerKey);
+        const current = await readLab(roots, owner, snapshot.id);
+        await validateReaperLab(roots, owner, current.ownerKey, current);
+        await recoverLabSync(roots, current);
+        if (!await exactDirectoryChain(roots.stateRoot, ["owners", current.ownerKey], "owner state directory")) {
+          throw new Error("owner state directory disappeared");
+        }
+        if (!await exactDirectoryChain(roots.stateRoot, ["owners", current.ownerKey, "labs"], "owner labs directory")) {
+          throw new Error("owner labs directory disappeared");
+        }
+        if (await exactDirectoryChain(roots.runtimeRoot, [current.ownerKey, current.id], "lab runtime directory")) {
+          await boundedRemove(current.runtimeRoot, 1e5);
+        }
+        await removeLabState(roots.stateRoot, owner, current.id);
+      }, { attempts: 600, delayMs: 50 });
+    } catch (error) {
+      if (previous) {
+        await withFileLock(labLock, async () => {
+          try {
+            const current = await readLab(roots, owner, snapshot.id);
+            if (current.state === "destroying") {
+              current.state = previous.state;
+              current.updatedAt = previous.updatedAt;
+              current.error = previous.error;
+              await writeLab(roots, current);
+            }
+          } catch {}
+        }, { attempts: 600, delayMs: 50 });
+      }
+      throw error;
+    }
+  }, { attempts: 600, delayMs: 50 });
+}
+async function validateReaperLab(roots, owner, ownerKey2, lab) {
+  const expectedRuntime = resolve3(roots.runtimeRoot, ownerKey2, lab.id);
+  if (lab.owner !== owner || lab.ownerKey !== ownerKey2 || resolve3(lab.runtimeRoot) !== expectedRuntime || resolve3(lab.workspace) !== join5(expectedRuntime, "workspace")) {
+    throw new Error("lab ownership or runtime containment is invalid");
+  }
+  if (lab.modeKind === "dockerfile" && lab.managedImage !== internalImageTag(ownerKey2, lab.id)) {
+    throw new Error("managed Dockerfile image identity is invalid");
+  }
+  const runtimePresent = await exactDirectoryChain(roots.runtimeRoot, [ownerKey2, lab.id], "lab runtime directory");
+  if (runtimePresent) {
+    await exactDirectoryChain(roots.runtimeRoot, [ownerKey2, lab.id, "workspace"], "lab workspace");
+  }
+}
+async function ensureGlobalLockDirectory(roots) {
+  const path3 = join5(roots.stateRoot, ".locks");
+  await mkdir5(path3, { recursive: true, mode: 448 });
+  if (!await exactDirectoryChain(roots.stateRoot, [".locks"], "global lock directory")) {
+    throw new Error("global lock directory disappeared");
+  }
+}
+async function ensureOwnerSafetyDirectories(roots, ownerKey2) {
+  if (!await exactDirectoryChain(roots.stateRoot, ["owners", ownerKey2], "owner state directory")) {
+    throw new Error("owner state directory disappeared");
+  }
+  if (!await exactDirectoryChain(roots.stateRoot, ["owners", ownerKey2, "labs"], "owner labs directory")) {
+    throw new Error("owner labs directory disappeared");
+  }
+  const locks = join5(roots.stateRoot, "owners", ownerKey2, ".locks");
+  await mkdir5(locks, { recursive: true, mode: 448 });
+  if (!await exactDirectoryChain(roots.stateRoot, ["owners", ownerKey2, ".locks"], "owner lock directory")) {
+    throw new Error("owner lock directory disappeared");
+  }
+}
+
 // packages/skizzles-container-lab/src/reaper/archive.ts
 async function reapArchivedOwners(options) {
   const roots = options.roots ?? resolveRoots();
-  const result = { ok: true, archivedOwnersCleaned: [], retainedOwners: [], errors: [] };
+  const result = { ok: true, archivedOwnersCleaned: [], expiredLabsCleaned: 0, retainedOwners: [], errors: [] };
   let database;
   try {
     database = new Database(options.dbPath, { readonly: true, strict: true, safeIntegers: true });
@@ -8112,17 +8280,19 @@ async function reapArchivedOwners(options) {
     return {
       ok: false,
       archivedOwnersCleaned: [],
+      expiredLabsCleaned: 0,
       retainedOwners: [],
       errors: [boundedMessage("Codex state database unavailable or incompatible", error)]
     };
   }
   try {
-    const ownerRoot = join4(roots.stateRoot, "owners");
+    const ownerRoot = join6(roots.stateRoot, "owners");
     if (!await exactDirectoryChain(roots.stateRoot, ["owners"], "owner state root"))
       return result;
+    await ensureGlobalLockDirectory(roots);
     let entries;
     try {
-      entries = await readdir3(ownerRoot, { withFileTypes: true });
+      entries = await readdir4(ownerRoot, { withFileTypes: true });
     } catch (error) {
       if (error.code === "ENOENT")
         return result;
@@ -8143,7 +8313,8 @@ async function reapArchivedOwners(options) {
         if (!await exactDirectoryChain(roots.stateRoot, ["owners", entry.name], "owner state directory")) {
           throw new Error("owner state directory disappeared");
         }
-        owner = await readOwnerManifest(join4(ownerRoot, entry.name, "owner.json"));
+        owner = await readOwnerManifest(join6(ownerRoot, entry.name, "owner.json"));
+        await ensureOwnerSafetyDirectories(roots, owner.ownerKey);
       } catch (error) {
         result.retainedOwners.push({ ownerKey: fallbackKey, reason: "invalid owner manifest" });
         result.ok = false;
@@ -8156,6 +8327,7 @@ async function reapArchivedOwners(options) {
         return {
           ok: false,
           archivedOwnersCleaned: [],
+          expiredLabsCleaned: 0,
           retainedOwners: [],
           errors: [boundedMessage("Codex state database query failed; no cleanup performed", error)]
         };
@@ -8164,19 +8336,61 @@ async function reapArchivedOwners(options) {
     }
     for (const { owner, state: initial } of preflight) {
       if (initial !== "archived") {
-        result.retainedOwners.push({
-          ownerKey: owner.ownerKey,
-          reason: initial === "active" ? "thread is active" : "thread row is missing or inconsistent"
-        });
+        if (initial === "active") {
+          try {
+            await options.beforeOwnerLock?.(owner.ownerKey);
+            await ensureOwnerSafetyDirectories(roots, owner.ownerKey);
+            let cleanedForOwner = 0;
+            let retainedForOwner = 0;
+            let cleanupFailed = false;
+            await withFileLock(ownerLockPath(roots.stateRoot, owner.owner), async () => {
+              await ensureOwnerSafetyDirectories(roots, owner.ownerKey);
+              let currentState;
+              try {
+                currentState = (options.stateReader ?? queryThreadState)(database, owner.owner);
+              } catch {
+                throw new Error("thread row could not be rechecked before retention cleanup");
+              }
+              if (currentState !== "active")
+                throw new Error("thread archival state changed before retention cleanup");
+              const labs = await listLabs(roots, owner.owner);
+              for (const lab of labs) {
+                if (!isExpiredActivity(lab.lastActivityAt, options.now, options.ttlMs)) {
+                  retainedForOwner++;
+                  continue;
+                }
+                try {
+                  await cleanupExpiredLab(roots, lab, options.docker ?? defaultDockerRunner, database, options, owner.owner, options.stateReader ?? queryThreadState);
+                  cleanedForOwner++;
+                  result.expiredLabsCleaned++;
+                } catch {
+                  result.ok = false;
+                  cleanupFailed = true;
+                  retainedForOwner++;
+                }
+              }
+            }, { attempts: 600, delayMs: 50 });
+            if (retainedForOwner > 0 || cleanedForOwner === 0) {
+              result.retainedOwners.push({ ownerKey: owner.ownerKey, reason: cleanupFailed ? "inactivity cleanup retained" : "thread is active" });
+            }
+          } catch {
+            result.ok = false;
+            result.retainedOwners.push({ ownerKey: owner.ownerKey, reason: "inactivity cleanup retained" });
+          }
+        } else {
+          result.retainedOwners.push({ ownerKey: owner.ownerKey, reason: "thread row is missing or inconsistent" });
+        }
         continue;
       }
       try {
         await options.beforeOwnerLock?.(owner.ownerKey);
+        await ensureOwnerSafetyDirectories(roots, owner.ownerKey);
         await withFileLock(ownerLockPath(roots.stateRoot, owner.owner), async () => {
+          await ensureOwnerSafetyDirectories(roots, owner.ownerKey);
           if (!await exactDirectoryChain(roots.stateRoot, ["owners", owner.ownerKey], "owner state directory")) {
             throw new Error("owner state directory disappeared");
           }
-          const currentOwner = await readOwnerManifest(join4(ownerRoot, owner.ownerKey, "owner.json"));
+          const currentOwner = await readOwnerManifest(join6(ownerRoot, owner.ownerKey, "owner.json"));
           if (currentOwner.owner !== owner.owner || currentOwner.ownerKey !== owner.ownerKey || currentOwner.createdAt !== owner.createdAt) {
             throw new Error("owner state changed before archive cleanup");
           }
@@ -8211,10 +8425,10 @@ async function reapArchivedOwners(options) {
           }
           await markOwnerReaped(roots.stateRoot, owner.owner);
           if (await exactDirectoryChain(roots.stateRoot, ["owners", owner.ownerKey], "owner state directory")) {
-            await boundedRemove(join4(ownerRoot, owner.ownerKey), 1e5);
+            await boundedRemove(join6(ownerRoot, owner.ownerKey), 1e5);
           }
           if (await exactDirectoryChain(roots.runtimeRoot, [owner.ownerKey], "owner runtime directory")) {
-            await boundedRemove(join4(roots.runtimeRoot, owner.ownerKey), 1e5);
+            await boundedRemove(join6(roots.runtimeRoot, owner.ownerKey), 1e5);
           }
           result.archivedOwnersCleaned.push(owner.ownerKey);
         }, { attempts: 600, delayMs: 50 });
@@ -8260,7 +8474,7 @@ function queryThreadState(database, owner) {
   return "uncertain";
 }
 async function prepareExactLab(roots, snapshot, cleanup) {
-  const lock = join4(ownerDirectory(roots.stateRoot, snapshot.owner), ".locks", `lab-${snapshot.id}`);
+  const lock = join6(ownerDirectory(roots.stateRoot, snapshot.owner), ".locks", `lab-${snapshot.id}`);
   const claimed = await withFileLock(lock, async () => {
     const lab = await readLab(roots, snapshot.owner, snapshot.id);
     await validateReaperLab(roots, lab.owner, lab.ownerKey, lab);
@@ -8269,8 +8483,8 @@ async function prepareExactLab(roots, snapshot, cleanup) {
   await cleanup?.(claimed);
 }
 async function cleanupExactLab(roots, lab, docker, authorize) {
-  const labLock = join4(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `lab-${lab.id}`);
-  const activityLock = join4(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `activity-${lab.id}`);
+  const labLock = join6(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `lab-${lab.id}`);
+  const activityLock = join6(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `activity-${lab.id}`);
   await authorize();
   let previous;
   await withFileLock(labLock, async () => {
@@ -8316,42 +8530,6 @@ async function cleanupExactLab(roots, lab, docker, authorize) {
     await removeLabState(roots.stateRoot, lab.owner, lab.id);
   }, { attempts: 600, delayMs: 50 }), { attempts: 600, delayMs: 50 });
 }
-async function validateReaperLab(roots, owner, ownerKey2, lab) {
-  const expectedRuntime = resolve3(roots.runtimeRoot, ownerKey2, lab.id);
-  if (lab.owner !== owner || lab.ownerKey !== ownerKey2 || resolve3(lab.runtimeRoot) !== expectedRuntime || resolve3(lab.workspace) !== join4(expectedRuntime, "workspace")) {
-    throw new Error("lab ownership or runtime containment is invalid");
-  }
-  if (lab.modeKind === "dockerfile" && lab.managedImage !== internalImageTag(ownerKey2, lab.id)) {
-    throw new Error("managed Dockerfile image identity is invalid");
-  }
-  const runtimePresent = await exactDirectoryChain(roots.runtimeRoot, [ownerKey2, lab.id], "lab runtime directory");
-  if (runtimePresent) {
-    await exactDirectoryChain(roots.runtimeRoot, [ownerKey2, lab.id, "workspace"], "lab workspace");
-  }
-}
-async function boundedRemove(root, maxEntries) {
-  let count = 0;
-  async function scan(path3) {
-    let info;
-    try {
-      info = await lstat7(path3);
-    } catch (error) {
-      if (error.code === "ENOENT")
-        return;
-      throw error;
-    }
-    if (!info.isDirectory() || info.isSymbolicLink()) {
-      return;
-    }
-    for (const name of await readdir3(path3)) {
-      if (++count > maxEntries)
-        throw new Error("cleanup path exceeds bounded entry limit");
-      await scan(join4(path3, name));
-    }
-  }
-  await scan(root);
-  await rm5(root, { recursive: true, force: true });
-}
 function boundedMessage(prefix, error) {
   const message2 = error instanceof Error ? error.message : String(error);
   return `${prefix}: ${message2.split(`
@@ -8388,7 +8566,7 @@ async function reaperMain(args = process.argv.slice(2)) {
       return 0;
     }
     const result = await reapArchivedOwners({
-      dbPath: parsed.dbPath ?? join5(homedir2(), ".codex", "state_5.sqlite"),
+      dbPath: parsed.dbPath ?? join7(homedir2(), ".codex", "state_5.sqlite"),
       roots: resolveRoots({ stateRoot: parsed.stateRoot, runtimeRoot: parsed.runtimeRoot })
     });
     const output = reaperOutput(result);
@@ -8402,18 +8580,27 @@ async function reaperMain(args = process.argv.slice(2)) {
 }
 function reaperOutput(result) {
   const exceptionalRetentions = result.retainedOwners.filter((item) => item.reason !== "thread is active");
-  if (result.ok && result.archivedOwnersCleaned.length === 0 && result.errors.length === 0 && exceptionalRetentions.length === 0)
+  if (result.ok && result.archivedOwnersCleaned.length === 0 && result.expiredLabsCleaned === 0 && result.errors.length === 0 && exceptionalRetentions.length === 0)
     return;
   const issues = distinctBounded([
-    ...exceptionalRetentions.map((item) => `retained: ${item.reason}`),
-    ...result.errors.map((error) => `error: ${error}`)
+    ...exceptionalRetentions.map((item) => publicRetentionIssue(item.reason)),
+    ...result.errors.map(() => "error: reaper retained resources")
   ]);
   return {
     ok: result.ok,
-    cleaned: result.archivedOwnersCleaned.length,
+    cleaned: result.archivedOwnersCleaned.length + result.expiredLabsCleaned,
     retained: result.retainedOwners.length,
     ...issues.length > 0 ? { issues } : {}
   };
+}
+function publicRetentionIssue(reason) {
+  if (reason === "thread row is missing or inconsistent")
+    return "retained: thread state is uncertain";
+  if (reason === "invalid owner manifest" || reason === "invalid owner state entry")
+    return "retained: owner state is invalid";
+  if (reason === "inactivity cleanup retained")
+    return "retained: inactivity cleanup was inconclusive";
+  return "retained: state is uncertain";
 }
 function writeError(code, error) {
   writeOutput({ error: { code, message: boundedRedacted(error instanceof Error ? error.message : String(error), 240) } }, process.stderr);

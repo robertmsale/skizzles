@@ -28,7 +28,7 @@ The managed-output hook recognizes a literal `run --lab ... -- COMMAND...` invoc
 
 When requested by the host owner, link the canonical workspace package from `packages/skizzles-container-lab` after a frozen root install. The LaunchAgent template at `install/com.openai.codex-container-lab-reaper.plist` must be rendered into a user-owned temporary file with absolute Bun, bundled-or-canonical reaper, and log paths; validate it with `plutil` before loading. LaunchAgents have a minimal environment and must not rely on `PATH` or the `/usr/bin/env bun` shebang.
 
-Keep every doctor health probe on disposable owner, state, runtime, and database roots. The archive reaper defaults are live-host behavior and are not a test target. Any database, schema, busy, manifest, or archive-state uncertainty retains resources.
+Keep every doctor health probe on disposable owner, state, runtime, and database roots. The reaper defaults are live-host behavior and are not a test target. Archive and seven-day active-owner retention both fail closed: any database, schema, busy, manifest, lease, clock, or archive-state uncertainty retains resources.
 
 ## Verification and rollback
 

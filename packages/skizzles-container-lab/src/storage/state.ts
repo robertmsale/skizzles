@@ -8,6 +8,8 @@ import { readJson, safeStateName, writeJsonAtomic } from "./files";
 import type { LabMetadata, OwnerManifest, PersistedLabRuntime } from "./records";
 
 export type StateRoots = { stateRoot: string; runtimeRoot: string };
+export type Clock = () => Date;
+export const DEFAULT_LAB_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 export type ReapedOwnerManifest = {
   version: 1;
   owner: string;
@@ -171,6 +173,23 @@ export async function writeLab(roots: StateRoots, lab: LabMetadata): Promise<voi
   await writeJsonAtomic(labManifestPath(roots.stateRoot, lab.owner, lab.id), lab);
 }
 
+/** Update a validated lab lease. Callers must hold the lab activity lock. */
+export async function refreshLabActivity(
+  roots: StateRoots,
+  owner: string,
+  labId: string,
+  clock: Clock = () => new Date(),
+): Promise<LabMetadata> {
+  const lab = await readLab(roots, owner, labId);
+  const now = clock();
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error("clock returned an invalid date");
+  const timestamp = now.toISOString();
+  lab.lastActivityAt = timestamp;
+  lab.updatedAt = timestamp;
+  await writeLab(roots, lab);
+  return lab;
+}
+
 export async function readLab(roots: StateRoots, owner: string, labId: string): Promise<LabMetadata> {
   const value = await readJson<unknown>(labManifestPath(roots.stateRoot, owner, labId));
   assertLabMetadata(value, roots, owner, labId);
@@ -244,6 +263,13 @@ export function assertLabMetadata(
       throw new Error("invalid command service");
     }
     if (!isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)) throw new Error("invalid timestamps");
+    // Missing fields are legacy state and are retained until a successful
+    // authenticated operation refreshes the lease. A malformed string is also
+    // retained for the fail-closed reaper to report, rather than expiring it.
+    if (value.lastActivityAt !== undefined &&
+        (typeof value.lastActivityAt !== "string" || !isBoundedString(value.lastActivityAt, 256))) {
+      throw new Error("invalid activity lease");
+    }
     if (!Array.isArray(value.endpoints) || !value.endpoints.every(isEndpoint)) throw new Error("invalid endpoints");
     if (!Array.isArray(value.findings) || !value.findings.every(isFinding)) throw new Error("invalid findings");
     if (!isEnvironmentNames(value.secretEnvironment)) throw new Error("invalid secret environment metadata");

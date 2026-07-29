@@ -31,7 +31,7 @@ import {
   removeLabState,
   resolveRoots,
   writeLab,
-  type StateRoots,
+  type Clock, type StateRoots,
 } from "../storage/state";
 import {
   assertCloneHasNoAlternates,
@@ -40,7 +40,8 @@ import {
 } from "../workspace/recovery";
 import { applySync, initializeSyncBaseline, previewSync, publicSyncPreview, recoverSyncTransactions, type SyncDirection } from "../workspace/sync";
 import type { LabMetadata } from "../storage/records";
-import { runAttachedCommand, type RunOutput } from "./attached-workflow";
+import { runAttachedCommand, type ActivityHeartbeatScheduler, type RunOutput } from "./attached-workflow";
+import { activityNow, refreshLabActivityState, refreshLockedLabActivity, withActivityLock } from "./activity";
 import { compactProvisioningError, resolveProvisioningEnvironment } from "./provisioning-policy";
 
 export type { RunOutput } from "./attached-workflow";
@@ -53,6 +54,9 @@ export class ContainerLabWorkflow {
     roots = resolveRoots(),
     private readonly docker: DockerRunner = defaultDockerRunner,
     private readonly environment: NodeJS.ProcessEnv = process.env,
+    private readonly clock: Clock = () => new Date(),
+    private readonly activityHeartbeatMs = 60_000,
+    private readonly startActivityHeartbeat?: ActivityHeartbeatScheduler,
   ) {
     this.owner = owner;
     this.roots = roots;
@@ -88,6 +92,7 @@ export class ContainerLabWorkflow {
       const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 8);
       const id = `${requested}-${suffix}`;
       const runtimeRoot = join(ownerRuntimeDirectory(this.roots.runtimeRoot, this.owner), id);
+      const createdAt = activityNow(this.clock).toISOString();
       const lab: LabMetadata = {
         version: 1,
         id,
@@ -102,8 +107,9 @@ export class ContainerLabWorkflow {
         workspace: join(runtimeRoot, "workspace"),
         manifestPath: join(sourceRoot, ".codex-container-lab.yaml"),
         commandService: "pending",
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt,
+        updatedAt: createdAt,
+        lastActivityAt: createdAt,
         endpoints: [],
         findings: [],
         secretEnvironment: [],
@@ -111,6 +117,7 @@ export class ContainerLabWorkflow {
       await withFileLock(this.labLock(id), async () => await writeLab(this.roots, lab));
       await this.provisionLab(id, signal);
       const final = await readLab(this.roots, this.owner, id);
+      if (final.state === "ready") await this.refreshActivity(id);
       return { labId: final.id, state: final.state };
     });
   }
@@ -123,10 +130,14 @@ export class ContainerLabWorkflow {
 
   async labStatus(id: string): Promise<unknown> {
     await this.reconcileOwner();
-    const lab = await readLab(this.roots, this.owner, id);
-    return compactLabStatus(lab, lab.state === "ready" && lab.runtime
-        ? await stackStatus(runtimeFromLab(lab), this.docker)
-        : undefined);
+    return await withActivityLock(this.activityLock(id), async () => {
+      const lab = await readLab(this.roots, this.owner, id);
+      const status = compactLabStatus(lab, lab.state === "ready" && lab.runtime
+          ? await stackStatus(runtimeFromLab(lab), this.docker)
+          : undefined);
+      await this.refreshActivity(id);
+      return status;
+    });
   }
 
   async run(
@@ -152,6 +163,9 @@ export class ContainerLabWorkflow {
       signal,
       activityLock: this.activityLock(id),
       labLock: this.labLock(id),
+      refreshActivity: async () => await this.refreshActivity(id),
+      activityHeartbeatMs: this.activityHeartbeatMs,
+      startActivityHeartbeat: this.startActivityHeartbeat,
       reconcileOwner: async () => await this.reconcileOwner(),
       requireReady: async () => await this.requireReady(id),
     });
@@ -159,26 +173,30 @@ export class ContainerLabWorkflow {
 
   async logs(id: string, service: string, tailLines: number): Promise<unknown> {
     await this.reconcileOwner();
-    const lab = await this.requireReady(id);
-    const transcript = await stackLogs(runtimeFromLab(lab), service, tailLines, this.docker);
-    return { labId: id, service, transcript: { ...transcript, bytes: Buffer.byteLength(transcript.text), lines: transcript.text ? transcript.text.split("\n").length : 0 } };
+    return await withActivityLock(this.activityLock(id), async () => {
+      const lab = await this.requireReady(id);
+      const transcript = await stackLogs(runtimeFromLab(lab), service, tailLines, this.docker);
+      await this.refreshActivity(id);
+      return { labId: id, service, transcript: { ...transcript, bytes: Buffer.byteLength(transcript.text), lines: transcript.text ? transcript.text.split("\n").length : 0 } };
+    });
   }
 
   async preview(id: string, direction: SyncDirection) {
     await this.reconcileOwner();
-    return await withFileLock(this.activityLock(id), async () => {
+    return await withActivityLock(this.activityLock(id), async () => {
       const lab = await this.requireReady(id);
       await assertSourceRepositoryIdentity(lab);
       const sourceRoot = direction === "push" ? lab.sourceRoot : lab.workspace;
       const targetRoot = direction === "push" ? lab.workspace : lab.sourceRoot;
       const preview = await previewSync({ stateRoot: lab.runtimeRoot, labId: lab.id, direction, sourceRoot, targetRoot, maxEntries: 100 });
+      await this.refreshActivity(id);
       return publicSyncPreview(preview, id, direction);
-    }, { attempts: 600, delayMs: 50 });
+    });
   }
 
   async apply(id: string, direction: SyncDirection, token: string) {
     await this.reconcileOwner();
-    return await withFileLock(this.activityLock(id), async () => {
+    return await withActivityLock(this.activityLock(id), async () => {
       return await withFileLock(this.labLock(id), async () => {
         const lab = await this.requireReady(id);
         await assertSourceRepositoryIdentity(lab);
@@ -186,9 +204,10 @@ export class ContainerLabWorkflow {
         const targetRoot = direction === "push" ? lab.workspace : lab.sourceRoot;
         const result = await applySync({ stateRoot: lab.runtimeRoot, labId: lab.id, direction, token, sourceRoot, targetRoot,
           idleGuard: () => true });
+        await refreshLabActivityState(this.roots, this.owner, id, this.clock);
         return { labId: id, direction, applied: result.applied };
       }, { attempts: 600, delayMs: 50 });
-    }, { attempts: 600, delayMs: 50 });
+    });
   }
 
   async destroyLab(id: string): Promise<{ labId: string; destroyed: boolean }> {
@@ -386,8 +405,6 @@ export class ContainerLabWorkflow {
       return current;
     });
   }
-
-
   private async assertDestroyFilesystem(lab: LabMetadata): Promise<boolean> {
     if (!await exactDirectoryChain(this.roots.stateRoot, ["owners", lab.ownerKey], "owner state directory")) {
       throw new Error("owner state directory is missing or unsafe");
@@ -413,6 +430,10 @@ export class ContainerLabWorkflow {
 
   private activityLock(id: string): string {
     return join(ownerDirectory(this.roots.stateRoot, this.owner), ".locks", `activity-${id}`);
+  }
+
+  private async refreshActivity(id: string): Promise<void> {
+    await refreshLockedLabActivity(this.roots, this.owner, id, this.labLock(id), this.clock);
   }
 
 }

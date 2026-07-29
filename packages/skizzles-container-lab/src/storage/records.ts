@@ -35,6 +35,8 @@ export type LabMetadata = {
   modeKind?: LabConfig["mode"]["kind"];
   createdAt: string;
   updatedAt: string;
+  /** Last successful authenticated Container Lab operation. Legacy manifests may omit it. */
+  lastActivityAt?: string;
   endpoints: Endpoint[];
   findings: ComposeInspectionFinding[];
   secretEnvironment: string[];

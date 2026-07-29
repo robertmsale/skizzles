@@ -39,19 +39,26 @@ export async function reaperMain(args = process.argv.slice(2)): Promise<number> 
  */
 export function reaperOutput(result: ReaperResult): ReaperCliOutput | undefined {
   const exceptionalRetentions = result.retainedOwners.filter((item) => item.reason !== "thread is active");
-  if (result.ok && result.archivedOwnersCleaned.length === 0 && result.errors.length === 0 &&
+  if (result.ok && result.archivedOwnersCleaned.length === 0 && result.expiredLabsCleaned === 0 && result.errors.length === 0 &&
       exceptionalRetentions.length === 0) return undefined;
 
   const issues = distinctBounded([
-    ...exceptionalRetentions.map((item) => `retained: ${item.reason}`),
-    ...result.errors.map((error) => `error: ${error}`),
+    ...exceptionalRetentions.map((item) => publicRetentionIssue(item.reason)),
+    ...result.errors.map(() => "error: reaper retained resources"),
   ]);
   return {
     ok: result.ok,
-    cleaned: result.archivedOwnersCleaned.length,
+    cleaned: result.archivedOwnersCleaned.length + result.expiredLabsCleaned,
     retained: result.retainedOwners.length,
     ...(issues.length > 0 ? { issues } : {}),
   };
+}
+
+function publicRetentionIssue(reason: string): string {
+  if (reason === "thread row is missing or inconsistent") return "retained: thread state is uncertain";
+  if (reason === "invalid owner manifest" || reason === "invalid owner state entry") return "retained: owner state is invalid";
+  if (reason === "inactivity cleanup retained") return "retained: inactivity cleanup was inconclusive";
+  return "retained: state is uncertain";
 }
 
 function writeError(code: "USAGE", error: unknown): void {

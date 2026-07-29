@@ -53,7 +53,7 @@ If the consuming manifest uses `secret_environment`, treat it as an explicit all
 
 Docker runs only on the host. Generated configuration never adds a Docker socket, host credential, privileged mode, device, capability, secret, or arbitrary host mount. A trusted project's intentional Compose configuration is preserved and reported. Forwarded environment variables must be explicitly named in the manifest; pass run-specific values only through `run --env KEY=VALUE`.
 
-The current thread owns its stack across CLI invocations, process exits, and stopped-but-unarchived task state. Explicit destroy is the normal lifecycle. A fail-closed periodic reaper removes only exact-labeled owners whose own Codex database row is consistently archived; missing, active, inconsistent, or unreadable state is retained.
+The current thread owns its stack across CLI invocations and process exits. Explicit destroy is the normal lifecycle. A fail-closed periodic reaper keeps archive cleanup as its highest priority, and removes only individual exact-labeled labs for a consistent active owner when the valid last authenticated Container Lab activity is older than seven days. It takes owner and lab activity locks before Docker cleanup and rechecks freshness. Missing, malformed, future, active-run, inconsistent, or unreadable state is retained. This is a temporary-storage retention limit, not proof that a thread is inactive.
 
 An owner is bounded to eight labs. Run arguments and environment payloads are capped. Synchronization accepts at most 20,000 eligible paths, 64 MiB per file, and 512 MiB total.
 

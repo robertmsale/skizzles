@@ -50,6 +50,7 @@ class SecretDiagnosticDocker extends RecordingDocker {
   }
 }
 
+
 class InterruptingDocker extends RecordingDocker {
   constructor(private readonly controller: AbortController) { super(); }
   override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
@@ -118,7 +119,9 @@ describe("attached service lifecycle", () => {
     const result = await new ContainerLabWorkflow("thread-create", roots, new RecordingDocker()).createLab("experiment", source);
     expect(Object.keys(result).sort()).toEqual(["labId", "state"]);
     expect(result.state).toBe("ready");
-    expect((await readLab(roots, "thread-create", result.labId)).state).toBe("ready");
+    const persisted = await readLab(roots, "thread-create", result.labId);
+    expect(persisted.state).toBe("ready");
+    expect(persisted.lastActivityAt).toBeDefined();
   });
 
   test("creates a self-contained workspace from an alternates-backed linked worktree before Docker runs", async () => {

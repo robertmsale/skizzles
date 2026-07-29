@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { reapArchivedOwners, validateThreadsSchema } from "./archive";
+import { ContainerLabWorkflow } from "../lifecycle/workflow";
 import type { DockerRunner } from "../compose/docker-runner";
 import type { CommandResult, RunOptions } from "../execution/process";
-import { ensureOwner, ownerKey, writeLab } from "../storage/state";
+import { ensureOwner, ownerKey, readLab, writeLab } from "../storage/state";
 import type { LabMetadata } from "../storage/records";
 import { withFileLock } from "../storage/locks";
 
@@ -25,7 +26,218 @@ class EmptyDocker implements DockerRunner {
   spawn(): ChildProcessWithoutNullStreams { throw new Error("reaper never spawns"); }
 }
 
+class FailingCleanupDocker extends EmptyDocker {
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    if (args[0] === "ps" && args[1] === "-aq") {
+      this.calls.push(args);
+      this.runCalls.push({ args, options });
+      return { code: 0, stdout: Buffer.from("container-1\n"), stderr: Buffer.alloc(0) };
+    }
+    if (args[0] === "rm" && args[1] === "-f") {
+      this.calls.push(args);
+      this.runCalls.push({ args, options });
+      return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("failed") };
+    }
+    return await super.run(args, options);
+  }
+}
+
 describe("archive reaper", () => {
+  test("cleans only individually expired active labs and keeps the owner usable", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-expired");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath);
+    db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]);
+    db.close();
+    const result = await reapArchivedOwners({
+      dbPath, roots: fixture, docker: new EmptyDocker(),
+      now: () => new Date("2020-01-09T00:00:00.000Z"),
+    });
+    expect(result.expiredLabsCleaned).toBe(1);
+    expect(result.retainedOwners).toEqual([]);
+    expect(await Bun.file(join(fixture.stateRoot, "owners", lab.ownerKey, "labs", `${lab.id}.json`)).exists()).toBe(false);
+    expect(await Bun.file(join(fixture.stateRoot, "owners", lab.ownerKey, "owner.json")).exists()).toBe(true);
+  });
+
+  test("allows a replacement lab after one active-owner lab expires", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-recreate-after-ttl");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]); db.close();
+    const result = await reapArchivedOwners({ dbPath, roots: fixture, docker: new EmptyDocker(), now: () => new Date("2020-01-09T00:00:00.000Z") });
+    expect(result.expiredLabsCleaned).toBe(1);
+    const replacement = await new ContainerLabWorkflow(lab.owner, fixture, new EmptyDocker()).createLab("replacement", process.cwd());
+    expect(replacement.labId).not.toBe(lab.id);
+    expect(await Bun.file(join(fixture.stateRoot, "owners", lab.ownerKey, "labs", `${replacement.labId}.json`)).exists()).toBe(true);
+  });
+
+  test("retains legacy, malformed, and future activity leases", async () => {
+    const fixture = await roots();
+    const owners = ["thread-legacy", "thread-malformed", "thread-parseable", "thread-equal", "thread-future"];
+    const labs: LabMetadata[] = [];
+    for (const owner of owners) {
+      const lab = await createLabFixture(fixture, owner);
+      if (owner.endsWith("malformed")) lab.lastActivityAt = "not-a-timestamp";
+      if (owner.endsWith("parseable")) lab.lastActivityAt = "2020-01-01";
+      if (owner.endsWith("equal")) lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+      if (owner.endsWith("future")) lab.lastActivityAt = new Date("2030-01-01T00:00:00.000Z").toISOString();
+      await writeLab(fixture, lab);
+      labs.push(lab);
+    }
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath);
+    for (const lab of labs) db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]);
+    db.close();
+    const result = await reapArchivedOwners({ dbPath, roots: fixture, docker: new EmptyDocker(), now: () => new Date("2020-01-08T00:00:00.000Z") });
+    expect(result.expiredLabsCleaned).toBe(0);
+    expect(result.retainedOwners).toHaveLength(5);
+  });
+
+  test("retains on invalid retention clock", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-invalid-clock");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]); db.close();
+    const docker = new EmptyDocker();
+    const result = await reapArchivedOwners({ dbPath, roots: fixture, docker, now: () => new Date(Number.NaN) });
+    expect(result.ok).toBe(false);
+    expect(result.expiredLabsCleaned).toBe(0);
+    expect(docker.calls).toEqual([]);
+    expect(await Bun.file(join(fixture.stateRoot, "owners", lab.ownerKey, "labs", `${lab.id}.json`)).exists()).toBe(true);
+  });
+
+  test("retains a lab symlink without deleting outside state or calling Docker", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-labs-symlink");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const labs = join(fixture.stateRoot, "owners", lab.ownerKey, "labs");
+    const outside = join(fixture.root, "outside-labs");
+    await rm(labs, { recursive: true });
+    await mkdir(outside);
+    const sentinel = join(outside, "sentinel.json");
+    await writeFile(sentinel, "keep");
+    await symlink(outside, labs, "dir");
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]); db.close();
+    const docker = new EmptyDocker();
+    const result = await reapArchivedOwners({ dbPath, roots: fixture, docker, now: () => new Date("2020-01-09T00:00:00.000Z") });
+    expect(result.ok).toBe(false);
+    expect(result.expiredLabsCleaned).toBe(0);
+    expect(docker.calls).toEqual([]);
+    expect(await Bun.file(sentinel).text()).toBe("keep");
+  });
+
+  test("retains a lock-parent symlink without outside mutation or Docker", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-lock-symlink");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const lockDirectory = join(fixture.stateRoot, "owners", lab.ownerKey, ".locks");
+    const outside = join(fixture.root, "outside-locks");
+    await rm(lockDirectory, { recursive: true, force: true });
+    await mkdir(outside);
+    const sentinel = join(outside, "sentinel");
+    await writeFile(sentinel, "keep");
+    await symlink(outside, lockDirectory, "dir");
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]); db.close();
+    const docker = new EmptyDocker();
+    const result = await reapArchivedOwners({ dbPath, roots: fixture, docker, now: () => new Date("2020-01-09T00:00:00.000Z") });
+    expect(result.ok).toBe(false);
+    expect(result.expiredLabsCleaned).toBe(0);
+    expect(docker.calls).toEqual([]);
+    expect(await Bun.file(sentinel).text()).toBe("keep");
+  });
+
+  test("retains a global lock-root symlink without outside mutation or Docker", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-global-lock-symlink");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const lockRoot = join(fixture.stateRoot, ".locks");
+    const outside = join(fixture.root, "outside-global-locks");
+    await mkdir(outside);
+    const sentinel = join(outside, "sentinel");
+    await writeFile(sentinel, "keep");
+    await symlink(outside, lockRoot, "dir");
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]); db.close();
+    const docker = new EmptyDocker();
+    const result = await reapArchivedOwners({ dbPath, roots: fixture, docker, now: () => new Date("2020-01-09T00:00:00.000Z") });
+    expect(result.ok).toBe(false);
+    expect(result.expiredLabsCleaned).toBe(0);
+    expect(docker.calls).toEqual([]);
+    expect(await Bun.file(sentinel).text()).toBe("keep");
+  });
+
+  test("restores a retryable lab state when TTL Docker cleanup fails", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-cleanup-failure");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]); db.close();
+    const result = await reapArchivedOwners({
+      dbPath, roots: fixture, docker: new FailingCleanupDocker(), now: () => new Date("2020-01-09T00:00:00.000Z"),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.expiredLabsCleaned).toBe(0);
+    const retained = await readLab(fixture, lab.owner, lab.id);
+    expect(retained.state).toBe(lab.state);
+    expect(retained.lastActivityAt).toBe(lab.lastActivityAt);
+  });
+
+  test("rechecks freshness after taking the activity lock", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-final-freshness");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]); db.close();
+    const docker = new EmptyDocker();
+    let refreshed = false;
+    const result = await reapArchivedOwners({
+      dbPath, roots: fixture, docker,
+      now: () => new Date("2020-01-09T00:00:00.000Z"),
+      beforeRecheck: async () => {
+        if (refreshed) return;
+        refreshed = true;
+        await writeLab(fixture, { ...lab, lastActivityAt: new Date("2020-01-08T00:00:00.000Z").toISOString() });
+      },
+    });
+    expect(result.expiredLabsCleaned).toBe(0);
+    expect(docker.calls).toEqual([]);
+    expect(await Bun.file(join(fixture.stateRoot, "owners", lab.ownerKey, "labs", `${lab.id}.json`)).exists()).toBe(true);
+  });
+
+  test("waits for an attached activity lock before any Docker cleanup", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-activity-race");
+    lab.lastActivityAt = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await writeLab(fixture, lab);
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 0, NULL)", [lab.owner]); db.close();
+    const activity = join(fixture.stateRoot, "owners", lab.ownerKey, ".locks", `activity-${lab.id}`);
+    let release!: () => void;
+    const held = withFileLock(activity, async () => await new Promise<void>((resolve) => { release = resolve; }));
+    await Bun.sleep(20);
+    const docker = new EmptyDocker();
+    const reaping = reapArchivedOwners({ dbPath, roots: fixture, docker, now: () => new Date("2020-01-09T00:00:00.000Z") });
+    await Bun.sleep(60);
+    expect(docker.calls).toEqual([]);
+    release();
+    await held;
+    expect((await reaping).expiredLabsCleaned).toBe(1);
+  });
+
   test("cleans archived exact owners and retains active and missing rows", async () => {
     const fixture = await roots();
     const archived = await createLabFixture(fixture, "thread-archived");

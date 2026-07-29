@@ -8,6 +8,7 @@ import {
   ownerDirectory,
   ownerKey,
   readLab,
+  refreshLabActivity,
   resolveOwner,
   writeLab,
 } from "./state";
@@ -62,5 +63,30 @@ describe("owner resolution and durable state", () => {
 
     expect(persisted).toEqual(lab);
     expect(Object.keys(persisted).sort()).toEqual(Object.keys(lab).sort());
+  });
+
+  test("refreshes a lease atomically only for a validated lab", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-state-"));
+    temporary.push(root);
+    const owner = "lease-refresh";
+    const roots = { stateRoot: root, runtimeRoot: join(root, "runtime") };
+    const lab = createLabFixture(root, owner, "ccl-test-lab");
+    await ensureOwner(root, owner);
+    await writeLab(roots, lab);
+    const refreshed = await refreshLabActivity(roots, owner, lab.id, () => new Date("2026-01-02T03:04:05.000Z"));
+    expect(refreshed.lastActivityAt).toBe("2026-01-02T03:04:05.000Z");
+    expect(refreshed.updatedAt).toBe(refreshed.lastActivityAt!);
+    expect((await readLab(roots, owner, lab.id)).lastActivityAt).toBe(refreshed.lastActivityAt);
+  });
+
+  test("retains a malformed legacy lease for fail-closed reaping", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-state-"));
+    temporary.push(root);
+    const owner = "malformed-lease";
+    const roots = { stateRoot: root, runtimeRoot: join(root, "runtime") };
+    const lab = { ...createLabFixture(root, owner, "ccl-test-lab"), lastActivityAt: "legacy-value" };
+    await ensureOwner(root, owner);
+    await writeLab(roots, lab);
+    expect((await readLab(roots, owner, lab.id)).lastActivityAt).toBe("legacy-value");
   });
 });

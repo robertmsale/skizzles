@@ -13,6 +13,11 @@ export type RunOutput = {
   stdin?: NodeJS.ReadableStream;
 };
 
+export type ActivityHeartbeatScheduler = (
+  callback: () => Promise<void>,
+  intervalMs: number,
+) => () => void;
+
 export type AttachedCommandOptions = {
   owner: string;
   roots: StateRoots;
@@ -29,6 +34,9 @@ export type AttachedCommandOptions = {
   labLock: string;
   reconcileOwner: () => Promise<void>;
   requireReady: () => Promise<LabMetadata>;
+  refreshActivity?: () => Promise<void>;
+  activityHeartbeatMs?: number;
+  startActivityHeartbeat?: ActivityHeartbeatScheduler;
 };
 
 export async function runAttachedCommand(options: AttachedCommandOptions): Promise<number> {
@@ -51,6 +59,16 @@ export async function runAttachedCommand(options: AttachedCommandOptions): Promi
         environment: options.environment,
       };
       const child = launchDockerRun(runtime, identity, options.docker, options.processEnvironment);
+      // The activity lock is held for the full attached command. Launch only
+      // after exact validation, then persist the first refresh and heartbeat;
+      // a refresh failure never terminates a genuine attached command.
+      await options.refreshActivity?.().catch(() => undefined);
+      const heartbeatMs = options.activityHeartbeatMs ?? 60_000;
+      const stopHeartbeat = options.refreshActivity && heartbeatMs > 0
+        ? (options.startActivityHeartbeat ?? startActivityHeartbeat)(async () => {
+          await options.refreshActivity!().catch(() => undefined);
+        }, heartbeatMs)
+        : undefined;
       child.stdout.on("data", options.output.stdout);
       child.stderr.on("data", options.output.stderr);
       options.output.stdin?.pipe(child.stdin);
@@ -73,6 +91,7 @@ export async function runAttachedCommand(options: AttachedCommandOptions): Promi
         if (stopping) await stopping;
         return requestedExit ?? code;
       } finally {
+        stopHeartbeat?.();
         if (timeout) clearTimeout(timeout);
         options.signal?.removeEventListener("abort", onAbort);
         options.output.stdin?.unpipe(child.stdin);
@@ -82,6 +101,12 @@ export async function runAttachedCommand(options: AttachedCommandOptions): Promi
     if (options.signal?.aborted) return signalExitCode(options.signal);
     throw error;
   }
+}
+
+function startActivityHeartbeat(callback: () => Promise<void>, intervalMs: number): () => void {
+  const timer = setInterval(() => { void callback(); }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 async function stopAttachedCommand(
