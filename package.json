@@ -16,6 +16,7 @@
     "typecheck": "bunx tsc --noEmit && bun run --cwd packages/skizzles-container-lab typecheck",
     "test": "bun test",
     "test:architecture": "bun test tests/architecture/repository-boundaries.test.ts",
+    "test:prompt-governance": "bun test evals/prompt-governance",
     "test:packaging": "bun test packages/skizzles-plugin/test",
     "verify": "bun run typecheck && bun run plugin:check && bun test"
   },

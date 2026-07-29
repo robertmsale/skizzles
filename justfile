@@ -234,3 +234,54 @@ unconfigure-apply codex_home codex_binary=env("CODEX_BIN", "codex"):
     [ -x "$codex_bin" ] || { echo "Codex binary is not executable: $codex_bin" >&2; exit 2; }
     cd {{ quote(justfile_directory()) }}
     bun run packages/skizzles-installer/src/cli.ts unconfigure --codex-home {{ quote(codex_home) }} --codex-binary "$codex_bin"
+
+# Run one no-write JSONL schema calibration in an explicit artifact directory.
+eval-root-calibrate artifact_root:
+    #!/bin/sh
+    set -eu
+    case {{ quote(artifact_root) }} in
+        /*) ;;
+        *) echo "artifact_root must be an absolute path" >&2; exit 2 ;;
+    esac
+    cd {{ quote(justfile_directory()) }}
+    exec bun evals/prompt-governance/cli.ts calibrate {{ quote(artifact_root) }}
+
+# Plan the three-pair root-instruction pilot; pass execute=true and confirm_runs=24 only after accepting usage cost.
+eval-root-pilot artifact_root execute="false" repetitions="3" confirm_runs="":
+    #!/bin/sh
+    set -eu
+    case {{ quote(artifact_root) }} in
+        /*) ;;
+        *) echo "artifact_root must be an absolute path" >&2; exit 2 ;;
+    esac
+    case {{ quote(execute) }} in
+        false)
+            ;;
+        true)
+            ;;
+        *) echo "execute must be false or true" >&2; exit 2 ;;
+    esac
+    case {{ quote(repetitions) }} in
+        ''|*[!0-9]*) echo "repetitions must be a positive integer" >&2; exit 2 ;;
+        0) echo "repetitions must be a positive integer" >&2; exit 2 ;;
+    esac
+    if [ {{ quote(execute) }} = true ] && [ -z {{ quote(confirm_runs) }} ]; then
+        echo "confirm_runs is required when execute=true (expected 24 for the default pilot)" >&2
+        exit 2
+    fi
+    cd {{ quote(justfile_directory()) }}
+    if [ {{ quote(execute) }} = true ]; then
+        exec bun evals/prompt-governance/cli.ts pilot {{ quote(artifact_root) }} --execute --repetitions {{ quote(repetitions) }} --confirm-runs {{ quote(confirm_runs) }}
+    fi
+    exec bun evals/prompt-governance/cli.ts pilot {{ quote(artifact_root) }} --repetitions {{ quote(repetitions) }}
+
+# Evaluate the two-reviewer blind corpus for a completed root-instruction pilot.
+eval-root-review artifact_root:
+    #!/bin/sh
+    set -eu
+    case {{ quote(artifact_root) }} in
+        /*) ;;
+        *) echo "artifact_root must be an absolute path" >&2; exit 2 ;;
+    esac
+    cd {{ quote(justfile_directory()) }}
+    exec bun evals/prompt-governance/cli.ts review {{ quote(artifact_root) }}
