@@ -1,29 +1,49 @@
 # Codex Compatibility
 
-Skizzles supports three host tiers. The current task's advertised tool inventory always controls which operations an agent may call.
+Skizzles supports three host tiers. Content installation is separate from host
+activation: copying a skill or plugin never claims that its selected Codex
+binary can run Skizzles orchestration. The current task's advertised tool
+inventory always controls which operations an agent may call.
+
+`configure` requires a POSIX host where the installer can own and terminate
+the selected binary's probe process group. Transfer-only plugin or skill
+installation remains independent and does not require this activation host.
 
 This matrix records the compatibility evidence supplied by Robert Sale on 2026-07-29. It does not promise that every future CLI release or Desktop task exposes the same tools.
 
 | Capability | CLI `0.145.0` | CLI `>= 0.146.0-alpha.3` | Desktop bundled `0.146.0-alpha.3.1` |
 | --- | --- | --- | --- |
-| Skills, plugins, hooks, managed command output | Supported | Supported | Supported |
-| Container Lab | Supported when Docker or OrbStack and the packaged or source runtime are available | Same | Same |
-| MultiAgentV2 child tree and same-root coordination | Partial; enable V2/collaboration and use only advertised tools | Full Skizzles core | Full Skizzles core |
-| Same-root lifecycle and messaging tools | Conditional on active inventory | Supported | Supported |
-| Fixed Triage, Worker, Designer, QA, Review, and Deployment role/model/reasoning selection | Conditional; not the durable baseline | Supported when generated roles are configured | Supported when generated roles are configured |
+| Skills, plugins, hooks, managed command output | Content transfer only; not an orchestration host | Supported | Supported |
+| Container Lab | Content/runtime may be installed, but configuration is unsupported | Supported when Docker or OrbStack and the packaged or source runtime are available | Same |
+| MultiAgentV2 child tree and same-root coordination | Unsupported; known broken, token-wasting host | Full Skizzles core | Full Skizzles core |
+| Same-root lifecycle and messaging tools | Unsupported for Skizzles configuration | Supported | Supported |
+| Fixed Triage, Worker, Designer, QA, Review, and Deployment role/model/reasoning selection | Unsupported | Supported when generated roles are configured | Supported when generated roles are configured |
 | Continuity after residency eviction, reload, or later reactivation | Not guaranteed; reactivation is not proof | Not guaranteed after eviction or reload; reactivation is not proof | Not guaranteed after eviction or reload; reactivation is not proof |
 | Browser, Computer Use, appshots, realtime voice, and native pipes | Not CLI model tools | Not CLI model tools | Conditional; advertised per task |
 | Cross-root task operations | Not CLI model tools | Not CLI model tools | Desktop-only extras when advertised |
 
-## CLI `0.145.0`: portable/partial
+## CLI `0.145.0`: unsupported for orchestration
 
-Skills, hooks, Container Lab, and basic child-tree work are supported when the session exposes the required tools. Tagged source may select configured roles, but Skizzles does not present this tier as the persistent fixed-role workflow.
+**Do not use Codex CLI 0.145.0 for Skizzles orchestration.** It is a known
+broken, token-wasting host. Upgrade to Codex CLI 0.146.0-alpha.3 or newer
+before running `configure`. Skills and plugin content may still be copied as a
+separate transfer, but that does not activate or support orchestration.
 
-Use passive configuration on unknown or partial hosts. It enables hooks without writing MultiAgentV2 settings.
+Versions below `0.146.0-alpha.3`, including `0.146.0-alpha.0` through
+`.2`, are rejected by `configure` before app-server RPC, receipt creation, or
+config writes. Unknown, malformed, nonzero, or timed-out `--version` probes
+also fail closed.
 
 ## CLI `>= 0.146.0-alpha.3`: full same-root core
 
-Fixed roles with their configured model and reasoning effort, plus native same-root MultiAgentV2 coordination, are supported while the selected child remains resident. Fixed-role behavior requires `--instructions skizzles` or equivalent configuration of the generated role files; plugin presence alone is insufficient. This tier does not add Desktop task management, browser control, Computer Use, voice, or other Desktop-hosted tools.
+`configure` probes the selected `--codex-binary` with bounded `--version`
+execution before any app-server RPC, receipt, or config write. Fixed roles with
+their configured model and reasoning effort, plus native same-root MultiAgentV2
+coordination, are supported while the selected child remains resident.
+Fixed-role behavior requires `--instructions skizzles` or equivalent
+configuration of the generated role files; plugin presence alone is
+insufficient. This tier does not add Desktop task management, browser control,
+Computer Use, voice, or other Desktop-hosted tools.
 
 Aggressive configuration is appropriate only when the session advertises the collaboration tools the workflow needs. If the host rejects the settings or omits a required tool, restore or use passive mode rather than emulating the missing feature.
 

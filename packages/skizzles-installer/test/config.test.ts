@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   configureCodex,
@@ -19,7 +19,10 @@ function fixture(initial: Value = {}): { codexHome: string; codexBinary: string;
   roots.push(codexHome);
   mkdirSync(codexHome, { recursive: true });
   writeFileSync(join(codexHome, "config.toml"), "# preserved by native Codex config editing\n");
-  return { codexHome, codexBinary: process.execPath, rpc: new FakeRpc(codexHome, initial) };
+  const codexBinary = join(codexHome, "fake-codex");
+  writeFileSync(codexBinary, "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.146.0-alpha.14'\n");
+  chmodSync(codexBinary, 0o755);
+  return { codexHome, codexBinary, rpc: new FakeRpc(codexHome, initial) };
 }
 
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })));

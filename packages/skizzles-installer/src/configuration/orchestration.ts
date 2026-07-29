@@ -10,6 +10,7 @@ import {
   selectUserConfigLayer,
   type ConfigRpc,
 } from "./codex-app-server";
+import { assertSupportedCodexBinary } from "./codex-version";
 import {
   desiredConfigEdits,
   resolveInstructionAssets,
@@ -48,6 +49,7 @@ export interface UnconfigureOptions {
 export async function configureCodex(options: ConfigureOptions): Promise<ConfigReceipt> {
   const codexHome = canonicalExistingPath(options.codexHome);
   const codexBinary = resolveCodexBinary(options.codexBinary);
+  await assertSupportedCodexBinary(codexBinary);
   const instructions = options.instructions ?? "native";
   if (instructions === "skizzles" && !options.sourceRoot) {
     throw new Error("--source-root is required with --instructions skizzles");

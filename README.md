@@ -96,6 +96,12 @@ After installing the complete plugin surface, choose:
 
 Preview the full developer setup:
 
+Before running `configure`, use Codex CLI `0.146.0-alpha.3` or newer. Do not
+use `0.145.0` for Skizzles orchestration: it is a known broken, token-wasting
+host. The installer probes the selected binary before any RPC, receipt, or
+configuration write. Configuration requires a POSIX host with an owned probe
+process group; transfer-only installation remains independent.
+
 ```sh
 just configure-preview /absolute/target/codex-home aggressive skizzles
 ```

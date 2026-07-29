@@ -116,7 +116,10 @@ describe("published plugin contracts", () => {
     expect(stagedInstaller).toContain(
       "Plugin and direct-skill copies are alternatives",
     );
-    expect(stagedInstaller).toContain("CLI `0.145.0` is portable/partial");
+    expect(stagedInstaller).toContain("known broken, token-wasting host");
+    expect(stagedInstaller).toContain("`0.146.0-alpha.3` or newer");
+    expect(stagedInstaller).toContain("bounded `--version` probe");
+    expect(stagedInstaller).toContain("POSIX host with owned process-group support");
     expect(stagedInstaller).not.toContain("blob/main/docs/compatibility.md");
     expect(stagedInstaller).not.toMatch(
       /reviewed local source|reviewed local marketplace|unpublished local fix/i,
@@ -151,7 +154,10 @@ describe("published plugin contracts", () => {
       "utf8",
     );
 
-    expect(compatibility).toContain("CLI `0.145.0`: portable/partial");
+    expect(compatibility).toContain("CLI `0.145.0`: unsupported for orchestration");
+    expect(compatibility).toContain("known broken, token-wasting host");
+    expect(compatibility).toContain("before app-server RPC, receipt creation, or");
+    expect(compatibility).toContain("POSIX host where the installer can own and terminate");
     expect(compatibility).toContain(
       "CLI `>= 0.146.0-alpha.3`: full same-root core",
     );

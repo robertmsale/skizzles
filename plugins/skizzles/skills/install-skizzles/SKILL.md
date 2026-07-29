@@ -81,7 +81,20 @@ With the Skizzles split, select the generated `agent_type`, omit independent mod
 
 Role/model/reasoning continuity is guaranteed only while the selected child remains resident. Eviction or reload ends that guarantee, and reactivation alone does not prove the prior settings survived. When continuity matters, create a fresh sibling with explicit role selection and a compact handoff.
 
-Compatibility: CLI `0.145.0` is portable/partial; CLI `>=0.146.0-alpha.3` provides the full configured-role same-root core; Desktop extras remain inventory-scoped and cross-root operations are available only when advertised.
+Compatibility is checked at configuration time against the selected
+`--codex-binary`. Before any app-server RPC, receipt, or config write,
+`configure` runs a bounded `--version` probe and rejects malformed, failed,
+timed-out, or below-floor results. **Do not use Codex CLI `0.145.0` for
+Skizzles orchestration.** It is a known broken, token-wasting host; upgrade to
+Codex CLI `0.146.0-alpha.3` or newer before running `configure`. The inclusive
+minimum is `0.146.0-alpha.3` (later prereleases, final `0.146.0`, and newer
+versions pass). Content transfer remains separate and can copy the plugin or
+skills without activating host configuration. `configure` also requires a
+POSIX host with owned process-group support; unsupported hosts refuse
+configuration while transfer-only installation remains available. The
+configured-role same-root core also requires `--instructions skizzles` (or
+equivalent generated roles), and Desktop extras remain inventory-scoped:
+cross-root operations are available only when advertised.
 
 Preview against an explicit `CODEX_HOME` and absolute Codex binary:
 
