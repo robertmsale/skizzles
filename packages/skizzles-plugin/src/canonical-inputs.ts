@@ -70,7 +70,6 @@ export async function copyGitSelectedTree(
       throw new PackagingError(`Git returned a path outside ${label}: ${path}.`);
     }
     const relativePath = path.slice(prefix.length);
-    assertDistributablePath(relativePath, `${label}/${relativePath}`);
     const source = join(repoRoot, path);
     const destination = join(destinationRoot, ...relativePath.split("/"));
     let sourceMetadata: Awaited<ReturnType<typeof lstat>>;
@@ -80,6 +79,7 @@ export async function copyGitSelectedTree(
       if (isNodeError(error) && error.code === "ENOENT") continue;
       throw error;
     }
+    assertDistributablePath(relativePath, `${label}/${relativePath}`);
     if (sourceMetadata.isSymbolicLink()) {
       throw new PackagingError(
         `${label}/${relativePath} is a symlink; distributable inputs must be self-contained.`,

@@ -3,24 +3,24 @@ import { parseScriptCommands } from "./parse-script.ts";
 
 type HookEvent = {
   hook_event_name?: unknown;
-  permission_mode?: unknown;
   tool_name?: unknown;
   tool_input?: Record<string, unknown>;
 };
 
 const maximumScriptLength = 64 * 1024;
-const bypassPermissionsMode = "bypassPermissions";
 
 /**
  * Converts an eligible PreToolUse event into the exact hook response expected
- * by Codex. Undefined means passthrough without a permission decision.
+ * by Codex. Permission metadata does not control output supervision: command
+ * eligibility stays conservative, while Codex's active sandbox remains the
+ * authority for the rewritten process. Undefined means passthrough without a
+ * permission decision.
  */
 export function renderManagedCommandResponse(raw: string): string | undefined {
   const event = parseHookEvent(raw);
   if (
     !event
     || event.hook_event_name !== "PreToolUse"
-    || event.permission_mode !== bypassPermissionsMode
   ) {
     return undefined;
   }

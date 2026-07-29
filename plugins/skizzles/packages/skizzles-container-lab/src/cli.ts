@@ -7576,6 +7576,8 @@ import { spawn as spawn2 } from "child_process";
 // packages/skizzles-container-lab/src/execution/process.ts
 import { spawn } from "child_process";
 async function runCommand(command, args, options = {}) {
+  if (options.signal?.aborted)
+    throw new Error(`${command} aborted`);
   return await new Promise((resolve2, reject) => {
     const ownsProcessGroup = process.platform !== "win32";
     const child = spawn(command, args, {
@@ -7596,6 +7598,10 @@ async function runCommand(command, args, options = {}) {
     let cleanupError;
     let outputOverflow;
     let forceKill;
+    let timeout;
+    let closeCode = null;
+    let closeObserved = false;
+    let settled = false;
     const signalTree = (signal) => {
       try {
         if (ownsProcessGroup && child.pid !== undefined) {
@@ -7610,6 +7616,32 @@ async function runCommand(command, args, options = {}) {
         return false;
       }
     };
+    const settle = () => {
+      if (settled || !closeObserved || cleanupSignalSent && !forceKillSent)
+        return;
+      settled = true;
+      if (timeout)
+        clearTimeout(timeout);
+      if (forceKill)
+        clearTimeout(forceKill);
+      options.signal?.removeEventListener("abort", abort);
+      if (cleanupError)
+        return reject(cleanupError);
+      if (outputOverflow) {
+        return reject(new Error(`${command} ${outputOverflow} exceeded ${cap} byte output limit`));
+      }
+      const result = {
+        code: timedOut ? 124 : closeCode ?? 1,
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr)
+      };
+      if (options.signal?.aborted)
+        return reject(new Error(`${command} aborted`));
+      if (result.code !== 0 && !options.allowFailure) {
+        return reject(new Error(`${command} ${args.join(" ")} failed (${result.code}): ${result.stderr.toString().trim()}`));
+      }
+      resolve2(result);
+    };
     const terminate = () => {
       if (cleanupStarted)
         return;
@@ -7622,8 +7654,10 @@ async function runCommand(command, args, options = {}) {
       if (signalTree("SIGTERM")) {
         cleanupSignalSent = true;
         forceKill = setTimeout(() => {
+          forceKill = undefined;
           forceKillSent = true;
           signalTree("SIGKILL");
+          settle();
         }, 100);
       }
     };
@@ -7646,11 +7680,16 @@ async function runCommand(command, args, options = {}) {
     });
     const abort = () => terminate();
     options.signal?.addEventListener("abort", abort, { once: true });
-    const timeout = options.timeoutMs ? setTimeout(() => {
+    if (options.signal?.aborted)
+      abort();
+    timeout = options.timeoutMs ? setTimeout(() => {
       timedOut = true;
       abort();
     }, options.timeoutMs) : undefined;
     child.once("error", (error) => {
+      if (settled)
+        return;
+      settled = true;
       if (timeout)
         clearTimeout(timeout);
       if (forceKill)
@@ -7660,31 +7699,9 @@ async function runCommand(command, args, options = {}) {
     });
     child.once("exit", terminate);
     child.once("close", (code) => {
-      if (timeout)
-        clearTimeout(timeout);
-      if (forceKill)
-        clearTimeout(forceKill);
-      if (cleanupSignalSent && !forceKillSent) {
-        forceKillSent = true;
-        signalTree("SIGKILL");
-      }
-      options.signal?.removeEventListener("abort", abort);
-      if (cleanupError)
-        return reject(cleanupError);
-      if (outputOverflow) {
-        return reject(new Error(`${command} ${outputOverflow} exceeded ${cap} byte output limit`));
-      }
-      const result = {
-        code: timedOut ? 124 : code ?? 1,
-        stdout: Buffer.concat(stdout),
-        stderr: Buffer.concat(stderr)
-      };
-      if (options.signal?.aborted)
-        return reject(new Error(`${command} aborted`));
-      if (result.code !== 0 && !options.allowFailure) {
-        return reject(new Error(`${command} ${args.join(" ")} failed (${result.code}): ${result.stderr.toString().trim()}`));
-      }
-      resolve2(result);
+      closeCode = code;
+      closeObserved = true;
+      settle();
     });
   });
 }

@@ -60,25 +60,25 @@ describe("published plugin contracts", () => {
       "utf8",
     );
     expect(stagedFourthWall).toBe(canonicalFourthWall);
-    expect(stagedFourthWall).toContain("$skizzles:fourth-wall");
-    expect(stagedFourthWall).toContain('never `"all"` when selecting a child role');
-    expect(stagedFourthWall).toContain(
-      "Reactivation does not prove that an evicted child's role",
-    );
+    expect(stagedFourthWall).toContain("fixed-role local engineering team");
+    expect(stagedFourthWall).toContain("## Evidence-First Triage");
+    expect(stagedFourthWall).toContain("## Parallel Luna Implementation");
     expect(stagedFourthWall).toContain("| `worker` | `gpt-5.6-luna` | xhigh |");
     expect(stagedFourthWall).toContain("| `review` | `gpt-5.6-sol` | high |");
     expect(stagedFourthWall).toContain(
       "There are no capability variants or model-escalation ladder",
     );
-    expect(stagedFourthWall).toContain(
-      "Do not invent fallback role mappings, lower routing floors, or capability variants",
+    expect(stagedFourthWall).not.toContain(
+      "Read before the first subagent spawn or orchestration action",
     );
-    expect(stagedFourthWall).not.toContain("blob/main/docs/compatibility.md");
-    expect(
-      await Bun.file(
-        join(staged, "skills/fourth-wall/references/learning-loop.md"),
-      ).exists(),
-    ).toBe(false);
+    const stagedLearning = await readFile(
+      join(staged, "skills/fourth-wall/references/learning-loop.md"),
+      "utf8",
+    );
+    expect(stagedLearning).toContain("private host-local record");
+    expect(stagedLearning).toContain(
+      "Never copy campaign-derived observations into this public skill repository",
+    );
     expect(
       await Bun.file(
         join(staged, "skills/fourth-wall/resources/learning-log.md"),
@@ -89,12 +89,16 @@ describe("published plugin contracts", () => {
     const canonicalDelegation = await readFile(join(repoRoot, delegationPath), "utf8");
     const stagedDelegation = await readFile(join(staged, delegationPath), "utf8");
     expect(stagedDelegation).toBe(canonicalDelegation);
-    expect(stagedDelegation).toContain(
-      "do not invent model or effort substitutes for those roles",
-    );
-    expect(stagedDelegation).toContain("report the missing configured-role surface");
-    expect(stagedDelegation).not.toContain(
-      "use only explicit model and effort values offered by the active spawn tool",
+    expect(stagedDelegation).toContain("## Complete Slice Test");
+
+    const handoffPath = "skills/fourth-wall/references/handoff-packet.md";
+    const canonicalHandoff = await readFile(join(repoRoot, handoffPath), "utf8");
+    const stagedHandoff = await readFile(join(staged, handoffPath), "utf8");
+    expect(stagedHandoff).toBe(canonicalHandoff);
+    expect(stagedHandoff).toContain("# Context Renewal And Warm Handoff");
+    expect(stagedHandoff).toContain("manual handoff");
+    expect(stagedHandoff).not.toContain(
+      "fresh sibling named `<role>__<objective>`",
     );
 
     const canonicalInstaller = await readFile(
@@ -138,20 +142,6 @@ describe("published plugin contracts", () => {
       expect(contents).toContain("do not script trivial changes");
     }
 
-    for (
-      const path of [
-        "assets/skizzles_instructions.md",
-        "assets/skizzles_subagent_instructions.md",
-        "skills/fourth-wall/references/coordination-loop.md",
-        "skills/fourth-wall/references/delegation-contract.md",
-        "skills/fourth-wall/references/handoff-packet.md",
-      ]
-    ) {
-      const contents = await readFile(join(staged, path), "utf8");
-      expect(contents).not.toMatch(
-        /campaign-close|learning log|guarded adjudication|red-flag KPI/i,
-      );
-    }
   });
 
   test("records the supplied compatibility boundary", async () => {

@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 export const packageRoot = resolve(import.meta.dir, "../..");
 export const hook = join(packageRoot, "hooks/manage-command-output.ts");
 export const runner = join(packageRoot, "runtime/codex-command.ts");
+export const defaultPermissionMode = "default";
 export const bypassPermissionsMode = "bypassPermissions";
 
 const runnerCommand = 'bun "${PLUGIN_ROOT}/runtime/codex-command.ts"';
@@ -56,7 +57,7 @@ export function invokeHook(
   const { key = "command", toolInput = {} } = options;
   const permissionMode = Object.hasOwn(options, "permissionMode")
     ? options.permissionMode
-    : bypassPermissionsMode;
+    : defaultPermissionMode;
   return invoke(hook, [], {
     stdin: JSON.stringify({
       hook_event_name: "PreToolUse",

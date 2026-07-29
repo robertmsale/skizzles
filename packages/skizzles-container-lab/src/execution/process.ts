@@ -12,6 +12,8 @@ export type RunOptions = {
 };
 
 export async function runCommand(command: string, args: string[], options: RunOptions = {}): Promise<CommandResult> {
+  if (options.signal?.aborted) throw new Error(`${command} aborted`);
+
   return await new Promise<CommandResult>((resolve, reject) => {
     const ownsProcessGroup = process.platform !== "win32";
     const child = spawn(command, args, {
@@ -32,6 +34,10 @@ export async function runCommand(command: string, args: string[], options: RunOp
     let cleanupError: Error | undefined;
     let outputOverflow: "stdout" | "stderr" | undefined;
     let forceKill: ReturnType<typeof setTimeout> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let closeCode: number | null = null;
+    let closeObserved = false;
+    let settled = false;
 
     const signalTree = (signal: NodeJS.Signals): boolean => {
       try {
@@ -48,6 +54,27 @@ export async function runCommand(command: string, args: string[], options: RunOp
         return false;
       }
     };
+    const settle = () => {
+      if (settled || !closeObserved || (cleanupSignalSent && !forceKillSent)) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (forceKill) clearTimeout(forceKill);
+      options.signal?.removeEventListener("abort", abort);
+      if (cleanupError) return reject(cleanupError);
+      if (outputOverflow) {
+        return reject(new Error(`${command} ${outputOverflow} exceeded ${cap} byte output limit`));
+      }
+      const result = {
+        code: timedOut ? 124 : (closeCode ?? 1),
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr),
+      };
+      if (options.signal?.aborted) return reject(new Error(`${command} aborted`));
+      if (result.code !== 0 && !options.allowFailure) {
+        return reject(new Error(`${command} ${args.join(" ")} failed (${result.code}): ${result.stderr.toString().trim()}`));
+      }
+      resolve(result);
+    };
     const terminate = () => {
       if (cleanupStarted) return;
       cleanupStarted = true;
@@ -59,8 +86,10 @@ export async function runCommand(command: string, args: string[], options: RunOp
       if (signalTree("SIGTERM")) {
         cleanupSignalSent = true;
         forceKill = setTimeout(() => {
+          forceKill = undefined;
           forceKillSent = true;
           signalTree("SIGKILL");
+          settle();
         }, 100);
       }
     };
@@ -83,8 +112,11 @@ export async function runCommand(command: string, args: string[], options: RunOp
     child.stderr.on("data", (chunk: Buffer) => { stderrBytes = collect("stderr", stderr, chunk, stderrBytes); });
     const abort = () => terminate();
     options.signal?.addEventListener("abort", abort, { once: true });
-    const timeout = options.timeoutMs ? setTimeout(() => { timedOut = true; abort(); }, options.timeoutMs) : undefined;
+    if (options.signal?.aborted) abort();
+    timeout = options.timeoutMs ? setTimeout(() => { timedOut = true; abort(); }, options.timeoutMs) : undefined;
     child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
       if (timeout) clearTimeout(timeout);
       if (forceKill) clearTimeout(forceKill);
       options.signal?.removeEventListener("abort", abort);
@@ -92,27 +124,9 @@ export async function runCommand(command: string, args: string[], options: RunOp
     });
     child.once("exit", terminate);
     child.once("close", (code) => {
-      if (timeout) clearTimeout(timeout);
-      if (forceKill) clearTimeout(forceKill);
-      if (cleanupSignalSent && !forceKillSent) {
-        forceKillSent = true;
-        signalTree("SIGKILL");
-      }
-      options.signal?.removeEventListener("abort", abort);
-      if (cleanupError) return reject(cleanupError);
-      if (outputOverflow) {
-        return reject(new Error(`${command} ${outputOverflow} exceeded ${cap} byte output limit`));
-      }
-      const result = {
-        code: timedOut ? 124 : (code ?? 1),
-        stdout: Buffer.concat(stdout),
-        stderr: Buffer.concat(stderr),
-      };
-      if (options.signal?.aborted) return reject(new Error(`${command} aborted`));
-      if (result.code !== 0 && !options.allowFailure) {
-        return reject(new Error(`${command} ${args.join(" ")} failed (${result.code}): ${result.stderr.toString().trim()}`));
-      }
-      resolve(result);
+      closeCode = code;
+      closeObserved = true;
+      settle();
     });
   });
 }

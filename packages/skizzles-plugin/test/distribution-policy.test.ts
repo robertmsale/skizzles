@@ -77,4 +77,17 @@ describe("distributable safety and metadata policy", () => {
       PackagingError,
     );
   });
+
+  test("rejects private learning records", async () => {
+    const root = await sandbox.createRepository();
+    await writeFixture(
+      root,
+      "skills/fourth-wall/resources/learning-log.md",
+      "private campaign observation\n",
+    );
+
+    expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
+      "skills/fourth-wall/resources/learning-log.md looks like local or live state",
+    );
+  });
 });

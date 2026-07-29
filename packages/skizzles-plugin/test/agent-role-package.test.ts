@@ -69,22 +69,21 @@ describe("capability-bearing agent role generation", () => {
     expect(renderAgentRoles(root)).rejects.toThrow("collides with generated agent type");
   });
 
-  test("renders bounded role duties without orchestration ceremony", async () => {
+  test("renders the fixed upstream role duties", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const files = await renderAgentRoles(repoRoot);
 
     expect(files.get("default.toml")).toContain("Do not add a specialized duty or spawn subagents");
-    expect(files.get("triage.toml")).toContain("Keep product source and durable configuration read-only");
-    expect(files.get("worker.toml")).toContain("Do not spawn subagents");
+    expect(files.get("triage.toml")).toContain(
+      "Keep product source and durable project configuration read-only",
+    );
+    expect(files.get("worker.toml")).toContain("Workers are leaves. Do not delegate");
     expect(files.get("designer.toml")).toContain("Validate through the real browser, simulator, or platform entrypoint");
     expect(files.get("qa.toml")).toContain("Do not modify implementation unless the assignment explicitly includes a fix");
     expect(files.get("review.toml")).toContain("Do not modify implementation unless explicitly assigned");
     expect(files.get("deployment.toml")).toContain("without explicit authorization for that action and target");
-
-    for (const [name, contents] of files) {
-      if (name === "manifest.json") continue;
-      expect(contents).not.toMatch(/campaign-close|learning log|peer map|guarded adjudication|persistent owner/i);
-    }
+    expect(files.get("triage.toml")).toContain("campaign-close learning");
+    expect(files.get("worker.toml")).toContain("peer map");
   });
 
   test("build and check reject generated drift", async () => {

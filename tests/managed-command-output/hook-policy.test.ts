@@ -9,6 +9,7 @@ import {
   artifactPath,
   bypassPermissionsMode,
   createTestDirectories,
+  defaultPermissionMode,
   hook,
   invoke,
   invokeHook,
@@ -211,21 +212,24 @@ describe("managed command output hook", () => {
     expect(text(result.stdout)).toBe("");
   });
 
-  test("preserves native approval unless bypassPermissions is explicit", () => {
-    for (const permission_mode of [undefined, "default", "acceptEdits", "plan", "dontAsk", 42]) {
+  test("rewrites recognized commands for ordinary and bypass permission metadata", () => {
+    for (const permission_mode of [undefined, defaultPermissionMode, bypassPermissionsMode]) {
       const result = invokeHook("bun test", { permissionMode: permission_mode });
-      expect(text(result.stdout), String(permission_mode)).toBe("");
+      const payload = JSON.parse(text(result.stdout));
+      expect(payload.hookSpecificOutput.permissionDecision).toBe("allow");
+      expect(payload.hookSpecificOutput.updatedInput.command).toBe(rewrittenCommand("bun test"));
     }
   });
 
-  test("requires every command in the script to be eligible", () => {
+  test("default permission mode still passes through scripts with any unsafe or ambiguous command", () => {
     for (const command of [
       "echo header; flutter test",
       "flutter test; rm -rf /tmp/sentinel",
       "cargo check && deploy-production",
       "bun test | tee test.log",
+      "bun test; echo $(cargo check)",
     ]) {
-      const result = invokeHook(command);
+      const result = invokeHook(command, { permissionMode: defaultPermissionMode });
       expect(text(result.stdout), command).toBe("");
     }
   });
@@ -266,7 +270,7 @@ describe("managed command output hook", () => {
     const result = invoke(hook, [], {
       stdin: JSON.stringify({
         hook_event_name: "PreToolUse",
-        permission_mode: bypassPermissionsMode,
+        permission_mode: defaultPermissionMode,
         tool_input: { cmd: "bun test", command: "cargo test" },
       }),
     });

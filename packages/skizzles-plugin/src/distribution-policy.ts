@@ -12,6 +12,7 @@ const BLOCKED_NAMES = new Set([
   ".ruff_cache",
   ".venv",
   "__pycache__",
+  "learning-log.md",
   "node_modules",
 ]);
 
