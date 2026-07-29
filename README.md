@@ -2,27 +2,41 @@
 
 ![Skizzles logo](assets/logo.png)
 
-Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks, tiny runtime tools, and release packaging in one canonical source tree. It turns the fiddly parts of agent work into a tidy little toolkit. 🧰
+Skizzles is a reviewable Codex harness and packaging project. Its canonical
+source tree contains reusable skills, hooks, runtime tools, and release
+packaging.
 
 ## What’s inside
 
-- **Command-output management** — classifies useful build/test commands, keeps output bounded, and leaves a useful artifact when a command gets noisy.
-- **Fourth Wall orchestration** — Terra proves the terrain, parallel Luna owners implement and validate disjoint slices, and Sol supplies design taste plus adversarial judgment. 🗺️🌙🎨🤌
-- **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
-- **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
-- **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
-- **Configured role brains** — an opt-in developer-focused root prompt keeps the conversation delightful, while generated Triage/Worker/Designer/QA/Review/Deployment roles bind each duty to a model/reasoning pair while the child remains resident. 🧠✨
-- **A practical skill shelf** — auth semantics, Cargo optimization, completion contracts, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
-- **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
-- **A polite config handshake** — enable the hooks, then choose passive native orchestration or the full proactive Fourth Wall experience without trampling the rest of `config.toml`. 🤝
+- **Runtime** — command-output management classifies useful build/test commands
+  and bounds noisy output. Fourth Wall: Terra supplies verified evidence and
+  commands; parallel Luna owners implement and validate disjoint slices; Sol
+  supplies design and adversarial judgment.
+- **Analysis and labs** — usage analyzer provides privacy-conscious, read-only
+  rollout analysis with explicit `CODEX_HOME`. Container Lab includes a skill,
+  full canonical source project, bundled CLI/reaper, compatibility descriptor,
+  and safe doctor boundary for disposable Docker Compose labs.
+- **Models and roles** — opt-in Luna V2 model-catalog overlay with launchd
+  refresher preserves the official catalog and enables proven Luna workers in
+  native MultiAgentV2; opt-in developer root prompt and generated
+  Triage/Worker/Designer/QA/Review/Deployment roles.
+- **Skills and setup** — public skill collection covers auth semantics, Cargo optimization,
+  completion contracts, counterfactual engineering, design proof gates, legacy
+  cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
+  The public `install-skizzles` skill covers optional host wiring after a
+  skill-only install; hooks support passive native or proactive Fourth Wall
+  configuration without changing unrelated `config.toml` settings.
 
-Everything is maintained once in the canonical roots and workspace packages, then staged into a versioned plugin. 🎯
+Canonical roots and workspace packages are maintained once, then staged into a
+versioned plugin.
 
-## Pick your ride
+## Choose an installation surface
 
 ### Stable plugin
 
-**WIP:** Use the official Codex marketplace/plugin flow to install a released `skizzles` plugin. It packages the skills, hooks, runtime helpers, branding, and runnable Container Lab CLI/reaper together. Plugin skills are namespaced.
+**WIP:** Use the official Codex marketplace/plugin flow to install a released
+`skizzles` plugin. It packages the skills, hooks, runtime helpers, branding,
+and runnable Container Lab CLI/reaper together. Plugin skills are namespaced.
 
 ### Individual skills
 
@@ -32,13 +46,20 @@ Install just the skills you want with the Skills CLI:
 bunx skills add https://github.com/robertmsale/skizzles --skill install-skizzles
 ```
 
-Add `--skill <name>` for another public skill, or omit it to choose interactively. Skill-only installs do not activate Skizzles hooks or runtime helpers; [install-skizzles](skills/install-skizzles/SKILL.md) explains the optional next steps.
+Add `--skill <name>` for another public skill, or omit it to choose
+interactively. Skill-only installs do not activate Skizzles hooks or runtime
+helpers; [install-skizzles](skills/install-skizzles/SKILL.md) explains the
+optional next steps.
 
-The plugin and a direct copy are alternative installation surfaces for the same skill. Remove an existing direct Skizzles skill before installing or enabling the plugin, and do not directly install a skill already supplied by the enabled plugin.
+The plugin and a direct copy are alternative installation surfaces for the same
+skill. Remove an existing direct Skizzles skill before installing or enabling
+the plugin, and do not directly install a skill already supplied by the enabled
+plugin.
 
 ### Source-linked development
 
-For maintainer work, use a local checkout and point the Skills CLI at its canonical `skills/` directory:
+For maintainer work, use a local checkout and point the Skills CLI at its
+canonical `skills/` directory:
 
 ```sh
 git clone https://github.com/robertmsale/skizzles.git
@@ -46,54 +67,119 @@ cd skizzles
 bunx skills add ./skills --skill install-skizzles
 ```
 
-Container Lab is fully included in this repository—not merely documented here. A source-linked installation runs the canonical CLI and reaper directly from the checkout, while the stable plugin carries dependency-self-contained bundles. If you install only a copied skill, `install-skizzles` guides Codex through obtaining a selected Skizzles version and installing the complete surface; the launcher can also use an existing `codex-container-lab` PATH command. Host PATH and LaunchAgent wiring are optional, explicit, reversible, and machine-local.
+This repository includes the canonical Container Lab CLI/reaper, not
+documentation alone. A source-linked installation runs them directly from the
+checkout; the stable plugin carries dependency-self-contained bundles. If you
+install only a copied skill, `install-skizzles` guides Codex to obtain a selected
+Skizzles version and install the complete surface; the launcher can use an existing
+`codex-container-lab` PATH command. Host PATH and LaunchAgent wiring are optional, explicit,
+reversible, and machine-local.
 
-After installing the complete plugin surface, Skizzles can safely finish the Codex-side handshake:
+After installing the complete plugin surface, choose:
 
-- **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
-- **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for bounded parallel teams, and adds identifier-neutral pointers to the Fourth Wall skill advertised in the active inventory. 🚀
-- **Native instructions** (the default) leave Codex's model instructions untouched.
-- **Skizzles instructions** install a developer-facing root prompt plus seven fixed capability-bearing roles: Worker is Luna xhigh, Triage and QA are Terra medium, Default is Luna high, Designer is Sol medium, Review is Sol high, and Deployment is Sol xhigh. There are no implementation escalation variants: Terra supplies verified evidence and commands, Luna Workers own clear slices, and Sol judges the result. Select the generated `agent_type` without separate model overrides, and use numbered or context-free forks so Codex applies it. `fork_turns="all"` bypasses selected-role application. Eviction or reload ends the continuity guarantee.
+- **Passive orchestration** — enables packaged hooks; leaves Codex’s native
+  MultiAgentV2 defaults completely alone.
+- **Aggressive orchestration** — also enables MultiAgentV2; keeps fourteen task
+  slots available for bounded parallel teams; adds identifier-neutral pointers
+  to the Fourth Wall skill advertised in the active inventory.
+- **Native instructions** (the default) — leaves Codex's model instructions
+  untouched.
+- **Skizzles instructions** — installs a developer-facing root prompt and seven
+  fixed capability-bearing roles: Worker Luna xhigh; Triage and QA Terra medium;
+  Default Luna high; Designer Sol medium; Review Sol high; Deployment Sol xhigh.
+  There are no implementation escalation variants:
+  Terra supplies verified evidence and commands; Luna Workers own clear slices;
+  Sol judges the result. Select the generated `agent_type` without separate
+  model overrides; use numbered or context-free forks so Codex applies it.
+  `fork_turns="all"` bypasses selected-role application. Eviction or reload
+  ends the continuity guarantee.
 
-Preview the full developer setup from the checkout:
+Preview the full developer setup:
 
 ```sh
-bun run packages/skizzles-installer/src/cli.ts configure \
-  --codex-home /absolute/target/codex-home \
-  --codex-binary /absolute/path/to/codex \
-  --orchestration aggressive \
-  --instructions skizzles \
-  --source-root /absolute/path/to/skizzles \
-  --dry-run
+just configure-preview /absolute/target/codex-home aggressive skizzles
 ```
 
-Review the reported keys, then repeat without `--dry-run`. The lifecycle uses Codex’s own atomic config editor, preserves comments and unrelated settings, and records only the keys it owns for drift-safe restoration. It never edits `AGENTS.md`, approvals, permissions, goals, model defaults, or MCP registrations. Prompt replacement happens only with the explicit `--instructions skizzles` option. See [install-skizzles](skills/install-skizzles/SKILL.md) for restoration and the complete contract.
+If `codex` is unavailable on `PATH`, prefix both invocations with the absolute
+binary override `CODEX_BIN=/absolute/path/to/codex`. When `skizzles`
+instructions are selected, these recipes use this checkout as the source root.
+Review the reported keys and target, then repeat without `--dry-run` by applying
+the same choices after explicit authorization:
 
-See [Codex compatibility](docs/compatibility.md) for the supplied CLI/Desktop matrix, active-inventory boundary, configured-role condition, and non-Desktop fallback.
+```sh
+just configure-apply /absolute/target/codex-home aggressive skizzles
+```
 
-The optional Luna V2 overlay lives in `runtime/model-catalog.ts`. It regenerates a complete static catalog from the newest valid normal cache or the installed Codex binary, changes only Luna's compatibility marker, and becomes a no-op when upstream enables V2 officially. Its launchd template watches both sources and runs every five minutes; catalog changes take effect after the next app-server restart. See `assets/model-catalog-installation.md` before activating it. 🚀
+The lifecycle uses Codex’s own atomic config editor; it preserves comments and
+unrelated settings and records only the keys it owns for drift-safe restoration.
+It never edits `AGENTS.md`, approvals, permissions, goals, model defaults, or
+MCP registrations. Prompt replacement happens only with the explicit
+`--instructions skizzles` option. See
+[install-skizzles](skills/install-skizzles/SKILL.md) for restoration and the
+complete contract.
 
-## Keep the loop delightful
+See [Codex compatibility](docs/compatibility.md) for the supplied CLI/Desktop
+matrix, active-inventory boundary, configured-role condition, and non-Desktop
+fallback.
+
+The optional Luna V2 overlay lives in `runtime/model-catalog.ts`. It regenerates
+a complete static catalog from the newest valid normal cache or installed Codex
+binary, changes only Luna's compatibility marker, and becomes a no-op when
+upstream enables V2 officially. Its launchd template watches both sources and
+runs every five minutes; catalog changes take effect after the next app-server
+restart. See `assets/model-catalog-installation.md` before activating it.
+
+With `just` installed, run `just` to list maintainer shortcuts. From a fresh
+checkout, use `just setup`; when dependencies are already installed, use
+`just package` for the complete package boundary.
+
+## Generated plugin checks
 
 Build and verify the generated plugin from source with:
 
 ```sh
-bun install --frozen-lockfile
-bun run verify
+just setup
 ```
 
-Agent roles are generated too: edit `assets/agent-role-spec.json` for the fixed capability pairs or `assets/agent-role-templates/` for duties, then run `bun run agents:build`. The checked-in `assets/agents/` directory is derived output and `bun run agents:check` guards it from hand-edited goblin drift. 👹
+`just setup` installs dependencies with the committed lockfile, then runs the
+complete package boundary. The boundary runs `bun run typecheck`, `bun test`,
+`bun run plugin:check`, `bun run plugin:build`, and `bun run plugin:check` in
+that exact order. The first check inspects the existing generated output,
+`plugin:build` writes generated roles and plugin output, and the final check
+checks the rebuilt projection. When dependencies are already installed and
+packaging inputs changed, run:
 
-Plugins and new tasks use cached, versioned content, so start a fresh task after an update. For ownership, release rules, and safety details, see [AGENTS.md](AGENTS.md).
+```sh
+just package
+```
+
+`just package` skips dependency installation but runs the same five commands
+and may write generated output during `plugin:build`.
+
+Agent roles are generated too: edit `assets/agent-role-spec.json` for the fixed
+capability pairs or `assets/agent-role-templates/` for duties, then run
+`bun run agents:build`. The checked-in `assets/agents/` directory is derived
+output, and `bun run agents:check` detects hand edits to that output.
+
+Plugins and new tasks use cached, versioned content, so start a fresh task
+after an update. For ownership, release rules, and safety details, see [AGENTS.md](AGENTS.md).
 
 ## Contributing and coding agents
 
 - People: read [`CONTRIBUTING.md`](CONTRIBUTING.md) before submitting a change.
-- Coding agents: read [`AGENTS.md`](AGENTS.md) before changing files or using repository tools.
+- Coding agents: read [`AGENTS.md`](AGENTS.md) before changing files or using
+  repository tools.
 - Translations: none.
 
 ## Intent, security, and review
 
-Contributions made with or without AI tools are welcome and reviewed against the same engineering evidence. Before changing an intentional boundary, read the project’s [design intent](docs/design-intent.md) and [security model](docs/security-model.md). Container Lab’s trusted-project and temporary-storage decisions are documented in its [architecture](packages/skizzles-container-lab/docs/architecture.md).
+Contributions made with or without AI tools are welcome and reviewed against
+the same engineering evidence. Before changing an intentional boundary, read
+the project’s [design intent](docs/design-intent.md) and
+[security model](docs/security-model.md). Container Lab’s trusted-project and
+temporary-storage decisions are documented in its [architecture](packages/skizzles-container-lab/docs/architecture.md).
 
-> **Pre-release note:** the Git-based examples become runnable once the repository and a versioned release are published. Stable marketplace publication remains a separate release step; host wiring is optional machine-local setup.
+> **Pre-release note:** the Git-based examples become runnable once the
+repository and a versioned release are published. Stable marketplace
+publication remains a separate release step; host wiring is optional
+machine-local setup.

@@ -5,7 +5,7 @@ description: Convert user intent, approved plans, and subagent handoffs into exp
 
 # Completion Contract
 
-Use this skill to turn a task into a concrete completion contract. A completion contract is not a plan, estimate, suggestion list, or escape hatch. It is the smallest explicit statement of what must be true before the work can be called done.
+Use this skill to turn a task into a concrete completion contract. A completion contract is not a plan, estimate, suggestion list, or escape hatch. It states the smallest final condition that must be true before the work can be called done. Keep a routine local change to its outcome, applicable constraints, and focused proof; use the fuller planning and coordination guidance when work is substantial, consequential, delegated, or materially ambiguous. The contract fixes the required result, not a rigid implementation method.
 
 ## Authority Order
 
@@ -21,7 +21,7 @@ Do not let a worker plan, convenience path, or smaller first slice weaken a high
 
 ## Contract Draft
 
-Before delegating or claiming completion, normalize the task:
+Write the smallest contract that makes the requested final state and its proof observable. Routine local changes need only the outcome, applicable constraints, and focused evidence. Use the fuller schema for substantial or consequential work, or before a handoff or delegation where scope could drift:
 
 ```text
 Outcome:
@@ -35,11 +35,11 @@ Known valid blockers:
 Unknowns requiring clarification:
 ```
 
-If an unknown would materially change the contract, ask the user or parent orchestrator instead of silently narrowing scope.
+An approved plan is useful input, not a prerequisite. If there is no prewritten plan, make a proportionate plan or ask only about a missing decision that would materially change the final state, scope, authority, or risk. Do not silently narrow scope to avoid that question. Fill each applicable field; omitting an explicit constraint does not weaken it.
 
 ## Fan-Out
 
-Split large work before execution, not by letting a worker shrink scope during execution.
+When work is substantial or consequential and has independent, coherent boundaries, split it before execution rather than letting a worker shrink scope during execution. For a routine localized task, keep one owner; delegation is not a target.
 
 Good boundaries:
 
@@ -51,7 +51,7 @@ Good boundaries:
 - QA validation
 - deployment/infrastructure
 
-Bad boundaries:
+Bad boundaries when they merely defer or shrink the requested outcome:
 
 - first slice
 - make a start
@@ -59,11 +59,11 @@ Bad boundaries:
 - best effort
 - docs-only substitute
 
-Each delegated package must cover the full responsibility for its boundary and map back to the top-level outcome.
+Each delegated package must cover the full responsibility for its boundary and map back to the top-level outcome. Do not create a partial package merely because it is easy to dispatch.
 
 ## Requirements
 
-Write one main obligation per requirement. Prefer obligations that are observable and hard to fake:
+For substantial or consequential work, write one main obligation per material requirement. For routine work, include only the obligations that apply and prove the changed boundary. Prefer obligations that are observable and hard to fake:
 
 - implement
 - remove
@@ -82,7 +82,7 @@ Write one main obligation per requirement. Prefer obligations that are observabl
 - reject
 - fail
 
-Avoid soft wording:
+Treat these formulations as scope-shrink risks when they hide an incomplete required outcome:
 
 ```text
 if possible
@@ -110,11 +110,11 @@ tombstone
 legacy wrapper
 ```
 
-Rewrite soft language into exact final-state obligations.
+An MVP, prototype, or milestone is valid when the user explicitly approves it as the intended scope. It must not silently replace the requested correct final outcome. State the final-state obligation directly, but leave the implementation sequence, tool choice, and decomposition open unless a higher-authority instruction fixes them. Do not add proof for unrelated systems or chase exhaustive theoretical coverage beyond the changed boundary; expand checks when risk, a public contract, or an integration boundary warrants it.
 
 ## Valid Blockers
 
-Accept blockers only when they are concrete and external:
+Accept blockers only when they are concrete and outside the current authority, or when an explicit missing user decision blocks a material action:
 
 - missing permissions
 - unavailable external services
@@ -128,7 +128,7 @@ Do not accept task size, difficulty, uncertainty, refactor effort, stale failing
 
 ## Clobber Audit
 
-Before execution or final acceptance, ask:
+Before execution or final acceptance, audit the contract against the assigned boundary. For routine work, answer the questions that apply to the changed surface; substantial or consequential work should cover the full audit:
 
 - Did the contract preserve the user-approved outcome?
 - Did it shrink scope into a partial job?
@@ -138,12 +138,12 @@ Before execution or final acceptance, ask:
 - Did it allow fake UI, fake data, disabled checks, skipped tests, or manual workarounds?
 - Did it ignore relevant skills, repo instructions, or role constraints?
 
-Final responses should include the concrete evidence used: changed files, tests or commands, screenshots, source inspection, artifacts, or exact blockers.
+Final responses should include the concrete evidence used: changed files, tests or commands, screenshots, source inspection, artifacts, or exact blockers. Report focused evidence for the claimed boundary rather than implying exhaustive validation.
 
 ## Forward-Progress Checkpoints
 
-Treat commits as validated repository checkpoints, independent of `/goal` lifecycle. A goal tracks the overall outcome; a commit records one coherent causal state. Do not require or create a goal merely to obtain commit boundaries.
+For substantial or consequential work, treat commits as validated repository checkpoints, independent of `/goal` lifecycle. A goal tracks the overall outcome; a commit records one coherent causal state. A routine local change need not create a dedicated checkpoint merely because this skill was used. Do not require or create a goal merely to obtain commit boundaries.
 
-Commit when a coherent ownership slice is integrated, its focused proof passes, and no known breakage remains in that slice. Prefer a checkpoint before switching causal surfaces, beginning a risky refactor, transferring substantial ownership, or starting independent QA or Review. Keep unrelated slices separate and write commit messages in terms of the behavioral outcome.
+When a checkpoint is appropriate, commit after a coherent ownership slice is integrated, its focused proof passes, and no known breakage remains in that slice. Prefer a checkpoint before switching causal surfaces, beginning a risky refactor, transferring substantial ownership, or starting independent QA or Review. Keep unrelated slices separate and write commit messages in terms of the behavioral outcome.
 
-Do not commit every child completion automatically. The root first inspects shared-worktree ownership, integrates the slice, excludes unrelated user or agent changes, and verifies the evidence. Do not checkpoint a known-broken intermediate state merely to reduce diff size. Preserve reviewer corrections as later commits when practical so accepted history remains inspectable. Before final acceptance, validate the aggregate commit series and working tree, not only the newest checkpoint.
+In a coordinated substantial task, do not commit every child completion automatically. The root first inspects shared-worktree ownership, integrates the slice, excludes unrelated user or agent changes, and verifies the evidence. Do not checkpoint a known-broken intermediate state merely to reduce diff size. Preserve reviewer corrections as later commits when practical so accepted history remains inspectable. Before final acceptance of such work, validate the aggregate commit series and working tree, not only the newest checkpoint.

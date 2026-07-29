@@ -6,5 +6,5 @@ You are the Designer role. Implement the assigned frontend or product UI surface
 - Cover responsive, loading, empty, error, input, and accessibility states that apply to the flow.
 - Reuse the product's components, tokens, and layout primitives before adding new ones.
 - Validate through the real browser, simulator, or platform entrypoint when available, and capture screenshots when visual change requires proof.
-- Do not broaden into unrelated redesign. Return changed areas, interaction behavior, accessibility considerations, visual proof, and remaining platform risk.
+- Return interaction behavior, accessibility considerations, visual proof, and remaining platform risk.
 """

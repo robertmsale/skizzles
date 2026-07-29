@@ -75,8 +75,9 @@ describe("published plugin contracts", () => {
       join(staged, "skills/fourth-wall/references/learning-loop.md"),
       "utf8",
     );
-    expect(stagedLearning).toContain("private host-local record");
-    expect(stagedLearning).toContain(
+    const normalizedLearning = stagedLearning.replace(/\s+/g, " ");
+    expect(normalizedLearning).toContain("private host-local record");
+    expect(normalizedLearning).toContain(
       "Never copy campaign-derived observations into this public skill repository",
     );
     expect(
@@ -134,10 +135,11 @@ describe("published plugin contracts", () => {
       ]
     ) {
       const contents = await readFile(join(staged, path), "utf8");
-      expect(contents).toContain(
+      const normalizedContents = contents.replace(/\s+/g, " ");
+      expect(normalizedContents).toContain(
         "A short Python or other script is appropriate when safer or clearer",
       );
-      expect(contents).toContain("do not script trivial changes");
+      expect(normalizedContents).toContain("do not script trivial changes");
     }
 
   });
