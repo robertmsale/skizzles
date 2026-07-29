@@ -86,4 +86,14 @@ Agent roles are generated too: edit `assets/agent-role-spec.json` for the fixed 
 
 Plugins and new tasks use cached, versioned content, so start a fresh task after an update. For ownership, release rules, and safety details, see [AGENTS.md](AGENTS.md).
 
+## Contributing and coding agents
+
+- People: read [`CONTRIBUTING.md`](CONTRIBUTING.md) before submitting a change.
+- Coding agents: read [`AGENTS.md`](AGENTS.md) before changing files or using repository tools.
+- Translations: none.
+
+## Intent, security, and review
+
+Contributions made with or without AI tools are welcome and reviewed against the same engineering evidence. Before changing an intentional boundary, read the project’s [design intent](docs/design-intent.md) and [security model](docs/security-model.md). Container Lab’s trusted-project and temporary-storage decisions are documented in its [architecture](packages/skizzles-container-lab/docs/architecture.md).
+
 > **Pre-release note:** the Git-based examples become runnable once the repository and a versioned release are published. Stable marketplace publication remains a separate release step; host wiring is optional machine-local setup.

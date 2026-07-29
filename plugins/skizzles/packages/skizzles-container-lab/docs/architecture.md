@@ -11,6 +11,22 @@ The ownership unit is the exact current Codex thread id. Unified shell commands 
 
 Small owner and lab manifests live in a durable per-user state directory. They record ownership, source checkout, runtime location, Compose identity, lifecycle state, endpoints, safety findings, and managed image identity. Disposable clones, generated Compose files, sync baselines/tokens/journals, and backups live under an injectable temporary runtime root. Tests inject both roots.
 
+## Parallel workflow and storage
+
+Container Lab is primarily a parallelization and reproducible-experiment primitive. Multiple tasks or counterfactual hypotheses can start from the same reviewed checkpoint, receive independent Git workspaces and Compose identities, complete their own inspect-edit-build-test-fix loops, and return selected changes through guarded synchronization or ordinary Git patches. The root task owns final integration into the host checkout.
+
+Independent labs intentionally duplicate their clones and any build output written below `/workspace`, including `target/`, `node_modules`, generated files, test databases, or platform build directories. Container images, BuildKit caches, and project-declared external bind mounts remain separate Docker or project concerns and are not broadly pruned by Container Lab.
+
+The system temporary runtime root is intentional:
+
+- it avoids imposing a persistent `.tmp` convention or ignore policy on every consuming repository;
+- it keeps runtime ownership independent of repository layout;
+- exact `lab destroy` can remove positively owned workspaces;
+- the archive reaper can recover exact-owned resources abandoned by archived threads;
+- operating-system temporary-storage cleanup and reboot recovery remain available after severe disk or swap pressure.
+
+Moving the same artifacts into a worktree-local `.tmp` directory would not reduce their size and could make abandoned data persist indefinitely. Explicit destruction is the normal lifecycle; the archive reaper is an abandonment backstop. Future storage controls should preserve this model, measure per-lab and aggregate use, add conservative byte or low-disk limits where evidence supports them, and reap only positively identified inactive or archived paths. They must never broadly prune Docker or delete unidentified temporary content.
+
 Archive cleanup writes a small exact-owner reaped tombstone outside the removable owner directory while holding the shared owner lock. A create queued behind cleanup therefore cannot recreate resources for an already reaped archived identity; manual work must use a new owner identity.
 
 Creation is synchronous: the CLI persists `provisioning`, provisions in the attached process, and records `ready` or a compact `failed` state before returning. Catchable interruption records `failed` after exact cleanup. An uncatchable host termination can leave the durable state at `provisioning`; that manifest and its exact ownership labels remain intentionally destroyable by `lab destroy` and eligible for exact archive cleanup.
