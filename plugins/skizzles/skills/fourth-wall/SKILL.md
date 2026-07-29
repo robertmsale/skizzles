@@ -132,6 +132,12 @@ Review may ask a named Worker for one concrete existing artifact or one bounded 
 
 Triage may request Review adjudication only through the root and only after two bounded diagnostic passes (or equivalent contradictory evidence) leave a high-consequence architectural, security, migration, concurrency, or repeating-causal-model impasse. The packet must include competing explanations, supporting/rejecting evidence, Worker attempts, why another Triage pass is unlikely to resolve it, and one narrow decision request. Review supplies adjudication, never Sol implementation. Each use is counted and flagged as a red-flag KPI; slow builds, difficult tests, or incomplete implementation are not sufficient.
 
+## Failed Proof Is A Repair Input
+
+A failed local build, test, Container Lab run, or QA proof is evidence to preserve and classify, not a reason to terminate a substantial goal or campaign. Record a bounded command result and artifact path, then keep the existing Worker/Triage repair loop active when branch or base code, an owned fixture/config/migration, or an in-scope runtime contract plausibly caused the failure. Unknown cause means diagnosis is still pending; it is not a terminal blocker. Route the evidence to the owning Worker or persistent Triage owner, repair in scope, and rerun fresh proof.
+
+Reserve `blocked` for an unavailable external dependency, service, or permission; contradictory requirements or an owner-only decision; or a safety boundary that prevents further authorized progress. Do not infer an external blocker merely from a failed local proof, and do not add automatic recovery in place of explicit ownership routing.
+
 ## Persistent Ownership And Review
 
 Task completion releases active execution, not identity or accumulated context.

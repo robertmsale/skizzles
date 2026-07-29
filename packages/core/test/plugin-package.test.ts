@@ -78,6 +78,18 @@ describe("deterministic plugin packaging", () => {
     }
     expect(stagedLearning).toContain("never auto-promote or auto-mutate harness policy");
     expect(stagedLearning).toContain("private host-local record");
+    expect(stagedLearning).toContain("incorrect_terminal_block");
+    expect(stagedLearning).toContain("in_scope_runtime_failure_continued");
+    const stagedFourthWall = await readFile(join(staged, "skills/fourth-wall/SKILL.md"), "utf8");
+    expect(stagedFourthWall).toContain("A failed local build, test, Container Lab run, or QA proof is evidence to preserve and classify");
+    expect(stagedFourthWall).toContain("Reserve `blocked` for an unavailable external dependency, service, or permission");
+    const stagedDelegation = await readFile(
+      join(staged, "skills/fourth-wall/references/delegation-contract.md"),
+      "utf8",
+    );
+    expect(stagedDelegation).toContain("must not by itself mark a substantial goal or campaign `blocked`");
+    expect(stagedDelegation).toContain("Route the evidence to the owning Worker or persistent Triage owner");
+    expect(stagedDelegation).toContain("never infer an external blocker from a failed local proof alone");
     expect(await Bun.file(join(staged, "skills/fourth-wall/resources/learning-log.md")).exists()).toBe(false);
 
     const stagedInstaller = await readFile(join(staged, "skills/install-skizzles/SKILL.md"), "utf8");

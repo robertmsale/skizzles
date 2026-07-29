@@ -60,12 +60,15 @@ For a large, well-planned implementation, prefer 2-6 parallel Luna Workers with 
 
 A valid blocker identifies one of:
 
-- An unavailable external dependency or environment.
-- Contradictory requirements.
-- A safety boundary that forbids the required action.
-- A product or architecture decision only the owner can make.
+- An unavailable external dependency, service, or permission.
+- Contradictory requirements or a product/architecture decision only the owner can make.
+- A safety boundary that forbids further authorized progress.
 
-Task size, difficult code, uncertainty, failing tests, or the need for more investigation are not blockers by themselves.
+Task size, difficult code, uncertainty, failing tests, or the need for more investigation are not blockers by themselves. In particular, a failed local build, test, Container Lab run, or QA proof must not by itself mark a substantial goal or campaign `blocked`.
+
+## Proof Failure Routing
+
+Preserve a bounded command result and artifact path, classify the likely cause, and keep the campaign active when branch or base code, an owned fixture/config/migration, or an in-scope runtime contract plausibly caused the failure. Route the evidence to the owning Worker or persistent Triage owner, repair in scope, and rerun fresh proof. Unknown cause remains a diagnosis task, not a terminal disposition. Use `blocked` only for the external, contradictory-owner-decision, or safety cases above; never infer an external blocker from a failed local proof alone.
 
 ## Completion Claim
 

@@ -20,7 +20,7 @@ The packet contains:
 - review-finding classification and outcomes;
 - Reviewer independence status per review cycle: `independent` or `reduced-independence-advisory` (the latter is required when that Reviewer supplied midstream Triage adjudication);
 - a separate **repository friction** report for reproducible product/process obstacles (command or surface, evidence, affected owner, and suggested repository owner);
-- a **harness candidate** section for generalizable orchestration observations, evidence paths, confidence, and the smallest change worth deliberating;
+- a **harness candidate** section for generalizable orchestration observations, evidence paths, confidence, and the smallest change worth deliberating. When observed, record `incorrect_terminal_block` for a root that treated failed local build/test/Lab/QA proof as terminal despite a plausible in-scope repair path, and `in_scope_runtime_failure_continued` when the failed proof stayed active, was repaired by the owning Worker/Triage loop, and fresh proof resumed;
 - forwarding status: optional configured learning consumer, or `not configured`/`ambiguous`.
 
 Do not infer a missing event from silence. Counts are observations, not performance conclusions; retain denominators and context so complex repository work is not compared with trivial slices.
