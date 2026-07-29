@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { cp, lstat, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -111,7 +112,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
     deadlineMs,
     killGraceMs,
     environmentKeys: ["CODEX_HOME", "PATH", "HOME", "TMPDIR"],
-    networkPolicy: "sandbox_workspace_write.network_access=false; web_search=disabled; child HOME is fixture-owned; Codex service transport remains host-managed",
+    networkPolicy: "sandbox_workspace_write.network_access=false; web_search=disabled; child HOME is fixture-owned; Codex process receives CODEX_HOME only for auth; Codex service transport remains host-managed",
     approvalPolicy: "--ask-for-approval never (top-level before exec); supported approval policy, not a sandbox bypass",
     startedAt,
   };
@@ -335,7 +336,7 @@ async function spawnCodex(
       stdin: new TextEncoder().encode(prompt),
       stdout: "ignore",
       stderr: "pipe",
-      env: evaluationEnvironment(isolatedHome),
+      env: buildEvaluationEnvironment(process.env, isolatedHome),
     });
     const statusText = await readOptional(statusPath, 16 * 1024);
     const supervisorResult = parseSupervisorResult(statusText, result.exitCode);
@@ -397,14 +398,14 @@ function parseSupervisorResult(text: string, fallbackExitCode: number): Supervis
   }
   return { exitCode: fallbackExitCode || 127, timedOut: false, stdout: { bytes: 0, storedBytes: 0, truncated: true }, stderr: { bytes: 0, storedBytes: 0, truncated: true } };
 }
-
-function evaluationEnvironment(homeOverride?: string): Record<string, string> {
+export function buildEvaluationEnvironment(sourceEnvironment: NodeJS.ProcessEnv = process.env, homeOverride?: string): Record<string, string> {
   const allowed = new Set(["CODEX_HOME", "PATH", "HOME", "TMPDIR"]);
-  const environment = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => allowed.has(key) && value !== undefined)) as Record<string, string>;
+  const environment = Object.fromEntries(Object.entries(sourceEnvironment).filter(([key, value]) => allowed.has(key) && value !== undefined && value !== "")) as Record<string, string>;
+  const codexHome = sourceEnvironment.CODEX_HOME || (sourceEnvironment.HOME && (() => { const path = join(sourceEnvironment.HOME!, ".codex"); try { return statSync(path).isDirectory() ? path : undefined; } catch { return undefined; } })());
+  if (codexHome) environment.CODEX_HOME = codexHome;
   if (homeOverride) environment.HOME = homeOverride;
   return environment;
 }
-
 function resolveBinary(binary = "codex"): string {
   if (binary.includes("/")) return execFileSync("realpath", [binary], { encoding: "utf8" }).trim();
   return execFileSync("which", [binary], { encoding: "utf8" }).trim();
@@ -413,7 +414,7 @@ function resolveBinary(binary = "codex"): string {
 export function getCodexVersion(binary = "codex"): string {
   try {
     const path = resolveBinary(binary);
-    const result = Bun.spawnSync([path, "--version"], { stdout: "pipe", stderr: "pipe", env: evaluationEnvironment() });
+    const result = Bun.spawnSync([path, "--version"], { stdout: "pipe", stderr: "pipe", env: buildEvaluationEnvironment() });
     const stdout = new TextDecoder().decode(result.stdout).trim();
     const stderr = new TextDecoder().decode(result.stderr).trim();
     return stdout || stderr || `unavailable (exit ${result.exitCode})`;

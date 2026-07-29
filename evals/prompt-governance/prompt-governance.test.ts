@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBlindReviewBundle } from "./blind";
-import { executeRun, spawnCodexForCalibration } from "./capture";
+import { buildEvaluationEnvironment, executeRun, spawnCodexForCalibration } from "./capture";
 import { assertSafeCodexCommand, buildCodexCommand, unsupportedApprovalPlacements } from "./command";
 import { getPilotCase, listPilotCases } from "./cases";
 import { canonicalFixtureSnapshotHash, createFixture, resetFixture } from "./fixture";
@@ -40,7 +40,6 @@ test("materializes frozen overlays with full hashes and opaque paths", async () 
   expect(pair.candidate.materializedPath).not.toContain("candidate");
   expect(pair.baseline.overlayId).not.toBe(pair.candidate.overlayId);
 });
-
 test("fixtures are fresh, resettable, and leave the product tree untouched", async () => {
   const root = await tempRoot("skizzles-prompt-eval-fixture-");
   const fixture = await createFixture("bounded-fix", join(root, "fixture"));
@@ -68,8 +67,7 @@ test("immutable baseline catches committed forbidden files and moved HEAD", asyn
   expect(result.passed).toBe(false);
   expect(result.oracleVerifierHash).toBe(sha256(await readFile(oracle)));
 });
-
-test("Codex command pins the verified isolation profile and rejects bypass flags", () => {
+test("Codex command pins the verified isolation profile and rejects bypass flags", async () => {
   const command = buildCodexCommand({ fixtureRoot: "/tmp/fixture", instructionFile: "/tmp/instructions.md", finalMessagePath: "/tmp/final.md" });
   expect(command.slice(1, 4)).toEqual(["--ask-for-approval", "never", "exec"]);
   expect(unsupportedApprovalPlacements).toEqual(["codex exec --ask-for-approval never"]);
@@ -84,6 +82,8 @@ test("Codex command pins the verified isolation profile and rejects bypass flags
   ]) expect(command).toContain(config);
   expect(() => assertSafeCodexCommand(["codex", "exec", "--ask-for-approval", "never", ...command.slice(4)])).toThrow("top-level --ask-for-approval");
   expect(() => assertSafeCodexCommand([...command, "--dangerously-bypass-hook-trust"])).toThrow("dangerous Codex flag");
+  const home = await tempRoot("skizzles-prompt-eval-auth-home-"); await mkdir(join(home, ".codex"));
+  expect(buildEvaluationEnvironment({ CODEX_HOME: "/auth/codex", HOME: "/host", PATH: "/bin", TMPDIR: "/tmp" }, "/fixture/home")).toMatchObject({ CODEX_HOME: "/auth/codex", HOME: "/fixture/home" }); expect(buildEvaluationEnvironment({ HOME: home, PATH: "/bin", TMPDIR: "/tmp" }, "/fixture/home")).toMatchObject({ CODEX_HOME: join(home, ".codex"), HOME: "/fixture/home" }); expect(buildEvaluationEnvironment({ HOME: join(home, "missing"), PATH: "/bin", TMPDIR: "/tmp" }, "/fixture/home")).not.toHaveProperty("CODEX_HOME");
 });
 
 test("installed Codex accepts the approval policy only before exec", () => {
