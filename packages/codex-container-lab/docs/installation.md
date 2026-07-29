@@ -26,7 +26,7 @@ The managed-output hook recognizes the launcher’s outer `run --lab ... -- COMM
 
 `codex-container-lab` and `codex-container-lab-reaper` PATH binaries are conveniences, not prerequisites. Host wiring is separate from skill/plugin installation: it is an explicit, reversible, machine-local operation with a recorded rollback target. Do not alter broad Codex hooks/configuration, Docker state, or SQLite while setting it up.
 
-When requested by the host owner, link the canonical workspace package from `packages/codex-container-lab/cli` after a frozen root install. The LaunchAgent template at `cli/install/com.openai.codex-container-lab-reaper.plist` must be rendered into a user-owned temporary file with absolute Bun, bundled-or-canonical reaper, and log paths; validate it with `plutil` before loading. LaunchAgents have a minimal environment and must not rely on `PATH` or the `/usr/bin/env bun` shebang.
+When requested by the host owner, link the canonical workspace package from `packages/codex-container-lab/cli` after a frozen root install. The LaunchAgent template at `cli/install/com.openai.codex-container-lab-reaper.plist` must be rendered into a user-owned temporary file with absolute Bun, bundled-or-canonical reaper, and log paths; validate it with `plutil` before loading. LaunchAgents have a minimal environment: the template provides only the standard system paths plus `/usr/local/bin` for the host Docker CLI, and must not rely on an interactive shell profile or the `/usr/bin/env bun` shebang.
 
 Keep every doctor health probe on disposable owner, state, runtime, and database roots. The archive reaper defaults are live-host behavior and are not a test target. Any database, schema, busy, manifest, or archive-state uncertainty retains resources.
 

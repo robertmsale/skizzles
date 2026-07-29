@@ -222,6 +222,8 @@ describe("CLI process boundary", () => {
     expect(source).toContain("<string>__BUN_ABSOLUTE_PATH__</string>");
     expect(source).toContain("<string>__REAPER_ABSOLUTE_PATH__</string>");
     expect(source.indexOf("__BUN_ABSOLUTE_PATH__")).toBeLessThan(source.indexOf("__REAPER_ABSOLUTE_PATH__"));
+    expect(source).toContain("<key>EnvironmentVariables</key>");
+    expect(source).toContain("<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>");
     expect(source).not.toContain("/usr/bin/env");
     expect((await runCommand("/usr/bin/plutil", ["-lint", path])).stdout.toString()).toContain("OK");
   });

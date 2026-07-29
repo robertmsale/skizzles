@@ -8111,10 +8111,10 @@ async function reapArchivedOwners(options) {
           }
           await markOwnerReaped(roots.stateRoot, owner.owner);
           if (await exactDirectoryChain(roots.stateRoot, ["owners", owner.ownerKey], "owner state directory")) {
-            await boundedRemove(join3(ownerRoot, owner.ownerKey), 1e5);
+            await removeVerifiedTree(join3(ownerRoot, owner.ownerKey));
           }
           if (await exactDirectoryChain(roots.runtimeRoot, [owner.ownerKey], "owner runtime directory")) {
-            await boundedRemove(join3(roots.runtimeRoot, owner.ownerKey), 1e5);
+            await removeVerifiedTree(join3(roots.runtimeRoot, owner.ownerKey));
           }
           result.archivedOwnersCleaned.push(owner.ownerKey);
         }, { attempts: 600, delayMs: 50 });
@@ -8208,7 +8208,7 @@ async function cleanupExactLab(roots, lab, docker, authorize) {
     await exactDirectoryChain(roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory");
     await cleanupLabLabels(lab, lab.modeKind === "dockerfile", docker);
     if (await exactDirectoryChain(roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory")) {
-      await boundedRemove(lab.runtimeRoot, 1e5);
+      await removeVerifiedTree(lab.runtimeRoot);
     }
     if (!await exactDirectoryChain(roots.stateRoot, ["owners", lab.ownerKey], "owner state directory")) {
       throw new Error("owner state directory disappeared");
@@ -8273,27 +8273,7 @@ async function exactDirectory(path3, expected, label) {
     throw new Error(`${label} is not exactly contained in its configured root`);
   return true;
 }
-async function boundedRemove(root, maxEntries) {
-  let count = 0;
-  async function scan(path3) {
-    let info;
-    try {
-      info = await lstat6(path3);
-    } catch (error) {
-      if (error.code === "ENOENT")
-        return;
-      throw error;
-    }
-    if (!info.isDirectory() || info.isSymbolicLink()) {
-      return;
-    }
-    for (const name of await readdir3(path3)) {
-      if (++count > maxEntries)
-        throw new Error("cleanup path exceeds bounded entry limit");
-      await scan(join3(path3, name));
-    }
-  }
-  await scan(root);
+async function removeVerifiedTree(root) {
   await rm6(root, { recursive: true, force: true });
 }
 function boundedMessage(prefix, error) {

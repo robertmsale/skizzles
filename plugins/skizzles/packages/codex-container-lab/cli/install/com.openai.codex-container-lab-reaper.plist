@@ -9,6 +9,11 @@
     <string>__BUN_ABSOLUTE_PATH__</string>
     <string>__REAPER_ABSOLUTE_PATH__</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>

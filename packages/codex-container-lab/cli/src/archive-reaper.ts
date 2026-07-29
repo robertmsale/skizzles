@@ -128,10 +128,10 @@ export async function reapArchivedOwners(options: ReaperOptions): Promise<Reaper
           }
           await markOwnerReaped(roots.stateRoot, owner.owner);
           if (await exactDirectoryChain(roots.stateRoot, ["owners", owner.ownerKey], "owner state directory")) {
-            await boundedRemove(join(ownerRoot, owner.ownerKey), 100_000);
+            await removeVerifiedTree(join(ownerRoot, owner.ownerKey));
           }
           if (await exactDirectoryChain(roots.runtimeRoot, [owner.ownerKey], "owner runtime directory")) {
-            await boundedRemove(join(roots.runtimeRoot, owner.ownerKey), 100_000);
+            await removeVerifiedTree(join(roots.runtimeRoot, owner.ownerKey));
           }
           result.archivedOwnersCleaned.push(owner.ownerKey);
         }, { attempts: 600, delayMs: 50 });
@@ -245,7 +245,7 @@ async function cleanupExactLab(
     await exactDirectoryChain(roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory");
     await cleanupLabLabels(lab, lab.modeKind === "dockerfile", docker);
     if (await exactDirectoryChain(roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory")) {
-      await boundedRemove(lab.runtimeRoot, 100_000);
+      await removeVerifiedTree(lab.runtimeRoot);
     }
     if (!await exactDirectoryChain(roots.stateRoot, ["owners", lab.ownerKey], "owner state directory")) {
       throw new Error("owner state directory disappeared");
@@ -318,24 +318,10 @@ async function exactDirectory(path: string, expected: string, label: string): Pr
   return true;
 }
 
-async function boundedRemove(root: string, maxEntries: number): Promise<void> {
-  let count = 0;
-  async function scan(path: string): Promise<void> {
-    let info;
-    try { info = await lstat(path); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
-    }
-    if (!info.isDirectory() || info.isSymbolicLink()) {
-      return;
-    }
-    for (const name of await readdir(path)) {
-      if (++count > maxEntries) throw new Error("cleanup path exceeds bounded entry limit");
-      await scan(join(path, name));
-    }
-  }
-  await scan(root);
+/** Removes only a root that its caller just proved is an exact, non-symlinked
+ * Container Lab path. Build outputs can contain far more than 100,000 entries;
+ * retaining them would turn archive cleanup into a host-storage leak. */
+async function removeVerifiedTree(root: string): Promise<void> {
   await rm(root, { recursive: true, force: true });
 }
 

@@ -134,6 +134,21 @@ describe("archive reaper", () => {
     expect((await reaping).archivedOwnersCleaned).toEqual([lab.ownerKey]);
   });
 
+  test("archive cleanup reclaims a runtime tree larger than the former entry limit", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-large-runtime");
+    const build = join(lab.workspace, "build");
+    await mkdir(build);
+    await writeEntries(build, 100_001);
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 1, 10)", [lab.owner]); db.close();
+
+    const result = await reapArchivedOwners({ dbPath, roots: fixture, docker: new EmptyDocker() });
+
+    expect(result.archivedOwnersCleaned).toEqual([lab.ownerKey]);
+    expect(await Bun.file(join(build, "100000")).exists()).toBe(false);
+  }, 60_000);
+
   test("cleanup scrubs persisted secret names from every reaper Docker subprocess", async () => {
     const fixture = await roots();
     const secretName = "CODEX_CONTAINER_LAB_REAPER_TEST_SECRET";
@@ -161,6 +176,12 @@ function createDatabase(path: string): Database {
   const db = new Database(path);
   db.run("CREATE TABLE threads (id TEXT PRIMARY KEY, archived INTEGER NOT NULL DEFAULT 0, archived_at INTEGER)");
   return db;
+}
+
+async function writeEntries(directory: string, count: number): Promise<void> {
+  for (let start = 0; start < count; start += 1_000) {
+    await Promise.all(Array.from({ length: Math.min(1_000, count - start) }, (_, index) => writeFile(join(directory, String(start + index)), "")));
+  }
 }
 
 async function roots() {
