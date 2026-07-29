@@ -9,25 +9,51 @@
 import { Database } from "bun:sqlite";
 import { basename, join } from "node:path";
 
-type Usage = { input: number; cached: number; output: number; reasoning: number; total: number; proxy: number };
+type Usage = { input: number; cached: number; cacheWrite: number; cacheWriteObserved: boolean; output: number; reasoning: number; total: number; proxy: number };
 type Actor = "root" | "subagent" | "guardian" | "other";
-type Aggregate = { usage: Usage; inferences: number; sessions: Set<string> };
+type RawAggregate = { usage: Usage; inferences: number };
+type CreditEquivalent = {
+  pricedCredits: number;
+  fullyPricedInferences: number;
+  partiallyPricedInferences: number;
+  unpricedInferences: number;
+  cacheWrite: { observedInferences: number; unavailableInferences: number; tokens: number };
+  unpricedUsage: { usage: Usage; inferences: number; models: Map<string, RawAggregate> };
+};
+type Aggregate = { usage: Usage; inferences: number; sessions: Set<string>; credit: CreditEquivalent };
 type RateSnapshot = { timestamp: number; usedPercent: number; resetsAt?: number };
 type SessionSummary = {
   id: string; actor: Actor; parentId?: string; agentPath?: string; usage: Usage;
-  inferences: number; models: Map<string, Aggregate>; routes: Map<string, Aggregate>; reviewCount: number;
+  inferences: number; models: Map<string, Aggregate>; routes: Map<string, Aggregate>; credit: CreditEquivalent; reviewCount: number;
   reviewAllow: number; reviewDeny: number; reviewDurationMs: number;
 };
 type Options = { from: number; to: number; bucket: "hour" | "day"; cachedWeight: number; top: number; json: boolean };
 
 const subagentRoles = new Set(["triage", "worker", "designer", "qa", "review", "deployment"]);
-const emptyUsage = (): Usage => ({ input: 0, cached: 0, output: 0, reasoning: 0, total: 0, proxy: 0 });
-const emptyAggregate = (): Aggregate => ({ usage: emptyUsage(), inferences: 0, sessions: new Set() });
+const CREDIT_RATES = {
+  "gpt-5.6-sol": { uncachedInput: 125, cachedInput: 12.5, cacheWriteInput: 156.25, output: 750 },
+  "gpt-5.6-terra": { uncachedInput: 62.5, cachedInput: 6.25, cacheWriteInput: 78.125, output: 375 },
+  "gpt-5.6-luna": { uncachedInput: 25, cachedInput: 2.5, cacheWriteInput: 31.25, output: 150 },
+} as const;
+const CREDIT_SCHEMA_VERSION = "gpt-5.6-credit-equivalent-v1";
+const emptyUsage = (): Usage => ({ input: 0, cached: 0, cacheWrite: 0, cacheWriteObserved: false, output: 0, reasoning: 0, total: 0, proxy: 0 });
+const emptyCredit = (): CreditEquivalent => ({
+  pricedCredits: 0,
+  fullyPricedInferences: 0,
+  partiallyPricedInferences: 0,
+  unpricedInferences: 0,
+  cacheWrite: { observedInferences: 0, unavailableInferences: 0, tokens: 0 },
+  unpricedUsage: { usage: emptyUsage(), inferences: 0, models: new Map() },
+});
+const emptyAggregate = (): Aggregate => ({ usage: emptyUsage(), inferences: 0, sessions: new Set(), credit: emptyCredit() });
 const asNumber = (value: unknown): number => typeof value === "number" && Number.isFinite(value) ? value : 0;
+const hasCacheWrite = (value: any): boolean => value !== null && typeof value === "object" && Object.hasOwn(value, "cache_write_input_tokens");
 
 function addUsage(target: Usage, source: Usage): void {
   target.input += source.input;
   target.cached += source.cached;
+  target.cacheWrite += source.cacheWrite;
+  target.cacheWriteObserved ||= source.cacheWriteObserved;
   target.output += source.output;
   target.reasoning += source.reasoning;
   target.total += source.total;
@@ -37,9 +63,11 @@ function addUsage(target: Usage, source: Usage): void {
 function usageFrom(raw: any, cachedWeight: number): Usage {
   const input = asNumber(raw?.input_tokens);
   const cached = Math.min(input, asNumber(raw?.cached_input_tokens));
+  const cacheWriteObserved = hasCacheWrite(raw);
+  const cacheWrite = cacheWriteObserved ? Math.min(Math.max(0, input - cached), asNumber(raw?.cache_write_input_tokens)) : 0;
   const output = asNumber(raw?.output_tokens);
   return {
-    input, cached, output,
+    input, cached, cacheWrite, cacheWriteObserved, output,
     reasoning: asNumber(raw?.reasoning_output_tokens),
     total: asNumber(raw?.total_tokens) || input + output,
     proxy: input - cached + cached * cachedWeight + output,
@@ -47,13 +75,65 @@ function usageFrom(raw: any, cachedWeight: number): Usage {
 }
 
 function usageDelta(current: any, previous: any, cachedWeight: number): Usage {
-  return usageFrom({
+  const raw: Record<string, number> = {
     input_tokens: Math.max(0, asNumber(current?.input_tokens) - asNumber(previous?.input_tokens)),
     cached_input_tokens: Math.max(0, asNumber(current?.cached_input_tokens) - asNumber(previous?.cached_input_tokens)),
     output_tokens: Math.max(0, asNumber(current?.output_tokens) - asNumber(previous?.output_tokens)),
     reasoning_output_tokens: Math.max(0, asNumber(current?.reasoning_output_tokens) - asNumber(previous?.reasoning_output_tokens)),
     total_tokens: Math.max(0, asNumber(current?.total_tokens) - asNumber(previous?.total_tokens)),
-  }, cachedWeight);
+  };
+  if (hasCacheWrite(current)) raw.cache_write_input_tokens = Math.max(0, asNumber(current?.cache_write_input_tokens) - asNumber(previous?.cache_write_input_tokens));
+  return usageFrom(raw, cachedWeight);
+}
+
+function addRawAggregate(target: RawAggregate, source: RawAggregate): void {
+  addUsage(target.usage, source.usage);
+  target.inferences += source.inferences;
+}
+
+function addCredit(target: CreditEquivalent, source: CreditEquivalent): void {
+  target.pricedCredits += source.pricedCredits;
+  target.fullyPricedInferences += source.fullyPricedInferences;
+  target.partiallyPricedInferences += source.partiallyPricedInferences;
+  target.unpricedInferences += source.unpricedInferences;
+  target.cacheWrite.observedInferences += source.cacheWrite.observedInferences;
+  target.cacheWrite.unavailableInferences += source.cacheWrite.unavailableInferences;
+  target.cacheWrite.tokens += source.cacheWrite.tokens;
+  addRawAggregate(target.unpricedUsage, source.unpricedUsage);
+  for (const [model, aggregate] of source.unpricedUsage.models) {
+    const targetAggregate = target.unpricedUsage.models.get(model) ?? { usage: emptyUsage(), inferences: 0 };
+    addRawAggregate(targetAggregate, aggregate);
+    target.unpricedUsage.models.set(model, targetAggregate);
+  }
+}
+
+function creditFor(model: string, usage: Usage): CreditEquivalent {
+  const credit = emptyCredit();
+  const rates = CREDIT_RATES[model as keyof typeof CREDIT_RATES];
+  if (!rates) {
+    credit.unpricedInferences = 1;
+    credit.unpricedUsage.inferences = 1;
+    addUsage(credit.unpricedUsage.usage, usage);
+    credit.unpricedUsage.models.set(model, { usage: { ...usage }, inferences: 1 });
+    return credit;
+  }
+
+  const uncachedInput = Math.max(0, usage.input - usage.cached - usage.cacheWrite);
+  credit.pricedCredits = (
+    uncachedInput * rates.uncachedInput
+    + usage.cached * rates.cachedInput
+    + usage.cacheWrite * rates.cacheWriteInput
+    + usage.output * rates.output
+  ) / 1_000_000;
+  if (usage.cacheWriteObserved) {
+    credit.fullyPricedInferences = 1;
+    credit.cacheWrite.observedInferences = 1;
+    credit.cacheWrite.tokens = usage.cacheWrite;
+  } else {
+    credit.partiallyPricedInferences = 1;
+    credit.cacheWrite.unavailableInferences = 1;
+  }
+  return credit;
 }
 
 function parseDate(value: string, endOfDay = false): number {
@@ -166,9 +246,10 @@ function classify(source: any): Actor {
   return "other";
 }
 
-function aggregateInto(map: Map<string, Aggregate>, key: string, id: string, usage: Usage): void {
+function aggregateInto(map: Map<string, Aggregate>, key: string, id: string, usage: Usage, credit: CreditEquivalent): void {
   const aggregate = map.get(key) ?? emptyAggregate();
   addUsage(aggregate.usage, usage);
+  addCredit(aggregate.credit, credit);
   aggregate.inferences += 1;
   aggregate.sessions.add(id);
   map.set(key, aggregate);
@@ -184,12 +265,15 @@ function bucketKey(timestamp: number, bucket: Options["bucket"]): string {
 async function findForkBoundary(path: string): Promise<{ forked: boolean; turnId?: string }> {
   let forked = false;
   let turnId: string | undefined;
+  let sawSessionMeta = false;
   for await (const line of lines(path)) {
     if (!line.trim()) continue;
     let event: any;
     try { event = JSON.parse(line); } catch { continue; }
     const payload = event.payload;
     if (event.type === "session_meta") {
+      if (sawSessionMeta) continue;
+      sawSessionMeta = true;
       forked = classify(payload?.source) === "subagent" && typeof payload?.forked_from_id === "string";
       if (!forked) return { forked: false };
     }
@@ -203,7 +287,7 @@ async function findForkBoundary(path: string): Promise<{ forked: boolean; turnId
 async function parseRollout(path: string, options: Options): Promise<{ session: SessionSummary; rates: RateSnapshot[]; timeline: Map<string, Aggregate> }> {
   const forkBoundary = await findForkBoundary(path);
   const fallbackId = /([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i.exec(path)?.[1] ?? basename(path);
-  const session: SessionSummary = { id: fallbackId, actor: "other", usage: emptyUsage(), inferences: 0, models: new Map(), routes: new Map(), reviewCount: 0, reviewAllow: 0, reviewDeny: 0, reviewDurationMs: 0 };
+  const session: SessionSummary = { id: fallbackId, actor: "other", usage: emptyUsage(), inferences: 0, models: new Map(), routes: new Map(), credit: emptyCredit(), reviewCount: 0, reviewAllow: 0, reviewDeny: 0, reviewDurationMs: 0 };
   const rates: RateSnapshot[] = [];
   const timeline = new Map<string, Aggregate>();
   let currentModel = "unknown";
@@ -211,6 +295,7 @@ async function parseRollout(path: string, options: Options): Promise<{ session: 
   let previousTotal: any;
   let previousSignature: string | undefined;
   let reachedOwnTurn = !forkBoundary.forked;
+  let sawSessionMeta = false;
   for await (const line of lines(path)) {
     if (!line.trim()) continue;
     let event: any;
@@ -218,6 +303,8 @@ async function parseRollout(path: string, options: Options): Promise<{ session: 
     const timestamp = Date.parse(event.timestamp);
     const payload = event.payload;
     if (event.type === "session_meta") {
+      if (sawSessionMeta) continue;
+      sawSessionMeta = true;
       session.id = payload?.id ?? payload?.session_id ?? session.id;
       session.actor = classify(payload?.source);
       session.parentId = payload?.parent_thread_id ?? payload?.source?.subagent?.thread_spawn?.parent_thread_id;
@@ -252,11 +339,13 @@ async function parseRollout(path: string, options: Options): Promise<{ session: 
       previousTotal = total ?? previousTotal;
       previousSignature = signature ?? previousSignature;
       if (usage.total <= 0 && usage.input <= 0 && usage.output <= 0) continue;
+      const credit = creditFor(currentModel, usage);
       addUsage(session.usage, usage);
+      addCredit(session.credit, credit);
       session.inferences += 1;
-      aggregateInto(session.models, currentModel, session.id, usage);
-      aggregateInto(session.routes, `${currentModel}/${currentEffort}`, session.id, usage);
-      aggregateInto(timeline, bucketKey(timestamp, options.bucket), session.id, usage);
+      aggregateInto(session.models, currentModel, session.id, usage, credit);
+      aggregateInto(session.routes, `${currentModel}/${currentEffort}`, session.id, usage, credit);
+      aggregateInto(timeline, bucketKey(timestamp, options.bucket), session.id, usage, credit);
       const primary = payload?.rate_limits?.primary;
       if (typeof primary?.used_percent === "number") rates.push({ timestamp, usedPercent: primary.used_percent, ...(typeof primary.resets_at === "number" ? { resetsAt: primary.resets_at * 1000 } : {}) });
     }
@@ -303,9 +392,27 @@ function rootId(session: SessionSummary, sessions: Map<string, SessionSummary>):
 }
 
 function serializableUsage(usage: Usage) {
-  return { inputTokens: usage.input, cachedInputTokens: usage.cached, uncachedInputTokens: usage.input - usage.cached, cachePercent: usage.input ? usage.cached / usage.input * 100 : 0, outputTokens: usage.output, reasoningTokens: usage.reasoning, totalTokens: usage.total, comparisonProxy: usage.proxy };
+  return { inputTokens: usage.input, cachedInputTokens: usage.cached, cacheWriteInputTokens: usage.cacheWrite, cacheWriteObserved: usage.cacheWriteObserved, uncachedInputTokens: usage.input - usage.cached, ordinaryInputTokens: Math.max(0, usage.input - usage.cached - usage.cacheWrite), cachePercent: usage.input ? usage.cached / usage.input * 100 : 0, outputTokens: usage.output, reasoningTokens: usage.reasoning, totalTokens: usage.total, comparisonProxy: usage.proxy };
 }
-function serializableAggregate(aggregate: Aggregate) { return { sessions: aggregate.sessions.size, inferences: aggregate.inferences, ...serializableUsage(aggregate.usage) }; }
+function serializableRawUsage(usage: Usage, inferences: number) {
+  return { inferences, ...serializableUsage(usage) };
+}
+function serializableCredit(credit: CreditEquivalent) {
+  return {
+    pricedCredits: Number(credit.pricedCredits.toFixed(9)),
+    fullyPricedInferences: credit.fullyPricedInferences,
+    partiallyPricedInferences: credit.partiallyPricedInferences,
+    unpricedInferences: credit.unpricedInferences,
+    cacheWrite: { ...credit.cacheWrite },
+    unpricedUsage: {
+      ...serializableRawUsage(credit.unpricedUsage.usage, credit.unpricedUsage.inferences),
+      models: Object.fromEntries([...credit.unpricedUsage.models].map(([model, aggregate]) => [model, serializableRawUsage(aggregate.usage, aggregate.inferences)])),
+    },
+  };
+}
+function serializableAggregate(aggregate: Aggregate) {
+  return { sessions: aggregate.sessions.size, inferences: aggregate.inferences, ...serializableUsage(aggregate.usage), creditEquivalent: serializableCredit(aggregate.credit) };
+}
 
 async function main(): Promise<void> {
   const options = parseArgs(Bun.argv.slice(2));
@@ -322,6 +429,7 @@ async function main(): Promise<void> {
       for (const [key, aggregate] of item.timeline) {
         const target = timeline.get(key) ?? emptyAggregate();
         addUsage(target.usage, aggregate.usage);
+        addCredit(target.credit, aggregate.credit);
         target.inferences += aggregate.inferences;
         for (const id of aggregate.sessions) target.sessions.add(id);
         timeline.set(key, target);
@@ -338,31 +446,31 @@ async function main(): Promise<void> {
   for (const session of sessions.values()) {
     if (!session.inferences && !session.reviewCount) continue;
     const actor = actors.get(session.actor) ?? emptyAggregate();
-    addUsage(actor.usage, session.usage); actor.inferences += session.inferences; actor.sessions.add(session.id); actors.set(session.actor, actor);
+    addUsage(actor.usage, session.usage); addCredit(actor.credit, session.credit); actor.inferences += session.inferences; actor.sessions.add(session.id); actors.set(session.actor, actor);
     for (const [model, aggregate] of session.models) {
       const target = models.get(model) ?? emptyAggregate();
-      addUsage(target.usage, aggregate.usage); target.inferences += aggregate.inferences; target.sessions.add(session.id); models.set(model, target);
+      addUsage(target.usage, aggregate.usage); addCredit(target.credit, aggregate.credit); target.inferences += aggregate.inferences; target.sessions.add(session.id); models.set(model, target);
     }
     if (session.actor === "subagent") {
       for (const [route, aggregate] of session.routes) {
         const target = routes.get(route) ?? emptyAggregate();
-        addUsage(target.usage, aggregate.usage); target.inferences += aggregate.inferences; target.sessions.add(session.id); routes.set(route, target);
+        addUsage(target.usage, aggregate.usage); addCredit(target.credit, aggregate.credit); target.inferences += aggregate.inferences; target.sessions.add(session.id); routes.set(route, target);
       }
       const name = session.agentPath?.split("/").filter(Boolean).at(-1) ?? "unknown";
       const parts = name.split("__");
       const role = subagentRoles.has(parts[0]!) ? parts[0]! : subagentRoles.has(parts[1]!) ? parts[1]! : "unclassified";
       const roleTarget = roles.get(role) ?? emptyAggregate();
-      addUsage(roleTarget.usage, session.usage); roleTarget.inferences += session.inferences; roleTarget.sessions.add(session.id); roles.set(role, roleTarget);
+      addUsage(roleTarget.usage, session.usage); addCredit(roleTarget.credit, session.credit); roleTarget.inferences += session.inferences; roleTarget.sessions.add(session.id); roles.set(role, roleTarget);
       if (parts.length >= 3 && subagentRoles.has(parts[1]!)) {
         const tier = parts[0]!;
         const tierTarget = tiers.get(tier) ?? emptyAggregate();
-        addUsage(tierTarget.usage, session.usage); tierTarget.inferences += session.inferences; tierTarget.sessions.add(session.id); tiers.set(tier, tierTarget);
+        addUsage(tierTarget.usage, session.usage); addCredit(tierTarget.credit, session.credit); tierTarget.inferences += session.inferences; tierTarget.sessions.add(session.id); tiers.set(tier, tierTarget);
       }
     }
     const root = rootId(session, sessions);
     const byActor = rootTasks.get(root) ?? new Map<Actor, Aggregate>();
     const rootActor = byActor.get(session.actor) ?? emptyAggregate();
-    addUsage(rootActor.usage, session.usage); rootActor.inferences += session.inferences; rootActor.sessions.add(session.id); byActor.set(session.actor, rootActor); rootTasks.set(root, byActor);
+    addUsage(rootActor.usage, session.usage); addCredit(rootActor.credit, session.credit); rootActor.inferences += session.inferences; rootActor.sessions.add(session.id); byActor.set(session.actor, rootActor); rootTasks.set(root, byActor);
     reviews += session.reviewCount; reviewAllow += session.reviewAllow; reviewDeny += session.reviewDeny; reviewDurationMs += session.reviewDurationMs;
   }
   rates.sort((a, b) => a.timestamp - b.timestamp);
@@ -370,19 +478,25 @@ async function main(): Promise<void> {
   for (const rate of rates) { const key = bucketKey(rate.timestamp, options.bucket); const bucketRates = ratesByBucket.get(key) ?? []; bucketRates.push(rate); ratesByBucket.set(key, bucketRates); }
   const titles = loadTitles(codexHome);
   const rankedRoots = [...rootTasks.entries()].map(([id, byActor]) => {
-    const total = emptyUsage(); for (const aggregate of byActor.values()) addUsage(total, aggregate.usage);
+    const total = emptyAggregate(); for (const aggregate of byActor.values()) { addUsage(total.usage, aggregate.usage); addCredit(total.credit, aggregate.credit); total.inferences += aggregate.inferences; }
     return { id, title: titles.get(id) ?? id, total, byActor };
-  }).sort((left, right) => right.total.proxy - left.total.proxy);
+  }).sort((left, right) => right.total.usage.proxy - left.total.usage.proxy);
   const report = {
     range: { from: new Date(options.from).toISOString(), to: new Date(options.to).toISOString(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, bucket: options.bucket, cachedWeight: options.cachedWeight, rolloutFiles: paths.length },
+    pricing: {
+      schemaVersion: CREDIT_SCHEMA_VERSION,
+      unit: "creditsPerMillionTokens",
+      rates: CREDIT_RATES,
+      disclaimer: "Credit equivalent only; not account quota or invoice. Unknown/unrated models are unpriced.",
+    },
     rateLimit: rates.length ? { firstUsedPercent: rates[0]!.usedPercent, lastUsedPercent: rates.at(-1)!.usedPercent, changePoints: rates.at(-1)!.usedPercent - rates[0]!.usedPercent, resetsAt: rates.at(-1)!.resetsAt ? new Date(rates.at(-1)!.resetsAt!).toISOString() : null } : null,
     actors: Object.fromEntries([...actors].map(([key, value]) => [key, serializableAggregate(value)])),
     models: Object.fromEntries([...models].map(([key, value]) => [key, serializableAggregate(value)])),
     subagentRoutes: Object.fromEntries([...routes].map(([key, value]) => [key, serializableAggregate(value)])),
     subagentRoles: Object.fromEntries([...roles].map(([key, value]) => [key, serializableAggregate(value)])),
     subagentTiers: Object.fromEntries([...tiers].map(([key, value]) => [key, serializableAggregate(value)])),
-    guardian: { reviews, allow: reviewAllow, deny: reviewDeny, unknown: reviews - reviewAllow - reviewDeny, durationMs: reviewDurationMs, averageDurationMs: reviews ? reviewDurationMs / reviews : 0, ...serializableUsage(actors.get("guardian")?.usage ?? emptyUsage()) },
-    topRootTasks: rankedRoots.slice(0, options.top).map(({ id, title, total, byActor }) => ({ id, title, ...serializableUsage(total), actors: Object.fromEntries([...byActor].map(([key, value]) => [key, serializableAggregate(value)])) })),
+    guardian: { reviews, allow: reviewAllow, deny: reviewDeny, unknown: reviews - reviewAllow - reviewDeny, durationMs: reviewDurationMs, averageDurationMs: reviews ? reviewDurationMs / reviews : 0, ...serializableUsage(actors.get("guardian")?.usage ?? emptyUsage()), creditEquivalent: serializableCredit(actors.get("guardian")?.credit ?? emptyCredit()) },
+    topRootTasks: rankedRoots.slice(0, options.top).map(({ id, title, total, byActor }) => ({ id, title, ...serializableUsage(total.usage), creditEquivalent: serializableCredit(total.credit), actors: Object.fromEntries([...byActor].map(([key, value]) => [key, serializableAggregate(value)])) })),
     timeline: Object.fromEntries([...timeline].sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => {
       const bucketRates = ratesByBucket.get(key) ?? []; const first = bucketRates[0]; const last = bucketRates.at(-1);
       return [key, { ...serializableAggregate(value), rateLimit: first && last ? { firstUsedPercent: first.usedPercent, lastUsedPercent: last.usedPercent, changePoints: last.usedPercent - first.usedPercent } : null }];
@@ -403,6 +517,11 @@ function printTable(title: string, headers: string[], rows: string[][]): void {
   for (const row of rows) console.log(row.map((value, index) => value.padEnd(widths[index]!)).join("  "));
 }
 function usageRow(name: string, value: any, total: number): string[] { return [name, String(value.sessions), String(value.inferences), formatNumber(value.totalTokens), formatNumber(value.uncachedInputTokens), `${value.cachePercent.toFixed(1)}%`, formatNumber(value.outputTokens), formatNumber(value.comparisonProxy), percent(value.comparisonProxy, total)]; }
+function creditRow(name: string, value: any, total: number): string[] {
+  const credit = value.creditEquivalent;
+  return [name, formatCredits(credit.pricedCredits), String(credit.fullyPricedInferences), String(credit.partiallyPricedInferences), String(credit.unpricedInferences), String(credit.cacheWrite.observedInferences), percent(credit.pricedCredits, total)];
+}
+function formatCredits(value: number): string { return value >= 1_000 ? `${(value / 1_000).toFixed(2)}K` : value.toFixed(2); }
 function printHuman(report: any): void {
   console.log(`Codex usage: ${new Date(report.range.from).toLocaleString()} -> ${new Date(report.range.to).toLocaleString()}`);
   console.log(`Rollouts ${report.range.rolloutFiles} | cache proxy weight ${report.range.cachedWeight}`);
@@ -412,21 +531,25 @@ function printHuman(report: any): void {
     console.log(`Weekly meter ${report.rateLimit.firstUsedPercent}% -> ${report.rateLimit.lastUsedPercent}% (${change} points) | resets ${reset}`);
   }
   printTable("Actors", ["actor", "sessions", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.actors).map(([name, value]) => usageRow(name, value, totalProxy(report.actors))));
+  const actorPricedTotal = Object.values(report.actors).reduce((total: number, value: any) => total + value.creditEquivalent.pricedCredits, 0);
+  printTable("Credits by actor (GPT-5.6 priced classes)", ["actor", "priced", "full", "partial", "unpriced", "cache write", "share"], Object.entries(report.actors).sort((left: any, right: any) => right[1].creditEquivalent.pricedCredits - left[1].creditEquivalent.pricedCredits).map(([name, value]: any) => creditRow(name, value, actorPricedTotal)));
   printTable("Models", ["model", "sessions", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.models).map(([name, value]) => usageRow(name, value, totalProxy(report.models))));
   if (Object.keys(report.subagentRoutes).length) printTable("Subagent routes", ["model/effort", "agents", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.subagentRoutes).map(([name, value]) => usageRow(name, value, totalProxy(report.subagentRoutes))));
   if (Object.keys(report.subagentRoles).length) printTable("Subagent roles", ["role", "agents", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.subagentRoles).map(([name, value]) => usageRow(name, value, totalProxy(report.subagentRoles))));
   if (Object.keys(report.subagentTiers).length) printTable("Legacy subagent tiers", ["tier", "agents", "calls", "total", "uncached", "cache", "output", "proxy", "share"], rankedRows(report.subagentTiers).map(([name, value]) => usageRow(name, value, totalProxy(report.subagentTiers))));
   const guardian = report.guardian;
   console.log(`\nGuardian\n  reviews ${guardian.reviews} (${guardian.allow} allow, ${guardian.deny} deny, ${guardian.unknown} unknown) | avg ${guardian.averageDurationMs ? `${(guardian.averageDurationMs / 1000).toFixed(1)}s` : "n/a"} | cache ${guardian.cachePercent.toFixed(1)}% | proxy ${formatNumber(guardian.comparisonProxy)}`);
-  printTable("Top root tasks", ["task", "proxy", "root", "agents", "guardian", "agent%", "id"], report.topRootTasks.map((task: any) => {
-    const root = task.actors.root?.comparisonProxy ?? 0;
-    const subagent = task.actors.subagent?.comparisonProxy ?? 0;
-    const guardianProxy = task.actors.guardian?.comparisonProxy ?? 0;
+  printTable("Top root tasks (priced credits are known-class; coverage below)", ["task", "proxy", "priced root", "priced agents", "priced total", "full", "partial", "unpriced", "agent%", "id"], report.topRootTasks.map((task: any) => {
+    const pricedRoot = task.actors.root?.creditEquivalent.pricedCredits ?? 0;
+    const pricedAgents = task.actors.subagent?.creditEquivalent.pricedCredits ?? 0;
+    const pricedTotal = task.creditEquivalent.pricedCredits;
+    const credit = task.creditEquivalent;
     const label = task.title.length <= 42 ? task.title : `${task.title.slice(0, 41)}…`;
-    return [label, formatNumber(task.comparisonProxy), formatNumber(root), formatNumber(subagent), formatNumber(guardianProxy), percent(subagent, task.comparisonProxy), task.id.slice(0, 8)];
+    return [label, formatNumber(task.comparisonProxy), formatCredits(pricedRoot), formatCredits(pricedAgents), formatCredits(pricedTotal), String(credit.fullyPricedInferences), String(credit.partiallyPricedInferences), String(credit.unpricedInferences), percent(pricedAgents, pricedTotal), task.id.slice(0, 8)];
   }));
   printTable("Timeline", [report.range.bucket, "sessions", "calls", "total", "uncached", "cache", "output", "proxy", "meter"], Object.entries(report.timeline).map(([key, value]: any) => [key, String(value.sessions), String(value.inferences), formatNumber(value.totalTokens), formatNumber(value.uncachedInputTokens), `${value.cachePercent.toFixed(1)}%`, formatNumber(value.outputTokens), formatNumber(value.comparisonProxy), value.rateLimit ? `${value.rateLimit.firstUsedPercent}%→${value.rateLimit.lastUsedPercent}%` : "n/a"]));
   console.log("\nProxy = uncached input + cached input * weight + output. It is comparative, not billing or quota.");
+  console.log("Credits = GPT-5.6 model rate-card equivalent; cache-write coverage is shown as full/partial and unknown models are unpriced.");
 }
 
 main().catch((error) => { console.error(`analyze.ts: ${error instanceof Error ? error.message : String(error)}`); process.exit(1); });

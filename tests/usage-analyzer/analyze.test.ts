@@ -106,6 +106,7 @@ test("aggregates synthetic active and archived rollouts, reads titles, and leave
     { timestamp, type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 999, cached_input_tokens: 0, output_tokens: 999, total_tokens: 1998 }, total_token_usage: { input_tokens: 1998, cached_input_tokens: 0, output_tokens: 1998, total_tokens: 3996 } } } },
     { timestamp, type: "event_msg", payload: { type: "task_started", turn_id: "child-turn" } },
     { timestamp, type: "turn_context", payload: { turn_id: "child-turn", model: "gpt-fixture", effort: "medium" } },
+    { timestamp, type: "session_meta", payload: { id: rootId, source: "cli" } },
     { timestamp, type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 2048, cached_input_tokens: 5, output_tokens: 2008, total_tokens: 4056 } } } },
   ]);
   await writeJsonl(join(archived, `${guardianId}.jsonl`), [
@@ -132,7 +133,15 @@ test("aggregates synthetic active and archived rollouts, reads titles, and leave
   expect(report.rateLimit).toMatchObject({ firstUsedPercent: 12.5, lastUsedPercent: 12.5 });
   expect(report.topRootTasks).toHaveLength(1);
   expect(report.topRootTasks[0]).toMatchObject({ id: rootId, title: "Synthetic root", comparisonProxy: 157.5 });
+  expect(report.topRootTasks[0].actors.root).toMatchObject({ sessions: 1, inferences: 1 });
+  expect(report.topRootTasks[0].actors.subagent).toMatchObject({ sessions: 1, inferences: 1 });
   expect(Object.values(report.timeline)).toHaveLength(1);
+  const actorAggregate = Object.values(report.actors).reduce((total: any, actor: any) => ({ inferences: total.inferences + actor.inferences, inputTokens: total.inputTokens + actor.inputTokens, pricedCredits: total.pricedCredits + actor.creditEquivalent.pricedCredits }), { inferences: 0, inputTokens: 0, pricedCredits: 0 });
+  const modelAggregate = Object.values(report.models).reduce((total: any, model: any) => ({ inferences: total.inferences + model.inferences, inputTokens: total.inputTokens + model.inputTokens, pricedCredits: total.pricedCredits + model.creditEquivalent.pricedCredits }), { inferences: 0, inputTokens: 0, pricedCredits: 0 });
+  const timelineAggregate = Object.values(report.timeline).reduce((total: any, bucket: any) => ({ inferences: total.inferences + bucket.inferences, inputTokens: total.inputTokens + bucket.inputTokens, pricedCredits: total.pricedCredits + bucket.creditEquivalent.pricedCredits }), { inferences: 0, inputTokens: 0, pricedCredits: 0 });
+  expect(actorAggregate).toEqual({ inferences: 2, inputTokens: 150, pricedCredits: 0 });
+  expect(modelAggregate).toEqual(actorAggregate);
+  expect(timelineAggregate).toEqual(actorAggregate);
   expect(await snapshot(home)).toEqual(before);
 });
 
@@ -152,4 +161,54 @@ test("preserves role and legacy tier attribution for historical task names", asy
   expect(report.subagentRoutes["gpt-fixture/high"]).toMatchObject({ sessions: 1, inferences: 1 });
   expect(report.subagentRoles.worker).toMatchObject({ sessions: 1, inferences: 1 });
   expect(report.subagentTiers.scoped).toMatchObject({ sessions: 1, inferences: 1 });
+});
+
+test("prices GPT-5.6 roots and subagents with inclusive cache-write coverage", async () => {
+  const home = await fixtureHome();
+  const archived = join(home, "archived_sessions", "2026", "07", "02");
+  const rootSolId = "44444444-4444-4444-4444-444444444444";
+  const childId = "55555555-5555-5555-5555-555555555555";
+  const unknownId = "66666666-6666-6666-6666-666666666666";
+  const reviewId = "77777777-7777-7777-7777-777777777777";
+  const token = (usage: Record<string, number>, total: Record<string, number> = usage) => ({ timestamp, type: "event_msg", payload: { type: "token_count", info: { last_token_usage: usage, total_token_usage: total } } });
+
+  await writeJsonl(join(archived, `${rootSolId}.jsonl`), [
+    { timestamp, type: "session_meta", payload: { id: rootSolId, source: "cli" } },
+    { timestamp, type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "medium" } },
+    token({ input_tokens: 1_000_000, cached_input_tokens: 200_000, cache_write_input_tokens: 100_000, output_tokens: 1_000_000, total_tokens: 2_000_000 }),
+  ]);
+  await writeJsonl(join(archived, `${childId}.jsonl`), [
+    { timestamp, type: "session_meta", payload: { id: childId, source: { subagent: { thread_spawn: { parent_thread_id: rootSolId, agent_path: "/root/worker__pricing" } } } } },
+    { timestamp, type: "turn_context", payload: { model: "gpt-5.6-terra", effort: "medium" } },
+    token({ input_tokens: 1_000_000, cached_input_tokens: 100_000, output_tokens: 500_000, total_tokens: 1_500_000 }),
+    { timestamp, type: "turn_context", payload: { model: "gpt-5.6-luna", effort: "medium" } },
+    token({ input_tokens: 2_000_000, cached_input_tokens: 100_000, cache_write_input_tokens: 100_000, output_tokens: 1_000_000, total_tokens: 3_000_000 }, { input_tokens: 3_000_000, cached_input_tokens: 200_000, cache_write_input_tokens: 100_000, output_tokens: 1_500_000, total_tokens: 4_500_000 }),
+  ]);
+  await writeJsonl(join(archived, `${unknownId}.jsonl`), [
+    { timestamp, type: "session_meta", payload: { id: unknownId, source: "cli" } },
+    { timestamp, type: "turn_context", payload: { model: "gpt-fixture", effort: "medium" } },
+    token({ input_tokens: 10_000, cached_input_tokens: 1_000, output_tokens: 2_000, total_tokens: 12_000 }),
+  ]);
+  await writeJsonl(join(archived, `${reviewId}.jsonl`), [
+    { timestamp, type: "session_meta", payload: { id: reviewId, source: "cli" } },
+    { timestamp, type: "turn_context", payload: { model: "codex-auto-review", effort: "medium" } },
+    token({ input_tokens: 20_000, cached_input_tokens: 5_000, output_tokens: 3_000, total_tokens: 23_000 }),
+  ]);
+
+  const result = output(run(home, ["--from", "2026-07-01", "--to", "2026-07-02", "--json"]));
+  expect(result.exitCode).toBe(0);
+  const report = JSON.parse(result.stdout);
+  expect(report.pricing).toMatchObject({ schemaVersion: "gpt-5.6-credit-equivalent-v1", unit: "creditsPerMillionTokens" });
+  expect(report.pricing.rates["gpt-5.6-sol"]).toEqual({ uncachedInput: 125, cachedInput: 12.5, cacheWriteInput: 156.25, output: 750 });
+  expect(report.actors.root.creditEquivalent).toMatchObject({ pricedCredits: 855.625, fullyPricedInferences: 1, partiallyPricedInferences: 0, unpricedInferences: 2 });
+  expect(report.actors.root.cacheWriteInputTokens).toBe(100_000);
+  expect(report.models["gpt-5.6-sol"]).toMatchObject({ uncachedInputTokens: 800_000, ordinaryInputTokens: 700_000 });
+  expect(report.models["gpt-5.6-sol"].creditEquivalent).toMatchObject({ pricedCredits: 855.625, fullyPricedInferences: 1 });
+  expect(report.models["gpt-5.6-terra"].creditEquivalent).toMatchObject({ pricedCredits: 244.375, fullyPricedInferences: 0, partiallyPricedInferences: 1 });
+  expect(report.models["gpt-5.6-luna"].creditEquivalent).toMatchObject({ pricedCredits: 198.375, fullyPricedInferences: 1 });
+  expect(report.models["gpt-fixture"].creditEquivalent).toMatchObject({ pricedCredits: 0, unpricedInferences: 1 });
+  expect(report.models["codex-auto-review"].creditEquivalent.unpricedUsage.models["codex-auto-review"]).toMatchObject({ inferences: 1, inputTokens: 20_000 });
+  expect(report.subagentRoutes["gpt-5.6-terra/medium"].creditEquivalent.partiallyPricedInferences).toBe(1);
+  expect(report.subagentRoutes["gpt-5.6-luna/medium"].creditEquivalent.cacheWrite).toMatchObject({ observedInferences: 1, tokens: 100_000 });
+  expect(report.topRootTasks[0].creditEquivalent.pricedCredits).toBe(1298.375);
 });
