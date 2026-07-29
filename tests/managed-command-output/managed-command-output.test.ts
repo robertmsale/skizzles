@@ -6,7 +6,8 @@ import { join, resolve } from "node:path";
 const packageRoot = resolve(import.meta.dir, "../..");
 const hook = join(packageRoot, "hooks/manage-command-output.ts");
 const runner = join(packageRoot, "runtime/codex-command.ts");
-const runnerCommand = 'bun "${PLUGIN_ROOT}/runtime/codex-command.ts"';
+const pluginRunnerCommand = 'bun "${PLUGIN_ROOT}/runtime/codex-command.ts"';
+const directRunnerCommand = `bun ${shellSingleQuote(runner)}`;
 const temporaryDirectories: string[] = [];
 
 function temporaryDirectory(): string {
@@ -36,7 +37,7 @@ function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function rewrittenCommand(script: string): string {
+function rewrittenCommand(script: string, runnerCommand = directRunnerCommand): string {
   return `${runnerCommand} run --json ${shellSingleQuote(encode(script))}`;
 }
 
@@ -61,10 +62,13 @@ describe("managed command output hook", () => {
 
   test("rewrites through a portable PLUGIN_ROOT runner with a visible, shell-safe JSON encoding", () => {
     const cmd = "flutter test --name \"it's literal: $HOME `uname`\" && echo complete > result.txt";
-    const result = invoke(hook, [], { stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { cmd, workdir: "/tmp" } }) });
+    const result = invoke(hook, [], {
+      stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { cmd, workdir: "/tmp" } }),
+      env: { PLUGIN_ROOT: packageRoot },
+    });
     const payload = JSON.parse(text(result.stdout));
     const rewritten = payload.hookSpecificOutput.updatedInput.cmd as string;
-    expect(rewritten).toBe(rewrittenCommand(cmd));
+    expect(rewritten).toBe(rewrittenCommand(cmd, pluginRunnerCommand));
     expect(rewritten).toContain("flutter test");
     expect(rewritten).toContain("$HOME");
     expect(payload.hookSpecificOutput.updatedInput.workdir).toBe("/tmp");
@@ -84,6 +88,13 @@ describe("managed command output hook", () => {
     expect(text(result.stdout)).toContain("literal $HOME `uname`");
     const path = artifactPath(text(result.stdout));
     expect(JSON.parse(readFileSync(join(path, "status.json"), "utf8")).command).toBe(script);
+  });
+
+  test("uses the adjacent source runtime when a direct global hook has no plugin root", () => {
+    const command = "cargo test -p skizzles";
+    const result = invoke(hook, [], { stdin: JSON.stringify({ hook_event_name: "PreToolUse", tool_input: { command } }) });
+    const payload = JSON.parse(text(result.stdout));
+    expect(payload.hookSpecificOutput.updatedInput.command).toBe(rewrittenCommand(command));
   });
 
   test("finds a recognized command after leading commands and preserves the entire script", () => {
