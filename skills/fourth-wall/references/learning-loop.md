@@ -38,7 +38,9 @@ Review findings use one of: **attributable Worker defect**, **adjacent pre-exist
 
 ## Candidate lifecycle
 
-Record a harness candidate only when observed in real execution, generalizable beyond one unusual incident, material to cost/correctness/latency/safety/reliability, and supported by a task path, measurement, reproducible behavior, or authoritative source. A candidate may be copied into the curated [learning log](../resources/learning-log.md), but children never edit global policy.
+Record a harness candidate only when observed in real execution, generalizable beyond one unusual incident, material to cost/correctness/latency/safety/reliability, and supported by a task path, measurement, reproducible behavior, or authoritative source. Never copy campaign-derived observations into this public skill repository, its resources, or its generated plugin. Children never edit global policy.
+
+Only after an explicit owner decision, a human may manually curate a private host-local record at `CODEX_HOME/.skizzles/learning/learning-log.md`. Keep its directory owner-only (`0700`) and the file owner-readable only (`0600`). It is user-owned local state, not an installer receipt, source input, or plugin asset. Keep project, client, workspace, task-path, transcript, credential, and raw-evidence details there; a public proposal must be independently rewritten as a de-identified, generalizable policy change and separately reviewed.
 
 Forwarding is optional and explicit. A configured consumer receives the bounded packet or its path; absent or ambiguous routing means report it to the human owner. Never clone a repository, create/message tasks, edit `AGENTS.md`, or mutate hooks/configuration to establish a consumer.
 

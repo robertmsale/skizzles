@@ -99,6 +99,8 @@ Fourth Wall emits a bounded campaign-close learning packet under `/tmp/skizzles-
 2. Choose a stable consumer naming or epoch convention and record the routing in machine-local instructions (for example, `AGENTS.md`) by an explicit user action.
 3. Forward only the bounded packet or its path after the user confirms the unique consumer and destination.
 
+Private campaign observations never belong in the source checkout or generated plugin. If an owner explicitly wants durable local curation, they may manually create `CODEX_HOME/.skizzles/learning/` with mode `0700` and `learning-log.md` with mode `0600`. That user-owned record is outside installation receipts and transfer targets; do not create, copy, package, or add it to Git on the user's behalf.
+
 The installer must not clone or modify a repository, edit `AGENTS.md`, create or message tasks, or guess when a consumer is absent or ambiguous. Report the packet to the human owner instead. Consumer review may propose changes, but promotion into Skizzles skills, roles, routing, hooks, configuration, or installs always requires separate owner deliberation.
 
 ## Use Container Lab deliberately

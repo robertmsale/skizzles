@@ -77,6 +77,8 @@ describe("deterministic plugin packaging", () => {
       expect(stagedLearning).toContain(`\`${field}\``);
     }
     expect(stagedLearning).toContain("never auto-promote or auto-mutate harness policy");
+    expect(stagedLearning).toContain("private host-local record");
+    expect(await Bun.file(join(staged, "skills/fourth-wall/resources/learning-log.md")).exists()).toBe(false);
 
     const stagedInstaller = await readFile(join(staged, "skills/install-skizzles/SKILL.md"), "utf8");
     expect(stagedInstaller).toContain("must not clone or modify a repository");
@@ -317,6 +319,15 @@ describe("deterministic plugin packaging", () => {
     await write(root, "runtime/session.sqlite", "state");
 
     expect(stagePlugin(root, join(root, "stage"))).rejects.toBeInstanceOf(PackagingError);
+  });
+
+  test("rejects private learning records", async () => {
+    const root = await fixture();
+    await write(root, "skills/fourth-wall/resources/learning-log.md", "private campaign observation\n");
+
+    expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
+      "skills/fourth-wall/resources/learning-log.md looks like local or live state",
+    );
   });
 });
 
