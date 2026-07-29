@@ -97,9 +97,7 @@ describe("published plugin contracts", () => {
     expect(stagedHandoff).toBe(canonicalHandoff);
     expect(stagedHandoff).toContain("# Context Renewal And Warm Handoff");
     expect(stagedHandoff).toContain("manual handoff");
-    expect(stagedHandoff).not.toContain(
-      "fresh sibling named `<role>__<objective>`",
-    );
+    expect(stagedHandoff).not.toContain("<role>__<objective>");
 
     const canonicalInstaller = await readFile(
       join(repoRoot, "skills/install-skizzles/SKILL.md"),

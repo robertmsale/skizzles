@@ -34,8 +34,6 @@ Do not include motivational framing, a chronological transcript, stable base ins
 
 For a long root task, store this packet under `/tmp` and pass its path to children together with a compact slice-specific assignment or follow-up. Update it at ownership transfers, material routing changes, and acceptance checkpoints. Do not automate encrypted spawn-message rewriting or continuously append command output.
 
-The `<role>__<objective>` convention applies when a root creates a child task for role visibility. Existing peer task paths are callable identities; a handoff does not rename them.
-
 ## Worker Or Specialist Handoff
 
 Use a parent-mediated sibling replacement so the root preserves the task graph and role boundary:
