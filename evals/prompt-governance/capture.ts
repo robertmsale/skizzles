@@ -4,24 +4,21 @@ import { statSync } from "node:fs";
 import { cp, lstat, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildCodexCommand, commandText } from "./command";
+import { buildCodexCommand, commandControlDescriptor, commandText } from "./command";
 import { createFixture, type FixtureHandle } from "./fixture";
-import { ensureDirectory, readCappedText, redactSensitiveText, sha256, snapshotHash, snapshotTree, writeText } from "./fs";
+import { ensureDirectory, readCappedText, redactSensitiveText, sanitizeTelemetryLine, sha256, snapshotHash, snapshotTree, writeText } from "./fs";
 import { writeDiffArtifact } from "./git";
 import { copyFrozenOverlay, type OverlayPair } from "./overlays";
 import { classifyAuthoritySignals, emptyObservedMetricPaths, inspectJsonlSchema, metricPaths, parseObservedMetrics, unavailableMetrics } from "./events";
 import { verifyRun } from "./verifier";
-import type { CaptureResult, Condition, MetricProfile, PilotCaseId, RunManifest, VerifierResult } from "./types";
-
-export const DEFAULT_DEADLINE_MS = 10 * 60 * 1000;
-export const DEFAULT_KILL_GRACE_MS = 3_000;
-export const DEFAULT_STDOUT_CAP_BYTES = 4 * 1024 * 1024;
-export const DEFAULT_STDERR_CAP_BYTES = 1 * 1024 * 1024;
-export const DEFAULT_FINAL_ANSWER_CAP_BYTES = 64 * 1024;
-
+import { assertCacheOutside, ensurePrivateDirectory, privateArtifactPath, type VerifiedPrivateCache } from "./cache"; import { isRecord } from "./records";
+import type { CaptureResult, Condition, MeasurementScope, MetricProfile, PilotCaseId, RunManifest, VerifierResult } from "./types";
+export const DEFAULT_DEADLINE_MS = 10 * 60 * 1000; export const DEFAULT_KILL_GRACE_MS = 3_000; export const DEFAULT_STDOUT_CAP_BYTES = 4 * 1024 * 1024; export const DEFAULT_STDERR_CAP_BYTES = 1 * 1024 * 1024; export const DEFAULT_FINAL_ANSWER_CAP_BYTES = 64 * 1024;
 export interface ExecuteRunOptions {
   readonly repositoryRoot: string;
   readonly artifactRoot: string;
+  /** Verified private execution cache. Public artifact roots never receive model output. */
+  readonly cache: VerifiedPrivateCache;
   readonly caseId: PilotCaseId;
   readonly condition: Condition;
   readonly repetition: number;
@@ -34,29 +31,24 @@ export interface ExecuteRunOptions {
   readonly runId?: string;
   readonly expectedFixtureBaselineTreeHash?: string;
 }
-
 export async function executeRun(options: ExecuteRunOptions): Promise<CaptureResult> {
   const runId = options.runId ?? randomUUID();
-  const runRoot = join(options.artifactRoot, "runs", runId);
   await ensureDirectory(options.artifactRoot);
-  await ensureDirectory(join(options.artifactRoot, "runs"));
-  await import("node:fs/promises").then(({ mkdir }) => mkdir(runRoot));
-  const fixtureRoot = join(runRoot, "fixture");
+  await assertCacheOutside(options.cache, options.artifactRoot);
+  const runRoot = privateArtifactPath(options.cache, "runs", runId);
+  await ensurePrivateDirectory(options.cache, "runs");
+  await ensurePrivateDirectory(options.cache, "runs", runId);
+  const fixtureRoot = privateArtifactPath(options.cache, "runs", runId, "fixture");
   const fixture = await createFixture(options.caseId, fixtureRoot);
   if (options.expectedFixtureBaselineTreeHash && fixture.baselineTreeHash !== options.expectedFixtureBaselineTreeHash) {
     throw new Error(`fixture baseline hash differs for ${options.caseId}`);
   }
   await assertFixtureInstructionBoundary(fixtureRoot);
   const selectedOverlay = options.overlays[options.condition];
-  const instructionFile = await copyFrozenOverlay(selectedOverlay, join(runRoot, "instructions.md"));
-  const finalAnswerPath = join(runRoot, "final.md");
-  // Keep Codex's raw -o output in a private temporary directory. Only the
-  // redacted bounded text is written to the durable campaign artifact.
-  const finalOutputRoot = await mkdtemp(join(tmpdir(), "skizzles-prompt-eval-final-"));
-  const finalOutputPath = join(finalOutputRoot, "final.md");
-  const rawEventsPath = join(runRoot, "events.jsonl");
-  const stderrPath = join(runRoot, "stderr.log");
-  const verifierPath = join(runRoot, "verifier.json");
+  const instructionFile = await copyFrozenOverlay(selectedOverlay, privateArtifactPath(options.cache, "runs", runId, "instructions.md"));
+  const finalAnswerPath = privateArtifactPath(options.cache, "runs", runId, "final.md");
+  const finalOutputRoot = await mkdtemp(join(tmpdir(), "skizzles-prompt-eval-final-")); const finalOutputPath = join(finalOutputRoot, "final.md");
+  const rawEventsPath = privateArtifactPath(options.cache, "runs", runId, "events.jsonl"); const stderrPath = privateArtifactPath(options.cache, "runs", runId, "stderr.log"); const verifierPath = privateArtifactPath(options.cache, "runs", runId, "verifier.json");
   const verifierSource = fixture.pilotCase.fixtureFiles["verify.mjs"] ?? "";
   const command = buildCodexCommand({
     fixtureRoot,
@@ -64,12 +56,9 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
     finalMessagePath: finalOutputPath,
     ...(options.codexBinary ? { codexBinary: options.codexBinary } : {}),
   });
-  const codexVersion = options.codexVersion ?? getCodexVersion(options.codexBinary);
-  const deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS;
-  const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
-  const startedAt = new Date().toISOString();
+  const codexVersion = options.codexVersion ?? getCodexVersion(options.codexBinary); const deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS; const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS; const startedAt = new Date().toISOString();
   const runManifest: RunManifest = {
-    schemaVersion: "prompt-governance-run-v1",
+    schemaVersion: "prompt-governance-run-v2",
     runId,
     caseId: options.caseId,
     condition: options.condition,
@@ -83,6 +72,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
     model: "gpt-5.6-sol",
     reasoningEffort: "high",
     command,
+    measurementScope: buildMeasurementScope(command, codexVersion),
     baselineHead: fixture.baselineCommit,
     fixtureBaselineTreeHash: fixture.baselineTreeHash,
     oracleVerifierHash: sha256(verifierSource),
@@ -112,32 +102,38 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
     deadlineMs,
     killGraceMs,
     environmentKeys: ["CODEX_HOME", "PATH", "HOME", "TMPDIR"],
-    networkPolicy: "sandbox_workspace_write.network_access=false; web_search=disabled; top-level HOME/CODEX_HOME remain caller-managed for auth; model child HOME is fixture-owned by shell_environment_policy.set; Codex service transport remains host-managed",
+    networkPolicy: "sandbox_workspace_write.network_access=false; web_search=disabled; paired comparison under caller-authenticated local Codex config; top-level HOME/CODEX_HOME remain caller-managed; features.hooks=false; model child HOME is fixture-owned by shell_environment_policy.set; Codex service transport remains host-managed",
     approvalPolicy: "--ask-for-approval never (top-level before exec); supported approval policy, not a sandbox bypass",
     startedAt,
   };
-  await writeText(join(runRoot, "run-manifest.json"), `${JSON.stringify(runManifest, null, 2)}\n`);
-
-  const execution = await spawnCodex(command, fixture.pilotCase.taskPrompt, fixtureRoot, runRoot, deadlineMs, killGraceMs);
-  await writeText(rawEventsPath, redactSensitiveText(execution.stdout));
-  await writeText(stderrPath, redactSensitiveText(execution.stderr));
-  const finalCapture = await readOptionalCapped(finalOutputPath, DEFAULT_FINAL_ANSWER_CAP_BYTES);
-  const finalAnswer = redactSensitiveText(finalCapture.text);
-  await writeText(finalAnswerPath, `${finalAnswer}${finalCapture.truncated ? "\n[final answer truncated by harness]\n" : ""}`);
-  await rm(finalOutputRoot, { recursive: true, force: true });
-  const knownInfrastructureFailure = execution.exitCode !== 0 || execution.timedOut || execution.drainTimedOut || execution.outputTruncated || finalCapture.truncated;
-  let infrastructureFailure = knownInfrastructureFailure;
-  let verificationSkipped = knownInfrastructureFailure;
-  let snapshotSourcePreHash = "";
-  let snapshotSourcePostHash = "";
-  let snapshotCopyHash = "";
-  let snapshotVerificationPostHash = "";
-  let snapshotStable = false;
+  await writeText(privateArtifactPath(options.cache, "runs", runId, "run-manifest.json"), `${JSON.stringify(runManifest, null, 2)}\n`);
+  let execution: SpawnResult;
+  let finalCapture: { text: string; bytes: number; truncated: boolean };
+  try {
+    execution = await spawnCodex(command, fixture.pilotCase.taskPrompt, fixtureRoot, runRoot, deadlineMs, killGraceMs);
+    finalCapture = await readOptionalCapped(finalOutputPath, DEFAULT_FINAL_ANSWER_CAP_BYTES);
+  } finally {
+    await rm(finalOutputRoot, { recursive: true, force: true });
+  }
+  const authorityViolations = classifyAuthoritySignals(execution.stdout, execution.stderr);
+  const knownInfrastructureFailure = execution.captureComplete === false || execution.exitCode !== 0 || execution.timedOut || execution.drainTimedOut || execution.outputTruncated || finalCapture.truncated || authorityViolations.length > 0;
+  const failureStatus = failureCategory({ ...execution, finalAnswerTruncated: finalCapture.truncated, authorityViolations });
+  const persistedEvents = knownInfrastructureFailure ? failureStatus : sanitizeTelemetryEvents(execution.stdout);
+  const persistedStderr = knownInfrastructureFailure ? failureStatus : safeStreamStatus("stderr", execution.stderrBytes, execution.stderrStoredBytes, execution.outputTruncated);
+  const finalAnswer = knownInfrastructureFailure ? failureStatus : redactSensitiveText(finalCapture.text);
+  await writeText(rawEventsPath, persistedEvents);
+  await writeText(stderrPath, persistedStderr);
+  await writeText(privateArtifactPath(options.cache, "runs", runId, "raw-stderr.bin"), execution.stderr);
+  await writeText(privateArtifactPath(options.cache, "runs", runId, "supervised-stdout.bin"), persistedEvents);
+  await writeText(privateArtifactPath(options.cache, "runs", runId, "supervised-stderr.bin"), persistedStderr);
+  await writeText(finalAnswerPath, knownInfrastructureFailure ? failureStatus : `${finalAnswer}${finalCapture.truncated ? "\n[final answer truncated by harness]\n" : ""}`);
+  let infrastructureFailure = knownInfrastructureFailure; let verificationSkipped = knownInfrastructureFailure;
+  let snapshotSourcePreHash = ""; let snapshotSourcePostHash = ""; let snapshotCopyHash = ""; let snapshotVerificationPostHash = ""; let snapshotStable = false;
   let verifier: VerifierResult;
   let diffArtifact: Awaited<ReturnType<typeof writeDiffArtifact>>;
   let snapshotQuarantineRoot: string | undefined;
   if (knownInfrastructureFailure) {
-    const reason = `verification skipped before verifier/diff (exitCode=${execution.exitCode}, timedOut=${execution.timedOut}, drainTimedOut=${execution.drainTimedOut}, outputTruncated=${execution.outputTruncated}, finalAnswerTruncated=${finalCapture.truncated})`;
+    const reason = failureStatus.trim();
     verifier = skippedVerifier(fixture, verifierSource, reason);
     diffArtifact = await skippedDiff(runRoot, reason);
   } else {
@@ -177,9 +173,10 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
       if (snapshotQuarantineRoot) await rm(snapshotQuarantineRoot, { recursive: true, force: true });
     }
   }
-  await writeText(verifierPath, `${JSON.stringify(verifier, null, 2)}\n`);
-  const authorityViolations = classifyAuthoritySignals(execution.stdout, execution.stderr);
-  const observedJsonlSchema = inspectJsonlSchema(execution.stdout);
+  // Snapshot/verifier failures occur after capture; only sanitized verifier fields and diff artifacts become durable.
+  const persistedVerifier = { ...verifier, stdout: redactSensitiveText(verifier.stdout), stderr: redactSensitiveText(verifier.stderr) };
+  await writeText(verifierPath, `${JSON.stringify(persistedVerifier, null, 2)}\n`);
+  const observedJsonlSchema = knownInfrastructureFailure ? inspectJsonlSchema("") : inspectJsonlSchema(persistedEvents);
   const observedMetricPaths = options.metricProfile ? metricPaths(options.metricProfile) : emptyObservedMetricPaths();
   const completedRun: RunManifest = {
     ...runManifest,
@@ -208,9 +205,9 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
     snapshotVerificationPostHash,
     snapshotStable,
   };
-  await writeText(join(runRoot, "run-manifest.json"), `${JSON.stringify(completedRun, null, 2)}\n`);
+  await writeText(privateArtifactPath(options.cache, "runs", runId, "run-manifest.json"), `${JSON.stringify(completedRun, null, 2)}\n`);
   const capture: CaptureResult = {
-    schemaVersion: "prompt-governance-capture-v1",
+    schemaVersion: "prompt-governance-capture-v2",
     run: completedRun,
     commandText: commandText(command),
     codexVersion,
@@ -224,9 +221,9 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
     diffPath: diffArtifact.path,
     verifierPath,
     fileAllowlist: fixture.pilotCase.allowlist,
-    verifier,
+    verifier: persistedVerifier,
     observedJsonlSchema,
-    secondaryMetrics: knownInfrastructureFailure || !options.metricProfile ? unavailableMetrics() : parseObservedMetrics(execution.stdout, options.metricProfile),
+    secondaryMetrics: knownInfrastructureFailure || !options.metricProfile ? unavailableMetrics() : parseObservedMetrics(persistedEvents, options.metricProfile),
     observedMetricPaths,
     outputTruncated: execution.outputTruncated,
     timedOut: execution.timedOut,
@@ -235,7 +232,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
     stderrBytes: execution.stderrBytes,
     stdoutStoredBytes: execution.stdoutStoredBytes,
     stderrStoredBytes: execution.stderrStoredBytes,
-    ...(options.metricProfile ? { metricProfileId: options.metricProfile.profileId } : {}),
+    ...(options.metricProfile ? { metricProfileId: options.metricProfile.registryId } : {}),
     finalAnswerBytes: finalCapture.bytes,
     finalAnswerStoredBytes: Buffer.byteLength(finalAnswer),
     finalAnswerTruncated: finalCapture.truncated,
@@ -247,10 +244,9 @@ export async function executeRun(options: ExecuteRunOptions): Promise<CaptureRes
     verificationSkipped,
     snapshotStable,
   };
-  await writeText(join(runRoot, "capture.json"), `${JSON.stringify(capture, null, 2)}\n`);
+  await writeText(privateArtifactPath(options.cache, "runs", runId, "capture.json"), `${JSON.stringify(capture, null, 2)}\n`);
   return capture;
 }
-
 function skippedVerifier(fixture: FixtureHandle, verifierSource: string, reason: string): VerifierResult {
   return {
     passed: false,
@@ -268,22 +264,20 @@ function skippedVerifier(fixture: FixtureHandle, verifierSource: string, reason:
     oracleVerifierHash: sha256(verifierSource),
   };
 }
-
 async function skippedDiff(runRoot: string, reason: string): Promise<Awaited<ReturnType<typeof writeDiffArtifact>>> {
   const path = join(runRoot, "fixture.diff");
   const text = `[diff skipped: ${reason}]\n`;
   await writeText(path, text);
   return { path, bytes: Buffer.byteLength(text), storedBytes: Buffer.byteLength(text), truncated: false };
 }
-
 interface SupervisorResult {
   readonly exitCode: number;
   readonly timedOut: boolean;
   readonly drainTimedOut?: boolean;
   readonly stdout: { readonly bytes: number; readonly storedBytes: number; readonly truncated: boolean };
   readonly stderr: { readonly bytes: number; readonly storedBytes: number; readonly truncated: boolean };
+  readonly captureComplete: boolean; readonly captureFailureCategory: string;
 }
-
 export interface SpawnResult {
   readonly exitCode: number;
   readonly stdout: string;
@@ -295,8 +289,26 @@ export interface SpawnResult {
   readonly stderrBytes: number;
   readonly stdoutStoredBytes: number;
   readonly stderrStoredBytes: number;
+  readonly captureComplete?: boolean; readonly captureFailureCategory?: string;
 }
-
+export interface FailureCategoryInput extends SpawnResult {
+  readonly finalAnswerTruncated: boolean;
+  readonly authorityViolations: readonly string[];
+  readonly additionalCategories?: readonly string[];
+}
+export function failureCategory(input: FailureCategoryInput): string {
+  const categories = [...(input.additionalCategories ?? []), ...(input.captureFailureCategory && /^[a-z][a-z0-9-]*$/.test(input.captureFailureCategory) ? [input.captureFailureCategory] : []), ...input.authorityViolations.map((value) => `authority:${value}`), ...(input.exitCode !== 0 ? ["nonzero-exit"] : []), ...(input.timedOut ? ["timeout"] : []), ...(input.drainTimedOut ? ["drain-timeout"] : []), ...(input.outputTruncated ? ["output-truncated"] : []), ...(input.finalAnswerTruncated ? ["final-answer-truncated"] : [])].filter((value) => /^[a-z][a-z0-9-]*(?::[a-z0-9-]+)?$/.test(value));
+  return `${JSON.stringify({ status: "capture-failure", categories, exitCode: input.exitCode, timedOut: input.timedOut, drainTimedOut: input.drainTimedOut, outputTruncated: input.outputTruncated, finalAnswerTruncated: input.finalAnswerTruncated })}\n`;
+}
+export function safeStreamStatus(stream: string, bytes: number, storedBytes: number, truncated: boolean): string {
+  return `${JSON.stringify({ status: "stream-suppressed", stream, bytes, storedBytes, truncated })}\n`;
+}
+export function sanitizeTelemetryEvents(rawEvents: string): string {
+  return rawEvents.split(/\r?\n/).flatMap((line) => {
+    const safe = line.trim() ? sanitizeTelemetryLine(line) : undefined;
+    return safe ? [`${safe}\n`] : [];
+  }).join("");
+}
 async function spawnCodex(
   command: readonly string[],
   prompt: string,
@@ -337,13 +349,9 @@ async function spawnCodex(
       env: buildEvaluationEnvironment(),
     });
     const statusText = await readOptional(statusPath, 16 * 1024);
-    const supervisorResult = parseSupervisorResult(statusText, result.exitCode);
+    const supervisorResult = parseSupervisorResult(statusText, result.exitCode, stdoutCapBytes, stderrCapBytes);
     const stdout = await readOptional(stdoutPath, DEFAULT_STDOUT_CAP_BYTES);
     const stderr = await readOptional(stderrPath, DEFAULT_STDERR_CAP_BYTES);
-    const safeStdout = redactSensitiveText(stdout);
-    const safeStderr = redactSensitiveText(stderr);
-    await writeText(join(runRoot, "supervised-stdout.bin"), safeStdout);
-    await writeText(join(runRoot, "supervised-stderr.bin"), safeStderr);
     return {
       exitCode: supervisorResult.exitCode,
       stdout,
@@ -355,12 +363,13 @@ async function spawnCodex(
       stderrBytes: supervisorResult.stderr.bytes,
       stdoutStoredBytes: supervisorResult.stdout.storedBytes,
       stderrStoredBytes: supervisorResult.stderr.storedBytes,
+      captureComplete: supervisorResult.captureComplete,
+      captureFailureCategory: supervisorResult.captureFailureCategory,
     };
   } finally {
     await rm(quarantineRoot, { recursive: true, force: true });
   }
 }
-
 export async function spawnCodexForCalibration(
   command: readonly string[],
   prompt: string,
@@ -373,29 +382,24 @@ export async function spawnCodexForCalibration(
 ): Promise<SpawnResult> {
   return spawnCodex(command, prompt, cwd, runRoot, deadlineMs, killGraceMs, stdoutCapBytes, stderrCapBytes);
 }
-
-function parseSupervisorResult(text: string, fallbackExitCode: number): SupervisorResult {
+export function parseSupervisorResult(text: string, supervisorExitCode: number, stdoutCapBytes = DEFAULT_STDOUT_CAP_BYTES, stderrCapBytes = DEFAULT_STDERR_CAP_BYTES): SupervisorResult {
+  const fallback = (category = "internal"): SupervisorResult => ({ exitCode: supervisorExitCode || 127, timedOut: false, drainTimedOut: false, stdout: { bytes: 0, storedBytes: 0, truncated: false }, stderr: { bytes: 0, storedBytes: 0, truncated: false }, captureComplete: false, captureFailureCategory: category });
   try {
-    const parsed = JSON.parse(text) as Partial<SupervisorResult>;
-    if (typeof parsed.exitCode === "number" && typeof parsed.timedOut === "boolean") {
-      const normalizeStream = (stream: Partial<SupervisorResult["stdout"]> | undefined) => ({
-        bytes: typeof stream?.bytes === "number" && Number.isFinite(stream.bytes) && stream.bytes >= 0 ? stream.bytes : 0,
-        storedBytes: typeof stream?.storedBytes === "number" && Number.isFinite(stream.storedBytes) && stream.storedBytes >= 0 ? stream.storedBytes : 0,
-        truncated: typeof stream?.truncated === "boolean" ? stream.truncated : Boolean(parsed.drainTimedOut ?? parsed.timedOut),
-      });
-      return {
-        exitCode: parsed.exitCode,
-        timedOut: parsed.timedOut,
-        ...(typeof parsed.drainTimedOut === "boolean" ? { drainTimedOut: parsed.drainTimedOut } : {}),
-        stdout: normalizeStream(parsed.stdout),
-        stderr: normalizeStream(parsed.stderr),
-      };
-    }
+    const parsed: unknown = JSON.parse(text);
+    if (!isRecord(parsed)) return fallback();
+    const required = ["captureComplete", "drainTimedOut", "exitCode", "failureCategory", "interrupted", "schemaVersion", "status", "stderr", "stdout", "timedOut"];
+    if (Object.keys(parsed).sort().join(",") !== required.slice().sort().join(",") || parsed.schemaVersion !== "supervisor-status-v2" || (parsed.status !== "complete" && parsed.status !== "failed")) return fallback();
+    if (!isSafeInteger(parsed.exitCode) || typeof parsed.timedOut !== "boolean" || typeof parsed.drainTimedOut !== "boolean" || typeof parsed.interrupted !== "boolean" || typeof parsed.captureComplete !== "boolean" || typeof parsed.failureCategory !== "string" || !["", "stream-open", "stream-read", "stream-write", "stream-close", "spawn", "input", "status-write", "internal"].includes(parsed.failureCategory)) return fallback();
+    const stdout = parseSupervisorStream(parsed.stdout, stdoutCapBytes); const stderr = parseSupervisorStream(parsed.stderr, stderrCapBytes);
+    if (!stdout || !stderr) return fallback();
+    if (parsed.status === "complete") return supervisorExitCode === 0 && parsed.captureComplete && parsed.failureCategory === "" && !parsed.timedOut && !parsed.drainTimedOut && !parsed.interrupted && stdout.storedBytes === Math.min(stdout.bytes, stdoutCapBytes) && stderr.storedBytes === Math.min(stderr.bytes, stderrCapBytes) ? { exitCode: parsed.exitCode, timedOut: false, drainTimedOut: false, stdout, stderr, captureComplete: true, captureFailureCategory: "" } : fallback();
+    return supervisorExitCode === 125 && !parsed.captureComplete && parsed.exitCode === 125 && (Boolean(parsed.failureCategory) || parsed.timedOut || parsed.drainTimedOut || parsed.interrupted) ? { exitCode: 125, timedOut: parsed.timedOut, drainTimedOut: parsed.drainTimedOut, stdout, stderr, captureComplete: false, captureFailureCategory: parsed.failureCategory } : fallback();
   } catch {
-    // The stderr/status artifact records the failure; return a bounded synthetic result.
+    return fallback();
   }
-  return { exitCode: fallbackExitCode || 127, timedOut: false, stdout: { bytes: 0, storedBytes: 0, truncated: true }, stderr: { bytes: 0, storedBytes: 0, truncated: true } };
 }
+function parseSupervisorStream(value: unknown, cap: number): SupervisorResult["stdout"] | undefined { if (!isRecord(value) || Object.keys(value).sort().join(",") !== "bytes,storedBytes,truncated" || !isSafeInteger(value.bytes) || !isSafeInteger(value.storedBytes) || value.bytes < 0 || value.storedBytes < 0 || value.storedBytes > value.bytes || value.storedBytes > cap || typeof value.truncated !== "boolean" || value.truncated !== (value.bytes > cap)) return undefined; return { bytes: value.bytes, storedBytes: value.storedBytes, truncated: value.truncated }; }
+function isSafeInteger(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value); }
 export function buildEvaluationEnvironment(sourceEnvironment: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const allowed = new Set(["CODEX_HOME", "PATH", "HOME", "TMPDIR"]);
   const environment = Object.fromEntries(Object.entries(sourceEnvironment).filter(([key, value]) => allowed.has(key) && value !== undefined && value !== "")) as Record<string, string>;
@@ -403,11 +407,15 @@ export function buildEvaluationEnvironment(sourceEnvironment: NodeJS.ProcessEnv 
   if (codexHome) environment.CODEX_HOME = codexHome;
   return environment;
 }
+export function buildMeasurementScope(command: readonly string[], codexVersion: string, sourceEnvironment: NodeJS.ProcessEnv = process.env): MeasurementScope {
+  const environment = buildEvaluationEnvironment(sourceEnvironment);
+  const controls = commandControlDescriptor(command);
+  return { schemaVersion: "prompt-governance-measurement-scope-v1", authMode: "caller-managed-CODEX_HOME", userConfigLoaded: true, userProjectRulesIgnored: true, taskScope: "root-instruction-only", subagents: "disabled-not-observed", fixedFlags: controls.fixedFlags, configControls: controls.configControls, codexHomePresent: Boolean(environment.CODEX_HOME), homePresent: Boolean(environment.HOME), tmpdirPresent: Boolean(environment.TMPDIR), codexBinary: sha256(command[0] ?? "codex"), codexVersion, ambientManagedPolicy: "unknown" };
+}
 function resolveBinary(binary = "codex"): string {
   if (binary.includes("/")) return execFileSync("realpath", [binary], { encoding: "utf8" }).trim();
   return execFileSync("which", [binary], { encoding: "utf8" }).trim();
 }
-
 export function getCodexVersion(binary = "codex"): string {
   try {
     const path = resolveBinary(binary);
@@ -419,21 +427,17 @@ export function getCodexVersion(binary = "codex"): string {
     return `unavailable (${error instanceof Error ? error.message : String(error)})`;
   }
 }
-
 export function resolveCodexPath(binary = "codex"): string {
   return resolveBinary(binary);
 }
-
 export function assertExactCodexVersion(version: string): void {
   if (version !== "codex-cli 0.146.0-alpha.14") throw new Error(`unsupported Codex version for prompt evaluation: ${version}`);
 }
-
 async function assertFixtureInstructionBoundary(fixtureRoot: string): Promise<void> {
   const entries = await import("node:fs/promises").then(({ readdir }) => readdir(fixtureRoot, { recursive: true }));
   const forbidden = entries.filter((entry) => entry === "AGENTS.md" || entry.endsWith("/AGENTS.md") || entry === ".codex" || entry.includes("/.codex/") || entry.endsWith(".rules"));
   if (forbidden.length > 0) throw new Error(`fixture contains an instruction-policy file: ${forbidden.join(", ")}`);
 }
-
 async function readOptionalCapped(path: string, cap: number): Promise<{ text: string; bytes: number; truncated: boolean }> {
   try {
     return await readCappedText(path, cap);
@@ -441,7 +445,6 @@ async function readOptionalCapped(path: string, cap: number): Promise<{ text: st
     return { text: "", bytes: 0, truncated: true };
   }
 }
-
 async function readOptional(path: string, cap: number): Promise<string> {
   return (await readOptionalCapped(path, cap)).text;
 }

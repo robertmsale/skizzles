@@ -48,6 +48,41 @@ export function redactSensitiveText(text: string): string {
   }).join("");
 }
 
+export function sanitizeTelemetryLine(line: string): string | undefined {
+  try {
+    const projected = projectTelemetry(JSON.parse(line));
+    return projected && typeof projected === "object" && !Array.isArray(projected) && typeof (projected as { type?: unknown }).type === "string" ? JSON.stringify(projected) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function projectTelemetry(value: unknown, key = ""): unknown {
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return key === "type" && safeTelemetryType(value) ? value : undefined;
+  if (Array.isArray(value)) {
+    const values = value.map((item) => projectTelemetry(item, key)).filter((item) => item !== undefined);
+    return values.length > 0 ? values : undefined;
+  }
+  if (!value || typeof value !== "object" || !safeTelemetryKey(key)) return undefined;
+  const entries = Object.entries(value).flatMap(([childKey, child]) => {
+    if (!safeTelemetryKey(childKey)) return [];
+    const projected = projectTelemetry(child, childKey);
+    return projected === undefined ? [] : [[childKey, projected] as const];
+  });
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function safeTelemetryKey(key: string): boolean {
+  if (key && !/^[a-z][a-z0-9_.-]*$/.test(key)) return false;
+  if (!key || !/(?:url|path|home|codex|hook|mcp|provider|config|credential|secret|password|authorization|command|shell|message|text|error|stderr|stdout|env)/i.test(key)) return true;
+  return /^(?:input|output|total|prompt|completion|cached|reasoning)(?:_?input|_?output)?_?tokens?(?:_?(?:count|usage))?$|^token_count$/i.test(key);
+}
+
+function safeTelemetryType(value: string): boolean {
+  return value.length <= 128 && /^[a-z][a-z0-9_.:-]*$/.test(value) && !/(?:url|path|home|codex|hook|mcp|provider|config|credential|secret|password|authorization|command|shell|message|text|error)/i.test(value);
+}
+
 function redactJsonValue(value: unknown, key = ""): unknown {
   if (isSecretKey(key)) return "<redacted>";
   if (Array.isArray(value)) return value.map((item) => redactJsonValue(item));
@@ -69,6 +104,7 @@ function redactPlainText(text: string): string {
   const valuePattern = "(\\\"[^\\\"]*\\\"|'[^']*'|Bearer\\s+(?:[A-Za-z0-9._~+/=-]+|<redacted>)|[^\\s,;}]+)";
   return text
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1<redacted>")
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/gi, "<redacted>")
     .replace(new RegExp(`((?<![A-Za-z0-9_-])${keyPattern}\\s*[:=]\\s*)${valuePattern}`, "gi"), (_match, prefix: string, value: string) => {
       const key = prefix.replace(/\s*[:=]\s*$/, "").trim();
       return isSecretKey(key) ? `${prefix}<redacted>` : `${prefix}${value}`;
@@ -76,7 +112,15 @@ function redactPlainText(text: string): string {
     .replace(new RegExp(`([?&]${keyPattern}=)([^&\\s]+)`, "gi"), (_match, prefix: string, value: string) => {
       const key = prefix.slice(1, -1);
       return isSecretKey(key) ? `${prefix}<redacted>` : `${prefix}${value}`;
-    });
+    })
+    .replace(/https?:\/\/[^\s"'|,;}]+/gi, "<redacted-url>")
+    .replace(/(?:\/Users|\/home|\/var|\/etc|[A-Za-z]:\\)[^\s"'|,;}]+/g, "<redacted-host-path>")
+    .replace(/(?:~|\.{1,2})[\\/]\.codex[\\/][^\s"'|,;}]+/gi, "<redacted-config-path>")
+    .replace(/(^|[\s|])\.codex[\\/][^\s"'|,;}]+/gi, "$1<redacted-config-path>")
+    .replace(/\b(?:config|settings)\.(?:toml|json|yaml|yml)\b/gi, "<redacted-config-file>")
+    .replace(/\b[A-Za-z0-9._-]*(?:hook|mcp)[A-Za-z0-9._-]*\b/gi, (value) => /^(?:hook|mcp)$/i.test(value) ? value : "<redacted-integration>")
+    .replace(/\b(?:OPENAI_[A-Z0-9_]+|CODEX_HOME|HOME|TMPDIR|PATH|[A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS|ENDPOINT|URL))\s*=\s*(?:"[^"]*"|'[^']*'|[^\s|,;}]+)/gi, (value) => value.replace(/=.*/, "=<redacted>"))
+    .replace(/\b[A-Z][A-Z0-9_]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s|,;}]+)/g, (value) => value.replace(/=.*/, "=<redacted>"));
 }
 
 function isSecretKey(key: string): boolean {

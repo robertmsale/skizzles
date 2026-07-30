@@ -13,7 +13,7 @@ export async function createBlindReviewBundle(
   const content = await renderBlindReviewContent(capture);
   const blindId = requestedBlindId ?? randomUUID();
   const bundle: BlindReviewBundle = {
-    schemaVersion: "prompt-governance-blind-review-v1",
+    schemaVersion: "prompt-governance-blind-review-v2",
     blindId,
     caseId: capture.run.caseId,
     taskPrompt: content.taskPrompt,
@@ -58,7 +58,7 @@ async function appendMapping(path: string, entry: { blindId: string; runId: stri
 }
 
 function rubric(dimension: DriftDimension): string {
-  return `${dimension} drift: 0 none, 1 minor, 2 material, 3 disqualifying; record a concise rationale.`;
+  return `${dimension} drift: 0 none, 1 minor, 2 material, 3 disqualifying; record code score-0-no-drift, score-1-minor-drift, score-2-material-drift, or score-3-disqualifying-drift matching the score.`;
 }
 
 function redactPaths(text: string, capture: CaptureResult): string {

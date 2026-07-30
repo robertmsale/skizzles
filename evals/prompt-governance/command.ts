@@ -34,7 +34,6 @@ function canonicalCodexCommand(options: CodexCommandOptions): string[] {
     "exec",
     "--strict-config",
     "--ephemeral",
-    "--ignore-user-config",
     "--ignore-rules",
     "--json",
     "--sandbox",
@@ -43,6 +42,14 @@ function canonicalCodexCommand(options: CodexCommandOptions): string[] {
     "gpt-5.6-sol",
     "-c",
     'model_reasoning_effort="high"',
+    "-c",
+    "agents.enabled=false",
+    "-c",
+    "features.apps=false",
+    "-c",
+    "features.hooks=false",
+    "-c",
+    "features.plugins=false",
     "-c",
     `model_instructions_file=${JSON.stringify(resolve(options.instructionFile))}`,
     "-c",
@@ -54,6 +61,8 @@ function canonicalCodexCommand(options: CodexCommandOptions): string[] {
     "-c",
     'web_search="disabled"',
     "-c",
+    'shell_environment_policy.inherit="none"',
+    "-c",
     `shell_environment_policy.set={HOME=${JSON.stringify(fixtureRoot)}}`,
     "-c",
     'shell_environment_policy.include_only=["PATH","TMPDIR"]',
@@ -64,14 +73,43 @@ function canonicalCodexCommand(options: CodexCommandOptions): string[] {
   ];
 }
 
+export interface CommandControlDescriptor {
+  readonly fixedFlags: readonly string[];
+  readonly configControls: readonly string[];
+}
+
+export function commandControlDescriptor(command: readonly string[]): CommandControlDescriptor {
+  const normalized = command.map((argument, index) => normalizeControlArgument(argument, index, command));
+  const fixedFlags: string[] = [];
+  const configControls: string[] = [];
+  for (let index = 1; index < normalized.length; index += 1) {
+    if (normalized[index] === "-c") {
+      if (normalized[index + 1]) configControls.push(normalized[index + 1]!);
+      index += 1;
+      continue;
+    }
+    if (normalized[index - 1] !== "-c") fixedFlags.push(normalized[index]!);
+  }
+  return { fixedFlags, configControls };
+}
+
+function normalizeControlArgument(argument: string, index: number, command: readonly string[]): string {
+  const previous = command[index - 1];
+  if (previous === "--cd") return "<fixture-root>";
+  if (previous === "-o") return "<final-output>";
+  if (argument.startsWith("model_instructions_file=")) return "model_instructions_file=<instruction-overlay>";
+  if (argument.startsWith("shell_environment_policy.set=")) return argument.replace(/HOME=(?:"[^"]*"|'[^']*'|[^,}]+)/, "HOME=<fixture-root>");
+  return argument;
+}
+
 export function assertSafeCodexCommand(command: readonly string[]): void {
   for (const argument of command) {
     if (forbiddenFlags.has(argument) || [...forbiddenFlags].some((flag) => argument.startsWith(`${flag}=`))) {
       throw new Error(`dangerous Codex flag is forbidden in prompt evaluation: ${argument}`);
     }
   }
-  if (!command.includes("--strict-config") || !command.includes("--ephemeral") || !command.includes("--ignore-user-config") || !command.includes("--ignore-rules")) {
-    throw new Error("prompt evaluation requires --strict-config, --ephemeral, --ignore-user-config, and --ignore-rules");
+  if (!command.includes("--strict-config") || !command.includes("--ephemeral") || !command.includes("--ignore-rules")) {
+    throw new Error("prompt evaluation requires --strict-config, --ephemeral, and --ignore-rules");
   }
   const binaryIndex = 0;
   if (command[binaryIndex + 1] !== "--ask-for-approval" || command[binaryIndex + 2] !== "never" || command[binaryIndex + 3] !== "exec") {

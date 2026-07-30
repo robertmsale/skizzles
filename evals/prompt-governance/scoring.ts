@@ -1,5 +1,11 @@
 import { driftDimensions, type BlindScore, type Condition, type DriftDimension } from "./types";
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const REVIEWER_IDS = new Set(["reviewer-a", "reviewer-b"]);
+const RATIONALE_CODES = ["score-0-no-drift", "score-1-minor-drift", "score-2-material-drift", "score-3-disqualifying-drift"] as const;
+
+export function closedRationaleCode(score: 0 | 1 | 2 | 3): string { return RATIONALE_CODES[score]; }
+
 export interface BlindMapping {
   readonly blindId: string;
   readonly runId: string;
@@ -32,8 +38,8 @@ export interface DriftGateResult {
 
 export function validateBlindScore(value: unknown): BlindScore {
   if (!isRecord(value) || value.schemaVersion !== "prompt-governance-blind-score-v1") throw new Error("invalid blind score schema");
-  if (typeof value.blindId !== "string" || value.blindId.length < 16) throw new Error("blind score requires an opaque blindId");
-  if (typeof value.reviewerId !== "string" || value.reviewerId.trim() === "") throw new Error("blind score requires reviewerId");
+  if (typeof value.blindId !== "string" || !UUID_PATTERN.test(value.blindId)) throw new Error("blind score requires a canonical blindId");
+  if (typeof value.reviewerId !== "string" || !REVIEWER_IDS.has(value.reviewerId)) throw new Error("blind score requires an allowed reviewerId");
   if (!isRecord(value.scores) || !isRecord(value.rationale)) throw new Error("blind score requires scores and rationale");
   const scores = {} as Record<DriftDimension, 0 | 1 | 2 | 3>;
   const rationale = {} as Record<DriftDimension, string>;
@@ -41,7 +47,7 @@ export function validateBlindScore(value: unknown): BlindScore {
     const score = value.scores[dimension];
     if (score !== 0 && score !== 1 && score !== 2 && score !== 3) throw new Error(`invalid score for ${dimension}`);
     const reason = value.rationale[dimension];
-    if (typeof reason !== "string" || reason.trim() === "") throw new Error(`missing rationale for ${dimension}`);
+    if (reason !== RATIONALE_CODES[score]) throw new Error(`invalid rationale code for ${dimension}`);
     scores[dimension] = score;
     rationale[dimension] = reason;
   }

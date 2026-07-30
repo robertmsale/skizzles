@@ -16,6 +16,25 @@ export interface PilotCase {
   readonly verifier: string;
 }
 
+export type AmbientManagedPolicy = "not-detected" | "detected" | "unknown";
+
+export interface MeasurementScope {
+  readonly schemaVersion: "prompt-governance-measurement-scope-v1";
+  readonly authMode: "caller-managed-CODEX_HOME";
+  readonly userConfigLoaded: true;
+  readonly userProjectRulesIgnored: true;
+  readonly taskScope: "root-instruction-only";
+  readonly subagents: "disabled-not-observed";
+  readonly fixedFlags: readonly string[];
+  readonly configControls: readonly string[];
+  readonly codexHomePresent: boolean;
+  readonly homePresent: boolean;
+  readonly tmpdirPresent: boolean;
+  readonly codexBinary: string;
+  readonly codexVersion: string;
+  readonly ambientManagedPolicy: AmbientManagedPolicy;
+}
+
 export interface TreeEntry {
   readonly kind: "file" | "symlink";
   readonly sha256: string;
@@ -35,7 +54,7 @@ export interface OverlayRecord {
 }
 
 export interface RunManifest {
-  readonly schemaVersion: "prompt-governance-run-v1";
+  readonly schemaVersion: "prompt-governance-run-v2";
   readonly runId: string;
   readonly caseId: PilotCaseId;
   readonly condition: Condition;
@@ -49,6 +68,7 @@ export interface RunManifest {
   readonly model: "gpt-5.6-sol";
   readonly reasoningEffort: "high";
   readonly command: readonly string[];
+  readonly measurementScope: MeasurementScope;
   readonly baselineHead: string;
   readonly fixtureBaselineTreeHash: string;
   readonly oracleVerifierHash: string;
@@ -110,6 +130,7 @@ export interface ObservedJsonlSchema {
   readonly topLevelKeys: readonly string[];
   readonly payloadKeys: readonly string[];
   readonly observedPaths: readonly string[];
+  readonly eventPathPairs: readonly string[];
   readonly schemaFingerprint: string;
 }
 
@@ -139,20 +160,20 @@ export interface MetricSelector {
   readonly aggregation: "delta" | "cumulative-total" | "count";
 }
 
+export type MetricSelectorId = string;
+
 /** A reviewed, schema-specific parser contract. Calibration never creates this. */
 export interface MetricProfile {
-  readonly schemaVersion: "prompt-governance-metric-profile-v1";
-  readonly profileId: string;
-  readonly codexVersion: string;
+  readonly schemaVersion: "prompt-governance-metric-selection-v3";
+  readonly registryId: string;
+  readonly selectorCommitmentHash: string;
   readonly schemaFingerprint: string;
-  readonly parserVersion: "metric-profile-v1";
-  readonly reviewedBy: string;
-  readonly reviewedAt: string;
-  readonly selectors: Readonly<Record<MetricName, MetricSelector | null>>;
+  readonly enabledMetrics: readonly Exclude<MetricName, "subagents">[];
+  readonly selectorIds: Readonly<Partial<Record<Exclude<MetricName, "subagents">, MetricSelectorId>>>;
 }
 
 export interface CalibrationRecord {
-  readonly schemaVersion: "prompt-governance-calibration-v2";
+  readonly schemaVersion: "prompt-governance-calibration-v5";
   readonly scope: "root-instruction-pilot";
   readonly passed: boolean;
   readonly codexVersion: string;
@@ -162,6 +183,10 @@ export interface CalibrationRecord {
   readonly rawSchemaOnly: true;
   readonly noWritePassed: boolean;
   readonly acknowledgementPassed: boolean;
+  readonly authorityViolations: readonly string[];
+  readonly failureCategory: string;
+  readonly measurementScope: MeasurementScope;
+  readonly measurementScopeFingerprint: string;
   readonly finalAnswerBytes: number;
   readonly finalAnswerStoredBytes: number;
   readonly finalAnswerTruncated: boolean;
@@ -175,10 +200,11 @@ export interface CalibrationRecord {
   readonly baselineHead: string;
   readonly schemaFingerprint: string;
   readonly artifactRoot: string;
+  readonly selectorCommitment: readonly string[];
 }
 
 export interface CaptureResult {
-  readonly schemaVersion: "prompt-governance-capture-v1";
+  readonly schemaVersion: "prompt-governance-capture-v2";
   readonly run: RunManifest;
   readonly commandText: string;
   readonly codexVersion: string;
@@ -237,7 +263,7 @@ export interface BlindScore {
 }
 
 export interface BlindReviewBundle {
-  readonly schemaVersion: "prompt-governance-blind-review-v1";
+  readonly schemaVersion: "prompt-governance-blind-review-v2";
   readonly blindId: string;
   readonly caseId: PilotCaseId;
   readonly taskPrompt: string;
@@ -245,4 +271,110 @@ export interface BlindReviewBundle {
   readonly diff: string;
   readonly verifier: Pick<VerifierResult, "passed" | "exitCode" | "changedPaths" | "unsafePaths" | "expectedNoWrite" | "headMoved">;
   readonly driftRubric: Readonly<Record<DriftDimension, string>>;
+}
+
+/** Content-free calibration evidence safe to persist under the public root. */
+export interface PersistedCalibrationEvidence {
+  readonly schemaVersion: "prompt-governance-calibration-v5";
+  readonly scope: "root-instruction-pilot";
+  readonly passed: boolean;
+  readonly codexVersion: string;
+  readonly overlays: readonly Readonly<Pick<OverlayRecord, "condition" | "sourceRevision" | "sha256" | "byteLength" | "overlayId" | "materializedPath">>[];
+  readonly observedJsonlSchema: Pick<ObservedJsonlSchema, "schemaVersion" | "lineCount" | "validJsonLines" | "invalidJsonLines" | "schemaFingerprint">;
+  readonly selectorCommitment: readonly string[];
+  readonly rawSchemaOnly: true;
+  readonly noWritePassed: boolean;
+  readonly acknowledgementPassed: boolean;
+  readonly authorityViolationCount: number;
+  readonly failureCategory: string;
+  readonly measurementScope: Omit<MeasurementScope, "codexBinary"> & { readonly codexBinary: string };
+  readonly measurementScopeFingerprint: string;
+  readonly finalAnswerBytes: number;
+  readonly finalAnswerStoredBytes: number;
+  readonly finalAnswerTruncated: boolean;
+  readonly exitCode: number;
+  readonly outputTruncated: boolean;
+  readonly timedOut: boolean;
+  readonly drainTimedOut: boolean;
+  readonly fixtureBaselineTreeHash: string;
+  readonly baselineHead: string;
+  readonly schemaFingerprint: string;
+}
+
+/** Content-free capture evidence safe to persist under the public root. */
+export interface PersistedCaptureEvidence {
+  readonly schemaVersion: "prompt-governance-capture-evidence-v1";
+  readonly run: Readonly<{
+    readonly runId: string;
+    readonly caseId: PilotCaseId;
+    readonly condition: Condition;
+    readonly repetition: number;
+    readonly fixtureBaselineTreeHash: string;
+    readonly oracleVerifierHash: string;
+  }>;
+  readonly runId: string;
+  readonly caseId: PilotCaseId;
+  readonly condition: Condition;
+  readonly repetition: number;
+  readonly codexVersion: string;
+  readonly model: "gpt-5.6-sol";
+  readonly reasoningEffort: "high";
+  readonly fixtureBaselineTreeHash: string;
+  readonly oracleVerifierHash: string;
+  readonly measurementScopeFingerprint: string;
+  readonly verifierPassed: boolean;
+  readonly verifierExitCode: number;
+  readonly expectedNoWrite: boolean;
+  readonly headMoved: boolean;
+  readonly changedPathCount: number;
+  readonly unsafePathCount: number;
+  readonly observedJsonlSchemaFingerprint: string;
+  readonly observedJsonlLineCount: number;
+  readonly secondaryMetrics: SecondaryMetrics;
+  readonly observedMetricPathCount: number;
+  readonly outputTruncated: boolean;
+  readonly timedOut: boolean;
+  readonly drainTimedOut: boolean;
+  readonly finalAnswerTruncated: boolean;
+  readonly diffTruncated: boolean;
+  readonly stdoutBytes: number;
+  readonly stderrBytes: number;
+  readonly stdoutStoredBytes: number;
+  readonly stderrStoredBytes: number;
+  readonly finalAnswerBytes: number;
+  readonly finalAnswerStoredBytes: number;
+  readonly diffBytes: number;
+  readonly diffStoredBytes: number;
+  readonly authorityViolationCount: number;
+  readonly infrastructureFailure: boolean;
+  readonly verificationSkipped: boolean;
+  readonly snapshotStable: boolean;
+}
+
+export interface PersistedPilotPlan {
+  readonly schemaVersion: "prompt-governance-pilot-plan-v3";
+  readonly protocol: typeof import("./protocol").evaluationProtocol;
+  readonly execute: boolean;
+  readonly repetitions: number;
+  readonly expectedRunCount: number;
+  readonly confirmedRunCount: number | null;
+  readonly codexVersion: string;
+  readonly calibrationRequired: true;
+  readonly calibrationHash: string;
+  readonly measurementScopeFingerprint: string;
+  readonly metricProfileHash: string;
+  readonly overlayHashes: Readonly<Record<Condition, string>>;
+  readonly privateScheduleHash: string;
+  readonly cacheLocator: import("./cache").CacheLocator | null;
+  readonly schedule: readonly Pick<ScheduleEntry, "sequence" | "runId" | "caseId" | "repetition">[];
+  readonly fixtureBaselineTreeHashes: Readonly<Record<PilotCaseId, string>>;
+  readonly note: string;
+}
+
+export interface ScheduleEntry {
+  readonly sequence: number;
+  readonly runId: string;
+  readonly caseId: PilotCaseId;
+  readonly repetition: number;
+  readonly condition?: Condition;
 }

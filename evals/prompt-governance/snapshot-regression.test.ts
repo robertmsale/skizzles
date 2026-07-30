@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeRun } from "./capture";
 import { materializeInstructionOverlays } from "./overlays";
+import { createPrivateCache, privateCachePath } from "./cache";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -12,6 +13,12 @@ async function tempRoot(prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   roots.push(root);
   return root;
+}
+
+async function tempCache() {
+  const created = await createPrivateCache();
+  roots.push(privateCachePath(created.locator.id));
+  return created.handle;
 }
 
 test("quiet detached writes cannot alter the quarantined verification snapshot", async () => {
@@ -30,7 +37,7 @@ printf '%s\\n' 'quiet snapshot complete' > "$out"
   const overlays = await materializeInstructionOverlays(join(import.meta.dir, "../.."), join(root, "frozen"));
   let pidPath: string | undefined;
   try {
-    const capture = await executeRun({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, caseId: "bounded-fix", condition: "baseline", repetition: 1, overlays, codexBinary: fake, deadlineMs: 1_000, killGraceMs: 25 });
+    const capture = await executeRun({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, cache: await tempCache(), caseId: "bounded-fix", condition: "baseline", repetition: 1, overlays, codexBinary: fake, deadlineMs: 1_000, killGraceMs: 25 });
     pidPath = join(capture.run.fixtureRoot, "../late.pid");
     await Bun.sleep(600);
     expect(capture.verifier.passed).toBe(true); expect(capture.verifier.changedPaths).not.toContain("oracle-verify.mjs");

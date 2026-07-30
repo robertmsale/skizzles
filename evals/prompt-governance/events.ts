@@ -1,5 +1,6 @@
 import { sha256 } from "./fs";
-import type { MetricProfile, ObservedJsonlSchema, ObservedMetricPaths, SecondaryMetrics } from "./types";
+import { metricProfileSelector } from "./metric-profile";
+import type { MetricProfile, MetricSelector, ObservedJsonlSchema, ObservedMetricPaths, SecondaryMetrics } from "./types";
 
 export function inspectJsonlSchema(rawEvents: string): ObservedJsonlSchema {
   const lines = rawEvents.split(/\r?\n/).filter((line) => line.length > 0);
@@ -7,6 +8,7 @@ export function inspectJsonlSchema(rawEvents: string): ObservedJsonlSchema {
   const topLevelKeys = new Set<string>();
   const payloadKeys = new Set<string>();
   const observedPaths = new Set<string>();
+  const eventPathPairs = new Set<string>();
   let validJsonLines = 0;
   let invalidJsonLines = 0;
   for (const line of lines) {
@@ -20,7 +22,10 @@ export function inspectJsonlSchema(rawEvents: string): ObservedJsonlSchema {
       Object.keys(parsed).forEach((key) => topLevelKeys.add(key));
       if (typeof parsed.type === "string") eventTypes.add(parsed.type);
       if (isRecord(parsed.payload)) Object.keys(parsed.payload).forEach((key) => payloadKeys.add(key));
-      collectPaths(parsed, "", observedPaths);
+      const paths = new Set<string>();
+      collectPaths(parsed, "", paths);
+      paths.forEach((path) => observedPaths.add(path));
+      if (typeof parsed.type === "string") paths.forEach((path) => eventPathPairs.add(`${parsed.type}\u0000${path}`));
     } catch {
       invalidJsonLines += 1;
     }
@@ -34,7 +39,8 @@ export function inspectJsonlSchema(rawEvents: string): ObservedJsonlSchema {
     topLevelKeys: [...topLevelKeys].sort(),
     payloadKeys: [...payloadKeys].sort(),
     observedPaths: [...observedPaths].sort(),
-    schemaFingerprint: sha256(JSON.stringify({ eventTypes: [...eventTypes].sort(), topLevelKeys: [...topLevelKeys].sort(), payloadKeys: [...payloadKeys].sort(), observedPaths: [...observedPaths].sort() })),
+    eventPathPairs: [...eventPathPairs].sort(),
+    schemaFingerprint: sha256(JSON.stringify({ eventTypes: [...eventTypes].sort(), topLevelKeys: [...topLevelKeys].sort(), payloadKeys: [...payloadKeys].sort(), observedPaths: [...observedPaths].sort(), eventPathPairs: [...eventPathPairs].sort() })),
   };
 }
 
@@ -43,13 +49,13 @@ export function emptyObservedMetricPaths(): ObservedMetricPaths {
 }
 
 export function metricPaths(profile: MetricProfile): ObservedMetricPaths {
-  const selectors = profile.selectors;
+  const selector = (name: "tokens" | "rework" | "toolLoops" | "unnecessaryClarification") => metricProfileSelector(profile, name);
   return {
-    tokens: selectors.tokens ? [selectors.tokens.path] : [],
-    subagents: selectors.subagents ? [selectors.subagents.path] : [],
-    rework: selectors.rework ? [selectors.rework.path] : [],
-    toolLoops: selectors.toolLoops ? [selectors.toolLoops.path] : [],
-    unnecessaryClarification: selectors.unnecessaryClarification ? [selectors.unnecessaryClarification.path] : [],
+    tokens: selector("tokens") ? [selector("tokens")!.path] : [],
+    subagents: [],
+    rework: selector("rework") ? [selector("rework")!.path] : [],
+    toolLoops: selector("toolLoops") ? [selector("toolLoops")!.path] : [],
+    unnecessaryClarification: selector("unnecessaryClarification") ? [selector("unnecessaryClarification")!.path] : [],
   };
 }
 
@@ -64,11 +70,11 @@ export function parseObservedMetrics(rawEvents: string, profile: MetricProfile, 
     }
   });
   return {
-    tokens: metricValue(records, profile.selectors.tokens),
-    subagents: metricValue(records, profile.selectors.subagents),
-    rework: metricValue(records, profile.selectors.rework),
-    toolLoops: metricValue(records, profile.selectors.toolLoops),
-    unnecessaryClarification: metricValue(records, profile.selectors.unnecessaryClarification),
+    tokens: metricValue(records, metricProfileSelector(profile, "tokens")),
+    subagents: "unavailable",
+    rework: metricValue(records, metricProfileSelector(profile, "rework")),
+    toolLoops: metricValue(records, metricProfileSelector(profile, "toolLoops")),
+    unnecessaryClarification: metricValue(records, metricProfileSelector(profile, "unnecessaryClarification")),
   };
 }
 
@@ -76,7 +82,7 @@ export function unavailableMetrics(): SecondaryMetrics {
   return { tokens: "unavailable", subagents: "unavailable", rework: "unavailable", toolLoops: "unavailable", unnecessaryClarification: "unavailable" };
 }
 
-function metricValue(records: readonly Record<string, unknown>[], selector: MetricProfile["selectors"][keyof MetricProfile["selectors"]]): number | "unavailable" {
+function metricValue(records: readonly Record<string, unknown>[], selector: MetricSelector | null): number | "unavailable" {
   if (!selector) return "unavailable";
   const matching = records.filter((record) => selector.eventTypes.includes(typeof record.type === "string" ? record.type : ""));
   if (matching.length === 0) return "unavailable";
