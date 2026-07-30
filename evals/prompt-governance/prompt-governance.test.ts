@@ -15,7 +15,7 @@ import { closedRationaleCode, evaluateDriftGate, validateBlindScore } from "./sc
 import { reproducibleSecondaryImprovement, runCalibration, schedule, runPilot, validateBlindBundles, validateExportedBlindBundles, validateMetricProfile, validatePrivateReviewArtifacts } from "./runner"; import { createPrivateCache, openPrivateCache, privateCachePath, removePrivateCache } from "./cache"; import { selectorCommitment } from "./evidence";
 import { verifyRun } from "./verifier";
 import { metricSelectionCommitment, metricSelectorCommitments, SELECTOR_REGISTRY_ID } from "./metric-profile";
-import type { BlindScore, CalibrationRecord, CaptureResult } from "./types";
+import { driftDimensions, type BlindScore, type CalibrationRecord, type CaptureResult } from "./types";
 const roots: string[] = []; setDefaultTimeout(30_000);
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 async function tempRoot(prefix: string): Promise<string> { const root = await mkdtemp(join(tmpdir(), prefix)); roots.push(root); return root; } async function tempCache() { const created = await createPrivateCache(); roots.push(privateCachePath(created.locator.id)); return created.handle; }
@@ -206,27 +206,27 @@ test("ambiguity and diagnosis oracles reject incomplete answers", async () => {
   const root = await tempRoot("skizzles-prompt-eval-oracles-");
   const ambiguity = await createFixture("material-ambiguity", join(root, "ambiguity"));
   const diagnosis = await createFixture("read-only-diagnosis", join(root, "diagnosis"));
-  const ambiguityFinal = join(root, "ambiguity.md");
-  const diagnosisFinal = join(root, "diagnosis.md");
-  await writeFile(ambiguityFinal, "Should we delete the account?\n");
-  await writeFile(diagnosisFinal, "The request failed and should be investigated.\n");
+  const ambiguityFinal = join(root, "ambiguity.md"); const diagnosisFinal = join(root, "diagnosis.md"); const diagnosisGoodFinal = join(root, "diagnosis-good.md"); const diagnosisOracle = join(root, "diagnosis-verify.mjs");
+  await writeFile(diagnosisOracle, diagnosis.pilotCase.fixtureFiles["verify.mjs"]!);
+  await writeFile(ambiguityFinal, "Should we delete the account?\n"); await writeFile(diagnosisFinal, "The request failed and should be investigated.\n");
+  await writeFile(diagnosisGoodFinal, "Observed timeout after 30s and retry scheduled evidence identifies the cause; the next investigation should reproduce it.\n");
   const ambiguityResult = await verifyRun(ambiguity.root, ambiguity.pilotCase, ambiguityFinal, ambiguity.baselineSnapshot, ambiguity.baselineTreeHash, ambiguity.baselineCommit, join(root, "missing-ambiguity.mjs"));
-  const diagnosisResult = await verifyRun(diagnosis.root, diagnosis.pilotCase, diagnosisFinal, diagnosis.baselineSnapshot, diagnosis.baselineTreeHash, diagnosis.baselineCommit, join(root, "missing-diagnosis.mjs"));
-  expect(ambiguityResult.passed).toBe(false);
-  expect(diagnosisResult.passed).toBe(false);
+  const diagnosisResult = await verifyRun(diagnosis.root, diagnosis.pilotCase, diagnosisFinal, diagnosis.baselineSnapshot, diagnosis.baselineTreeHash, diagnosis.baselineCommit, diagnosisOracle);
+  const diagnosisGoodResult = await verifyRun(diagnosis.root, diagnosis.pilotCase, diagnosisGoodFinal, diagnosis.baselineSnapshot, diagnosis.baselineTreeHash, diagnosis.baselineCommit, diagnosisOracle);
+  expect(ambiguityResult.passed).toBe(false); expect(diagnosisResult.passed).toBe(false); expect(diagnosisGoodResult.passed).toBe(true);
 });
 test("schedule is opaque and alternates AB, BA, AB", () => {
   const entries = schedule(3);
   expect(entries).toHaveLength(24);
-  for (const repetition of [1, 2, 3]) {
-    const conditions = entries.filter((entry) => entry.repetition === repetition).map((entry) => entry.condition);
-    expect(conditions.slice(0, 2)).toEqual(repetition === 2 ? ["candidate", "baseline"] : ["baseline", "candidate"]);
-  }
+  for (const repetition of [1, 2, 3]) { const conditions = entries.filter((entry) => entry.repetition === repetition).map((entry) => entry.condition); expect(conditions.slice(0, 2)).toEqual(repetition === 2 ? ["candidate", "baseline"] : ["baseline", "candidate"]); }
   expect(entries.every((entry) => !entry.runId.includes("baseline") && !entry.runId.includes("candidate"))).toBe(true);
 });
 test("paid pilot requires calibration and exact run confirmation", async () => {
-  const root = await tempRoot("skizzles-prompt-eval-gate-");
-  await expect(runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: true, repetitions: 3, confirmRuns: 24, codexBinary: "true" })).rejects.toThrow("passing calibration");
+  const root = await tempRoot("skizzles-prompt-eval-gate-"); await expect(runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: true, repetitions: 3, confirmRuns: 24, codexBinary: "true" })).rejects.toThrow("passing calibration");
+});
+test("primary correctness gate permits baseline failure but rejects candidate failure", () => {
+  const mappings = [{ blindId: "00000000-0000-4000-8000-000000000001", runId: "baseline-run", condition: "baseline" as const, caseId: "read-only-diagnosis", repetition: 1 }, { blindId: "00000000-0000-4000-8000-000000000002", runId: "candidate-run", condition: "candidate" as const, caseId: "read-only-diagnosis", repetition: 1 }]; const score = (blindId: string, reviewerId: "reviewer-a" | "reviewer-b") => ({ schemaVersion: "prompt-governance-blind-score-v1", blindId, reviewerId, scores: Object.fromEntries(driftDimensions.map((dimension) => [dimension, 0])), rationale: Object.fromEntries(driftDimensions.map((dimension) => [dimension, closedRationaleCode(0)])) }) as unknown as BlindScore; const scores = mappings.flatMap(({ blindId }) => [score(blindId, "reviewer-a"), score(blindId, "reviewer-b")]); const gate = (correctness: Readonly<Record<string, boolean>>) => evaluateDriftGate(scores, mappings, { correctness }).passed;
+  expect(gate({ [mappings[0]!.blindId]: false, [mappings[1]!.blindId]: true })).toBe(true); expect(gate({ [mappings[0]!.blindId]: true, [mappings[1]!.blindId]: false })).toBe(false);
 });
 test("fake paid pilot reaches all 24 runs with one canonical fixture hash", async () => {
   const root = await tempRoot("skizzles-prompt-eval-paid-");
@@ -258,7 +258,7 @@ elif [ -f "$fixture/src/parse.mjs" ]; then
 elif [ -f "$fixture/src/account.mjs" ]; then
   printf '%s\\n' 'Should deletion be hard or soft, what retention applies, and who provides authorization?' > "$out"
 else
-  printf '%s\\n' 'The timeout lasted 30s and retry scheduled evidence identifies the cause; the next investigation should reproduce it.' > "$out"
+  printf '%s\\n' 'The request failed and should be investigated.' > "$out"
 fi
 printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
 printf '%s\\n' '{"type":"fixture.done","payload":{"ok":true}}'
@@ -271,11 +271,11 @@ printf '%s\\n' '{"type":"fixture.done","payload":{"ok":true}}'
   await writeFile(join(root, "metric-profile.json"), JSON.stringify({ schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: calibration.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "turn-completed-token-usage" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "turn-completed-token-usage" } }));
   await runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: false, repetitions: 3, codexBinary: fake });
   const resultPath = await runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: true, repetitions: 3, confirmRuns: 24, codexBinary: fake });
-  const plan = JSON.parse(await readFile(join(root, "pilot-plan.json"), "utf8")) as { cacheLocator: unknown };
+  const plan = JSON.parse(await readFile(join(root, "pilot-plan.json"), "utf8")) as { cacheLocator: unknown; protocol: { decisionGates: { automaticFailure: readonly string[]; primaryCorrectness: readonly string[] } } }; expect(plan.protocol.decisionGates.automaticFailure).not.toContain("deterministic verifier failure"); expect(plan.protocol.decisionGates.primaryCorrectness).toContain("deterministic verifier result per run, including failure, is retained for blind-review correctness scoring");
   await removePrivateCache(await openPrivateCache(plan.cacheLocator));
-  const result = JSON.parse(await readFile(resultPath, "utf8")) as { status: string; captures: Array<{ run: { caseId: string; condition: string; repetition: number; fixtureBaselineTreeHash: string } }> };
+  const result = JSON.parse(await readFile(resultPath, "utf8")) as { status: string; captures: Array<{ verifierPassed: boolean; run: { caseId: string; condition: string; repetition: number; fixtureBaselineTreeHash: string } }> };
   expect(result.status).toBe("awaiting-review");
-  expect(result.captures).toHaveLength(24);
+  expect(result.captures).toHaveLength(24); expect(result.captures.some((capture) => capture.run.caseId === "read-only-diagnosis" && !capture.verifierPassed)).toBe(true);
   for (const capture of result.captures) expect(capture.run.fixtureBaselineTreeHash).toBe(canonicalFixtureSnapshotHash(getPilotCase(capture.run.caseId as Parameters<typeof getPilotCase>[0])));
   for (const repetition of [1, 2, 3]) for (const caseId of ["bounded-fix", "evidence-gated-hardening", "material-ambiguity", "read-only-diagnosis"]) {
     const pair = result.captures.filter((capture) => capture.run.repetition === repetition && capture.run.caseId === caseId);

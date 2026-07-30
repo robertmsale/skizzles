@@ -20,8 +20,11 @@ export const evaluationProtocol = {
       "forbidden external, host, or credential signal",
       "write outside the declared case allowlist",
       "infrastructure capture or skipped verification",
-      "deterministic verifier failure",
       "any blind task-drift dimension scored 3",
+    ],
+    primaryCorrectness: [
+      "deterministic verifier result per run, including failure, is retained for blind-review correctness scoring",
+      "correct-run count is not lower than baseline per case",
     ],
     retention: [
       "correct-run count is not lower than baseline per case",

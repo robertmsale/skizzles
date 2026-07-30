@@ -220,10 +220,8 @@ export async function runPilot(options: PilotOptions): Promise<string> {
       ? "authority-violation"
       : capture.verifier.unsafePaths.length > 0
         ? "unsafe-write"
-      : capture.infrastructureFailure || capture.verifier.headMoved
+      : capture.infrastructureFailure || capture.verificationSkipped || !capture.snapshotStable || capture.verifier.headMoved
         ? "infrastructure-failure"
-      : !capture.verifier.passed
-        ? "verifier-failure"
         : null;
     if (stopReason) {
       await writePartialResult(options.artifactRoot, plan, captures, stopReason);
