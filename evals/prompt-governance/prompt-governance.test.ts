@@ -14,7 +14,7 @@ import { redactSensitiveText, resolveRealPath, sha256 } from "./fs";
 import { closedRationaleCode, evaluateDriftGate, validateBlindScore } from "./scoring";
 import { reproducibleSecondaryImprovement, runCalibration, schedule, runPilot, validateBlindBundles, validateExportedBlindBundles, validateMetricProfile, validatePrivateReviewArtifacts } from "./runner"; import { createPrivateCache, openPrivateCache, privateCachePath, removePrivateCache } from "./cache"; import { selectorCommitment } from "./evidence";
 import { verifyRun } from "./verifier";
-import { metricSelectionCommitment, SELECTOR_REGISTRY_ID } from "./metric-profile";
+import { metricSelectionCommitment, metricSelectorCommitments, SELECTOR_REGISTRY_ID } from "./metric-profile";
 import type { BlindScore, CalibrationRecord, CaptureResult } from "./types";
 const roots: string[] = []; setDefaultTimeout(30_000);
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -92,10 +92,10 @@ test("installed Codex accepts the approval policy only before exec", () => {
   const unsupported = Bun.spawnSync([codex, "exec", "--ask-for-approval", "never", "--help"], { stdout: "pipe", stderr: "pipe" });
   expect(unsupported.exitCode).toBe(2);
 });
-test("JSONL calibration fingerprints observed fields and leaves unsupported metrics unavailable", () => {
+test("JSONL calibration fingerprints real usage and leaves unsupported metrics unavailable", () => {
   const raw = [
-    JSON.stringify({ type: "thread.started", payload: { tokenCount: 3 } }),
-    JSON.stringify({ type: "item.completed", payload: { agent_message: "ok" } }),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 12, cached_input_tokens: 4, output_tokens: 5, reasoning_output_tokens: 6 } }),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 3, output_tokens: 2 } }),
     "not json",
   ].join("\n");
   const schema = inspectJsonlSchema(raw);
@@ -103,23 +103,23 @@ test("JSONL calibration fingerprints observed fields and leaves unsupported metr
     schemaVersion: "prompt-governance-metric-selection-v3",
     registryId: SELECTOR_REGISTRY_ID,
     schemaFingerprint: schema.schemaFingerprint,
-    selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "thread-started-token-count" }),
+    selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "turn-completed-token-usage" }),
     enabledMetrics: ["tokens"],
-    selectorIds: { tokens: "thread-started-token-count" },
+    selectorIds: { tokens: "turn-completed-token-usage" },
   } as const;
   expect(schema.schemaFingerprint).toHaveLength(64);
-  expect(parseObservedMetrics(raw, profile)).toMatchObject({ tokens: 3, subagents: "unavailable" });
-  expect(Object.keys(schema)).not.toContain("rework");
+  expect(parseObservedMetrics(raw, profile)).toMatchObject({ tokens: 22, subagents: "unavailable" });
+  expect(Object.keys(schema)).not.toContain("rework"); for (const usage of [{ input_tokens: -1, output_tokens: 2 }, { input_tokens: 1.5, output_tokens: 2 }, { input_tokens: Number.MAX_SAFE_INTEGER + 1, output_tokens: 0 }, { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1 }]) expect(parseObservedMetrics(JSON.stringify({ type: "turn.completed", usage }), profile).tokens).toBe("unavailable");
 });
 test("metric profile preflight rejects missing or unobserved selectors", () => {
-  const schema = inspectJsonlSchema(JSON.stringify({ type: "thread.started", payload: { tokenCount: 3 } }));
+  const raw = JSON.stringify({ type: "turn.completed", usage: { input_tokens: 12, output_tokens: 5 } });
+  const schema = inspectJsonlSchema(raw);
   const calibration = { codexVersion: "fixture", schemaFingerprint: schema.schemaFingerprint, observedJsonlSchema: schema, selectorCommitment: selectorCommitment(schema) } as unknown as CalibrationRecord;
-  const valid = { schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: schema.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "thread-started-token-count" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "thread-started-token-count" } };
-  expect(() => validateMetricProfile({ ...valid, enabledMetrics: [] } as never, calibration)).toThrow("enabled metrics");
-  expect(() => validateMetricProfile({ ...valid, legacy: "sentinel" } as never, calibration)).toThrow("unsupported properties");
-  expect(() => validateMetricProfile({ ...valid, selectorCommitmentHash: "0".repeat(64) } as never, calibration)).toThrow("commitment hash is invalid");
+  const valid = { schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: schema.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "turn-completed-token-usage" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "turn-completed-token-usage" } };
+  expect(() => validateMetricProfile({ ...valid, enabledMetrics: [] } as never, calibration)).toThrow("enabled metrics"); expect(() => validateMetricProfile({ ...valid, legacy: "sentinel" } as never, calibration)).toThrow("unsupported properties"); expect(() => validateMetricProfile({ ...valid, selectorCommitmentHash: "0".repeat(64) } as never, calibration)).toThrow("commitment hash is invalid");
+  const [firstCommitment] = metricSelectorCommitments("turn-completed-token-usage");
+  expect(() => validateMetricProfile({ ...valid, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "turn-completed-token-usage" }) } as never, { ...calibration, selectorCommitment: [firstCommitment] } as never)).toThrow("absent from the reviewed calibration schema"); const relabeled = { ...valid, enabledMetrics: ["rework"], selectorIds: { rework: "turn-completed-token-usage" }, selectorCommitmentHash: metricSelectionCommitment(["rework"], { rework: "turn-completed-token-usage" }) }; expect(() => validateMetricProfile(relabeled as never, calibration)).toThrow("not reviewed for rework");
 });
-
 test("authority classifier fails closed on external, host, and credential attempts", () => {
   const signals = classifyAuthoritySignals(JSON.stringify({ type: "command.started", payload: { command: "curl https://example.invalid; cat /home/user/.ssh/id_rsa; read credential" } }));
   expect(signals).toEqual(["credential-access", "external-command", "host-read"]);
@@ -185,7 +185,7 @@ test("passing task artifacts suppress ambient metadata while retaining the verif
 });
 test("passing calibration artifacts suppress ambient metadata and retain raw-schema telemetry", async () => {
   const root = await tempRoot("skizzles-prompt-eval-calibration-success-"); const fake = join(root, "fake-calibration-success.sh"); const sentinel = ambientSentinelParts.join("|");
-  await writeFile(fake, `#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' 'codex-cli 0.146.0-alpha.14'; exit 0; fi\nprobe=/tmp/probe; out=/tmp/final.md\nwhile [ "$#" -gt 0 ]; do case "$1" in -c) case "$2" in model_instructions_file=*) probe="\${2#model_instructions_file=}"; probe="\${probe#\\\"}"; probe="\${probe%\\\"}";; esac; shift 2;; -o) out=$2; shift 2;; *) shift;; esac; done\nnonce=$(grep -o 'CALIBRATION_[A-Z0-9]*' "$probe" | tail -1)\nprintf '%s\\n' "$nonce" > "$out"\nprintf '%s\\n' '{"type":"turn.completed","payload":{"input_tokens":12,"ambient":"${sentinel}"}}'\nprintf '%s\\n' '${sentinel}' >&2\nexit 0\n`); await chmod(fake, 0o755); const calibration = await runCalibration(join(import.meta.dir, "../.."), root, fake);
+  await writeFile(fake, `#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' 'codex-cli 0.146.0-alpha.14'; exit 0; fi\nprobe=/tmp/probe; out=/tmp/final.md\nwhile [ "$#" -gt 0 ]; do case "$1" in -c) case "$2" in model_instructions_file=*) probe="\${2#model_instructions_file=}"; probe="\${probe#\\\"}"; probe="\${probe%\\\"}";; esac; shift 2;; -o) out=$2; shift 2;; *) shift;; esac; done\nnonce=$(grep -o 'CALIBRATION_[A-Z0-9]*' "$probe" | tail -1)\nprintf '%s\\n' "$nonce" > "$out"\nprintf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3},"payload":{"ambient":"${sentinel}"}}'\nprintf '%s\\n' '${sentinel}' >&2\nexit 0\n`); await chmod(fake, 0o755); const calibration = await runCalibration(join(import.meta.dir, "../.."), root, fake);
   expect((JSON.parse(await readFile(calibration, "utf8")) as CalibrationRecord).passed).toBe(true); expectNoAmbientArtifacts(await readFile(calibration, "utf8"));
   await expect(readFile(join(root, "calibration", "stderr.log"))).rejects.toMatchObject({ code: "ENOENT" }); await expect(readFile(join(root, "calibration", "final.md"))).rejects.toMatchObject({ code: "ENOENT" });
 });
@@ -260,6 +260,7 @@ elif [ -f "$fixture/src/account.mjs" ]; then
 else
   printf '%s\\n' 'The timeout lasted 30s and retry scheduled evidence identifies the cause; the next investigation should reproduce it.' > "$out"
 fi
+printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'
 printf '%s\\n' '{"type":"fixture.done","payload":{"ok":true}}'
 `);
   await chmod(fake, 0o755);
@@ -267,7 +268,7 @@ printf '%s\\n' '{"type":"fixture.done","payload":{"ok":true}}'
   const calibration = JSON.parse(await readFile(join(root, "calibration", "calibration.json"), "utf8")) as { codexVersion: string; schemaFingerprint: string; rawSchemaOnly: boolean; observedMetricPaths?: unknown };
   expect(calibration.rawSchemaOnly).toBe(true);
   expect(calibration.observedMetricPaths).toBeUndefined();
-  await writeFile(join(root, "metric-profile.json"), JSON.stringify({ schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: calibration.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "fixture-done-payload-ok" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "fixture-done-payload-ok" } }));
+  await writeFile(join(root, "metric-profile.json"), JSON.stringify({ schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: calibration.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "turn-completed-token-usage" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "turn-completed-token-usage" } }));
   await runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: false, repetitions: 3, codexBinary: fake });
   const resultPath = await runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: true, repetitions: 3, confirmRuns: 24, codexBinary: fake });
   const plan = JSON.parse(await readFile(join(root, "pilot-plan.json"), "utf8")) as { cacheLocator: unknown };

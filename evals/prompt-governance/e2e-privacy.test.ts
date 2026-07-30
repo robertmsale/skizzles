@@ -46,6 +46,7 @@ function fakeCodex(sentinels: readonly string[], unsafe = false): string {
     `else printf '%s\\n' 'The timeout lasted 30s and retry scheduled evidence identifies the cause; the next investigation should reproduce it.' > "$out"; fi`,
     unsafeBlock,
     `if ! printf '%s' "$prompt" | grep -qi 'calibration phrase'; then printf '%s\\n' '${final}' >> "$out"; fi`,
+    `printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}'`,
     `printf '%s\\n' '{"type":"fixture.done","payload":{"ok":true}}'`,
     `printf '%s\\n' '{"type":"e2e.${stdout}","payload":{"${events}":true}}'`,
     `printf '%s\\n' '${stderr}' >&2`,
@@ -61,7 +62,7 @@ test("fake campaign keeps mutable sentinels private through review", async () =>
   try {
     await runCalibration(join(import.meta.dir, "../.."), root, fake);
     const calibration = JSON.parse(await readFile(join(root, "calibration", "calibration.json"), "utf8")) as { codexVersion: string; schemaFingerprint: string };
-    const profile = JSON.stringify({ schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: calibration.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "fixture-done-payload-ok" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "fixture-done-payload-ok" } });
+    const profile = JSON.stringify({ schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: calibration.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "turn-completed-token-usage" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "turn-completed-token-usage" } });
     await writeFile(join(root, "metric-profile.json"), profile);
     await runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: false, repetitions: 3, codexBinary: fake });
     await runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: true, repetitions: 3, confirmRuns: 24, codexBinary: fake });
@@ -124,7 +125,7 @@ test("review failure removes the committed private cache", async () => {
   try {
     await runCalibration(join(import.meta.dir, "../.."), root, fake);
     const calibration = JSON.parse(await readFile(join(root, "calibration", "calibration.json"), "utf8")) as { codexVersion: string; schemaFingerprint: string };
-    await writeFile(join(root, "metric-profile.json"), JSON.stringify({ schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: calibration.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "fixture-done-payload-ok" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "fixture-done-payload-ok" } }));
+    await writeFile(join(root, "metric-profile.json"), JSON.stringify({ schemaVersion: "prompt-governance-metric-selection-v3", registryId: SELECTOR_REGISTRY_ID, schemaFingerprint: calibration.schemaFingerprint, selectorCommitmentHash: metricSelectionCommitment(["tokens"], { tokens: "turn-completed-token-usage" }), enabledMetrics: ["tokens"], selectorIds: { tokens: "turn-completed-token-usage" } }));
     await runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: false, repetitions: 3, codexBinary: fake });
     await runPilot({ repositoryRoot: join(import.meta.dir, "../.."), artifactRoot: root, execute: true, repetitions: 3, confirmRuns: 24, codexBinary: fake });
     const plan = JSON.parse(await readFile(join(root, "pilot-plan.json"), "utf8")) as { cacheLocator: unknown };

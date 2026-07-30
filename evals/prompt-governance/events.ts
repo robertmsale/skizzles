@@ -51,11 +51,11 @@ export function emptyObservedMetricPaths(): ObservedMetricPaths {
 export function metricPaths(profile: MetricProfile): ObservedMetricPaths {
   const selector = (name: "tokens" | "rework" | "toolLoops" | "unnecessaryClarification") => metricProfileSelector(profile, name);
   return {
-    tokens: selector("tokens") ? [selector("tokens")!.path] : [],
+    tokens: selector("tokens")?.paths ?? [],
     subagents: [],
-    rework: selector("rework") ? [selector("rework")!.path] : [],
-    toolLoops: selector("toolLoops") ? [selector("toolLoops")!.path] : [],
-    unnecessaryClarification: selector("unnecessaryClarification") ? [selector("unnecessaryClarification")!.path] : [],
+    rework: selector("rework")?.paths ?? [],
+    toolLoops: selector("toolLoops")?.paths ?? [],
+    unnecessaryClarification: selector("unnecessaryClarification")?.paths ?? [],
   };
 }
 
@@ -85,9 +85,21 @@ export function unavailableMetrics(): SecondaryMetrics {
 function metricValue(records: readonly Record<string, unknown>[], selector: MetricSelector | null): number | "unavailable" {
   if (!selector) return "unavailable";
   const matching = records.filter((record) => selector.eventTypes.includes(typeof record.type === "string" ? record.type : ""));
-  if (matching.length === 0) return "unavailable";
-  if (selector.aggregation === "count") return matching.filter((record) => pathValue(record, selector.path) !== undefined).length;
-  const values = matching.map((record) => pathValue(record, selector.path)).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (matching.length === 0 || selector.paths.length === 0) return "unavailable";
+  if (selector.aggregation === "count") return matching.filter((record) => pathValue(record, selector.paths[0]!) !== undefined).length;
+  if (selector.aggregation === "sum-components") {
+    const values = matching.map((record) => selector.paths.map((path) => pathValue(record, path)));
+    let total = 0;
+    for (const components of values) {
+      for (const value of components) {
+        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return "unavailable";
+        if (total > Number.MAX_SAFE_INTEGER - value) return "unavailable";
+        total += value;
+      }
+    }
+    return total;
+  }
+  const values = matching.map((record) => pathValue(record, selector.paths[0]!)).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   if (values.length === 0) return "unavailable";
   if (selector.aggregation === "cumulative-total") return Math.max(...values);
   return values.reduce((total, value) => total + value, 0);

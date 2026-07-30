@@ -156,8 +156,8 @@ export type MetricName = keyof SecondaryMetrics;
 
 export interface MetricSelector {
   readonly eventTypes: readonly string[];
-  readonly path: string;
-  readonly aggregation: "delta" | "cumulative-total" | "count";
+  readonly paths: readonly string[];
+  readonly aggregation: "delta" | "cumulative-total" | "count" | "sum-components";
 }
 
 export type MetricSelectorId = string;

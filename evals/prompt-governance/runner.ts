@@ -16,7 +16,7 @@ import { evaluationProtocol } from "./protocol";
 import { evaluateDriftGate, validateBlindScore, type BlindMapping } from "./scoring";
 import { assertCacheOutside, createPrivateCache, ensurePrivateDirectory, openPrivateCache, privateArtifactPath, privateCachePath, removePrivateCache, type VerifiedPrivateCache } from "./cache";
 import { projectCalibrationEvidence, projectCaptureEvidence, selectorCommitment } from "./evidence";
-import { isKnownSelector, metricSelectionCommitment, metricSelectorCommitment, SELECTOR_REGISTRY_ID, metricProfileSelector } from "./metric-profile";
+import { isKnownSelector, metricSelectionCommitment, metricSelectorCommitments, SELECTOR_REGISTRY_ID, metricProfileSelector, selectorMetric } from "./metric-profile";
 import { isRecord } from "./records";
 import { assertAbsent, ensureFreshDirectory, writePartialResult } from "./runner-files";
 import type { BlindScore, CalibrationRecord, CaptureResult, Condition, MeasurementScope, MetricName, MetricProfile, PersistedCalibrationEvidence, PilotCaseId } from "./types";
@@ -416,10 +416,11 @@ export function validateMetricProfile(profile: MetricProfile, calibration: Calib
   for (const name of profile.enabledMetrics as Exclude<MetricName, "subagents">[]) {
     const selectorId = profile.selectorIds[name];
     if (typeof selectorId !== "string" || !isKnownSelector(selectorId)) throw new Error(`metric profile selector id is not in the reviewed registry for ${name}`);
+    if (selectorMetric(selectorId) !== name) throw new Error(`metric profile selector is not reviewed for ${name}`);
     const selector = metricProfileSelector(profile, name);
-    const expectedCommitment = metricSelectorCommitment(selectorId);
-    if (!selector || !expectedCommitment) throw new Error(`metric profile selector commitment is invalid for ${name}`);
-    if (expectedCommitment && !commitment.includes(expectedCommitment)) throw new Error(`metric profile selector for ${name} is absent from the reviewed calibration schema`);
+    const expectedCommitments = metricSelectorCommitments(selectorId);
+    if (!selector || expectedCommitments.length === 0) throw new Error(`metric profile selector commitment is invalid for ${name}`);
+    if (expectedCommitments.some((expectedCommitment) => !commitment.includes(expectedCommitment))) throw new Error(`metric profile selector for ${name} is absent from the reviewed calibration schema`);
   }
   if (profile.selectorCommitmentHash !== metricSelectionCommitment(profile.enabledMetrics, profile.selectorIds)) throw new Error("metric profile selector commitment hash is invalid");
 }
