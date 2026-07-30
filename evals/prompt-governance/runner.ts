@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getPilotCase } from "./cases";
 import { canonicalFixtureSnapshotHash, createFixture } from "./fixture";
 import { canonicalBlindRubric, createBlindReviewBundle, renderBlindReviewContent } from "./blind";
 import { buildCodexCommand } from "./command";
-import { buildMeasurementScope, executeRun, failureCategory, getCodexVersion, resolveCodexPath, assertExactCodexVersion, DEFAULT_DEADLINE_MS, DEFAULT_KILL_GRACE_MS, DEFAULT_STDOUT_CAP_BYTES, safeStreamStatus, sanitizeTelemetryEvents } from "./capture";
+import { buildMeasurementScope, executeRun, failureCategory, getCodexVersion, resolveCodexPath, assertExactCodexVersion, DEFAULT_DEADLINE_MS, DEFAULT_KILL_GRACE_MS, DEFAULT_STDOUT_CAP_BYTES, sanitizeTelemetryEvents } from "./capture";
 import type { SpawnResult } from "./capture";
 import { changedFromBaseline, git } from "./git";
 import { ensureDirectory, readCappedText, readText, redactSensitiveText, sha256, writeAtomicText, writeText } from "./fs";
@@ -46,6 +46,8 @@ export async function runCalibration(repositoryRoot: string, artifactRoot: strin
   const calibrationRoot = join(artifactRoot, "calibration");
   await ensureFreshDirectory(calibrationRoot);
   const { handle: cache } = await createPrivateCache();
+  const calibrationPath = join(calibrationRoot, "calibration.json");
+  let projected: PersistedCalibrationEvidence | undefined;
   try {
   await assertCacheOutside(cache, artifactRoot);
   const fixtureRoot = privateArtifactPath(cache, "fixture");
@@ -77,8 +79,6 @@ export async function runCalibration(repositoryRoot: string, artifactRoot: strin
   const failureStatus = failureCategory({ ...execution, finalAnswerTruncated: finalCapture.truncated, authorityViolations, additionalCategories });
   const finalAnswer = categoryOnly ? failureStatus : redactSensitiveText(finalCapture.text);
   const persistedEvents = categoryOnly ? failureStatus : sanitizeTelemetryEvents(execution.stdout);
-  const persistedStderr = categoryOnly ? failureStatus : safeStreamStatus("stderr", execution.stderrBytes, execution.stderrStoredBytes, execution.outputTruncated);
-  await writeText(join(calibrationRoot, "final.md"), categoryOnly ? failureStatus : JSON.stringify({ status: "calibration-capture-suppressed", bytes: finalCapture.bytes }) + "\n");
   const observedJsonlSchema = categoryOnly ? inspectJsonlSchema("") : inspectJsonlSchema(persistedEvents);
   const measurementScope = buildMeasurementScope(command, codexVersion);
   const calibration: CalibrationRecord = {
@@ -111,12 +111,14 @@ export async function runCalibration(repositoryRoot: string, artifactRoot: strin
     artifactRoot: calibrationRoot,
     selectorCommitment: selectorCommitment(observedJsonlSchema),
   };
-    await writeText(join(calibrationRoot, "stderr.log"), persistedStderr);
-  await writeText(join(calibrationRoot, "calibration.json"), `${JSON.stringify(projectCalibrationEvidence(calibration, artifactRoot), null, 2)}\n`);
-  return join(calibrationRoot, "calibration.json");
+  projected = projectCalibrationEvidence(calibration, artifactRoot);
   } finally {
     await removePrivateCache(cache);
+    await assertPrivateCacheRemoved(cache);
   }
+  if (!projected) throw new Error("calibration projection was not prepared");
+  await writeAtomicText(calibrationPath, `${JSON.stringify(projected, null, 2)}\n`);
+  return calibrationPath;
 }
 export async function runPilot(options: PilotOptions): Promise<string> {
   await ensureDirectory(options.artifactRoot);
@@ -343,6 +345,14 @@ export function schedule(repetitions: number): ScheduleEntry[] {
 async function runSupervisedCommand(command: readonly string[], prompt: string, cwd: string, cache: VerifiedPrivateCache): Promise<SpawnResult> {
   const { spawnCodexForCalibration } = await import("./capture");
   return spawnCodexForCalibration(command, prompt, cwd, privateCachePath(cache.locator.id));
+}
+async function assertPrivateCacheRemoved(cache: VerifiedPrivateCache): Promise<void> {
+  try {
+    await lstat(privateCachePath(cache.locator.id));
+    throw new Error("private-cache-cleanup: calibration cache remained");
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
 }
 async function readOptionalCapped(path: string, cap: number): Promise<{ text: string; bytes: number; truncated: boolean }> {
   try {

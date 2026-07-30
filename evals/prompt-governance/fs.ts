@@ -5,18 +5,18 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { TreeEntry, TreeSnapshot } from "./types";
 
 export async function ensureDirectory(path: string): Promise<void> {
-  await mkdir(path, { recursive: true });
+  await mkdir(path, { recursive: true, mode: 0o700 });
 }
 
 export async function writeText(path: string, text: string): Promise<void> {
   await ensureDirectory(dirname(path));
-  await writeFile(path, text, "utf8");
+  await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
 }
 
 export async function writeAtomicText(path: string, text: string): Promise<void> {
   await ensureDirectory(dirname(path));
   const temporary = `${path}.${randomUUID()}.tmp`;
-  await writeFile(temporary, text, "utf8");
+  await writeFile(temporary, text, { encoding: "utf8", mode: 0o600 });
   await rename(temporary, path);
 }
 

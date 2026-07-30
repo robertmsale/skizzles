@@ -5,7 +5,7 @@ import { writeAtomicText } from "./fs";
 import type { CaptureResult } from "./types";
 
 export async function ensureFreshDirectory(path: string): Promise<void> {
-  await mkdir(path);
+  await mkdir(path, { mode: 0o700 });
 }
 
 export async function assertAbsent(path: string): Promise<void> {

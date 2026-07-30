@@ -173,8 +173,8 @@ test("nonzero Codex exit is infrastructure failure even with a final answer", as
 test("calibration failure artifacts retain only category status", async () => {
   const root = await tempRoot("skizzles-prompt-eval-calibration-failure-"); const fake = join(root, "fake-calibration.sh"); const sentinel = "/Users/alice/.codex/config.toml|https://provider.private/v1|corp-hook|private-mcp|PRIVATE_MODE=ambient-env-value|OPENAI_API_KEY=sk-live-secret";
   await writeFile(fake, `#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' 'codex-cli 0.146.0-alpha.14'; exit 0; fi\nprintf '%s\\n' '${sentinel}'\nprintf '%s\\n' '${sentinel}' >&2\nwhile [ "$#" -gt 0 ]; do if [ "$1" = "-o" ]; then printf '%s\\n' '${sentinel}' > "$2"; shift 2; else shift; fi; done\nexit 1\n`); await chmod(fake, 0o755);
-  const calibration = await runCalibration(join(import.meta.dir, "../.."), root, fake); const files = [join(root, "calibration", "stderr.log"), join(root, "calibration", "final.md"), calibration];
-  for (const path of files) expectNoAmbientArtifacts(await readFile(path, "utf8"));
+  const calibration = await runCalibration(join(import.meta.dir, "../.."), root, fake); expectNoAmbientArtifacts(await readFile(calibration, "utf8"));
+  await expect(readFile(join(root, "calibration", "stderr.log"))).rejects.toMatchObject({ code: "ENOENT" }); await expect(readFile(join(root, "calibration", "final.md"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 test("passing task artifacts suppress ambient metadata while retaining the verifier and telemetry", async () => {
   const root = await tempRoot("skizzles-prompt-eval-success-"); const fake = join(root, "fake-success.sh"); const sentinel = ambientSentinelParts.join("|");
@@ -185,8 +185,9 @@ test("passing task artifacts suppress ambient metadata while retaining the verif
 });
 test("passing calibration artifacts suppress ambient metadata and retain raw-schema telemetry", async () => {
   const root = await tempRoot("skizzles-prompt-eval-calibration-success-"); const fake = join(root, "fake-calibration-success.sh"); const sentinel = ambientSentinelParts.join("|");
-  await writeFile(fake, `#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' 'codex-cli 0.146.0-alpha.14'; exit 0; fi\nprobe=/tmp/probe; out=/tmp/final.md\nwhile [ "$#" -gt 0 ]; do case "$1" in -c) case "$2" in model_instructions_file=*) probe="\${2#model_instructions_file=}"; probe="\${probe#\\\"}"; probe="\${probe%\\\"}";; esac; shift 2;; -o) out=$2; shift 2;; *) shift;; esac; done\nnonce=$(grep -o 'CALIBRATION_[A-Z0-9]*' "$probe" | tail -1)\nprintf '%s\\n' "$nonce" > "$out"\nprintf '%s\\n' '{"type":"turn.completed","payload":{"input_tokens":12,"ambient":"${sentinel}"}}'\nprintf '%s\\n' '${sentinel}' >&2\nexit 0\n`); await chmod(fake, 0o755); const calibration = await runCalibration(join(import.meta.dir, "../.."), root, fake); const files = [join(root, "calibration", "stderr.log"), join(root, "calibration", "final.md"), calibration];
-  expect((JSON.parse(await readFile(calibration, "utf8")) as CalibrationRecord).passed).toBe(true); for (const path of files) expectNoAmbientArtifacts(await readFile(path, "utf8"));
+  await writeFile(fake, `#!/bin/sh\nif [ "$1" = "--version" ]; then printf '%s\\n' 'codex-cli 0.146.0-alpha.14'; exit 0; fi\nprobe=/tmp/probe; out=/tmp/final.md\nwhile [ "$#" -gt 0 ]; do case "$1" in -c) case "$2" in model_instructions_file=*) probe="\${2#model_instructions_file=}"; probe="\${probe#\\\"}"; probe="\${probe%\\\"}";; esac; shift 2;; -o) out=$2; shift 2;; *) shift;; esac; done\nnonce=$(grep -o 'CALIBRATION_[A-Z0-9]*' "$probe" | tail -1)\nprintf '%s\\n' "$nonce" > "$out"\nprintf '%s\\n' '{"type":"turn.completed","payload":{"input_tokens":12,"ambient":"${sentinel}"}}'\nprintf '%s\\n' '${sentinel}' >&2\nexit 0\n`); await chmod(fake, 0o755); const calibration = await runCalibration(join(import.meta.dir, "../.."), root, fake);
+  expect((JSON.parse(await readFile(calibration, "utf8")) as CalibrationRecord).passed).toBe(true); expectNoAmbientArtifacts(await readFile(calibration, "utf8"));
+  await expect(readFile(join(root, "calibration", "stderr.log"))).rejects.toMatchObject({ code: "ENOENT" }); await expect(readFile(join(root, "calibration", "final.md"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 test("capture only persists a redacted final answer", async () => {
   const root = await tempRoot("skizzles-prompt-eval-final-redaction-");
