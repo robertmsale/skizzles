@@ -186,6 +186,60 @@ describe("CLI process boundary", () => {
     expect(await waitForProcessExit(descendant)).toBe(true);
   });
 
+  test("SIGTERM aborts health promptly and keeps the closed health result successful", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-health-abort-cli-"));
+    temporary.push(root);
+    const docker = join(root, "docker");
+    await writeFile(docker, `#!${process.execPath}\nawait Bun.sleep(20_000);\n`);
+    await chmod(docker, 0o755);
+    const child = Bun.spawn([
+      process.execPath,
+      join(import.meta.dir, "..", "cli.ts"),
+      "--owner", "thread-health-abort-cli",
+      "--state-root", join(root, "state"),
+      "--runtime-root", join(root, "runtime"),
+      "health",
+    ], { env: { PATH: root, HOME: join(root, "home") }, stdout: "pipe", stderr: "pipe" });
+    await Bun.sleep(100);
+    child.kill("SIGTERM");
+    const code = await Promise.race([child.exited, Bun.sleep(1_000).then(() => -1)]);
+    if (code === -1) child.kill("SIGKILL");
+    const [stdout, stderr] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual({ ok: true, dockerAvailable: false, labs: 0 });
+  });
+
+  test("SIGINT aborts health promptly and preserves the interrupt exit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-health-int-cli-"));
+    temporary.push(root);
+    const docker = join(root, "docker");
+    await writeFile(docker, `#!${process.execPath}\nawait Bun.sleep(20_000);\n`);
+    await chmod(docker, 0o755);
+    const child = Bun.spawn([
+      process.execPath,
+      join(import.meta.dir, "..", "cli.ts"),
+      "--owner", "thread-health-int-cli",
+      "--state-root", join(root, "state"),
+      "--runtime-root", join(root, "runtime"),
+      "health",
+    ], { env: { PATH: root, HOME: join(root, "home") }, stdout: "pipe", stderr: "pipe" });
+    await Bun.sleep(100);
+    child.kill("SIGINT");
+    const code = await Promise.race([child.exited, Bun.sleep(1_000).then(() => -1)]);
+    if (code === -1) child.kill("SIGKILL");
+    const [stdout, stderr] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(code).toBe(130);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual({ ok: true, dockerAvailable: false, labs: 0 });
+  });
+
   test("timeout performs exact attached process-group cleanup and exits 124", async () => {
     const fixture = await attachedFixture();
     const child = spawnRun(fixture, {}, 1);

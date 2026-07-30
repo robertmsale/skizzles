@@ -62,13 +62,13 @@ export class ContainerLabWorkflow {
     this.roots = roots;
   }
 
-  async health(): Promise<{ ok: true; dockerAvailable: boolean; labs: number }> {
+  async health(signal?: AbortSignal): Promise<{ ok: true; dockerAvailable: boolean; labs: number }> {
     await this.reconcileOwner();
     const labs = await listLabs(this.roots, this.owner);
     const secretEnvironment = [...new Set(labs.flatMap((lab) => lab.secretEnvironment))];
     return {
       ok: true,
-      dockerAvailable: await dockerAvailable(this.docker, secretEnvironment, this.environment).catch(() => false),
+      dockerAvailable: await dockerAvailable(this.docker, secretEnvironment, this.environment, signal).catch(() => false),
       labs: labs.length,
     };
   }

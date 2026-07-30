@@ -20,11 +20,13 @@ export async function dockerAvailable(
   runner: DockerRunner = defaultDockerRunner,
   secretEnvironment: readonly string[] = [],
   environment: NodeJS.ProcessEnv = process.env,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   return (await runner.run(["info", "--format", "{{.ServerVersion}}"], {
     allowFailure: true,
     timeoutMs: 10_000,
     env: scrubSecretEnvironment(secretEnvironment, environment),
+    signal,
   })).code === 0;
 }
 

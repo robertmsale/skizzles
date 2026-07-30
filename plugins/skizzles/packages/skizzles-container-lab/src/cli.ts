@@ -7714,11 +7714,12 @@ var defaultDockerRunner = {
     stdio: ["pipe", "pipe", "pipe"]
   })
 };
-async function dockerAvailable(runner = defaultDockerRunner, secretEnvironment = [], environment = process.env) {
+async function dockerAvailable(runner = defaultDockerRunner, secretEnvironment = [], environment = process.env, signal) {
   return (await runner.run(["info", "--format", "{{.ServerVersion}}"], {
     allowFailure: true,
     timeoutMs: 1e4,
-    env: scrubSecretEnvironment(secretEnvironment, environment)
+    env: scrubSecretEnvironment(secretEnvironment, environment),
+    signal
   })).code === 0;
 }
 function secretComposeEnvironment(names, environment) {
@@ -9701,13 +9702,13 @@ class ContainerLabWorkflow {
     this.owner = owner;
     this.roots = roots;
   }
-  async health() {
+  async health(signal) {
     await this.reconcileOwner();
     const labs = await listLabs(this.roots, this.owner);
     const secretEnvironment = [...new Set(labs.flatMap((lab) => lab.secretEnvironment))];
     return {
       ok: true,
-      dockerAvailable: await dockerAvailable(this.docker, secretEnvironment, this.environment).catch(() => false),
+      dockerAvailable: await dockerAvailable(this.docker, secretEnvironment, this.environment, signal).catch(() => false),
       labs: labs.length
     };
   }
@@ -10141,7 +10142,7 @@ async function cliMain(args = process.argv.slice(2), environment = process.env, 
       }
       const result = await dispatch(service, global.rest, controller.signal);
       writePublicJson(io, result);
-      return signalExit ?? 0;
+      return global.rest[0] === "health" && signalExit === 143 ? 0 : signalExit ?? 0;
     } finally {
       process.removeListener("SIGINT", interrupt);
       process.removeListener("SIGTERM", terminate);
@@ -10164,7 +10165,7 @@ async function dispatch(service, args, signal) {
     throw new UsageError("a command is required; use --help");
   if (noun === "health") {
     requireNoArgs([verb, ...rest].filter((value) => value !== undefined));
-    return await service.health();
+    return await service.health(signal);
   }
   if (noun === "lab") {
     if (verb === "create") {

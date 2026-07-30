@@ -69,7 +69,7 @@ describe("Container Lab doctor", () => {
       launcher: join(sourceRoot, "skills/codex-container-lab/scripts/codex-container-lab"),
       launchAgentTemplate: join(sourceRoot, "packages/skizzles-container-lab/install/com.openai.codex-container-lab-reaper.plist"),
     });
-    expect(doctorBundledContainerLab(sourceRoot)).toMatchObject({
+    expect(doctorBundledContainerLab(sourceRoot, undefined, 1_000)).toMatchObject({
       installed: true,
       compatible: true,
       version: "configured-0.1.0-unverified",

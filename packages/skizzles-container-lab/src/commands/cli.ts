@@ -61,7 +61,7 @@ export async function cliMain(
       }
       const result = await dispatch(service, global.rest, controller.signal);
       writePublicJson(io, result);
-      return signalExit ?? 0;
+      return global.rest[0] === "health" && signalExit === 143 ? 0 : signalExit ?? 0;
     } finally {
       process.removeListener("SIGINT", interrupt);
       process.removeListener("SIGTERM", terminate);
@@ -83,7 +83,7 @@ async function dispatch(service: ContainerLabWorkflow, args: string[], signal?: 
   if (!noun) throw new UsageError("a command is required; use --help");
   if (noun === "health") {
     requireNoArgs([verb, ...rest].filter((value): value is string => value !== undefined));
-    return await service.health();
+    return await service.health(signal);
   }
   if (noun === "lab") {
     if (verb === "create") {

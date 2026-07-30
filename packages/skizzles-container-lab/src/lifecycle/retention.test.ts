@@ -48,6 +48,28 @@ class FailingLogsDocker extends RecordingDocker {
   }
 }
 
+class BlockingHealthDocker extends RecordingDocker {
+  readonly started: Promise<void>;
+  private resolveStarted!: () => void;
+  seenSignal?: AbortSignal;
+
+  constructor() {
+    super();
+    this.started = new Promise<void>((resolve) => { this.resolveStarted = resolve; });
+  }
+
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    if (args[0] !== "info") return await super.run(args, options);
+    this.seenSignal = options?.signal;
+    this.resolveStarted();
+    return await new Promise<CommandResult>((resolve, reject) => {
+      const abort = () => reject(new Error("docker info aborted"));
+      if (options?.signal?.aborted) abort();
+      else options?.signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+}
+
 describe("Container Lab activity retention", () => {
   test("refreshes a valid lease after a successful status operation", async () => {
     const fixture = await durableFixture("thread-status-lease", "ready", true);
@@ -101,6 +123,21 @@ describe("Container Lab activity retention", () => {
     const service = new ContainerLabWorkflow(fixture.owner, fixture.roots, new FailingLogsDocker(), process.env, () => new Date("2026-03-04T05:06:07.000Z"));
     await expect(service.logs(fixture.lab.id, "dev", 10)).rejects.toThrow();
     expect((await readLab(fixture.roots, fixture.owner, fixture.lab.id)).lastActivityAt).toBe(old);
+  });
+
+  test("aborted health closes the Docker probe promptly", async () => {
+    const fixture = await durableFixture("thread-health-abort", "ready", true);
+    const docker = new BlockingHealthDocker();
+    const service = new ContainerLabWorkflow(fixture.owner, fixture.roots, docker);
+    const controller = new AbortController();
+    const health = service.health(controller.signal);
+    await docker.started;
+    const startedAt = performance.now();
+    controller.abort("SIGTERM");
+    const result = await Promise.race([health, Bun.sleep(250).then(() => undefined)]);
+    expect(result).toEqual({ ok: true, dockerAvailable: false, labs: 1 });
+    expect(performance.now() - startedAt).toBeLessThan(250);
+    expect(docker.seenSignal).toBe(controller.signal);
   });
 
   test("heartbeat refreshes only the requested attached lab and survives persistence failure", async () => {

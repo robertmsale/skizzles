@@ -50,7 +50,6 @@ class SecretDiagnosticDocker extends RecordingDocker {
   }
 }
 
-
 class InterruptingDocker extends RecordingDocker {
   constructor(private readonly controller: AbortController) { super(); }
   override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
