@@ -8,46 +8,46 @@
     {
       "agentType": "default",
       "behavior": "default",
-      "capability": "luna_high",
+      "capability": "luna_max",
       "model": "gpt-5.6-luna",
-      "reasoningEffort": "high",
-      "description": "General Skizzles subagent with a compact developer-focused execution contract. Default capability: gpt-5.6-luna at high effort.",
+      "reasoningEffort": "max",
+      "description": "General Skizzles subagent with a compact developer-focused execution contract. Default capability: gpt-5.6-luna at max effort.",
       "configFile": "default.toml"
     },
     {
       "agentType": "triage",
       "behavior": "triage",
-      "capability": "terra_medium",
-      "model": "gpt-5.6-terra",
+      "capability": "sol_medium",
+      "model": "gpt-5.6-sol",
       "reasoningEffort": "medium",
-      "description": "Evidence-first diagnosis, runtime reproduction, and implementation-path mapping. Default capability: gpt-5.6-terra at medium effort.",
+      "description": "Evidence-first diagnosis, runtime reproduction, and implementation-path mapping. Default capability: gpt-5.6-sol at medium effort.",
       "configFile": "triage.toml"
     },
     {
       "agentType": "worker",
       "behavior": "worker",
-      "capability": "luna_xhigh",
+      "capability": "luna_max",
       "model": "gpt-5.6-luna",
-      "reasoningEffort": "xhigh",
-      "description": "Bounded implementation ownership through focused validation and evidence. Default capability: gpt-5.6-luna at xhigh effort.",
+      "reasoningEffort": "max",
+      "description": "Bounded implementation ownership through focused validation and evidence. Default capability: gpt-5.6-luna at max effort.",
       "configFile": "worker.toml"
     },
     {
       "agentType": "designer",
       "behavior": "designer",
-      "capability": "sol_medium",
-      "model": "gpt-5.6-sol",
-      "reasoningEffort": "medium",
-      "description": "Frontend and product UI implementation with visual and accessibility proof. Default capability: gpt-5.6-sol at medium effort.",
+      "capability": "luna_max",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "max",
+      "description": "Frontend and product UI implementation with visual and accessibility proof. Default capability: gpt-5.6-luna at max effort.",
       "configFile": "designer.toml"
     },
     {
       "agentType": "qa",
       "behavior": "qa",
-      "capability": "terra_medium",
-      "model": "gpt-5.6-terra",
-      "reasoningEffort": "medium",
-      "description": "Runtime piloting and evidence-rich product verification without silent fixes. Default capability: gpt-5.6-terra at medium effort.",
+      "capability": "luna_max",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "max",
+      "description": "Runtime piloting and evidence-rich product verification without silent fixes. Default capability: gpt-5.6-luna at max effort.",
       "configFile": "qa.toml"
     },
     {

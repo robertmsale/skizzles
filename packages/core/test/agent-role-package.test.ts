@@ -28,11 +28,11 @@ describe("capability-bearing agent role generation", () => {
     expect(manifest.routes).toEqual({});
     expect(manifest.nativeRoleAliases).toEqual({ explorer: "triage" });
     expect(manifest.agents.map(({ agentType, model, reasoningEffort }) => ({ agentType, model, reasoningEffort }))).toEqual([
-      { agentType: "default", model: "gpt-5.6-luna", reasoningEffort: "high" },
-      { agentType: "triage", model: "gpt-5.6-terra", reasoningEffort: "medium" },
-      { agentType: "worker", model: "gpt-5.6-luna", reasoningEffort: "xhigh" },
-      { agentType: "designer", model: "gpt-5.6-sol", reasoningEffort: "medium" },
-      { agentType: "qa", model: "gpt-5.6-terra", reasoningEffort: "medium" },
+      { agentType: "default", model: "gpt-5.6-luna", reasoningEffort: "max" },
+      { agentType: "triage", model: "gpt-5.6-sol", reasoningEffort: "medium" },
+      { agentType: "worker", model: "gpt-5.6-luna", reasoningEffort: "max" },
+      { agentType: "designer", model: "gpt-5.6-luna", reasoningEffort: "max" },
+      { agentType: "qa", model: "gpt-5.6-luna", reasoningEffort: "max" },
       { agentType: "review", model: "gpt-5.6-sol", reasoningEffort: "high" },
       { agentType: "deployment", model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
     ]);
@@ -40,7 +40,7 @@ describe("capability-bearing agent role generation", () => {
       "default.toml", "deployment.toml", "designer.toml", "manifest.json",
       "qa.toml", "review.toml", "triage.toml", "worker.toml",
     ]);
-    expect(files.get("worker.toml")).toContain('model = "gpt-5.6-luna"\nmodel_reasoning_effort = "xhigh"');
+    expect(files.get("worker.toml")).toContain('model = "gpt-5.6-luna"\nmodel_reasoning_effort = "max"');
   });
 
   test("rejects native aliases that target an unknown generated role", async () => {

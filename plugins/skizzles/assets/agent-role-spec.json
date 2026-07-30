@@ -1,9 +1,7 @@
 {
   "version": 1,
   "capabilities": {
-    "luna_high": { "model": "gpt-5.6-luna", "reasoningEffort": "high" },
-    "luna_xhigh": { "model": "gpt-5.6-luna", "reasoningEffort": "xhigh" },
-    "terra_medium": { "model": "gpt-5.6-terra", "reasoningEffort": "medium" },
+    "luna_max": { "model": "gpt-5.6-luna", "reasoningEffort": "max" },
     "sol_medium": { "model": "gpt-5.6-sol", "reasoningEffort": "medium" },
     "sol_high": { "model": "gpt-5.6-sol", "reasoningEffort": "high" },
     "sol_xhigh": { "model": "gpt-5.6-sol", "reasoningEffort": "xhigh" }
@@ -14,32 +12,32 @@
     {
       "behavior": "default",
       "description": "General Skizzles subagent with a compact developer-focused execution contract.",
-      "defaultCapability": "luna_high",
-      "capabilities": ["luna_high"]
+      "defaultCapability": "luna_max",
+      "capabilities": ["luna_max"]
     },
     {
       "behavior": "triage",
       "description": "Evidence-first diagnosis, runtime reproduction, and implementation-path mapping.",
-      "defaultCapability": "terra_medium",
-      "capabilities": ["terra_medium"]
-    },
-    {
-      "behavior": "worker",
-      "description": "Bounded implementation ownership through focused validation and evidence.",
-      "defaultCapability": "luna_xhigh",
-      "capabilities": ["luna_xhigh"]
-    },
-    {
-      "behavior": "designer",
-      "description": "Frontend and product UI implementation with visual and accessibility proof.",
       "defaultCapability": "sol_medium",
       "capabilities": ["sol_medium"]
     },
     {
+      "behavior": "worker",
+      "description": "Bounded implementation ownership through focused validation and evidence.",
+      "defaultCapability": "luna_max",
+      "capabilities": ["luna_max"]
+    },
+    {
+      "behavior": "designer",
+      "description": "Frontend and product UI implementation with visual and accessibility proof.",
+      "defaultCapability": "luna_max",
+      "capabilities": ["luna_max"]
+    },
+    {
       "behavior": "qa",
       "description": "Runtime piloting and evidence-rich product verification without silent fixes.",
-      "defaultCapability": "terra_medium",
-      "capabilities": ["terra_medium"]
+      "defaultCapability": "luna_max",
+      "capabilities": ["luna_max"]
     },
     {
       "behavior": "review",
