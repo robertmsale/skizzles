@@ -93,11 +93,11 @@ Maintainers edit `assets/agent-role-spec.json` for model/reasoning pairs and `as
 
 ## Optionally configure a learning consumer
 
-Fourth Wall emits a bounded campaign-close learning packet under `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md`. This is evidence, not an automatic harness change. If the user explicitly wants harness learning forwarded, guide them to:
+Fourth Wall maintains a bounded latest campaign-close snapshot under `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` and emits immutable revisioned forwarding artifacts under that campaign's `learning/forwarded/` directory. This is evidence, not an automatic harness change. If the user explicitly wants harness learning forwarded, guide them to:
 
 1. Choose an existing local project whose owner can evaluate orchestration behavior. A versioned checkout of the official OpenAI Codex repository is a useful recommendation when the consumer must inspect harness implementation, but it is never a prerequisite.
 2. Choose a stable consumer naming or epoch convention and record the routing in machine-local instructions (for example, `AGENTS.md`) by an explicit user action.
-3. Forward only the bounded packet or its path after the user confirms the unique consumer and destination.
+3. Forward only the new immutable revisioned artifact or its path after the user confirms the unique consumer and destination. Never forward the mutable latest snapshot. If later evidence reopens the campaign, preserve the prior artifact and forward a new revision that identifies what it supersedes and summarizes the correction.
 
 Private campaign observations never belong in the source checkout or generated plugin. If an owner explicitly wants durable local curation, they may manually create `CODEX_HOME/.skizzles/learning/` with mode `0700` and `learning-log.md` with mode `0600`. That user-owned record is outside installation receipts and transfer targets; do not create, copy, package, or add it to Git on the user's behalf.
 

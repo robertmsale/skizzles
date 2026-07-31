@@ -2,7 +2,7 @@ interface:
   display_name: "Fourth Wall"
   short_description: "Orchestrate bounded Codex task trees"
   brand_color: "#2563EB"
-  default_prompt: "Use $fourth-wall to coordinate a bounded MultiAgentV2 task tree where Terra maps context, Luna owns explicit implementation loops, Sol designs and reviews, and rework preserves ownership whenever possible."
+  default_prompt: "Use $fourth-wall to coordinate a bounded MultiAgentV2 task tree where fixed roles own evidence, implementation, design, review, and rework through persistent task identities."
 
 policy:
   allow_implicit_invocation: true

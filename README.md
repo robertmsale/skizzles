@@ -7,11 +7,11 @@ Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks
 ## What’s inside
 
 - **Command-output management** — classifies useful build/test commands, keeps output bounded, and leaves a useful artifact when a command gets noisy.
-- **Fourth Wall orchestration** — Terra proves the terrain and records a shared execution map, parallel Luna owners implement and validate disjoint slices, and Sol supplies design taste plus adversarial judgment. Persistent teammates clarify and repair without rediscovering the campaign from scratch. 🗺️🌙🎨🤌
+- **Fourth Wall orchestration** — Triage proves the terrain and records a shared execution map, parallel Workers implement and validate disjoint slices, and specialist roles supply design, QA, review, and deployment judgment. Persistent teammates clarify and repair without rediscovering the campaign from scratch. 🗺️🎨🤌
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
-- **Durable role brains** — an opt-in developer-focused root prompt keeps the conversation delightful, while generated Triage/Worker/Designer/QA/Review/Deployment roles bind each duty to a model/reasoning pair that survives eviction and rework. Luna can keep painting instead of waking up convinced it is Sol. 🧠✨
+- **Durable role brains** — an opt-in developer-focused root prompt keeps the conversation delightful, while generated Triage/Worker/Designer/QA/Review/Deployment roles bind each duty to a configured capability that survives eviction and rework. Behavioral guidance stays stable while the canonical role catalog evolves. 🧠✨
 - **A practical skill shelf** — auth semantics, Cargo optimization, completion contracts, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
 - **A polite config handshake** — enable the hooks, then choose passive native orchestration or the full proactive Fourth Wall experience without trampling the rest of `config.toml`. 🤝

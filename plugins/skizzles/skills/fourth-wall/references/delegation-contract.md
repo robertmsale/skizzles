@@ -15,9 +15,9 @@ Define:
 
 When Triage exists, also define its canonical task name, accepted report path, report revision, and the narrow conditions under which the recipient should reactivate it.
 
-For consequential or multi-owner work, include a **peer map** with only relevant canonical task paths and ownership/contact conditions. Workers receive Triage and relevant neighboring Workers; Triage receives affected Workers; Review receives Triage and reviewed Workers; QA/Designer receive owners when clarification or rework may need them. Paths are callable peer identities, not ownership transfer, and child contact never authorizes spawning.
+For consequential or multi-owner work, include a **peer map** with only relevant canonical task paths and ownership/contact conditions. Workers receive Triage and relevant neighboring Workers; Triage receives affected Workers; Review receives Triage and reviewed Workers; QA/Designer receive owners when clarification or rework may need them. When a peer owns a relevant resource, record its stable identifier and locator plus the exact owner task path—for example, a Container Lab identifier and state/workspace path, an owned worktree/branch, or a critical evidence artifact. Route evidence or runtime requests to the current resource owner; the request does not transfer custody or create shared control. Review may request one bounded existing artifact or missing observation from that owner, while root coordinates repair or ownership changes. Paths are callable peer identities, not ownership transfer, and child contact never authorizes spawning.
 
-State assurance explicitly: a Worker completion claim is unverified; accepted Triage evidence is provisional causal authority after root checks plausibility/source support; an independent Reviewer verdict is the highest independent-assurance recommendation; a Reviewer that supplied midstream Triage adjudication must label later verdicts reduced-independence/advisory; root owns final acceptance and uses a fresh Reviewer when consequential independent acceptance is required. Do not infer assurance from numeric model effort.
+State assurance explicitly: a Worker completion claim is unverified; accepted Triage evidence is provisional causal authority after root checks plausibility/source support; an independent Reviewer verdict is the highest independent-assurance recommendation; a Reviewer that supplied midstream Triage adjudication must label later verdicts reduced-independence/advisory; root owns final acceptance and uses a fresh Reviewer when consequential independent acceptance is required. Do not infer assurance from role metadata or configured effort.
 
 ## Complete Slice Test
 
@@ -27,7 +27,7 @@ Keep shared Git mutations and final acceptance at the root. When parallel edits 
 
 ## Spawn Shape
 
-Encode the role and objective in the task name; the fixed role carries capability:
+Encode the role and objective in the task name; the generated role catalog carries model and reasoning-effort binding:
 
 ```json
 {
@@ -38,7 +38,7 @@ Encode the role and objective in the task name; the fixed role carries capabilit
 }
 ```
 
-Duty selects the fixed model/effort pair. Set the matching native `agent_type`, omit independent model and reasoning overrides, and repeat only assignment-specific constraints. Every child is a leaf; further decomposition returns to the root.
+Select the fixed native `agent_type`, omit independent model and reasoning overrides, and repeat only assignment-specific constraints. The canonical `assets/agent-role-spec.json` and generated installed role catalog are the sole authority for those bindings. Every child is a leaf; further decomposition returns to the root.
 
 Include directly relevant skill names and obligations in the message. Skills available to the parent are not a substitute for telling the recipient which domain contract governs its work.
 
@@ -54,7 +54,7 @@ Spawn tasks in parallel only when all are true:
 
 Prefer dependency order over maximum concurrency. Contracts, schemas, and shared interfaces usually stabilize before broad implementation fan-out.
 
-For a large, well-planned implementation, prefer 2-6 parallel Luna Workers with disjoint complete slices over one exhausted Worker or a Sol implementation substitute. The installed limit of 14 active children is a ceiling, not a target.
+For a large, well-planned implementation, prefer 2-6 parallel Workers with disjoint complete slices over one exhausted Worker or a review-role implementation substitute. The installed limit of 14 active children is a ceiling, not a target.
 
 ## Blockers
 
@@ -80,7 +80,7 @@ Require the task to report:
 - What did not run and why.
 - Remaining risks, decisions, or downstream work.
 
-After aggregate validation and an explicit decision when possible, root records the campaign terminal disposition (`accepted`, `rejected`, `blocked`, or `abandoned`) and finalizes a bounded learning packet at `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` on every terminal path, with the KPI schema and denominators in [learning-loop.md](learning-loop.md), even when values are zero or not observed. Separate repository friction from harness candidates. Forwarding is optional and explicit; observations never auto-mutate harness policy, roles, routing, hooks, tasks, configuration, or installs.
+After aggregate validation and an explicit decision when possible, root records the campaign terminal disposition (`accepted`, `rejected`, `blocked`, or `abandoned`) and finalizes a bounded latest snapshot at `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` on every terminal path, with the KPI schema and denominators in [learning-loop.md](learning-loop.md), even when values are zero or not observed. Forward only immutable revisioned artifacts with campaign/revision metadata, `supersedes` and correction details when applicable, and a verifiable integrity identity; an explicitly reopened campaign never overwrites an earlier forwarded revision. Separate repository friction from harness candidates. Forwarding is optional and explicit; observations never auto-mutate harness policy, roles, routing, hooks, tasks, configuration, or installs.
 
 The root verifies this claim before integration or completion.
 

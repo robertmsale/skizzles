@@ -48,7 +48,7 @@ Prefer no-history forks. Quote the relevant completed decisions in the handoff p
 
 ## Reactivation Or Replacement
 
-Use `followup_task` when a completed child remains the right owner and its accumulated context reduces rediscovery; native MultiAgentV2 preserves its role, model, reasoning settings, and context. Spawn a fresh sibling only for changed ownership, poisoned context, a genuinely independent second opinion, or a materially new slice. Use the smallest useful positive fork plus the packet so a necessary successor retains relevant knowledge without inheriting an unbounded transcript.
+Use `followup_task` when a completed child remains the right owner and its accumulated context reduces rediscovery; native MultiAgentV2 preserves its role binding and context. Spawn a fresh sibling only for changed ownership, poisoned context, a genuinely independent second opinion, or a materially new slice. Use the smallest useful positive fork plus the packet so a necessary successor retains relevant knowledge without inheriting an unbounded transcript.
 
 ## Root Handoff Limitation
 

@@ -4,10 +4,10 @@
 
 | Tool | Use | Important behavior |
 | --- | --- | --- |
-| `spawn_agent` | Create bounded work | Root-only. Use `<role>__<objective>`, select the fixed native `agent_type`, omit model/effort overrides, and choose the smallest useful `fork_turns` value. |
+| `spawn_agent` | Create bounded work | Root-only. Use `<role>__<objective>`, select the fixed native `agent_type`, omit model/effort overrides, and choose the smallest useful `fork_turns` value. The canonical role spec and generated installed catalog resolve those bindings. |
 | `list_agents` | Inspect the live tree | Can filter by task-path prefix. Use before intervention or reassignment. |
 | `send_message` | Deliver context or a correction to running work | Queues the message and does not trigger a new turn. |
-| `followup_task` | Continue prior ownership | Reactivates an idle or completed child while preserving its task identity, model, reasoning effort, and accumulated context. |
+| `followup_task` | Continue prior ownership | Reactivates an idle or completed child while preserving its task identity, role binding, configured effort, and accumulated context. |
 | `wait_agent` | Synchronize on activity | Waits for any mailbox update, user steering, or timeout. It is an event wait, not a status dump. |
 | `interrupt_agent` | Stop current work | Leaves the task available for later messages and follow-up work. Cannot interrupt self or root. |
 
@@ -23,24 +23,24 @@
 
 The child that owns a long-running command also owns its terminal polling and reports the useful outcome. The root should not mirror that polling or repeatedly request status from a task that is still within its expected runtime.
 
-Children are leaves. A Luna Worker should send an intermediate message only for a material blocker, ownership collision, or falsified assumption; normal progress arrives in its compact final report.
+Children are leaves. A Worker should send an intermediate message only for a material blocker, ownership collision, or falsified assumption; normal progress arrives in its compact final report.
 
 ## Triage And Worker Cooperation
 
-At dispatch, root gives each relevant peer the canonical task paths it may contact:
+At dispatch, root gives each relevant peer the canonical task paths and resource custody it may contact:
 
 - Workers receive the named Triage path and relevant neighboring Worker paths.
 - Triage receives affected Worker paths.
 - Review receives Triage and every Worker it reviews.
 - QA/Designer receive owners only when clarification or rework may need them.
 
-Paths are callable peer identities, not ownership transfer. A running Worker uses `send_message` for a narrow clarification and `followup_task` only to reactivate a completed Triage owner. Include the exact command, expected and observed result, attempts, evidence path, and one question. Triage updates the report when its assumptions change; the Worker retains implementation ownership. Material cross-slice changes also go to the root.
+For every relevant resource, include its stable identifier and locator plus the exact owner task path: Container Lab identifier and state/workspace path, owned worktree/branch, or critical evidence artifact as applicable. Route evidence and runtime requests to the current resource owner. Resource custody is routing metadata, not transfer or shared control; contact never authorizes edits, spawning, or ownership changes. A running Worker uses `send_message` for a narrow clarification and `followup_task` only to reactivate a completed Triage owner. Include the exact command, expected and observed result, attempts, evidence path, and one question. Triage updates the report when its assumptions change; the Worker retains implementation ownership. Material cross-slice changes also go to the root.
 
 Claims carry assurance labels: Worker completion claims are unverified; accepted Triage evidence is provisional causal authority after root verification; an independent Reviewer verdict is the highest independent-assurance recommendation, while a Reviewer that supplied midstream Triage adjudication must mark later verdicts reduced-independence/advisory. Root retains final acceptance and uses a fresh Reviewer when consequential independent final acceptance is required.
 
-Review may request one concrete existing artifact or one bounded missing runtime observation from a named Worker that still owns the relevant Lab or slice. The Worker runs it in that boundary and returns command, result, and artifact path. Review neither takes the Lab nor edits implementation; root routes repairs.
+Review may request one concrete existing artifact or one bounded missing runtime observation from the exact owner of the relevant Lab, worktree, or evidence. The owner runs it within that boundary and returns command, result, and artifact path. Review neither takes custody nor edits implementation; root coordinates any repair or ownership change.
 
-Triage-to-Review is a guarded adjudication escape hatch, authorized only by root after two bounded diagnostic passes (or equivalent contradictory/high-consequence impasse). Triage's packet includes alternatives, evidence, Worker attempts, why another pass is unlikely to resolve the question, and one narrow decision request. Count every root-authorized dispatch, even when unanswered; record the outcome separately and keep rejected preauthorization attempts as context only. Review adjudicates only and never becomes a Sol implementation owner. Flag every dispatched use as a red-flag KPI; difficult tests or slow builds do not qualify.
+Triage-to-Review is a guarded adjudication escape hatch, authorized only by root after two bounded diagnostic passes (or equivalent contradictory/high-consequence impasse). Triage's packet includes alternatives, evidence, Worker attempts, why another pass is unlikely to resolve the question, and one narrow decision request. Count every root-authorized dispatch, even when unanswered; record the outcome separately and keep rejected preauthorization attempts as context only. Review adjudicates only and never becomes an implementation owner. Flag every dispatched use as a red-flag KPI; difficult tests or slow builds do not qualify.
 
 ## Privileged Steps
 
@@ -92,4 +92,4 @@ Canonical paths are the routing graph. A task can use a short relative name for 
 
 ## Campaign Closeout
 
-After aggregate validation and an explicit decision when possible, root records the campaign terminal disposition (`accepted`, `rejected`, `blocked`, or `abandoned`) and finalizes `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` for every substantial campaign, including zero or `not observed` KPI values. Finalize on every terminal path, not only acceptance. Keep the packet bounded, split repository friction from harness candidates, and forward only to an explicitly configured consumer. Observation/reporting may be automated; policy, hooks, roles, routing, tasks, configuration, and installs never change automatically.
+After aggregate validation and an explicit decision when possible, root records the campaign terminal disposition (`accepted`, `rejected`, `blocked`, or `abandoned`) and finalizes a bounded latest packet at `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` for every substantial campaign, including zero or `not observed` KPI values. A true terminal close has no pending repair or evidence decision. If later evidence reopens the campaign, preserve the prior packet and create a new immutable revisioned forwarding artifact; never overwrite a previously forwarded file. Each forwarded artifact carries campaign ID, revision, `supersedes` when correcting prior evidence, a correction summary, and a verifiable integrity hash or equivalent identity. Finalize on every terminal path, not only acceptance. Keep packets bounded, split repository friction from harness candidates, and forward only to an explicitly configured consumer. Observation/reporting may be automated; policy, hooks, roles, routing, tasks, configuration, and installs never change automatically.

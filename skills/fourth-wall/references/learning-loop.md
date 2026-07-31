@@ -10,7 +10,17 @@ Once a substantial orchestrated campaign reaches any terminal disposition, root 
 /tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md
 ```
 
-The root creates the directory with local-user permissions and passes the packet by path. Enforce a safe total cap of **24 KiB** (below context-item limits), with at most **32** per-slice/KPI detail rows, **32** evidence references, **8** repository-friction items, **8** harness candidates, and **32** review findings. Cap each row/reference at **512 bytes**; truncate detail and retain an `overflow_counts` summary (omitted rows, refs, friction, candidates, findings, and bytes) rather than exceeding a cap. Include no secrets, private ambient data, raw transcripts, or unbounded logs. Reference relevant child reports and evidence paths instead of copying them.
+The root creates the directory with local-user permissions. This `campaign-close.md` path is a bounded latest snapshot for local coordination, not an immutable consumer record. When a packet is forwarded, copy it to a new, never-reused revision path such as:
+
+```text
+/tmp/skizzles-orchestration/<campaign-id>/learning/forwarded/campaign-close.<campaign-id>.r<revision>.<identity>.md
+```
+
+The forwarded artifact is immutable: do not edit, replace, or silently reuse a revision filename. Its metadata must include `campaign_id`, integer `revision`, `close_state`, `supersedes` (the exact prior forwarded artifact or `null`), `correction_summary` (`none` for an uncorrected close), and `integrity_sha256` or another independently verifiable identity. Compute the hash over canonical UTF-8 packet bytes with the integrity field omitted or blanked, and include the resulting identity in the filename or metadata so a consumer can verify it without trusting the sender.
+
+A **true terminal close** (`close_state: terminal_close`) means aggregate validation and the root decision are complete with no pending repair or evidence decision; forward that revision and do not mutate it. If later evidence requires work, explicitly reopen the campaign, preserve every prior forwarded revision, update only the latest snapshot, and write the next revision with `close_state: reopened_correction`, `supersedes` pointing to the corrected artifact, and a concise correction summary. After the correction is validated, issue another `terminal_close` revision when the campaign is final again. A reopened correction must never silently overwrite or masquerade as the earlier terminal close.
+
+Enforce a safe total cap of **24 KiB** (below context-item limits), with at most **32** per-slice/KPI detail rows, **32** evidence references, **8** repository-friction items, **8** harness candidates, and **32** review findings. Cap each row/reference at **512 bytes**; truncate detail and retain an `overflow_counts` summary (omitted rows, refs, friction, candidates, findings, and bytes) rather than exceeding a cap. Include no secrets, private ambient data, raw transcripts, or unbounded logs. Reference relevant child reports and evidence paths instead of copying them.
 
 The packet contains:
 
@@ -21,7 +31,7 @@ The packet contains:
 - Reviewer independence status per review cycle: `independent` or `reduced-independence-advisory` (the latter is required when that Reviewer supplied midstream Triage adjudication);
 - a separate **repository friction** report for reproducible product/process obstacles (command or surface, evidence, affected owner, and suggested repository owner);
 - a **harness candidate** section for generalizable orchestration observations, evidence paths, confidence, and the smallest change worth deliberating. When observed, record `incorrect_terminal_block` for a root that treated failed local build/test/Lab/QA proof as terminal despite a plausible in-scope repair path, and `in_scope_runtime_failure_continued` when the failed proof stayed active, was repaired by the owning Worker/Triage loop, and fresh proof resumed;
-- forwarding status: optional configured learning consumer, or `not configured`/`ambiguous`.
+- forwarding status: optional configured learning consumer plus the immutable artifact path, revision, and integrity identity, or `not configured`/`ambiguous`.
 
 Do not infer a missing event from silence. Counts are observations, not performance conclusions; retain denominators and context so complex repository work is not compared with trivial slices.
 
