@@ -44,7 +44,7 @@ Use a parent-mediated sibling replacement so the root preserves the task graph a
 4. The root confirms the successor exists and has the right ownership boundary.
 5. The predecessor returns or is interrupted only after the successor is established.
 
-Prefer no-history forks. Quote the relevant completed decisions in the handoff packet or point to a durable artifact instead of relying on inherited execution history.
+Prefer the smallest useful positive numbered fork. Quote the relevant completed decisions in the handoff packet or point to a durable artifact instead of relying on an unbounded inherited execution history.
 
 ## Reactivation Or Replacement
 

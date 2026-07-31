@@ -43,7 +43,7 @@ Stay single-agent when coordination costs more than the work. Prefer one complet
 
 Name every child `<role>__<objective>`, using single underscores inside the objective. Examples: `triage__map_sync_failure`, `worker__implement_storage_contract`, and `review__audit_auth_change`.
 
-Use `fork_turns="none"` for self-contained packets and isolated slices. Prefer a small positive integer such as `"1"` or `"2"` when recent root decisions prevent rediscovery. Do not use `"all"`: full-history forks inherit the parent role and bypass the child-specific role configuration. A positive number larger than available history retains all available turns without becoming full-history mode.
+Use a small positive integer for `fork_turns`, such as `"1"` or `"2"`, choosing the smallest useful value when recent root decisions prevent rediscovery. Do not use `"none"` or `"all"`: context-free forks discard the bounded handoff context, while full-history forks inherit the parent role and bypass the child-specific role configuration. A positive number larger than available history retains all available turns without becoming full-history mode.
 
 Every assignment states:
 

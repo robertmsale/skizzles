@@ -45,6 +45,17 @@ describe("deterministic plugin packaging", () => {
               },
             ],
           },
+          {
+            matcher: "spawn_agent",
+            hooks: [
+              {
+                type: "command",
+                command: 'bun "${PLUGIN_ROOT}/hooks/guard-spawn-agent-fork.ts"',
+                timeout: 3,
+                statusMessage: "checking spawn-agent fork policy",
+              },
+            ],
+          },
         ],
       },
     });

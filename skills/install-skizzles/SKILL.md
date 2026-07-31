@@ -63,7 +63,7 @@ Also ask whether Codex should keep its native model instructions or use the Skiz
 - `native` is the default and does not write instruction or agent-role config.
 - `skizzles` writes the canonical root prompt to `model_instructions_file` and configures the seven fixed native roles advertised by `assets/agents/manifest.json`. Generated role files combine one behavioral duty with one durable model/reasoning pair, share `skizzles_subagent_instructions.md`, and add duty-specific `developer_instructions`. This mode requires an absolute `--source-root` whose assets remain available after installation.
 
-With the Skizzles split, select the generated `agent_type`, omit independent model/reasoning overrides, and use `fork_turns="none"` or a positive integer. A positive integer larger than the available history retains all available turns without becoming full-history mode. Do not use `fork_turns="all"`: full-history spawning inherits the parent role and deliberately bypasses selected-role application.
+With the Skizzles split, select the generated `agent_type`, omit independent model/reasoning overrides, and use the smallest useful positive integer for `fork_turns`. A positive integer larger than the available history retains all available turns without becoming full-history mode. Do not use `fork_turns="none"` or `fork_turns="all"`: context-free and full-history spawning discard the bounded role handoff or inherit the parent role, respectively, bypassing selected-role application.
 
 Preview against an explicit `CODEX_HOME` and absolute Codex binary:
 

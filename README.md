@@ -51,7 +51,7 @@ After installing the complete plugin surface, Skizzles can safely finish the Cod
 - **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
 - **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for bounded parallel teams, and adds tiny root/subagent pointers to `$fourth-wall` plus the proactive quality-and-speed trigger. 🚀
 - **Native instructions** (the default) leave Codex's model instructions untouched.
-- **Skizzles instructions** install a developer-facing root prompt plus seven fixed capability-bearing roles: Worker is Luna xhigh, Triage and QA are Terra medium, Default is Luna high, Designer is Sol medium, Review is Sol high, and Deployment is Sol xhigh. There are no implementation escalation variants: Terra supplies verified evidence and commands, multiple persistent Luna Workers own clear slices, and Sol judges the result. Select the generated `agent_type` without separate model overrides, and use numbered or context-free forks so Codex applies it—a large number safely means “up to this many turns,” not full-history mode.
+- **Skizzles instructions** install a developer-facing root prompt plus seven fixed capability-bearing roles from the generated role catalog and canonical role spec. There are no implementation escalation variants: roles provide stable behavioral duties and durable generated bindings, while the root coordinates evidence and acceptance. Select the generated `agent_type` without separate model overrides, and use the smallest useful positive numbered fork so Codex applies it—a large number safely means “up to this many turns,” not full-history mode.
 
 Preview the full developer setup from the checkout:
 
