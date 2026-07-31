@@ -58,6 +58,8 @@ When task B depends on task A:
 
 All tasks in the tree share the same checkout. Assign disjoint write ownership, tell implementation tasks not to revert unrelated edits, and resolve overlap before more changes land.
 
+Use one shared worktree by default. Do not create extra branches or temporary worktrees, or require per-Worker commits, merely to support review. The shared worktree may contain unrelated user or agent changes; disclose those deltas and keep relevant or overlapping source edits out of the reviewed candidate.
+
 The root owns branch changes, staging, commits, merges, rebases, cherry-picks, stashes, resets, cleans, pushes, and other Git-history mutations unless the user and root explicitly delegate an exact action. Subagents should use read-only Git inspection by default.
 
 Treat project-wide build, analyze, format, and test commands as synchronization points while parallel edits are active. Let implementation children run narrow checks that do not contend for shared locks. After edits stabilize, prefer one of these ownership shapes:
@@ -71,11 +73,13 @@ The root retains Git mutations, resolves cross-owner decisions, inspects the ret
 ## Review Loop
 
 1. Worker returns its completion claim and evidence.
-2. Root inspects the diff and selects the relevant proof obligations.
-3. Spawn a `review` task for adversarial correctness, architecture, security, risk, and quality judgment, or `qa` for runnable product proof. The reviewer assesses whether Worker evidence is sufficient and does not routinely repeat the same build, test, formatting, or static-analysis commands. Implementation-time QA proof complements rather than replaces a later independent product QA handoff.
-4. Classify a bounded finding as attributable rework, adjacent healing, or contract discovery. Reactivate the owning Worker so it retains its research and implementation context. A contract-discovery finding returns to persistent Triage before the same Worker continues.
-5. Re-review the corrected state when the risk warrants it.
-6. Reactivate the same Reviewer for re-review of the same slice. The root integrates and decides completion; the reviewer does not silently broaden scope, repair the code, duplicate validation without cause, or relax the owner outcome.
+2. Root quiesces parallel writers and inspects the aggregate diff and `git status`. If integration repair is needed, activate exactly one serial integration owner while all other source writers remain quiescent; after it finishes, re-quiesce reviewed surfaces. Unrelated uncommitted deltas may remain but must be disclosed and excluded from the candidate.
+3. Root integrates the final aggregate state, runs focused validation, and creates one coherent stable-candidate commit before source Review/QA, then freezes reviewed surfaces through Review/QA. The root retains Git mutations; do not create per-Worker commits or extra branches/worktrees for review.
+4. The Review/QA packet names exact base and target SHAs, the committed diff, Git status/uncommitted-delta summary, Worker/evidence map, and QA provenance. Review inspects the committed target object/diff. QA claims exact-target runtime proof only when its environment and source are verified at that target and no undisclosed or relevant deltas can affect proof; otherwise it waits for quiescence or labels provenance honestly.
+5. Spawn a `review` task for adversarial correctness, architecture, security, risk, and quality judgment, or `qa` for runnable product proof. The reviewer assesses whether Worker evidence is sufficient and does not routinely repeat the same build, test, formatting, or static-analysis commands. Implementation-time QA proof complements rather than replaces a later independent product QA handoff.
+6. Classify a bounded finding as attributable rework, adjacent healing, or contract discovery. Reactivate the persistent specialist that owns the affected slice: Worker for source changes, Triage for contract discovery, or QA for runtime proof. A contract-discovery finding returns to persistent Triage before the same Worker continues.
+7. Root integrates each repair as an additive commit. The same Reviewer re-reviews source findings against the repair delta and cumulative diff; the same QA owner reruns QA after repair and reports target provenance again.
+8. The root integrates and decides completion; the reviewer does not silently broaden scope, repair the code, duplicate validation without cause, or relax the owner outcome.
 
 ## Recovery Loop
 

@@ -143,6 +143,35 @@ A failed local build, test, Container Lab run, or QA proof is evidence to preser
 
 Reserve `blocked` for an unavailable external dependency, service, or permission; contradictory requirements or an owner-only decision; or a safety boundary that prevents further authorized progress. Do not infer an external blocker merely from a failed local proof, and do not add automatic recovery in place of explicit ownership routing.
 
+## Stable Review Checkpoints
+
+The default review topology is one shared worktree. Do not create extra branches or temporary worktrees, or require per-Worker commits, merely to make review possible. Review is a checkpoint against an immutable candidate, not an acceptance verdict on a moving worktree.
+
+The shared worktree need not be globally clean: unrelated user or agent changes may remain. The root must disclose them and keep any relevant, overlapping, or unreviewed source delta out of the candidate target.
+
+At a coherent integration boundary:
+
+1. **Quiesce parallel writers.** The root waits for relevant Workers to finish their current turns and stops parallel source edits. If integration repair is needed, the root activates exactly one serial integration owner; all other source writers remain quiescent while that owner edits. When it finishes, the root quiesces reviewed surfaces again before validation.
+2. **Validate the re-quiesced candidate.** The root inspects the aggregate diff and ownership boundaries, resolves any remaining integration issue, and runs focused aggregate validation. Exclude unrelated shared-worktree changes from the candidate commit and disclose them; do not checkpoint known breakage or relevant unreviewed deltas.
+3. **Commit and freeze.** The root creates one coherent stable-candidate commit. This commit is the Review/QA target; the root retains Git integration and acceptance. No edits to reviewed surfaces land through Review/QA.
+4. Review/QA receives an immutable packet with the exact base and target SHAs, the primary committed diff, current Git status and uncommitted-delta summary, reviewed-source quiescence, the included Worker map, and the validation/evidence paths:
+
+   ```md
+   ## Review target
+   - Original base: <sha>
+   - Candidate target: <sha>
+   - Primary diff: <base>..<target>
+   - Git status: <clean/dirty and exact status or bounded summary>
+   - Uncommitted deltas: <paths, owners, and whether any can affect the target>
+   - Reviewed source writers: quiescent
+   - Included Workers: <task paths and owned slices>
+   - Evidence: <validation and artifact paths>
+   - QA provenance: <target-verified, or honest non-target provenance>
+   ```
+
+   Review inspects the committed target object and diff, not an assumed globally clean worktree, and must not issue independent acceptance against a moving target. QA may claim exact-target runtime proof only when its execution environment and source are verified at the candidate target and no undisclosed or relevant deltas can affect proof; otherwise QA waits for quiescence or labels provenance honestly. An architecture consultation may inspect uncommitted or incomplete material only as advisory input, never as independent acceptance.
+5. Findings return to the persistent specialist that owns the affected slice. After repair, the root creates an additive repair commit; the same Reviewer re-reviews source findings against both the repair delta (`<old-target>..<new-target>`) and cumulative diff (`<base>..<new-target>`), while the same QA owner reruns runtime proof against the repaired target and reports its provenance again.
+
 ## Persistent Ownership And Review
 
 Task completion releases active execution, not identity or accumulated context.
@@ -151,13 +180,14 @@ Task completion releases active execution, not identity or accumulated context.
 - Reactivate the same completed Worker for reviewer-directed repairs and coherent follow-on work.
 - Reactivate the same Triage owner for clarification and renewed evidence.
 - Reactivate the same Reviewer for re-review of the same slice or campaign.
+- Reactivate the same QA owner to rerun runtime proof after repair.
 - Spawn a fresh sibling only for changed ownership, poisoned context, a genuinely independent second opinion, or a materially new slice.
 
 Before spawning, inspect existing task paths for the same role and ownership. One durable owner per slice is the default. Rework is not a reason to discard context. If two repair cycles fail, revisit diagnosis, decomposition, or the execution contract rather than manufacturing another Worker.
 
 Review treats both the Triage report and implementation as fallible. Review compares the causal model with source and runtime evidence, checks the touched and adjacent surfaces, judges architecture, correctness, security, migration completeness, and evidence sufficiency, and hunts deeper explanations. It does not routinely repeat formatting, compilation, static analysis, or tests already run successfully by the Worker. Run a targeted probe only for a concrete suspicion, contradictory proof, high-consequence boundary, or integrated-state drift.
 
-Return bounded findings to the same Worker. If a Reviewer supplied midstream Triage adjudication, mark later verdicts reduced-independence/advisory; use a fresh Reviewer when consequential independent final acceptance is required.
+Return bounded source findings to the same Worker or persistent specialist, and runtime findings to the same QA owner. If a Reviewer supplied midstream Triage adjudication, mark later verdicts reduced-independence/advisory; use a fresh Reviewer when consequential independent final acceptance is required.
 
 ## QA, Design, And Deployment
 
@@ -180,9 +210,9 @@ Read [references/coordination-loop.md](references/coordination-loop.md) for exac
 3. Verify the report, settle shared contracts, and define dependency-ordered ownership slices.
 4. Dispatch persistent Workers in parallel where ownership is clear; keep uncertain or overlapping work serial.
 5. Route concrete Worker questions to the existing Triage owner and propagate only material cross-slice changes through the root.
-6. After parallel edits stabilize, give one Worker the integrated build/test/fix lane when necessary. The root retains Git mutations and acceptance.
-7. Inspect completion claims and evidence. Dispatch persistent Review or QA when risk warrants it; return findings to the same owner.
-8. Commit stable forward progress after a coherent slice has focused proof and no known breakage, excluding unrelated shared-worktree changes.
+6. After parallel edits stabilize, the root quiesces parallel writers. If integration repair or a serial build/test/fix lane is needed, activate exactly one integration Worker while all other writers remain quiescent; after it finishes, re-quiesce reviewed surfaces, integrate the final aggregate state, and run focused aggregate validation. The root retains Git mutations and acceptance.
+7. Commit one coherent stable candidate after that validation, excluding unrelated shared-worktree changes; do not create per-Worker commits or extra branches/worktrees for review.
+8. Dispatch persistent Review or QA against the exact checkpoint packet when risk warrants it; return findings to the persistent specialist, then use an additive repair commit, same-Reviewer source re-review, and same-QA-owner rerun as described above.
 9. Finish aggregate validation and make the explicit decision when possible; record the campaign terminal disposition as `accepted`, `rejected`, `blocked`, or `abandoned`.
 10. Once the campaign reaches any terminal disposition, finalize the bounded campaign-close learning packet described in [references/learning-loop.md](references/learning-loop.md) for every substantial campaign, even when KPIs are zero or not observed. Keep a bounded latest snapshot if useful, but forward only a new immutable revisioned artifact with campaign/revision metadata, supersession and correction details when applicable, and a verifiable integrity identity. A later correction explicitly reopens the campaign and never overwrites a prior forwarded revision. Separate repository friction, which belongs in the task-owner completion handoff, from harness candidates; forward only to an explicitly configured consumer. Learning packets are evidence only: never automatically change policy, roles, routing, hooks, tasks, configuration, or installs.
 
