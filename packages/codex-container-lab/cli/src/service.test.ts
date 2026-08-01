@@ -125,6 +125,38 @@ class LargeComposeFailureServiceDocker extends RecordingDocker {
   }
 }
 
+class ServiceLogsDocker extends RecordingDocker {
+  constructor(
+    private readonly statuses: unknown[],
+    private readonly logs: Record<string, string | CommandResult | Error>,
+    private readonly modelServices: string[] = ["dev"],
+    private readonly lifecycle = "LIFECYCLE_MARKER",
+  ) { super(); }
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    this.calls.push(args);
+    this.runCalls.push({ args, options });
+    if (args.includes("config")) {
+      return { code: 0, stdout: Buffer.from(JSON.stringify({
+        services: Object.fromEntries(this.modelServices.map((service) => [service, {}])),
+      })), stderr: Buffer.alloc(0) };
+    }
+    if (args.includes("up")) {
+      return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(this.lifecycle) };
+    }
+    if (args.includes("ps") && args.includes("--all")) {
+      return { code: 0, stdout: Buffer.from(JSON.stringify(this.statuses)), stderr: Buffer.alloc(0) };
+    }
+    if (args.includes("logs")) {
+      const service = args.at(-1)!;
+      const log = this.logs[service] ?? "";
+      if (log instanceof Error) throw log;
+      if (typeof log === "string") return { code: 0, stdout: Buffer.from(log), stderr: Buffer.alloc(0) };
+      return log;
+    }
+    return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+}
+
 describe("attached service lifecycle", () => {
   test("create provisions synchronously and returns only lab identity and terminal state", async () => {
     const root = await mkdtemp(join(tmpdir(), "container-lab-create-"));
@@ -312,6 +344,219 @@ describe("attached service lifecycle", () => {
     expect(diagnostic).toContain("TERMINAL_COMPOSE_FAILURE_DEV");
     expect(diagnostic).toContain("TERMINAL_DEV_EXIT_17");
     expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(16 * 1024);
+    await service.destroyLab(created.labId);
+  });
+
+  test("combines lifecycle and failed-service logs while excluding healthy, exit-zero, and unexposed services", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-selection-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), `image: { name: node:24, service: dev }
+ports:
+  api: { service: api, target: 8080 }
+`);
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const statuses = [
+      { Service: "dev", State: "exited", ExitCode: 17 },
+      { Service: "api", State: "running", Health: "healthy", ExitCode: 0 },
+      { Service: "exit-zero", State: "exited", ExitCode: 0 },
+      { Service: "database", State: "exited", ExitCode: 17 },
+    ];
+    const docker = new ServiceLogsDocker(statuses, {
+      dev: "MIGRATION_ERROR_MARKER",
+      api: "HEALTHY_SERVICE_MARKER",
+      database: "UNEXPOSED_SIDECAR_MARKER",
+    }, ["dev", "api"]);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-selection", roots, docker);
+
+    const created = await service.createLab("service-logs", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-selection", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(artifact).toContain("--- compose-up ---");
+    expect(artifact).toContain("LIFECYCLE_MARKER");
+    expect(artifact).toContain("--- service:dev ---");
+    expect(artifact).toContain("MIGRATION_ERROR_MARKER");
+    expect(artifact).not.toContain("HEALTHY_SERVICE_MARKER");
+    expect(artifact).not.toContain("UNEXPOSED_SIDECAR_MARKER");
+    expect(docker.runCalls.filter((call) => call.args.includes("logs")).map((call) => call.args.at(-1))).toEqual(["dev"]);
+    expect(lab.provisioningFailure?.services).toEqual([
+      { service: "dev", state: "exited", exitCode: 17 },
+      { service: "api", state: "running", health: "healthy", exitCode: 0 },
+      { service: "exit-zero", state: "exited", exitCode: 0 },
+      { service: "database", state: "exited", exitCode: 17 },
+    ]);
+    const diagnostic = JSON.stringify(await service.diagnostic(created.labId));
+    expect(diagnostic).toContain("MIGRATION_ERROR_MARKER");
+    expect(diagnostic).not.toContain("HEALTHY_SERVICE_MARKER");
+    await service.destroyLab(created.labId);
+  });
+
+  test("captures unhealthy manifest services even with a zero or absent exit code", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-unhealthy-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), `image: { name: node:24, service: dev }
+ports:
+  api: { service: api, target: 8080 }
+  worker: { service: worker, target: 8081 }
+`);
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const docker = new ServiceLogsDocker([
+      { Service: "dev", State: "running", Health: "healthy", ExitCode: 0 },
+      { Service: "api", State: "running", Health: "unhealthy", ExitCode: 0 },
+      { Service: "worker", State: "running", Health: "unhealthy" },
+    ], {
+      api: "UNHEALTHY_ZERO_EXIT_MARKER",
+      worker: "UNHEALTHY_MISSING_EXIT_MARKER",
+    }, ["dev", "api", "worker"]);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-unhealthy", roots, docker);
+
+    const created = await service.createLab("service-unhealthy", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-unhealthy", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(artifact).toContain("UNHEALTHY_ZERO_EXIT_MARKER");
+    expect(artifact).toContain("UNHEALTHY_MISSING_EXIT_MARKER");
+    expect(docker.runCalls.filter((call) => call.args.includes("logs")).map((call) => call.args.at(-1))).toEqual(["api", "worker"]);
+    await service.destroyLab(created.labId);
+  });
+
+  test("selects command and declared port services in manifest order beyond public summary limits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-order-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), `image: { name: node:24, service: dev }
+ports:
+  api: { service: api, target: 8080 }
+  worker: { service: worker, target: 8081 }
+  jobs: { service: jobs, target: 8082 }
+  metrics: { service: metrics, target: 8083 }
+`);
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const sidecars = Array.from({ length: 16 }, (_, index) => ({ Service: `sidecar-${index}`, State: "exited", ExitCode: 17 }));
+    const candidates = ["dev", "api", "worker", "jobs", "metrics"];
+    const statuses = [...sidecars, ...candidates.map((Service) => ({ Service, State: "exited", ExitCode: 17 }))];
+    const logs = Object.fromEntries(candidates.map((service) => [service, `TERMINAL_${service.toUpperCase()}_MARKER`])) as Record<string, string>;
+    const docker = new ServiceLogsDocker(statuses, logs, ["dev", "api", "worker", "jobs", "metrics", ...sidecars.map((row) => row.Service)]);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-order", roots, docker);
+
+    const created = await service.createLab("service-order", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-order", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(docker.runCalls.filter((call) => call.args.includes("logs")).map((call) => call.args.at(-1))).toEqual(["dev", "api", "worker", "jobs"]);
+    for (const serviceName of ["dev", "api", "worker", "jobs"]) expect(artifact).toContain(`TERMINAL_${serviceName.toUpperCase()}_MARKER`);
+    expect(artifact).not.toContain("TERMINAL_METRICS_MARKER");
+    expect(lab.provisioningFailure?.serviceCount).toBe(21);
+    expect(JSON.stringify(await service.labStatus(created.labId))).not.toContain("TERMINAL_API_MARKER");
+    await service.destroyLab(created.labId);
+  });
+
+  test("fairly preserves terminal markers for every selected service within the aggregate cap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-fairness-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), `image: { name: node:24, service: dev }
+ports:
+  api: { service: api, target: 8080 }
+  worker: { service: worker, target: 8081 }
+  jobs: { service: jobs, target: 8082 }
+`);
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const selected = ["dev", "api", "worker", "jobs"];
+    const statuses = selected.map((Service) => ({ Service, State: "exited", ExitCode: 17 }));
+    const logs = Object.fromEntries(selected.map((serviceName) => [
+      serviceName,
+      `${"NOISY_${serviceName}_PREFIX\\n".repeat(400)}TERMINAL_${serviceName.toUpperCase()}_MARKER`,
+    ])) as Record<string, string>;
+    const docker = new ServiceLogsDocker(statuses, logs, selected);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-fairness", roots, docker);
+
+    const created = await service.createLab("service-fairness", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-fairness", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    for (const serviceName of selected) expect(artifact).toContain(`TERMINAL_${serviceName.toUpperCase()}_MARKER`);
+    expect(Buffer.byteLength(artifact)).toBeLessThanOrEqual(8 * 1024);
+    expect(artifact.split("\n").length).toBeLessThanOrEqual(500);
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, truncated: true });
+    for (const call of docker.runCalls.filter((entry) => entry.args.includes("logs"))) {
+      expect(call.options).toMatchObject({ stdoutCapture: "tail", stderrCapture: "tail" });
+    }
+    await service.destroyLab(created.labId);
+  });
+
+  test("fails closed across service log secrets, paths, and control bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-redaction-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    const secret = "service-log-secret-8f31";
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [REGISTRY_TOKEN]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const statuses = [{ Service: "dev", State: "exited", ExitCode: 17 }];
+    const docker = new ServiceLogsDocker(statuses, {
+      dev: `secret=${secret} path=/private/tmp/adversarial windows=C:\\Users\\adversarial\\AppData\\Local\\Docker\\secret unc=\\\\server\\share\\secret project=ccl-private id=${"a".repeat(64)}\u0001`,
+    });
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-redaction", roots, docker, {
+      PATH: process.env.PATH,
+      REGISTRY_TOKEN: secret,
+    });
+
+    const created = await service.createLab("service-redaction", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-redaction", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    const status = JSON.stringify(await service.labStatus(created.labId));
+    const diagnostic = JSON.stringify(await service.diagnostic(created.labId));
+    const logsCall = docker.runCalls.find((call) => call.args.includes("logs"));
+    expect(logsCall).toBeDefined();
+    expect(logsCall?.options?.env?.REGISTRY_TOKEN).toBeUndefined();
+    for (const value of [artifact, status, diagnostic]) {
+      expect(value).not.toContain(secret);
+      expect(value).not.toContain("/private/tmp");
+      expect(value).not.toContain("C:\\Users\\adversarial\\AppData\\Local\\Docker\\secret");
+      expect(value).not.toContain("\\\\server\\share\\secret");
+      expect(value).not.toContain("ccl-private");
+      expect(value).not.toContain("a".repeat(64));
+      expect(value).not.toContain("\u0001");
+    }
+    expect(Buffer.byteLength(artifact)).toBeLessThanOrEqual(8 * 1024);
+    await service.destroyLab(created.labId);
+  });
+
+  test("keeps the fixed Compose error when selected service log capture fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-failure-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const docker = new ServiceLogsDocker([{ Service: "dev", State: "exited", ExitCode: 17 }], { dev: new Error("logs unavailable") });
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-failure", roots, docker);
+
+    const created = await service.createLab("service-log-failure", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-failure", created.labId);
+    expect(lab.error).toBe("Docker Compose up failed; secret-bearing diagnostics redacted");
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, truncated: true });
     await service.destroyLab(created.labId);
   });
 

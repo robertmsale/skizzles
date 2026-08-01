@@ -198,32 +198,70 @@ export async function stackStatus(
   runner: DockerRunner = defaultDockerRunner,
   options: { all?: boolean; environment?: NodeJS.ProcessEnv } = {},
 ): Promise<unknown> {
-  const result = await composeCommand(runtime, ["ps", ...(options.all ? ["--all"] : []), "--format", "json"], {
-    allowFailure: true,
-    timeoutMs: 20_000,
-    environment: options.environment,
-  }, runner);
-  if (result.code !== 0) return { available: false, error: compactError(result.stderr.toString()) };
+  const status = await listStackServiceSummaries(runtime, runner, options.environment, options.all === true);
+  if (!status.available) return { available: false, error: status.error };
+  return {
+    available: true,
+    ...(options.all ? { serviceCount: status.serviceCount } : {}),
+    services: status.services.slice(0, 16),
+  };
+}
+
+type ServiceSummary = {
+  service: string;
+  state: string;
+  health?: string;
+  exitCode?: number;
+};
+
+type StackServiceStatus = {
+  available: boolean;
+  services: ServiceSummary[];
+  serviceCount: number;
+  error?: string;
+};
+
+async function listStackServiceSummaries(
+  runtime: LabRuntime,
+  runner: DockerRunner,
+  environment?: NodeJS.ProcessEnv,
+  all = true,
+): Promise<StackServiceStatus> {
+  let result: CommandResult;
+  try {
+    result = await composeCommand(runtime, ["ps", ...(all ? ["--all"] : []), "--format", "json"], {
+      allowFailure: true,
+      timeoutMs: 20_000,
+      environment,
+    }, runner);
+  } catch {
+    return { available: false, services: [], serviceCount: 0, error: "Docker returned an unavailable status response" };
+  }
+  if (result.code !== 0) {
+    return { available: false, services: [], serviceCount: 0, error: compactError(result.stderr.toString()) };
+  }
   const raw = result.stdout.toString().trim();
-  if (!raw) return { available: true, services: [] };
+  if (!raw) return { available: true, services: [], serviceCount: 0 };
+  const values = parseStatusValues(raw, 1_000);
+  if (!values) {
+    return { available: false, services: [], serviceCount: 0, error: "Docker returned an invalid bounded status response" };
+  }
+  return {
+    available: true,
+    services: summarizeServices(values, 1_000),
+    serviceCount: values.length,
+  };
+}
+
+function parseStatusValues(raw: string, maximum: number): unknown[] | undefined {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    const values = Array.isArray(parsed) ? parsed : [parsed];
-    return {
-      available: true,
-      ...(options.all ? { serviceCount: Math.min(values.length, 1_000) } : {}),
-      services: summarizeServices(values),
-    };
+    return (Array.isArray(parsed) ? parsed : [parsed]).slice(0, maximum);
   } catch {
     try {
-      const values = raw.split("\n").filter(Boolean).map((line) => JSON.parse(line) as unknown);
-      return {
-        available: true,
-        ...(options.all ? { serviceCount: Math.min(values.length, 1_000) } : {}),
-        services: summarizeServices(values),
-      };
+      return raw.split("\n").filter(Boolean).slice(0, maximum).map((line) => JSON.parse(line) as unknown);
     } catch {
-      return { available: false, error: "Docker returned an invalid bounded status response" };
+      return undefined;
     }
   }
 }
@@ -237,13 +275,15 @@ async function captureComposeFailure(
   const capturedAt = new Date().toISOString();
   let services: ProvisioningFailureDiagnostic["services"] = [];
   let serviceCount = 0;
+  let candidates: string[] = [];
+  let allServices: ServiceSummary[] = [];
   try {
-    const status = await stackStatus(runtime, runner, { all: true, environment });
-    if (isRecord(status) && Array.isArray(status.services)) {
-      services = status.services.filter(isServiceSummary).slice(0, 16);
-      serviceCount = typeof status.serviceCount === "number" && Number.isInteger(status.serviceCount)
-        ? Math.max(services.length, Math.min(status.serviceCount, 1_000))
-        : services.length;
+    const status = await listStackServiceSummaries(runtime, runner, environment, true);
+    if (status.available) {
+      allServices = status.services;
+      services = allServices.slice(0, 16);
+      serviceCount = status.serviceCount;
+      candidates = selectFailedDiagnosticServices(runtime, allServices);
     }
   } catch {
     // Capturing diagnostics is deliberately best effort. The original
@@ -254,26 +294,60 @@ async function captureComposeFailure(
     ? ""
     : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0).join("\n");
   const secretValues = declaredSecretValues(runtime, environment);
-  let transcript = boundedLogTail(redactComposeFailure(raw, runtime, secretValues), 500, 8 * 1024);
-  // This is the final privacy boundary. boundedLogTail sanitizes control
-  // bytes, so it can introduce a literal declared secret after redaction
-  // (for example U+0001 becoming U+FFFD when the secret is U+FFFD).
-  if (secretValues.some((secret) => transcript.text.includes(secret))) {
-    transcript = { text: "", truncated: false };
+  const lifecycleBytes = candidates.length > 0 ? 2_048 - 1 : 8 * 1024;
+  const lifecycleLines = candidates.length > 0 ? 125 : 500;
+  const lifecycle = buildDiagnosticSegment(
+    "compose-up",
+    raw,
+    runtime,
+    secretValues,
+    lifecycleLines,
+    lifecycleBytes,
+    provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true,
+  );
+  const serviceBytes = divideDiagnosticBudget(6 * 1024 - Math.max(0, candidates.length - 1), candidates.length);
+  const serviceLines = divideDiagnosticBudget(375, candidates.length);
+  const segments = [lifecycle];
+  for (const [index, service] of candidates.entries()) {
+    const captured = await captureFailedServiceLogs(
+      runtime,
+      service,
+      Math.max(1, (serviceLines[index] ?? 1) - 1),
+      Math.max(1, serviceBytes[index] ?? 1),
+      runner,
+      environment,
+    );
+    segments.push(buildDiagnosticSegment(
+      `service:${service}`,
+      captured.raw,
+      runtime,
+      secretValues,
+      serviceLines[index] ?? 1,
+      serviceBytes[index] ?? 1,
+      captured.truncated,
+    ));
   }
-  const upstreamTruncated = provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true;
+  let transcript = segments.map((segment) => segment.text).filter(Boolean).join("\n");
+  let transcriptTruncated = segments.some((segment) => segment.truncated);
+  const privacyFailure = segments.some((segment) => segment.privacyFailure);
+  const aggregateSecret = secretValues.some((secret) => transcript.includes(secret));
+  const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split("\n").length > 500;
+  if (privacyFailure || aggregateSecret || aggregateBounds) {
+    transcript = "";
+    transcriptTruncated ||= aggregateSecret || aggregateBounds;
+  }
   const evidence = {
     kind: "compose-up" as const,
     available: false,
     bytes: 0,
     lines: 0,
-    truncated: upstreamTruncated || transcript.truncated,
+    truncated: transcriptTruncated,
   };
   try {
-    await writeFailureTranscript(runtime.metadata.runtimeRoot, transcript.text);
+    await writeFailureTranscript(runtime.metadata.runtimeRoot, transcript);
     evidence.available = true;
-    evidence.bytes = Buffer.byteLength(transcript.text);
-    evidence.lines = transcript.text ? transcript.text.split("\n").length : 0;
+    evidence.bytes = Buffer.byteLength(transcript);
+    evidence.lines = transcript ? transcript.split("\n").length : 0;
   } catch {
     // A transcript write must never mask the exact Compose error or block
     // label-scoped cleanup in the service failure path.
@@ -284,6 +358,80 @@ async function captureComposeFailure(
     services,
     serviceCount,
     evidence,
+  };
+}
+
+function selectFailedDiagnosticServices(runtime: LabRuntime, services: readonly ServiceSummary[]): string[] {
+  const candidates = [...new Set([
+    runtime.config.mode.commandService,
+    ...runtime.config.ports.map((port) => port.service),
+  ])];
+  const summaries = new Map(services.map((service) => [service.service, service]));
+  return candidates.filter((candidate) => {
+    const summary = summaries.get(candidate);
+    if (!summary) return false;
+    const failedExit = summary.state.toLowerCase() === "exited" && summary.exitCode !== undefined && summary.exitCode !== 0;
+    return failedExit || summary.health?.toLowerCase() === "unhealthy";
+  }).slice(0, 4);
+}
+
+function divideDiagnosticBudget(total: number, count: number): number[] {
+  if (count <= 0) return [];
+  const base = Math.floor(total / count);
+  const remainder = total - base * count;
+  return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1 : 0));
+}
+
+async function captureFailedServiceLogs(
+  runtime: LabRuntime,
+  service: string,
+  tailLines: number,
+  segmentBytes: number,
+  runner: DockerRunner,
+  environment: NodeJS.ProcessEnv,
+): Promise<{ raw: string; truncated: boolean }> {
+  const headerBytes = Buffer.byteLength(`--- service:${service} ---`);
+  const streamBytes = Math.max(1, Math.floor(Math.max(1, segmentBytes - headerBytes - 1) / 2));
+  let result: CommandResult;
+  try {
+    result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--tail", String(tailLines), service], {
+      allowFailure: true,
+      timeoutMs: 20_000,
+      maxOutputBytes: streamBytes,
+      stdoutCapture: "tail",
+      stderrCapture: "tail",
+      env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
+    });
+  } catch {
+    return { raw: "", truncated: true };
+  }
+  return {
+    raw: [result.stdout.toString(), result.stderr.toString()].filter((part) => part.length > 0).join("\n"),
+    truncated: result.code !== 0 || result.stdoutTruncated === true || result.stderrTruncated === true,
+  };
+}
+
+function buildDiagnosticSegment(
+  label: string,
+  raw: string,
+  runtime: LabRuntime,
+  secretValues: readonly string[],
+  maxLines: number,
+  maxBytes: number,
+  upstreamTruncated: boolean,
+): { text: string; truncated: boolean; privacyFailure: boolean } {
+  const header = `--- ${label} ---`;
+  const body = boundedLogTail(
+    redactComposeFailure(raw, runtime, secretValues),
+    Math.max(0, maxLines - 1),
+    Math.max(0, maxBytes - Buffer.byteLength(header) - 1),
+  );
+  const text = body.text ? `${header}\n${body.text}` : header;
+  const privacyFailure = secretValues.some((secret) => text.includes(secret));
+  return {
+    text: privacyFailure ? "" : text,
+    truncated: upstreamTruncated || body.truncated,
+    privacyFailure,
   };
 }
 
@@ -557,13 +705,8 @@ export async function terminateDockerRun(
   }
 }
 
-function summarizeServices(values: unknown[]): Array<{
-  service: string;
-  state: string;
-  health?: string;
-  exitCode?: number;
-}> {
-  return values.slice(0, 16).flatMap((value) => {
+function summarizeServices(values: unknown[], maximum = 16): ServiceSummary[] {
+  return values.slice(0, maximum).flatMap((value) => {
     if (!isRecord(value)) return [];
     const rawService = typeof value.Service === "string" ? value.Service : typeof value.Name === "string" ? value.Name : undefined;
     const rawState = typeof value.State === "string" ? value.State : undefined;
@@ -589,17 +732,6 @@ function summarizeServices(values: unknown[]): Array<{
 
 function sanitizeDiagnosticField(value: string, maximum: number): string {
   return value.replace(/[\u0000-\u001f\u007f]/g, "�").slice(0, maximum);
-}
-
-function isServiceSummary(value: unknown): value is {
-  service: string;
-  state: string;
-  health?: string;
-  exitCode?: number;
-} {
-  return isRecord(value) && typeof value.service === "string" &&
-    typeof value.state === "string" && (value.health === undefined || typeof value.health === "string") &&
-    (value.exitCode === undefined || (typeof value.exitCode === "number" && Number.isInteger(value.exitCode) && value.exitCode >= -1 && value.exitCode <= 255));
 }
 
 function boundedLogTail(value: string, maxLines: number, maxBytes: number): { text: string; truncated: boolean } {
