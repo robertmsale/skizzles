@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, realpath, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { loadLabConfig } from "./config";
 import { internalImageTag } from "./compose";
 import {
   cleanupLabLabels,
   defaultDockerRunner,
+  DockerProvisioningFailure,
   destroyLabStack,
   dockerAvailable,
   launchDockerRun,
+  PROVISIONING_FAILURE_DIAGNOSTIC_FILE,
   prepareLabRuntime,
   provisionLabStack,
   runtimeFromLab,
@@ -38,7 +40,7 @@ import {
   type StateRoots,
 } from "./state";
 import { applySync, initializeSyncBaseline, previewSync, publicSyncPreview, recoverSyncTransactions, type SyncDirection } from "./sync";
-import type { LabMetadata } from "./types";
+import type { LabMetadata, ProvisioningFailureDiagnostic } from "./types";
 
 export type RunOutput = {
   stdout: (chunk: Buffer) => void;
@@ -128,6 +130,46 @@ export class ContainerLabService {
     return compactLabStatus(lab, lab.state === "ready" && lab.runtime
         ? await stackStatus(runtimeFromLab(lab), this.docker)
         : undefined);
+  }
+
+  /**
+   * Read the bounded Compose-up transcript captured for this owner's failed
+   * lab. The returned contract contains no filesystem path; ownership is
+   * enforced by resolving the manifest through this service instance.
+   */
+  async diagnostic(id: string): Promise<unknown> {
+    await this.reconcileOwner();
+    const lab = await readLab(this.roots, this.owner, id);
+    if (lab.state !== "failed") throw new Error(`lab is not failed: ${lab.state}`);
+    const failure = lab.provisioningFailure;
+    if (!failure?.evidence?.available) throw new Error("terminal provisioning diagnostic is unavailable");
+    if (!await exactDirectoryChain(this.roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory")) {
+      throw new Error("terminal provisioning diagnostic is unavailable");
+    }
+    const path = join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+    const metadata = await lstat(path).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!metadata || metadata.isSymbolicLink() || !metadata.isFile() || (metadata.mode & 0o777) !== 0o600) {
+      throw new Error("terminal provisioning diagnostic is unavailable");
+    }
+    const stored = await readFile(path, "utf8");
+    if (Buffer.byteLength(stored) > 8 * 1024) throw new Error("terminal provisioning diagnostic is unavailable");
+    const text = redactPublicText(stored.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "�"), 8 * 1024, 500);
+    const lines = text ? text.split("\n").length : 0;
+    if (lines > 500) throw new Error("terminal provisioning diagnostic is unavailable");
+    return {
+      labId: id,
+      diagnostic: {
+        phase: failure.phase,
+        capturedAt: failure.capturedAt,
+        services: failure.services,
+        serviceCount: failure.serviceCount,
+        evidence: failure.evidence,
+        transcript: { text, truncated: failure.evidence.truncated, bytes: Buffer.byteLength(text), lines },
+      },
+    };
   }
 
   async run(
@@ -252,6 +294,7 @@ export class ContainerLabService {
       }
       await this.assertDestroyFilesystem(lab);
       lab.state = "destroying";
+      lab.provisioningFailure = undefined;
       lab.updatedAt = new Date().toISOString();
       await writeLab(this.roots, lab);
       claimed = lab;
@@ -298,6 +341,7 @@ export class ContainerLabService {
     let dockerMaterializationStarted = false;
     let provisioningEnvironment: NodeJS.ProcessEnv | undefined;
     let secretEnvironmentNames: string[] = [];
+    let provisioningFailure: ProvisioningFailureDiagnostic | undefined;
     let failure: unknown;
     try {
         await this.assertProvisioning(id, signal);
@@ -364,6 +408,14 @@ export class ContainerLabService {
         await this.assertProvisioning(id, signal);
       } catch (error) {
         failure = error;
+        if (error instanceof DockerProvisioningFailure) {
+          provisioningFailure = error.diagnostic;
+          // Make the structured summary durable while the stack still exists;
+          // cleanup and the final failed-state transition are separate steps.
+          await this.updateProvisioning(id, (current) => {
+            current.provisioningFailure = provisioningFailure;
+          }).catch(() => undefined);
+        }
         if (runtime) await destroyLabStack(runtime, this.docker).catch(() => undefined);
         else if (dockerMaterializationStarted) await cleanupLabLabels(
           lab,
@@ -383,6 +435,7 @@ export class ContainerLabService {
       current = { ...current, ...lab };
       current.state = failure ? "failed" : "ready";
       current.error = failure ? compactError(failure) : undefined;
+      current.provisioningFailure = failure ? provisioningFailure : undefined;
       current.updatedAt = new Date().toISOString();
       await writeLab(this.roots, current);
     }, { attempts: 600, delayMs: 50 });
@@ -566,7 +619,25 @@ function compactLabStatus(lab: LabMetadata, stack: unknown): unknown {
     ...(endpoints.length ? { endpoints, endpointCount: lab.endpoints.length } : {}),
     ...(findings.length ? { findings, findingCount: lab.findings.length } : {}),
     ...(lab.error ? { error: publicError(lab.error) } : {}),
+    ...(lab.state === "failed" && lab.provisioningFailure
+      ? { provisioningFailure: publicProvisioningFailure(lab.provisioningFailure) }
+      : {}),
     ...(stack ? { stack } : {}),
+  };
+}
+
+function publicProvisioningFailure(value: ProvisioningFailureDiagnostic): ProvisioningFailureDiagnostic {
+  return {
+    phase: value.phase,
+    capturedAt: value.capturedAt,
+    services: value.services.slice(0, 16).map((service) => ({
+      service: service.service.slice(0, 128),
+      state: service.state.slice(0, 64),
+      ...(service.health ? { health: service.health.slice(0, 64) } : {}),
+      ...(service.exitCode === undefined ? {} : { exitCode: service.exitCode }),
+    })),
+    serviceCount: value.serviceCount,
+    ...(value.evidence ? { evidence: { ...value.evidence } } : {}),
   };
 }
 

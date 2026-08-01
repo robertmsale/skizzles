@@ -25,14 +25,15 @@ Docker runs only on the host. Generated configuration never adds a Docker socket
 
 Synchronization includes Git-tracked and non-ignored untracked files. It uses a three-way baseline, five-minute single-use preview tokens, digest-based stale checks, transactional backups, recovery journals, and a crash-recoverable per-lab activity lock that excludes attached execution while preview/apply runs. Attached commands use argv after `--`; the configured shell is used only as the container-side launcher needed to establish and clean up the process group.
 
-The public JSON boundary uses compact purpose-built response objects. It never serializes durable lab manifests or runtime configuration. Compose status is reduced to service name/state/health summaries, service log tails have line and byte caps, and internal owner hashes, generated paths, Compose arguments, image bookkeeping, and process identities remain private.
+The public JSON boundary uses compact purpose-built response objects. It never serializes durable lab manifests or runtime configuration. Compose status is reduced to service name/state/health summaries, service log tails have line and byte caps, and internal owner hashes, generated paths, Compose arguments, image bookkeeping, and process identities remain private. A failed Compose-up captures a bounded per-lab terminal summary before exact Docker cleanup; its optional `evidence` descriptor is an opaque availability record, never a host path. The owner may retrieve the bounded redacted transcript with `lab diagnostic --lab ID` while the lab remains failed. Diagnostic capture is best effort and cannot replace the original provisioning error or block cleanup.
 
 The stable administrative response shapes are:
 
 - `health`: `{ok,dockerAvailable,labs}`
 - `lab create`: `{labId,state}`
 - `lab list`: `{labs:[{labId,name,state,updatedAt}]}`
-- `lab status`: `{labId,name,state,updatedAt,endpoints?,endpointCount?,findings?,findingCount?,error?,stack?}`; bounded arrays expose actionable entries while counts disclose omitted entries, and `stack.services` contains only `{service,state,health?,exitCode?}` summaries
+- `lab status`: `{labId,name,state,updatedAt,endpoints?,endpointCount?,findings?,findingCount?,error?,provisioningFailure?,stack?}`; failed Compose-up records contain only `{phase,capturedAt,services,serviceCount,evidence?}`, where `evidence` is `{kind,available,bytes,lines,truncated}` and never a filesystem path. Bounded arrays expose actionable entries while counts disclose omitted entries, and `stack.services` contains only `{service,state,health?,exitCode?}` summaries
+- `lab diagnostic --lab ID`: `{labId,diagnostic:{phase,capturedAt,services,serviceCount,evidence,transcript:{text,truncated,bytes,lines}}}` for an owner-scoped failed lab; it rejects ready labs and never exposes the backing runtime path
 - `lab destroy`: `{labId,destroyed}`; `lab destroy-all`: `{destroyed}`
 - `logs`: `{labId,service,transcript:{text,truncated,bytes,lines}}`
 - `sync preview`: `{labId,direction,token,expiresAt,changes,conflicts,changeCount,conflictCount,truncated}`; `sync apply`: `{labId,direction,applied}`

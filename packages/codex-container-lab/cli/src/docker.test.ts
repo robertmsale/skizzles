@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupLabLabels, launchDockerRun, prepareLabRuntime, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
+import { cleanupLabLabels, DockerProvisioningFailure, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
 import { parseLabConfig } from "./config";
 import type { RunOptions, CommandResult } from "./process";
 import type { LabMetadata } from "./types";
@@ -47,6 +47,19 @@ class SecretRecordingDocker implements DockerRunner {
     this.spawnCalls.push({ args, options });
     return new EventEmitter() as ChildProcessWithoutNullStreams;
   }
+}
+
+class ComposeFailureDocker implements DockerRunner {
+  calls: string[][] = [];
+  constructor(readonly sentinel: string, readonly psOutput: string) {}
+  async run(args: string[]): Promise<CommandResult> {
+    this.calls.push(args);
+    if (args.includes("config")) return result(JSON.stringify({ services: { dev: {} } }));
+    if (args.includes("up")) return resultWithError(`failed ${this.sentinel} /private/tmp/ccl-project ${"a".repeat(64)}`);
+    if (args.includes("ps") && args.includes("--all")) return result(this.psOutput);
+    return result("");
+  }
+  spawn(): ChildProcessWithoutNullStreams { return new EventEmitter() as ChildProcessWithoutNullStreams; }
 }
 
 describe("secret environment materialization", () => {
@@ -118,6 +131,60 @@ secret_environment: [REGISTRY_TOKEN]
       expect(upError).toBeInstanceOf(Error);
       expect((upError as Error).message).toBe("Docker Compose up failed; secret-bearing diagnostics redacted");
       expect((upError as Error).message).not.toContain(sentinel);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("failed Compose diagnostics", () => {
+  test("captures --all service exits before cleanup and writes only bounded owner-scoped evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-compose-failure-"));
+    const sentinel = "sentinel-compose-secret-4f17";
+    try {
+      const config = parseLabConfig("image: { name: node:24, service: dev }\nsecret_environment: [REGISTRY_TOKEN]\n", join(root, "source"));
+      const environment = { PATH: "/usr/bin:/bin", REGISTRY_TOKEN: sentinel };
+      const docker = new ComposeFailureDocker(sentinel, JSON.stringify([
+        { Service: "dev", State: "exited", Health: "unhealthy", ExitCode: 17, ID: "container-private", Project: "ccl-private" },
+      ]));
+      const prepared = await prepareLabRuntime(labAt(root), config, docker, environment);
+      let failure: unknown;
+      try { await provisionLabStack(prepared, undefined, docker, environment); }
+      catch (error) { failure = error; }
+      expect(failure).toBeInstanceOf(DockerProvisioningFailure);
+      const diagnostic = (failure as DockerProvisioningFailure).diagnostic;
+      expect(diagnostic.phase).toBe("compose-up");
+      expect(diagnostic.services).toEqual([{ service: "dev", state: "exited", health: "unhealthy", exitCode: 17 }]);
+      expect(diagnostic.evidence?.available).toBe(true);
+      const up = docker.calls.findIndex((args) => args.includes("up"));
+      const ps = docker.calls.findIndex((args) => args.includes("ps") && args.includes("--all"));
+      expect(ps).toBeGreaterThan(up);
+      const artifact = join(labAt(root).runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+      const info = await lstat(artifact);
+      expect(info.isFile()).toBe(true);
+      expect(info.isSymbolicLink()).toBe(false);
+      expect(info.mode & 0o777).toBe(0o600);
+      const text = await readFile(artifact, "utf8");
+      expect(text).not.toContain(sentinel);
+      expect(text).not.toContain("/private/tmp");
+      expect(text).not.toContain("ccl-private");
+      expect(text).not.toContain("a".repeat(64));
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(8 * 1024);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("capture failure preserves the fixed Compose error", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-compose-failure-write-"));
+    try {
+      const config = parseLabConfig("image: { name: node:24, service: dev }\n", join(root, "source"));
+      const docker = new ComposeFailureDocker("unused", "not-json");
+      const prepared = await prepareLabRuntime(labAt(root), config, docker);
+      await rm(prepared.metadata.runtimeRoot, { recursive: true, force: true });
+      await expect(provisionLabStack(prepared, undefined, docker)).rejects.toThrow(
+        "Docker Compose up failed; secret-bearing diagnostics redacted",
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

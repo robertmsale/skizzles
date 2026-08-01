@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { reapArchivedOwners, validateThreadsSchema } from "./archive-reaper";
-import type { DockerRunner } from "./docker";
+import { PROVISIONING_FAILURE_DIAGNOSTIC_FILE, type DockerRunner } from "./docker";
 import type { CommandResult, RunOptions } from "./process";
 import { ensureOwner, ownerKey, writeLab } from "./state";
 import type { LabMetadata } from "./types";
@@ -132,6 +132,18 @@ describe("archive reaper", () => {
     release();
     await held;
     expect((await reaping).archivedOwnersCleaned).toEqual([lab.ownerKey]);
+  });
+
+  test("archive cleanup removes failed-lab diagnostic artifacts with the runtime", async () => {
+    const fixture = await roots();
+    const lab = await createLabFixture(fixture, "thread-diagnostic-reaper");
+    const artifact = join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+    await writeFile(artifact, "redacted\n", { mode: 0o600 });
+    const dbPath = join(fixture.root, "state.sqlite");
+    const db = createDatabase(dbPath); db.run("INSERT INTO threads VALUES (?, 1, 10)", [lab.owner]); db.close();
+
+    expect((await reapArchivedOwners({ dbPath, roots: fixture, docker: new EmptyDocker() })).archivedOwnersCleaned).toEqual([lab.ownerKey]);
+    expect(await Bun.file(artifact).exists()).toBe(false);
   });
 
   test("archive cleanup reclaims a runtime tree larger than the former entry limit", async () => {

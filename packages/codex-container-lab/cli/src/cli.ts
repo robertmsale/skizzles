@@ -93,6 +93,10 @@ async function dispatch(service: ContainerLabService, args: string[], signal?: A
       const flags = parseFlags(rest, new Set(["--lab"]));
       return await service.labStatus(flags.required("--lab"));
     }
+    if (verb === "diagnostic") {
+      const flags = parseFlags(rest, new Set(["--lab"]));
+      return await service.diagnostic(flags.required("--lab"));
+    }
     if (verb === "destroy") {
       const flags = parseFlags(rest, new Set(["--lab"]));
       return await service.destroyLab(flags.required("--lab"));
@@ -242,7 +246,7 @@ function helpText(): string {
     "codex-container-lab [--owner THREAD_ID] [--state-root PATH] [--runtime-root PATH] COMMAND",
     "health",
     "lab create [--name NAME] [--source PATH]",
-    "lab list | lab status --lab ID | lab destroy --lab ID | lab destroy-all",
+    "lab list | lab status --lab ID | lab diagnostic --lab ID | lab destroy --lab ID | lab destroy-all",
     "run --lab ID [--cwd REPO_RELATIVE_PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...",
     "  --cwd is relative to the repository workspace root (default: .); never pass /workspace or another absolute container path",
     "  example: run --lab ID --cwd packages/api -- bun test",

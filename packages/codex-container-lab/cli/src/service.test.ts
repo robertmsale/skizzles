@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { ContainerLabService } from "./service";
-import type { DockerRunner, DockerSpawnOptions } from "./docker";
+import { PROVISIONING_FAILURE_DIAGNOSTIC_FILE, type DockerRunner, type DockerSpawnOptions } from "./docker";
 import type { CommandResult, RunOptions } from "./process";
 import { runCommand } from "./process";
 import { ensureOwner, labManifestPath, ownerKey, readLab, writeLab } from "./state";
@@ -73,6 +73,26 @@ class DestructiveDocker extends RecordingDocker {
     if (args[0] === "rm" && args[1] === "-f") {
       Object.assign(this.child!, { exitCode: 137 });
       this.child!.emit("close", 137);
+    }
+    return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+}
+
+class ComposeFailureServiceDocker extends RecordingDocker {
+  constructor(private readonly sentinel: string) { super(); }
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    this.calls.push(args);
+    this.runCalls.push({ args, options });
+    if (args.includes("config")) {
+      return { code: 0, stdout: Buffer.from(JSON.stringify({ services: { dev: {} } })), stderr: Buffer.alloc(0) };
+    }
+    if (args.includes("up")) {
+      return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(`Compose failed ${this.sentinel} /private/tmp/project`) };
+    }
+    if (args.includes("ps") && args.includes("--all")) {
+      return { code: 0, stdout: Buffer.from(JSON.stringify([
+        { Service: "dev", State: "exited", Health: "unhealthy", ExitCode: 23, ID: "private-container-id", Project: "ccl-private" },
+      ])), stderr: Buffer.alloc(0) };
     }
     return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   }
@@ -177,6 +197,64 @@ describe("attached service lifecycle", () => {
     for (const call of docker.runCalls.filter((call) => !call.args.includes("config") && !call.args.includes("up"))) {
       expect(Object.hasOwn(call.options?.env ?? {}, "REGISTRY_TOKEN")).toBe(false);
     }
+  });
+
+  test("persists failed Compose evidence, serves it across service instances, and removes it on destroy", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-failed-diagnostic-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    const sentinel = "sentinel-failed-compose-7b22";
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [REGISTRY_TOKEN]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const docker = new ComposeFailureServiceDocker(sentinel);
+    const service = new ContainerLabService("thread-failed-diagnostic", roots, docker, {
+      PATH: process.env.PATH,
+      REGISTRY_TOKEN: sentinel,
+    });
+
+    const created = await service.createLab("failed", source);
+    expect(Object.keys(created).sort()).toEqual(["labId", "state"]);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-failed-diagnostic", created.labId);
+    expect(lab.provisioningFailure).toMatchObject({
+      phase: "compose-up",
+      services: [{ service: "dev", state: "exited", health: "unhealthy", exitCode: 23 }],
+    });
+    const status = JSON.stringify(await service.labStatus(created.labId));
+    expect(status).toContain("provisioningFailure");
+    expect(status).toContain("exited");
+    for (const forbidden of [sentinel, "/private/tmp", "ccl-private", "private-container-id", lab.ownerKey, lab.runtimeRoot]) {
+      expect(status).not.toContain(forbidden);
+    }
+    expect(Buffer.byteLength(status)).toBeLessThanOrEqual(16 * 1024);
+    const artifact = join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+    expect(lab.provisioningFailure?.evidence?.available).toBe(true);
+    expect(await Bun.file(artifact).exists()).toBe(true);
+
+    const fresh = new ContainerLabService("thread-failed-diagnostic", roots, docker, { PATH: process.env.PATH });
+    const diagnostic = JSON.stringify(await fresh.diagnostic(created.labId));
+    expect(diagnostic).toContain('"phase":"compose-up"');
+    expect(diagnostic).toContain("exited");
+    expect(diagnostic).not.toContain(sentinel);
+    expect(diagnostic).not.toContain("/private/tmp");
+    expect(diagnostic).not.toContain(lab.runtimeRoot);
+    expect(diagnostic).not.toContain(PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+    expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(16 * 1024);
+
+    await expect(new ContainerLabService("another-owner", roots, docker).diagnostic(created.labId)).rejects.toThrow();
+    expect((await fresh.destroyLab(created.labId)).destroyed).toBe(true);
+    expect(await Bun.file(artifact).exists()).toBe(false);
+    await expect(readLab(roots, "thread-failed-diagnostic", created.labId)).rejects.toThrow();
+  });
+
+  test("keeps legacy failed manifests readable without diagnostics", async () => {
+    const fixture = await durableFixture("thread-legacy-failed", "failed");
+    const service = new ContainerLabService(fixture.owner, fixture.roots, new RecordingDocker());
+    expect((await service.labStatus(fixture.lab.id) as { state: string }).state).toBe("failed");
+    await expect(service.diagnostic(fixture.lab.id)).rejects.toThrow("unavailable");
   });
 
   test("health scrubs the union of secret names from known labs", async () => {

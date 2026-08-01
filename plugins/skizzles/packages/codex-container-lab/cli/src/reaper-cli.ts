@@ -7459,7 +7459,7 @@ function isRecord2(value) {
 
 // packages/codex-container-lab/cli/src/service.ts
 import { createHash as createHash3 } from "crypto";
-import { lstat as lstat5, mkdir as mkdir5, readdir as readdir2, realpath as realpath3, stat } from "fs/promises";
+import { lstat as lstat5, mkdir as mkdir5, readdir as readdir2, readFile as readFile4, realpath as realpath3, stat } from "fs/promises";
 import { join as join2, resolve as resolve2 } from "path";
 
 // packages/codex-container-lab/cli/src/config.ts
@@ -7724,6 +7724,12 @@ function assertLabMetadata(value, roots, owner, labId) {
     }
     if (value.error !== undefined && !isBoundedString(value.error, 4000))
       throw new Error("invalid error");
+    if (value.provisioningFailure !== undefined) {
+      validateProvisioningFailure(value.provisioningFailure);
+      if (value.state !== "provisioning" && value.state !== "failed") {
+        throw new Error("provisioning failure requires provisioning or failed state");
+      }
+    }
     if (value.runtime !== undefined)
       validatePersistedRuntime(value, value.runtime);
     if (value.state === "ready" && value.runtime === undefined)
@@ -7737,6 +7743,25 @@ function assertLabMetadata(value, roots, owner, labId) {
   } catch (error) {
     throw new Error(`invalid lab manifest: ${labId}: ${message(error)}`);
   }
+}
+function validateProvisioningFailure(value) {
+  if (!isRecord3(value) || value.phase !== "compose-up" || !isTimestamp(value.capturedAt) || !Array.isArray(value.services) || value.services.length > 16 || typeof value.serviceCount !== "number" || !Number.isInteger(value.serviceCount) || value.serviceCount < value.services.length || value.serviceCount > 1000) {
+    throw new Error("invalid provisioning failure diagnostic");
+  }
+  if (!value.services.every(isProvisioningService))
+    throw new Error("invalid provisioning failure services");
+  if (value.evidence !== undefined && !isProvisioningEvidence(value.evidence)) {
+    throw new Error("invalid provisioning failure evidence");
+  }
+}
+function isProvisioningService(value) {
+  return isRecord3(value) && typeof value.service === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value.service) && typeof value.state === "string" && isSafeDiagnosticText(value.state, 64) && (value.health === undefined || typeof value.health === "string" && isSafeDiagnosticText(value.health, 64)) && (value.exitCode === undefined || typeof value.exitCode === "number" && Number.isInteger(value.exitCode) && value.exitCode >= -1 && value.exitCode <= 255);
+}
+function isProvisioningEvidence(value) {
+  return isRecord3(value) && value.kind === "compose-up" && typeof value.available === "boolean" && typeof value.bytes === "number" && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 && typeof value.lines === "number" && Number.isInteger(value.lines) && value.lines >= 0 && value.lines <= 500 && typeof value.truncated === "boolean";
+}
+function isSafeDiagnosticText(value, maximum) {
+  return value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value);
 }
 function validatePersistedRuntime(lab, runtime) {
   if (!isRecord3(runtime) || !isRecord3(runtime.config))
@@ -8176,8 +8201,14 @@ async function cleanupExactLab(roots, lab, docker, authorize) {
   await withFileLock(labLock, async () => {
     const current = await readLab(roots, lab.owner, lab.id);
     await validateReaperLab(roots, current.owner, current.ownerKey, current);
-    previous = { state: current.state, updatedAt: current.updatedAt, error: current.error };
+    previous = {
+      state: current.state,
+      updatedAt: current.updatedAt,
+      error: current.error,
+      provisioningFailure: current.provisioningFailure
+    };
     current.state = "destroying";
+    current.provisioningFailure = undefined;
     current.updatedAt = new Date().toISOString();
     await writeLab(roots, current);
     lab = current;
@@ -8191,6 +8222,7 @@ async function cleanupExactLab(roots, lab, docker, authorize) {
         current.state = previous.state;
         current.updatedAt = previous.updatedAt;
         current.error = previous.error;
+        current.provisioningFailure = previous.provisioningFailure;
         await writeLab(roots, current);
       }
     }, { attempts: 600, delayMs: 50 });

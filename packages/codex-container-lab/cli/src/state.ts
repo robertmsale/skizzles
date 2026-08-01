@@ -251,6 +251,12 @@ export function assertLabMetadata(
       throw new Error("invalid mode kind");
     }
     if (value.error !== undefined && !isBoundedString(value.error, 4_000)) throw new Error("invalid error");
+    if (value.provisioningFailure !== undefined) {
+      validateProvisioningFailure(value.provisioningFailure);
+      if (value.state !== "provisioning" && value.state !== "failed") {
+        throw new Error("provisioning failure requires provisioning or failed state");
+      }
+    }
     if (value.runtime !== undefined) validatePersistedRuntime(value, value.runtime);
     if (value.state === "ready" && value.runtime === undefined) throw new Error("ready lab has no runtime");
     if (value.modeKind === "dockerfile") {
@@ -261,6 +267,38 @@ export function assertLabMetadata(
   } catch (error) {
     throw new Error(`invalid lab manifest: ${labId}: ${message(error)}`);
   }
+}
+
+function validateProvisioningFailure(value: unknown): void {
+  if (!isRecord(value) || value.phase !== "compose-up" || !isTimestamp(value.capturedAt) ||
+      !Array.isArray(value.services) || value.services.length > 16 ||
+      typeof value.serviceCount !== "number" || !Number.isInteger(value.serviceCount) ||
+      value.serviceCount < value.services.length || value.serviceCount > 1_000) {
+    throw new Error("invalid provisioning failure diagnostic");
+  }
+  if (!value.services.every(isProvisioningService)) throw new Error("invalid provisioning failure services");
+  if (value.evidence !== undefined && !isProvisioningEvidence(value.evidence)) {
+    throw new Error("invalid provisioning failure evidence");
+  }
+}
+
+function isProvisioningService(value: unknown): boolean {
+  return isRecord(value) && typeof value.service === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value.service) &&
+    typeof value.state === "string" && isSafeDiagnosticText(value.state, 64) &&
+    (value.health === undefined || (typeof value.health === "string" && isSafeDiagnosticText(value.health, 64))) &&
+    (value.exitCode === undefined || (typeof value.exitCode === "number" && Number.isInteger(value.exitCode) && value.exitCode >= -1 && value.exitCode <= 255));
+}
+
+function isProvisioningEvidence(value: unknown): boolean {
+  return isRecord(value) && value.kind === "compose-up" && typeof value.available === "boolean" &&
+    typeof value.bytes === "number" && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 &&
+    typeof value.lines === "number" && Number.isInteger(value.lines) && value.lines >= 0 && value.lines <= 500 &&
+    typeof value.truncated === "boolean";
+}
+
+function isSafeDiagnosticText(value: string, maximum: number): boolean {
+  return value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 function validatePersistedRuntime(lab: Record<string, unknown>, runtime: unknown): asserts runtime is PersistedLabRuntime {

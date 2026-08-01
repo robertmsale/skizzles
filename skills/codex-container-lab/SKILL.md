@@ -37,7 +37,7 @@ For intentional manual use outside Codex, place `--owner THREAD_ID` before the c
 
 - Administrative commands print one compact JSON value. `run` instead streams the child stdout/stderr and exits with its outcome. Usage errors exit 2; operational failures or uncertainty exit 1 with a compact diagnostic on stderr.
 - `lab create` is synchronous. A catchable interruption records `failed`; an abrupt uncatchable host termination may leave `provisioning`. Both states remain explicitly destroyable, so destroy and recreate rather than treating a stale nonterminal state as ready.
-- `failed` includes a compact actionable error. Inspect findings and bounded service logs, then explicitly destroy the failed lab.
+- `failed` includes a compact actionable error and, for Compose-up failures, a bounded redacted terminal service/health/exit summary captured before Docker cleanup. Use `lab diagnostic --lab ID` for the owner-scoped bounded diagnostic transcript; it exposes no runtime path and does not require `state=ready`. Inspect findings and diagnostics, then explicitly destroy the failed lab.
 - Endpoints are named by the manifest and published on random loopback ports. Never guess ports from source Compose files.
 - `logs` returns a bounded service tail with explicit byte, line, and truncation metadata. Use repeated targeted service-log calls for inspection; no internal runtime path is exposed.
 - `health`, create, list, status, destroy, logs, and synchronization use Skizzles' compact public JSON contract. Administrative JSON never exceeds 16 KiB; service transcript text is capped at 8 KiB and the requested line bound. Long attached-run output remains available through the normal command-output supervisor artifact.

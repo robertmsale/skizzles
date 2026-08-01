@@ -18,6 +18,32 @@ export type PersistedLabRuntime = {
   findings: ComposeInspectionFinding[];
 };
 
+/**
+ * A bounded, structured snapshot captured while a lab is provisioning.
+ *
+ * This deliberately contains no Docker ids, Compose project names, owner
+ * material, or filesystem paths.  The optional evidence descriptor refers to
+ * an owner-scoped diagnostic through the service API; it is never a path.
+ */
+export type ProvisioningFailureDiagnostic = {
+  phase: "compose-up";
+  capturedAt: string;
+  services: Array<{
+    service: string;
+    state: string;
+    health?: string;
+    exitCode?: number;
+  }>;
+  serviceCount: number;
+  evidence?: {
+    kind: "compose-up";
+    available: boolean;
+    bytes: number;
+    lines: number;
+    truncated: boolean;
+  };
+};
+
 export type LabMetadata = {
   version: 1;
   id: string;
@@ -40,6 +66,7 @@ export type LabMetadata = {
   secretEnvironment: string[];
   managedImage?: string;
   error?: string;
+  provisioningFailure?: ProvisioningFailureDiagnostic;
   runtime?: PersistedLabRuntime;
 };
 

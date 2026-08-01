@@ -208,12 +208,23 @@ async function cleanupExactLab(
   const labLock = join(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `lab-${lab.id}`);
   const activityLock = join(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `activity-${lab.id}`);
   await authorize();
-  let previous: { state: import("./types").LabMetadata["state"]; updatedAt: string; error?: string } | undefined;
+  let previous: {
+    state: import("./types").LabMetadata["state"];
+    updatedAt: string;
+    error?: string;
+    provisioningFailure?: import("./types").LabMetadata["provisioningFailure"];
+  } | undefined;
   await withFileLock(labLock, async () => {
     const current = await readLab(roots, lab.owner, lab.id);
     await validateReaperLab(roots, current.owner, current.ownerKey, current);
-    previous = { state: current.state, updatedAt: current.updatedAt, error: current.error };
+    previous = {
+      state: current.state,
+      updatedAt: current.updatedAt,
+      error: current.error,
+      provisioningFailure: current.provisioningFailure,
+    };
     current.state = "destroying";
+    current.provisioningFailure = undefined;
     current.updatedAt = new Date().toISOString();
     await writeLab(roots, current);
     lab = current;
@@ -226,6 +237,7 @@ async function cleanupExactLab(
         current.state = previous.state;
         current.updatedAt = previous.updatedAt;
         current.error = previous.error;
+        current.provisioningFailure = previous.provisioningFailure;
         await writeLab(roots, current);
       }
     }, { attempts: 600, delayMs: 50 });

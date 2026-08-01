@@ -6949,7 +6949,7 @@ import { StringDecoder } from "string_decoder";
 
 // packages/codex-container-lab/cli/src/service.ts
 import { createHash as createHash3 } from "crypto";
-import { lstat as lstat6, mkdir as mkdir6, readdir as readdir2, realpath as realpath4, stat as stat2 } from "fs/promises";
+import { lstat as lstat7, mkdir as mkdir6, readdir as readdir2, readFile as readFile5, realpath as realpath4, stat as stat2 } from "fs/promises";
 import { join as join3, resolve as resolve3 } from "path";
 
 // packages/codex-container-lab/cli/src/config.ts
@@ -7571,8 +7571,9 @@ function isRecord2(value) {
 }
 
 // packages/codex-container-lab/cli/src/docker.ts
+import { randomUUID } from "crypto";
 import { spawn as spawn2 } from "child_process";
-import { mkdir, writeFile } from "fs/promises";
+import { lstat, mkdir, rename, rm, writeFile } from "fs/promises";
 import { join, posix as posix2 } from "path";
 
 // packages/codex-container-lab/cli/src/process.ts
@@ -7645,6 +7646,16 @@ function truncateUtf8(value, maxBytes) {
 }
 
 // packages/codex-container-lab/cli/src/docker.ts
+var PROVISIONING_FAILURE_DIAGNOSTIC_FILE = "provisioning-failure.compose-up.log";
+
+class DockerProvisioningFailure extends Error {
+  diagnostic;
+  constructor(message, diagnostic) {
+    super(message);
+    this.diagnostic = diagnostic;
+    this.name = "DockerProvisioningFailure";
+  }
+}
 var defaultDockerRunner = {
   run: async (args, options = {}) => await runCommand("docker", args, options),
   spawn: (args, options = {}) => spawn2("docker", args, {
@@ -7722,7 +7733,7 @@ async function composeCommand(runtime, args, options = {}, runner = defaultDocke
     allowFailure: options.allowFailure,
     maxOutputBytes: 4 * 1024 * 1024,
     signal: options.signal,
-    env: scrubSecretEnvironment(runtime.config.secretEnvironment, process.env)
+    env: scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env)
   });
 }
 async function provisionLabStack(runtime, signal, runner = defaultDockerRunner, environment = process.env) {
@@ -7736,18 +7747,11 @@ async function provisionLabStack(runtime, signal, runner = defaultDockerRunner, 
       env: secretComposeEnvironment(runtime.config.secretEnvironment, environment)
     });
   } catch {
-    throw new Error(signal?.aborted ? "Docker Compose up aborted; secret-bearing diagnostics redacted" : "Docker Compose up failed; secret-bearing diagnostics redacted");
+    const message = signal?.aborted ? "Docker Compose up aborted; secret-bearing diagnostics redacted" : "Docker Compose up failed; secret-bearing diagnostics redacted";
+    throw new DockerProvisioningFailure(message, await captureComposeFailure(runtime, undefined, runner, environment));
   }
   if (provisioned.code !== 0) {
-    let diagnostic = `${provisioned.stdout.toString()}
-${provisioned.stderr.toString()}`;
-    for (const name of runtime.config.secretEnvironment) {
-      const value = environment[name];
-      if (value)
-        diagnostic = diagnostic.split(value).join("[secret-value-redacted]");
-    }
-    await writeFile("/tmp/ccl-compose-failure-redacted.log", redactPublicText(diagnostic), { mode: 384 });
-    throw new Error("Docker Compose up failed; secret-bearing diagnostics redacted");
+    throw new DockerProvisioningFailure("Docker Compose up failed; secret-bearing diagnostics redacted", await captureComposeFailure(runtime, provisioned, runner, environment));
   }
   const compatibility = [
     `test -d ${shellQuote(runtime.config.runtime.workspace)}`,
@@ -7780,8 +7784,12 @@ ${provisioned.stderr.toString()}`;
   }
   return endpoints;
 }
-async function stackStatus(runtime, runner = defaultDockerRunner) {
-  const result = await composeCommand(runtime, ["ps", "--format", "json"], { allowFailure: true, timeoutMs: 20000 }, runner);
+async function stackStatus(runtime, runner = defaultDockerRunner, options = {}) {
+  const result = await composeCommand(runtime, ["ps", ...options.all ? ["--all"] : [], "--format", "json"], {
+    allowFailure: true,
+    timeoutMs: 20000,
+    environment: options.environment
+  }, runner);
   if (result.code !== 0)
     return { available: false, error: compactError(result.stderr.toString()) };
   const raw = result.stdout.toString().trim();
@@ -7789,15 +7797,100 @@ async function stackStatus(runtime, runner = defaultDockerRunner) {
     return { available: true, services: [] };
   try {
     const parsed = JSON.parse(raw);
-    return { available: true, services: summarizeServices(Array.isArray(parsed) ? parsed : [parsed]) };
+    const values = Array.isArray(parsed) ? parsed : [parsed];
+    return {
+      available: true,
+      ...options.all ? { serviceCount: Math.min(values.length, 1000) } : {},
+      services: summarizeServices(values)
+    };
   } catch {
     try {
-      return { available: true, services: summarizeServices(raw.split(`
-`).filter(Boolean).map((line) => JSON.parse(line))) };
+      const values = raw.split(`
+`).filter(Boolean).map((line) => JSON.parse(line));
+      return {
+        available: true,
+        ...options.all ? { serviceCount: Math.min(values.length, 1000) } : {},
+        services: summarizeServices(values)
+      };
     } catch {
       return { available: false, error: "Docker returned an invalid bounded status response" };
     }
   }
+}
+async function captureComposeFailure(runtime, provisioned, runner, environment) {
+  const capturedAt = new Date().toISOString();
+  let services = [];
+  let serviceCount = 0;
+  try {
+    const status = await stackStatus(runtime, runner, { all: true, environment });
+    if (isRecord3(status) && Array.isArray(status.services)) {
+      services = status.services.filter(isServiceSummary).slice(0, 16);
+      serviceCount = typeof status.serviceCount === "number" && Number.isInteger(status.serviceCount) ? Math.max(services.length, Math.min(status.serviceCount, 1000)) : services.length;
+    }
+  } catch {}
+  const raw = provisioned === undefined ? "" : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0).join(`
+`);
+  const transcript = boundedLogTail(redactComposeFailure(raw, runtime, environment), 500, 8 * 1024);
+  const evidence = {
+    kind: "compose-up",
+    available: false,
+    bytes: 0,
+    lines: 0,
+    truncated: transcript.truncated
+  };
+  try {
+    await writeFailureTranscript(runtime.metadata.runtimeRoot, transcript.text);
+    evidence.available = true;
+    evidence.bytes = Buffer.byteLength(transcript.text);
+    evidence.lines = transcript.text ? transcript.text.split(`
+`).length : 0;
+  } catch {}
+  return {
+    phase: "compose-up",
+    capturedAt,
+    services,
+    serviceCount,
+    evidence
+  };
+}
+async function writeFailureTranscript(runtimeRoot, text) {
+  const root = await lstat(runtimeRoot);
+  if (!root.isDirectory() || root.isSymbolicLink()) {
+    throw new Error("invalid lab runtime root");
+  }
+  const destination = join(runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+  const temporary = `${destination}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, text, { mode: 384, flag: "wx" });
+    await rename(temporary, destination);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+function redactComposeFailure(value, runtime, environment) {
+  let diagnostic = value;
+  for (const name of runtime.config.secretEnvironment) {
+    const secret = environment[name];
+    if (secret)
+      diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
+  }
+  const metadata = [
+    runtime.metadata.owner,
+    runtime.metadata.ownerKey,
+    runtime.metadata.id,
+    runtime.metadata.composeProject,
+    runtime.metadata.sourceRoot,
+    runtime.metadata.manifestPath,
+    runtime.metadata.runtimeRoot,
+    runtime.metadata.workspace,
+    ...runtime.composeArgs
+  ];
+  for (const value2 of metadata) {
+    if (value2)
+      diagnostic = diagnostic.split(value2).join("[redacted]");
+  }
+  diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
+  return redactPublicText(diagnostic, 8 * 1024, 500);
 }
 async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunner) {
   if (tailLines < 1 || tailLines > 500)
@@ -8029,21 +8122,34 @@ function summarizeServices(values) {
   return values.slice(0, 16).flatMap((value) => {
     if (!isRecord3(value))
       return [];
-    const service = typeof value.Service === "string" ? value.Service : typeof value.Name === "string" ? value.Name : undefined;
-    const state = typeof value.State === "string" ? value.State : undefined;
-    if (!service || !state)
+    const rawService = typeof value.Service === "string" ? value.Service : typeof value.Name === "string" ? value.Name : undefined;
+    const rawState = typeof value.State === "string" ? value.State : undefined;
+    if (!rawService || !rawState)
+      return [];
+    const service = rawService.slice(0, 128);
+    const state = sanitizeDiagnosticField(rawState, 64);
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(service) || !state)
       return [];
     const summary = {
-      service: service.slice(0, 128),
-      state: state.slice(0, 64)
+      service,
+      state
     };
-    if (typeof value.Health === "string" && value.Health)
-      summary.health = value.Health.slice(0, 64);
-    const exitCode = typeof value.ExitCode === "number" ? value.ExitCode : Number(value.ExitCode);
-    if (Number.isInteger(exitCode))
+    if (typeof value.Health === "string" && value.Health) {
+      const health = sanitizeDiagnosticField(value.Health, 64);
+      if (health)
+        summary.health = health;
+    }
+    const exitCode = typeof value.ExitCode === "number" ? value.ExitCode : typeof value.ExitCode === "string" && value.ExitCode.trim() !== "" ? Number(value.ExitCode) : undefined;
+    if (exitCode !== undefined && Number.isInteger(exitCode))
       summary.exitCode = exitCode;
     return [summary];
   });
+}
+function sanitizeDiagnosticField(value, maximum) {
+  return value.replace(/[\u0000-\u001f\u007f]/g, "\uFFFD").slice(0, maximum);
+}
+function isServiceSummary(value) {
+  return isRecord3(value) && typeof value.service === "string" && typeof value.state === "string" && (value.health === undefined || typeof value.health === "string") && (value.exitCode === undefined || typeof value.exitCode === "number" && Number.isInteger(value.exitCode));
 }
 function boundedLogTail(value, maxLines, maxBytes) {
   const sanitized = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "\uFFFD").trimEnd();
@@ -8104,9 +8210,9 @@ function isRecord3(value) {
 }
 
 // packages/codex-container-lab/cli/src/files.ts
-import { createHash, randomUUID } from "crypto";
+import { createHash, randomUUID as randomUUID2 } from "crypto";
 import { createReadStream } from "fs";
-import { lstat, mkdir as mkdir2, readFile as readFile2, readlink, realpath as realpath2, rename, rm, writeFile as writeFile2 } from "fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2, readlink, realpath as realpath2, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
 import path from "path";
 var MAX_SYNC_FILE_BYTES = 64 * 1024 * 1024;
 function safeRelativePath(value) {
@@ -8127,7 +8233,7 @@ function safeStateName(value, label = "identifier") {
 }
 async function canonicalRoot(root) {
   const resolved = await realpath2(root);
-  const stat2 = await lstat(resolved);
+  const stat2 = await lstat2(resolved);
   if (!stat2.isDirectory())
     throw new Error(`Synchronization root is not a directory: ${root}`);
   return resolved;
@@ -8140,7 +8246,7 @@ async function guardedPath(root, relative2, createParents = false) {
   for (const part of parts.slice(0, -1)) {
     parent = path.join(parent, part);
     try {
-      const stat2 = await lstat(parent);
+      const stat2 = await lstat2(parent);
       if (stat2.isSymbolicLink() || !stat2.isDirectory()) {
         throw new Error(`Unsafe synchronization parent for ${relative2}`);
       }
@@ -8160,7 +8266,7 @@ async function guardedPath(root, relative2, createParents = false) {
 }
 async function describeSyncFile(root, relative2) {
   const absolute = await guardedPath(root, relative2);
-  const stat2 = await lstat(absolute);
+  const stat2 = await lstat2(absolute);
   const mode = stat2.mode & 511;
   if (stat2.isSymbolicLink()) {
     const target = await readlink(absolute);
@@ -8184,17 +8290,17 @@ async function readJson(file) {
 }
 async function writeJsonAtomic(file, value) {
   await mkdir2(path.dirname(file), { recursive: true, mode: 448 });
-  const temporary = `${file}.${randomUUID()}.tmp`;
+  const temporary = `${file}.${randomUUID2()}.tmp`;
   await writeFile2(temporary, `${JSON.stringify(value)}
 `, { mode: 384 });
-  await rename(temporary, file);
+  await rename2(temporary, file);
 }
 async function removeIfPresent(file, options = {}) {
-  await rm(file, { force: true, recursive: options.recursive ?? false });
+  await rm2(file, { force: true, recursive: options.recursive ?? false });
 }
 
 // packages/codex-container-lab/cli/src/locks.ts
-import { link, lstat as lstat2, mkdir as mkdir3, open, readFile as readFile3, rm as rm2, writeFile as writeFile3 } from "fs/promises";
+import { link, lstat as lstat3, mkdir as mkdir3, open, readFile as readFile3, rm as rm3, writeFile as writeFile3 } from "fs/promises";
 import { dirname } from "path";
 async function withFileLock(path2, operation, options = {}) {
   const attempts = options.attempts ?? 100;
@@ -8219,7 +8325,7 @@ async function withFileLock(path2, operation, options = {}) {
           throw error;
       }
       if (acquired) {
-        const candidateInfo = await lstat2(candidate, { bigint: true });
+        const candidateInfo = await lstat3(candidate, { bigint: true });
         const candidateIdentity = identity2(candidateInfo);
         try {
           return await operation();
@@ -8228,7 +8334,7 @@ async function withFileLock(path2, operation, options = {}) {
         }
       }
     } finally {
-      await rm2(candidate, { force: true });
+      await rm3(candidate, { force: true });
     }
     await removeConfirmedStaleLock(path2, staleMs, options.processProbe ?? probeProcess);
     if (attempt + 1 < attempts) {
@@ -8289,10 +8395,10 @@ async function reclaimSameLock(path2, inspected, staleMs, processProbe) {
       pid: process.pid,
       createdAt: new Date().toISOString()
     }), { mode: 384, flag: "wx" });
-    const candidateIdentity = identity2(await lstat2(candidate, { bigint: true }));
+    const candidateIdentity = identity2(await lstat3(candidate, { bigint: true }));
     await claimAndRemoveLock(path2, inspected, candidate, candidateIdentity, staleMs, processProbe);
   } finally {
-    await rm2(candidate, { force: true });
+    await rm3(candidate, { force: true });
   }
 }
 async function claimAndRemoveLock(path2, inspected, claimSource, claimIdentity, staleMs, processProbe) {
@@ -8317,7 +8423,7 @@ async function claimAndRemoveLock(path2, inspected, claimSource, claimIdentity, 
       return;
     if (!await hasIdentity(claimPath, claimIdentity) || !await hasIdentity(path2, inspected))
       return;
-    await rm2(path2, { recursive: true, force: true });
+    await rm3(path2, { recursive: true, force: true });
   } finally {
     if (claimed)
       await removeIfSamePath(claimPath, claimIdentity);
@@ -8366,7 +8472,7 @@ async function removeConfirmedOrphanClaim(claimPath, staleMs, processProbe) {
 async function hasIdentity(path2, expected) {
   let current;
   try {
-    current = await lstat2(path2, { bigint: true });
+    current = await lstat3(path2, { bigint: true });
   } catch (error) {
     if (error.code === "ENOENT")
       return false;
@@ -8378,7 +8484,7 @@ async function hasIdentity(path2, expected) {
 async function removeIfSamePath(path2, inspected) {
   if (!await hasIdentity(path2, inspected))
     return;
-  await rm2(path2, { recursive: true, force: true });
+  await rm3(path2, { recursive: true, force: true });
 }
 function identity2(info) {
   if (info.dev < 0n || info.ino <= 0n)
@@ -8396,7 +8502,7 @@ function isRecord4(value) {
 import { createHash as createHash2 } from "crypto";
 import { homedir, tmpdir } from "os";
 import { basename, isAbsolute as isAbsolute2, join as join2, parse, posix as posix3, relative as relative2, resolve as resolve2, sep } from "path";
-import { lstat as lstat3, mkdir as mkdir4, readdir, realpath as realpath3, rm as rm3 } from "fs/promises";
+import { lstat as lstat4, mkdir as mkdir4, readdir, realpath as realpath3, rm as rm4 } from "fs/promises";
 var LAB_STATES = new Set(["provisioning", "ready", "failed", "destroying"]);
 var FINDING_SURFACES = new Set([
   "host-bind",
@@ -8539,7 +8645,7 @@ async function listLabs(roots, owner) {
   return labs;
 }
 async function removeLabState(stateRoot, owner, labId) {
-  await rm3(labManifestPath(stateRoot, owner, labId), { force: true });
+  await rm4(labManifestPath(stateRoot, owner, labId), { force: true });
 }
 async function assertReadyLabFilesystem(roots, lab) {
   if (lab.state !== "ready" || !lab.runtime)
@@ -8605,6 +8711,12 @@ function assertLabMetadata(value, roots, owner, labId) {
     }
     if (value.error !== undefined && !isBoundedString(value.error, 4000))
       throw new Error("invalid error");
+    if (value.provisioningFailure !== undefined) {
+      validateProvisioningFailure(value.provisioningFailure);
+      if (value.state !== "provisioning" && value.state !== "failed") {
+        throw new Error("provisioning failure requires provisioning or failed state");
+      }
+    }
     if (value.runtime !== undefined)
       validatePersistedRuntime(value, value.runtime);
     if (value.state === "ready" && value.runtime === undefined)
@@ -8618,6 +8730,25 @@ function assertLabMetadata(value, roots, owner, labId) {
   } catch (error) {
     throw new Error(`invalid lab manifest: ${labId}: ${message(error)}`);
   }
+}
+function validateProvisioningFailure(value) {
+  if (!isRecord5(value) || value.phase !== "compose-up" || !isTimestamp(value.capturedAt) || !Array.isArray(value.services) || value.services.length > 16 || typeof value.serviceCount !== "number" || !Number.isInteger(value.serviceCount) || value.serviceCount < value.services.length || value.serviceCount > 1000) {
+    throw new Error("invalid provisioning failure diagnostic");
+  }
+  if (!value.services.every(isProvisioningService))
+    throw new Error("invalid provisioning failure services");
+  if (value.evidence !== undefined && !isProvisioningEvidence(value.evidence)) {
+    throw new Error("invalid provisioning failure evidence");
+  }
+}
+function isProvisioningService(value) {
+  return isRecord5(value) && typeof value.service === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value.service) && typeof value.state === "string" && isSafeDiagnosticText(value.state, 64) && (value.health === undefined || typeof value.health === "string" && isSafeDiagnosticText(value.health, 64)) && (value.exitCode === undefined || typeof value.exitCode === "number" && Number.isInteger(value.exitCode) && value.exitCode >= -1 && value.exitCode <= 255);
+}
+function isProvisioningEvidence(value) {
+  return isRecord5(value) && value.kind === "compose-up" && typeof value.available === "boolean" && typeof value.bytes === "number" && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 && typeof value.lines === "number" && Number.isInteger(value.lines) && value.lines >= 0 && value.lines <= 500 && typeof value.truncated === "boolean";
+}
+function isSafeDiagnosticText(value, maximum) {
+  return value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value);
 }
 function validatePersistedRuntime(lab, runtime) {
   if (!isRecord5(runtime) || !isRecord5(runtime.config))
@@ -8704,13 +8835,13 @@ function isFinding(value) {
   return isRecord5(value) && (value.service === undefined || isBoundedString(value.service, 128)) && typeof value.surface === "string" && FINDING_SURFACES.has(value.surface) && isBoundedString(value.detail, 1024);
 }
 async function realDirectory(path2, label) {
-  const info = await lstat3(path2);
+  const info = await lstat4(path2);
   if (!info.isDirectory() || info.isSymbolicLink())
     throw new Error(`${label} is not a real directory`);
   return await realpath3(path2);
 }
 async function realFileInside(root, path2, label) {
-  const info = await lstat3(path2);
+  const info = await lstat4(path2);
   if (!info.isFile() || info.isSymbolicLink())
     throw new Error(`${label} is not a real file`);
   assertCanonicalInside(root, await realpath3(path2), label, false);
@@ -8745,13 +8876,13 @@ function isRecord5(value) {
 }
 
 // packages/codex-container-lab/cli/src/sync.ts
-import { randomBytes, randomUUID as randomUUID2 } from "crypto";
-import { chmod, copyFile, lstat as lstat5, mkdir as mkdir5, readlink as readlink2, rename as rename2, rm as rm4, symlink } from "fs/promises";
+import { randomBytes, randomUUID as randomUUID3 } from "crypto";
+import { chmod, copyFile, lstat as lstat6, mkdir as mkdir5, readlink as readlink2, rename as rename3, rm as rm5, symlink } from "fs/promises";
 import path2 from "path";
 
 // packages/codex-container-lab/cli/src/git-manifest.ts
 import { execFile } from "child_process";
-import { lstat as lstat4 } from "fs/promises";
+import { lstat as lstat5 } from "fs/promises";
 import { promisify } from "util";
 var execFileAsync = promisify(execFile);
 var MAX_SYNC_FILES = 20000;
@@ -8771,7 +8902,7 @@ async function buildGitManifest(root) {
   let totalBytes = 0;
   for (const relative3 of await eligibleGitPaths(canonical)) {
     try {
-      const stat2 = await lstat4(await guardedPath(canonical, relative3));
+      const stat2 = await lstat5(await guardedPath(canonical, relative3));
       if (!stat2.isFile() && !stat2.isSymbolicLink())
         continue;
       const file = await describeSyncFile(canonical, relative3);
@@ -8924,10 +9055,10 @@ async function applySync(options) {
   if (idle === false)
     throw new Error("Synchronization apply requires an idle lab");
   const claimed = path2.join(state.used, `${options.token}.json`);
-  await rename2(previewPath, claimed).catch(() => {
+  await rename3(previewPath, claimed).catch(() => {
     throw new Error("Unknown or already-used synchronization preview token");
   });
-  const journalId = randomUUID2();
+  const journalId = randomUUID3();
   const backupDir = path2.join(state.backups, journalId);
   const journalPath = path2.join(state.journals, `${journalId}.json`);
   await mkdir5(backupDir, { recursive: true });
@@ -8940,7 +9071,7 @@ async function applySync(options) {
   try {
     backups = await backupTargets(targetRoot, preview.changes, preview.expectedTargets, targetBackups);
   } catch (error) {
-    await rm4(backupDir, { recursive: true, force: true });
+    await rm5(backupDir, { recursive: true, force: true });
     throw error;
   }
   const journal = {
@@ -8973,14 +9104,14 @@ async function applySync(options) {
     journal.state = "applied";
     await writeJsonAtomic(journalPath, journal);
     await writeJsonAtomic(state.baseline, journal.newBaseline);
-    await rm4(journalPath, { force: true });
-    await rm4(backupDir, { recursive: true, force: true });
+    await rm5(journalPath, { force: true });
+    await rm5(backupDir, { recursive: true, force: true });
     return { applied: preview.changes.length };
   } catch (error) {
     try {
       await rollbackJournalSafely(targetRoot, journal);
-      await rm4(journalPath, { force: true });
-      await rm4(backupDir, { recursive: true, force: true });
+      await rm5(journalPath, { force: true });
+      await rm5(backupDir, { recursive: true, force: true });
     } catch (rollbackError) {
       throw new Error(`Synchronization apply failed and recovery state was retained: ${rollbackError instanceof Error ? rollbackError.message : rollbackError}`, { cause: error });
     }
@@ -9007,8 +9138,8 @@ async function recoverSyncTransactions(options) {
       await writeJsonAtomic(state.baseline, journal.newBaseline);
     else
       await rollbackJournalSafely(targetRoot, journal);
-    await rm4(journalPath, { force: true });
-    await rm4(path2.join(state.backups, path2.basename(name, ".json")), { recursive: true, force: true });
+    await rm5(journalPath, { force: true });
+    await rm5(path2.join(state.backups, path2.basename(name, ".json")), { recursive: true, force: true });
     recovered++;
   }
   return recovered;
@@ -9036,7 +9167,7 @@ async function ensureStateDirectory(stateRoot, relative3) {
     if (error.code !== "EEXIST")
       throw error;
   });
-  const stat2 = await lstat5(directory);
+  const stat2 = await lstat6(directory);
   if (stat2.isSymbolicLink() || !stat2.isDirectory())
     throw new Error(`Unsafe synchronization state directory: ${relative3}`);
 }
@@ -9078,7 +9209,7 @@ async function backupTargets(targetRoot, changes, expected, backupDir) {
     await assertExpectedEntry(targetRoot, change.path, expected[change.path] ?? null, "target");
     const target = await guardedPath(targetRoot, change.path);
     try {
-      const stat2 = await lstat5(target);
+      const stat2 = await lstat6(target);
       const backup = path2.join(backupDir, String(index));
       if (stat2.isSymbolicLink()) {
         await symlink(await readlink2(target), backup);
@@ -9105,7 +9236,7 @@ async function stageSources(sourceRoot, changes, stagedRoot) {
       throw new Error(`Synchronization preview is missing file details for ${change.path}`);
     const source = await guardedPath(sourceRoot, change.path);
     const target = await guardedPath(stagedRoot, change.path, true);
-    const stat2 = await lstat5(source);
+    const stat2 = await lstat6(source);
     if (change.file.kind === "symlink" && stat2.isSymbolicLink()) {
       const link2 = await readlink2(source);
       const bytes = Buffer.from(link2);
@@ -9125,11 +9256,11 @@ async function stageSources(sourceRoot, changes, stagedRoot) {
 }
 async function applyChange(sourceRoot, targetRoot, change) {
   const target = await guardedPath(targetRoot, change.path, true);
-  await rm4(target, { force: true, recursive: false });
+  await rm5(target, { force: true, recursive: false });
   if (change.action === "delete")
     return;
   const source = await guardedPath(sourceRoot, change.path);
-  const stat2 = await lstat5(source);
+  const stat2 = await lstat6(source);
   if (change.file?.kind === "symlink" && stat2.isSymbolicLink()) {
     await symlink(await readlink2(source), target);
   } else if (change.file?.kind === "file" && stat2.isFile()) {
@@ -9153,7 +9284,7 @@ async function assertExpectedEntry(root, relative3, expected, side) {
 async function restoreBackups(targetRoot, backups) {
   for (const record of backups) {
     const target = await guardedPath(targetRoot, record.path, true);
-    await rm4(target, { force: true, recursive: false });
+    await rm5(target, { force: true, recursive: false });
     if (!record.existed)
       continue;
     if (!record.backup)
@@ -9273,6 +9404,46 @@ class ContainerLabService {
     await this.reconcileOwner();
     const lab = await readLab(this.roots, this.owner, id);
     return compactLabStatus(lab, lab.state === "ready" && lab.runtime ? await stackStatus(runtimeFromLab(lab), this.docker) : undefined);
+  }
+  async diagnostic(id) {
+    await this.reconcileOwner();
+    const lab = await readLab(this.roots, this.owner, id);
+    if (lab.state !== "failed")
+      throw new Error(`lab is not failed: ${lab.state}`);
+    const failure = lab.provisioningFailure;
+    if (!failure?.evidence?.available)
+      throw new Error("terminal provisioning diagnostic is unavailable");
+    if (!await exactDirectoryChain(this.roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory")) {
+      throw new Error("terminal provisioning diagnostic is unavailable");
+    }
+    const path3 = join3(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+    const metadata = await lstat7(path3).catch((error) => {
+      if (error.code === "ENOENT")
+        return;
+      throw error;
+    });
+    if (!metadata || metadata.isSymbolicLink() || !metadata.isFile() || (metadata.mode & 511) !== 384) {
+      throw new Error("terminal provisioning diagnostic is unavailable");
+    }
+    const stored = await readFile5(path3, "utf8");
+    if (Buffer.byteLength(stored) > 8 * 1024)
+      throw new Error("terminal provisioning diagnostic is unavailable");
+    const text = redactPublicText(stored.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "\uFFFD"), 8 * 1024, 500);
+    const lines = text ? text.split(`
+`).length : 0;
+    if (lines > 500)
+      throw new Error("terminal provisioning diagnostic is unavailable");
+    return {
+      labId: id,
+      diagnostic: {
+        phase: failure.phase,
+        capturedAt: failure.capturedAt,
+        services: failure.services,
+        serviceCount: failure.serviceCount,
+        evidence: failure.evidence,
+        transcript: { text, truncated: failure.evidence.truncated, bytes: Buffer.byteLength(text), lines }
+      }
+    };
   }
   async run(id, argv, cwd = ".", environment = {}, timeoutSeconds = 1800, output, signal) {
     validateRun(argv, cwd, environment, timeoutSeconds);
@@ -9403,6 +9574,7 @@ class ContainerLabService {
       }
       await this.assertDestroyFilesystem(lab);
       lab.state = "destroying";
+      lab.provisioningFailure = undefined;
       lab.updatedAt = new Date().toISOString();
       await writeLab(this.roots, lab);
       claimed = lab;
@@ -9456,6 +9628,7 @@ class ContainerLabService {
     let dockerMaterializationStarted = false;
     let provisioningEnvironment;
     let secretEnvironmentNames = [];
+    let provisioningFailure;
     let failure;
     try {
       await this.assertProvisioning(id, signal);
@@ -9524,6 +9697,14 @@ class ContainerLabService {
       await this.assertProvisioning(id, signal);
     } catch (error) {
       failure = error;
+      if (error instanceof DockerProvisioningFailure) {
+        provisioningFailure = error.diagnostic;
+        await this.updateProvisioning(id, (current) => {
+          current.provisioningFailure = provisioningFailure;
+        }).catch(() => {
+          return;
+        });
+      }
       if (runtime)
         await destroyLabStack(runtime, this.docker).catch(() => {
           return;
@@ -9547,6 +9728,7 @@ class ContainerLabService {
       current = { ...current, ...lab };
       current.state = failure ? "failed" : "ready";
       current.error = failure ? compactError2(failure) : undefined;
+      current.provisioningFailure = failure ? provisioningFailure : undefined;
       current.updatedAt = new Date().toISOString();
       await writeLab(this.roots, current);
     }, { attempts: 600, delayMs: 50 });
@@ -9625,7 +9807,7 @@ async function exactDirectoryChain(root, segments, label) {
   let path3 = resolve3(root);
   let info;
   try {
-    info = await lstat6(path3);
+    info = await lstat7(path3);
   } catch (error) {
     if (error.code === "ENOENT")
       return false;
@@ -9638,7 +9820,7 @@ async function exactDirectoryChain(root, segments, label) {
     path3 = join3(path3, segment);
     expected = join3(expected, segment);
     try {
-      info = await lstat6(path3);
+      info = await lstat7(path3);
     } catch (error) {
       if (error.code === "ENOENT")
         return false;
@@ -9738,7 +9920,22 @@ function compactLabStatus(lab, stack) {
     ...endpoints.length ? { endpoints, endpointCount: lab.endpoints.length } : {},
     ...findings.length ? { findings, findingCount: lab.findings.length } : {},
     ...lab.error ? { error: publicError(lab.error) } : {},
+    ...lab.state === "failed" && lab.provisioningFailure ? { provisioningFailure: publicProvisioningFailure(lab.provisioningFailure) } : {},
     ...stack ? { stack } : {}
+  };
+}
+function publicProvisioningFailure(value) {
+  return {
+    phase: value.phase,
+    capturedAt: value.capturedAt,
+    services: value.services.slice(0, 16).map((service) => ({
+      service: service.service.slice(0, 128),
+      state: service.state.slice(0, 64),
+      ...service.health ? { health: service.health.slice(0, 64) } : {},
+      ...service.exitCode === undefined ? {} : { exitCode: service.exitCode }
+    })),
+    serviceCount: value.serviceCount,
+    ...value.evidence ? { evidence: { ...value.evidence } } : {}
   };
 }
 function publicError(value) {
@@ -9857,6 +10054,10 @@ async function dispatch(service, args, signal) {
     if (verb === "status") {
       const flags = parseFlags(rest, new Set(["--lab"]));
       return await service.labStatus(flags.required("--lab"));
+    }
+    if (verb === "diagnostic") {
+      const flags = parseFlags(rest, new Set(["--lab"]));
+      return await service.diagnostic(flags.required("--lab"));
     }
     if (verb === "destroy") {
       const flags = parseFlags(rest, new Set(["--lab"]));
@@ -9992,7 +10193,7 @@ function helpText() {
     "codex-container-lab [--owner THREAD_ID] [--state-root PATH] [--runtime-root PATH] COMMAND",
     "health",
     "lab create [--name NAME] [--source PATH]",
-    "lab list | lab status --lab ID | lab destroy --lab ID | lab destroy-all",
+    "lab list | lab status --lab ID | lab diagnostic --lab ID | lab destroy --lab ID | lab destroy-all",
     "run --lab ID [--cwd REPO_RELATIVE_PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...",
     "  --cwd is relative to the repository workspace root (default: .); never pass /workspace or another absolute container path",
     "  example: run --lab ID --cwd packages/api -- bun test",

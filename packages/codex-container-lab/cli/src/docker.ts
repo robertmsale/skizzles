@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { LabConfig } from "./config";
@@ -15,7 +16,7 @@ import {
 } from "./compose";
 import { runCommand, type RunOptions, type CommandResult } from "./process";
 import { redactPublicText } from "./public-output";
-import type { Endpoint, LabMetadata, PersistedLabRuntime } from "./types";
+import type { Endpoint, LabMetadata, PersistedLabRuntime, ProvisioningFailureDiagnostic } from "./types";
 
 export type LabRuntime = PersistedLabRuntime & { metadata: LabMetadata };
 
@@ -25,6 +26,19 @@ export interface DockerRunner {
 }
 
 export type DockerSpawnOptions = { env?: NodeJS.ProcessEnv };
+
+/** The only durable path used for a failed Compose-up transcript. */
+export const PROVISIONING_FAILURE_DIAGNOSTIC_FILE = "provisioning-failure.compose-up.log";
+
+export class DockerProvisioningFailure extends Error {
+  constructor(
+    message: string,
+    readonly diagnostic: ProvisioningFailureDiagnostic,
+  ) {
+    super(message);
+    this.name = "DockerProvisioningFailure";
+  }
+}
 
 export type DockerRunTerminationResult =
   | { confirmed: true; status: "signaled" | "absent" }
@@ -110,7 +124,7 @@ async function normalizedModel(
 export async function composeCommand(
   runtime: LabRuntime,
   args: string[],
-  options: { timeoutMs?: number; allowFailure?: boolean; signal?: AbortSignal } = {},
+  options: { timeoutMs?: number; allowFailure?: boolean; signal?: AbortSignal; environment?: NodeJS.ProcessEnv } = {},
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<CommandResult> {
   return await runner.run([...runtime.composeArgs, ...args], {
@@ -118,7 +132,7 @@ export async function composeCommand(
     allowFailure: options.allowFailure,
     maxOutputBytes: 4 * 1024 * 1024,
     signal: options.signal,
-    env: scrubSecretEnvironment(runtime.config.secretEnvironment, process.env),
+    env: scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env),
   });
 }
 
@@ -138,22 +152,16 @@ export async function provisionLabStack(
       env: secretComposeEnvironment(runtime.config.secretEnvironment, environment),
     });
   } catch {
-    throw new Error(signal?.aborted
+    const message = signal?.aborted
       ? "Docker Compose up aborted; secret-bearing diagnostics redacted"
-      : "Docker Compose up failed; secret-bearing diagnostics redacted");
+      : "Docker Compose up failed; secret-bearing diagnostics redacted";
+    throw new DockerProvisioningFailure(message, await captureComposeFailure(runtime, undefined, runner, environment));
   }
   if (provisioned.code !== 0) {
-    let diagnostic = `${provisioned.stdout.toString()}\n${provisioned.stderr.toString()}`;
-    for (const name of runtime.config.secretEnvironment) {
-      const value = environment[name];
-      if (value) diagnostic = diagnostic.split(value).join("[secret-value-redacted]");
-    }
-    await writeFile(
-      "/tmp/ccl-compose-failure-redacted.log",
-      redactPublicText(diagnostic),
-      { mode: 0o600 },
+    throw new DockerProvisioningFailure(
+      "Docker Compose up failed; secret-bearing diagnostics redacted",
+      await captureComposeFailure(runtime, provisioned, runner, environment),
     );
-    throw new Error("Docker Compose up failed; secret-bearing diagnostics redacted");
   }
   const compatibility = [
     `test -d ${shellQuote(runtime.config.runtime.workspace)}`,
@@ -183,21 +191,131 @@ export async function provisionLabStack(
   return endpoints;
 }
 
-export async function stackStatus(runtime: LabRuntime, runner: DockerRunner = defaultDockerRunner): Promise<unknown> {
-  const result = await composeCommand(runtime, ["ps", "--format", "json"], { allowFailure: true, timeoutMs: 20_000 }, runner);
+export async function stackStatus(
+  runtime: LabRuntime,
+  runner: DockerRunner = defaultDockerRunner,
+  options: { all?: boolean; environment?: NodeJS.ProcessEnv } = {},
+): Promise<unknown> {
+  const result = await composeCommand(runtime, ["ps", ...(options.all ? ["--all"] : []), "--format", "json"], {
+    allowFailure: true,
+    timeoutMs: 20_000,
+    environment: options.environment,
+  }, runner);
   if (result.code !== 0) return { available: false, error: compactError(result.stderr.toString()) };
   const raw = result.stdout.toString().trim();
   if (!raw) return { available: true, services: [] };
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return { available: true, services: summarizeServices(Array.isArray(parsed) ? parsed : [parsed]) };
+    const values = Array.isArray(parsed) ? parsed : [parsed];
+    return {
+      available: true,
+      ...(options.all ? { serviceCount: Math.min(values.length, 1_000) } : {}),
+      services: summarizeServices(values),
+    };
   } catch {
     try {
-      return { available: true, services: summarizeServices(raw.split("\n").filter(Boolean).map((line) => JSON.parse(line) as unknown)) };
+      const values = raw.split("\n").filter(Boolean).map((line) => JSON.parse(line) as unknown);
+      return {
+        available: true,
+        ...(options.all ? { serviceCount: Math.min(values.length, 1_000) } : {}),
+        services: summarizeServices(values),
+      };
     } catch {
       return { available: false, error: "Docker returned an invalid bounded status response" };
     }
   }
+}
+
+async function captureComposeFailure(
+  runtime: LabRuntime,
+  provisioned: CommandResult | undefined,
+  runner: DockerRunner,
+  environment: NodeJS.ProcessEnv,
+): Promise<ProvisioningFailureDiagnostic> {
+  const capturedAt = new Date().toISOString();
+  let services: ProvisioningFailureDiagnostic["services"] = [];
+  let serviceCount = 0;
+  try {
+    const status = await stackStatus(runtime, runner, { all: true, environment });
+    if (isRecord(status) && Array.isArray(status.services)) {
+      services = status.services.filter(isServiceSummary).slice(0, 16);
+      serviceCount = typeof status.serviceCount === "number" && Number.isInteger(status.serviceCount)
+        ? Math.max(services.length, Math.min(status.serviceCount, 1_000))
+        : services.length;
+    }
+  } catch {
+    // Capturing diagnostics is deliberately best effort. The original
+    // Compose failure remains authoritative when Docker is unavailable.
+  }
+
+  const raw = provisioned === undefined
+    ? ""
+    : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0).join("\n");
+  const transcript = boundedLogTail(redactComposeFailure(raw, runtime, environment), 500, 8 * 1024);
+  const evidence = {
+    kind: "compose-up" as const,
+    available: false,
+    bytes: 0,
+    lines: 0,
+    truncated: transcript.truncated,
+  };
+  try {
+    await writeFailureTranscript(runtime.metadata.runtimeRoot, transcript.text);
+    evidence.available = true;
+    evidence.bytes = Buffer.byteLength(transcript.text);
+    evidence.lines = transcript.text ? transcript.text.split("\n").length : 0;
+  } catch {
+    // A transcript write must never mask the exact Compose error or block
+    // label-scoped cleanup in the service failure path.
+  }
+  return {
+    phase: "compose-up",
+    capturedAt,
+    services,
+    serviceCount,
+    evidence,
+  };
+}
+
+async function writeFailureTranscript(runtimeRoot: string, text: string): Promise<void> {
+  const root = await lstat(runtimeRoot);
+  if (!root.isDirectory() || root.isSymbolicLink()) {
+    throw new Error("invalid lab runtime root");
+  }
+  const destination = join(runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+  const temporary = `${destination}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, text, { mode: 0o600, flag: "wx" });
+    await rename(temporary, destination);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+function redactComposeFailure(value: string, runtime: LabRuntime, environment: NodeJS.ProcessEnv): string {
+  let diagnostic = value;
+  for (const name of runtime.config.secretEnvironment) {
+    const secret = environment[name];
+    if (secret) diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
+  }
+  const metadata = [
+    runtime.metadata.owner,
+    runtime.metadata.ownerKey,
+    runtime.metadata.id,
+    runtime.metadata.composeProject,
+    runtime.metadata.sourceRoot,
+    runtime.metadata.manifestPath,
+    runtime.metadata.runtimeRoot,
+    runtime.metadata.workspace,
+    ...runtime.composeArgs,
+  ];
+  for (const value of metadata) {
+    if (value) diagnostic = diagnostic.split(value).join("[redacted]");
+  }
+  // Compose may print short container ids that are not covered by the public
+  // text redactor's UUID/sha256 rules. They are not useful at this boundary.
+  diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
+  return redactPublicText(diagnostic, 8 * 1024, 500);
 }
 
 export async function stackLogs(
@@ -431,17 +549,39 @@ function summarizeServices(values: unknown[]): Array<{
 }> {
   return values.slice(0, 16).flatMap((value) => {
     if (!isRecord(value)) return [];
-    const service = typeof value.Service === "string" ? value.Service : typeof value.Name === "string" ? value.Name : undefined;
-    const state = typeof value.State === "string" ? value.State : undefined;
-    if (!service || !state) return [];
+    const rawService = typeof value.Service === "string" ? value.Service : typeof value.Name === "string" ? value.Name : undefined;
+    const rawState = typeof value.State === "string" ? value.State : undefined;
+    if (!rawService || !rawState) return [];
+    const service = rawService.slice(0, 128);
+    const state = sanitizeDiagnosticField(rawState, 64);
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(service) || !state) return [];
     const summary: { service: string; state: string; health?: string; exitCode?: number } = {
-      service: service.slice(0, 128), state: state.slice(0, 64),
+      service, state,
     };
-    if (typeof value.Health === "string" && value.Health) summary.health = value.Health.slice(0, 64);
-    const exitCode = typeof value.ExitCode === "number" ? value.ExitCode : Number(value.ExitCode);
-    if (Number.isInteger(exitCode)) summary.exitCode = exitCode;
+    if (typeof value.Health === "string" && value.Health) {
+      const health = sanitizeDiagnosticField(value.Health, 64);
+      if (health) summary.health = health;
+    }
+    const exitCode = typeof value.ExitCode === "number" ? value.ExitCode :
+      typeof value.ExitCode === "string" && value.ExitCode.trim() !== "" ? Number(value.ExitCode) : undefined;
+    if (exitCode !== undefined && Number.isInteger(exitCode)) summary.exitCode = exitCode;
     return [summary];
   });
+}
+
+function sanitizeDiagnosticField(value: string, maximum: number): string {
+  return value.replace(/[\u0000-\u001f\u007f]/g, "�").slice(0, maximum);
+}
+
+function isServiceSummary(value: unknown): value is {
+  service: string;
+  state: string;
+  health?: string;
+  exitCode?: number;
+} {
+  return isRecord(value) && typeof value.service === "string" &&
+    typeof value.state === "string" && (value.health === undefined || typeof value.health === "string") &&
+    (value.exitCode === undefined || (typeof value.exitCode === "number" && Number.isInteger(value.exitCode)));
 }
 
 function boundedLogTail(value: string, maxLines: number, maxBytes: number): { text: string; truncated: boolean } {

@@ -62,6 +62,28 @@ describe("owner resolution and durable state", () => {
     expect(persisted).toEqual(lab);
     expect(Object.keys(persisted).sort()).toEqual(Object.keys(lab).sort());
   });
+
+  test("validates optional failed-provisioning summaries while preserving legacy manifests", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-state-diagnostic-"));
+    temporary.push(root);
+    const owner = "failed-diagnostic-state";
+    const roots = { stateRoot: root, runtimeRoot: join(root, "runtime") };
+    const lab = { ...fixtureLab(root, owner), provisioningFailure: {
+      phase: "compose-up" as const,
+      capturedAt: new Date(0).toISOString(),
+      services: [{ service: "dev", state: "exited", health: "unhealthy", exitCode: 23 }],
+      serviceCount: 1,
+      evidence: { kind: "compose-up" as const, available: false, bytes: 0, lines: 0, truncated: false },
+    } };
+    await ensureOwner(roots.stateRoot, owner);
+    await writeLab(roots, lab);
+    expect((await readLab(roots, owner, lab.id)).provisioningFailure).toEqual(lab.provisioningFailure);
+    const provisioning = { ...lab, state: "provisioning" as const };
+    await writeLab(roots, provisioning);
+    expect((await readLab(roots, owner, lab.id)).provisioningFailure).toEqual(lab.provisioningFailure);
+    lab.provisioningFailure.services[0]!.service = "/private/tmp/owner";
+    await expect(writeLab(roots, lab)).rejects.toThrow("invalid provisioning failure services");
+  });
 });
 
 function fixtureLab(root: string, owner: string): LabMetadata {
