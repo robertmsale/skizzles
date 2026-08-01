@@ -7830,7 +7830,11 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
   } catch {}
   const raw = provisioned === undefined ? "" : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0).join(`
 `);
-  const transcript = boundedLogTail(redactComposeFailure(raw, runtime, environment), 500, 8 * 1024);
+  const secretValues = declaredSecretValues(runtime, environment);
+  let transcript = boundedLogTail(redactComposeFailure(raw, runtime, secretValues), 500, 8 * 1024);
+  if (secretValues.some((secret) => transcript.text.includes(secret))) {
+    transcript = { text: "", truncated: false };
+  }
   const evidence = {
     kind: "compose-up",
     available: false,
@@ -7867,9 +7871,8 @@ async function writeFailureTranscript(runtimeRoot, text) {
     await rm(temporary, { force: true });
   }
 }
-function redactComposeFailure(value, runtime, environment) {
+function redactComposeFailure(value, runtime, secretValues) {
   let diagnostic = value;
-  const secretValues = [...new Set(runtime.config.secretEnvironment.map((name) => environment[name]).filter((secret) => typeof secret === "string" && secret.length > 0))].sort((left, right) => right.length - left.length);
   for (const secret of secretValues) {
     diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
   }
@@ -7889,8 +7892,10 @@ function redactComposeFailure(value, runtime, environment) {
       diagnostic = diagnostic.split(value2).join("[redacted]");
   }
   diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  const redacted = redactPublicText(diagnostic, 8 * 1024, 500);
-  return secretValues.some((secret) => redacted.includes(secret)) ? "" : redacted;
+  return redactPublicText(diagnostic, 8 * 1024, 500);
+}
+function declaredSecretValues(runtime, environment) {
+  return [...new Set(runtime.config.secretEnvironment.map((name) => environment[name]).filter((secret) => typeof secret === "string" && secret.length > 0))].sort((left, right) => right.length - left.length);
 }
 async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunner) {
   if (tailLines < 1 || tailLines > 500)

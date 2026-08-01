@@ -79,7 +79,7 @@ class DestructiveDocker extends RecordingDocker {
 }
 
 class ComposeFailureServiceDocker extends RecordingDocker {
-  constructor(private readonly sentinel: string, private readonly exitCode = 23) { super(); }
+  constructor(private readonly sentinel: string, private readonly exitCode = 23, private readonly failureText?: string) { super(); }
   override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
     this.calls.push(args);
     this.runCalls.push({ args, options });
@@ -87,7 +87,7 @@ class ComposeFailureServiceDocker extends RecordingDocker {
       return { code: 0, stdout: Buffer.from(JSON.stringify({ services: { dev: {} } })), stderr: Buffer.alloc(0) };
     }
     if (args.includes("up")) {
-      return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(`Compose failed ${this.sentinel} /private/tmp/project`) };
+      return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(this.failureText ?? `Compose failed ${this.sentinel} /private/tmp/project`) };
     }
     if (args.includes("ps") && args.includes("--all")) {
       return { code: 0, stdout: Buffer.from(JSON.stringify([
@@ -334,6 +334,40 @@ describe("attached service lifecycle", () => {
       expect(JSON.stringify(diagnostic.diagnostic.transcript)).not.toContain(secret);
       await service.destroyLab(created.labId);
     }
+  });
+
+  test("falls back to an empty transcript when sanitization introduces a declared secret", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-sanitized-secret-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    const secret = "�";
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [TOKEN_REPLACEMENT]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const docker = new ComposeFailureServiceDocker(secret, 23, "Compose failed \u0001");
+    const service = new ContainerLabService("thread-sanitized-secret", roots, docker, {
+      PATH: process.env.PATH,
+      TOKEN_REPLACEMENT: secret,
+    });
+
+    const created = await service.createLab("sanitized", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-sanitized-secret", created.labId);
+    expect(lab.error).toBe("Docker Compose up failed; secret-bearing diagnostics redacted");
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0, truncated: false });
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(artifact).toBe("");
+
+    const status = JSON.stringify(await service.labStatus(created.labId));
+    expect(status).toContain('"bytes":0');
+    expect(status).toContain('"lines":0');
+    expect(status).not.toContain(secret);
+    const diagnostic = JSON.stringify(await service.diagnostic(created.labId));
+    expect(diagnostic).toContain('"text":""');
+    expect(diagnostic).not.toContain(secret);
+    await service.destroyLab(created.labId);
   });
 
   test("keeps legacy failed manifests readable without diagnostics", async () => {

@@ -251,7 +251,14 @@ async function captureComposeFailure(
   const raw = provisioned === undefined
     ? ""
     : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0).join("\n");
-  const transcript = boundedLogTail(redactComposeFailure(raw, runtime, environment), 500, 8 * 1024);
+  const secretValues = declaredSecretValues(runtime, environment);
+  let transcript = boundedLogTail(redactComposeFailure(raw, runtime, secretValues), 500, 8 * 1024);
+  // This is the final privacy boundary. boundedLogTail sanitizes control
+  // bytes, so it can introduce a literal declared secret after redaction
+  // (for example U+0001 becoming U+FFFD when the secret is U+FFFD).
+  if (secretValues.some((secret) => transcript.text.includes(secret))) {
+    transcript = { text: "", truncated: false };
+  }
   const evidence = {
     kind: "compose-up" as const,
     available: false,
@@ -292,12 +299,8 @@ async function writeFailureTranscript(runtimeRoot: string, text: string): Promis
   }
 }
 
-function redactComposeFailure(value: string, runtime: LabRuntime, environment: NodeJS.ProcessEnv): string {
+function redactComposeFailure(value: string, runtime: LabRuntime, secretValues: readonly string[]): string {
   let diagnostic = value;
-  const secretValues = [...new Set(runtime.config.secretEnvironment
-    .map((name) => environment[name])
-    .filter((secret): secret is string => typeof secret === "string" && secret.length > 0))]
-    .sort((left, right) => right.length - left.length);
   for (const secret of secretValues) {
     diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
   }
@@ -318,11 +321,14 @@ function redactComposeFailure(value: string, runtime: LabRuntime, environment: N
   // Compose may print short container ids that are not covered by the public
   // text redactor's UUID/sha256 rules. They are not useful at this boundary.
   diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  const redacted = redactPublicText(diagnostic, 8 * 1024, 500);
-  // Replacement markers themselves can contain a declared secret (for
-  // example TOKEN=secret or TOKEN=[secret-value-redacted]). Never persist a
-  // transcript that still contains any literal secret, even after redaction.
-  return secretValues.some((secret) => redacted.includes(secret)) ? "" : redacted;
+  return redactPublicText(diagnostic, 8 * 1024, 500);
+}
+
+function declaredSecretValues(runtime: LabRuntime, environment: NodeJS.ProcessEnv): string[] {
+  return [...new Set(runtime.config.secretEnvironment
+    .map((name) => environment[name])
+    .filter((secret): secret is string => typeof secret === "string" && secret.length > 0))]
+    .sort((left, right) => right.length - left.length);
 }
 
 export async function stackLogs(
