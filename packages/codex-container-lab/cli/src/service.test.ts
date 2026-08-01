@@ -79,7 +79,7 @@ class DestructiveDocker extends RecordingDocker {
 }
 
 class ComposeFailureServiceDocker extends RecordingDocker {
-  constructor(private readonly sentinel: string) { super(); }
+  constructor(private readonly sentinel: string, private readonly exitCode = 23) { super(); }
   override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
     this.calls.push(args);
     this.runCalls.push({ args, options });
@@ -91,7 +91,7 @@ class ComposeFailureServiceDocker extends RecordingDocker {
     }
     if (args.includes("ps") && args.includes("--all")) {
       return { code: 0, stdout: Buffer.from(JSON.stringify([
-        { Service: "dev", State: "exited", Health: "unhealthy", ExitCode: 23, ID: "private-container-id", Project: "ccl-private" },
+        { Service: "dev", State: "exited", Health: "unhealthy", ExitCode: this.exitCode, ID: "private-container-id", Project: "ccl-private" },
       ])), stderr: Buffer.alloc(0) };
     }
     return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
@@ -248,6 +248,58 @@ describe("attached service lifecycle", () => {
     expect((await fresh.destroyLab(created.labId)).destroyed).toBe(true);
     expect(await Bun.file(artifact).exists()).toBe(false);
     await expect(readLab(roots, "thread-failed-diagnostic", created.labId)).rejects.toThrow();
+  });
+
+  test("omits an out-of-contract Compose exit code without masking the original failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-failed-exit-code-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const docker = new ComposeFailureServiceDocker("sentinel-invalid-exit", 999);
+    const service = new ContainerLabService("thread-invalid-exit", roots, docker, { PATH: process.env.PATH });
+
+    const created = await service.createLab("invalid-exit", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-invalid-exit", created.labId);
+    expect(lab.error).toBe("Docker Compose up failed; secret-bearing diagnostics redacted");
+    expect(lab.provisioningFailure?.services).toEqual([{ service: "dev", state: "exited", health: "unhealthy" }]);
+    await service.destroyLab(created.labId);
+  });
+
+  test("replaces overlapping secret values longest-first across all diagnostic surfaces", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-overlap-secret-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    const short = "token";
+    const long = "token-private-suffix";
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [TOKEN_SHORT, TOKEN_LONG]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const docker = new ComposeFailureServiceDocker(long);
+    const service = new ContainerLabService("thread-overlap-secret", roots, docker, {
+      PATH: process.env.PATH,
+      TOKEN_SHORT: short,
+      TOKEN_LONG: long,
+    });
+
+    const created = await service.createLab("overlap-secret", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-overlap-secret", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    const status = JSON.stringify(await service.labStatus(created.labId));
+    const diagnostic = JSON.stringify(await service.diagnostic(created.labId));
+    for (const value of [short, long, "private-suffix"]) {
+      expect(artifact).not.toContain(value);
+      expect(status).not.toContain(value);
+      expect(diagnostic).not.toContain(value);
+    }
+    await service.destroyLab(created.labId);
   });
 
   test("keeps legacy failed manifests readable without diagnostics", async () => {

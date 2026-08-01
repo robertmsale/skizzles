@@ -294,9 +294,12 @@ async function writeFailureTranscript(runtimeRoot: string, text: string): Promis
 
 function redactComposeFailure(value: string, runtime: LabRuntime, environment: NodeJS.ProcessEnv): string {
   let diagnostic = value;
-  for (const name of runtime.config.secretEnvironment) {
-    const secret = environment[name];
-    if (secret) diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
+  const secretValues = [...new Set(runtime.config.secretEnvironment
+    .map((name) => environment[name])
+    .filter((secret): secret is string => typeof secret === "string" && secret.length > 0))]
+    .sort((left, right) => right.length - left.length);
+  for (const secret of secretValues) {
+    diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
   }
   const metadata = [
     runtime.metadata.owner,
@@ -564,7 +567,9 @@ function summarizeServices(values: unknown[]): Array<{
     }
     const exitCode = typeof value.ExitCode === "number" ? value.ExitCode :
       typeof value.ExitCode === "string" && value.ExitCode.trim() !== "" ? Number(value.ExitCode) : undefined;
-    if (exitCode !== undefined && Number.isInteger(exitCode)) summary.exitCode = exitCode;
+    if (exitCode !== undefined && Number.isInteger(exitCode) && exitCode >= -1 && exitCode <= 255) {
+      summary.exitCode = exitCode;
+    }
     return [summary];
   });
 }
@@ -581,7 +586,7 @@ function isServiceSummary(value: unknown): value is {
 } {
   return isRecord(value) && typeof value.service === "string" &&
     typeof value.state === "string" && (value.health === undefined || typeof value.health === "string") &&
-    (value.exitCode === undefined || (typeof value.exitCode === "number" && Number.isInteger(value.exitCode)));
+    (value.exitCode === undefined || (typeof value.exitCode === "number" && Number.isInteger(value.exitCode) && value.exitCode >= -1 && value.exitCode <= 255));
 }
 
 function boundedLogTail(value: string, maxLines: number, maxBytes: number): { text: string; truncated: boolean } {

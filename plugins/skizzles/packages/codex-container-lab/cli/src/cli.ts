@@ -7869,10 +7869,9 @@ async function writeFailureTranscript(runtimeRoot, text) {
 }
 function redactComposeFailure(value, runtime, environment) {
   let diagnostic = value;
-  for (const name of runtime.config.secretEnvironment) {
-    const secret = environment[name];
-    if (secret)
-      diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
+  const secretValues = [...new Set(runtime.config.secretEnvironment.map((name) => environment[name]).filter((secret) => typeof secret === "string" && secret.length > 0))].sort((left, right) => right.length - left.length);
+  for (const secret of secretValues) {
+    diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
   }
   const metadata = [
     runtime.metadata.owner,
@@ -8140,8 +8139,9 @@ function summarizeServices(values) {
         summary.health = health;
     }
     const exitCode = typeof value.ExitCode === "number" ? value.ExitCode : typeof value.ExitCode === "string" && value.ExitCode.trim() !== "" ? Number(value.ExitCode) : undefined;
-    if (exitCode !== undefined && Number.isInteger(exitCode))
+    if (exitCode !== undefined && Number.isInteger(exitCode) && exitCode >= -1 && exitCode <= 255) {
       summary.exitCode = exitCode;
+    }
     return [summary];
   });
 }
@@ -8149,7 +8149,7 @@ function sanitizeDiagnosticField(value, maximum) {
   return value.replace(/[\u0000-\u001f\u007f]/g, "\uFFFD").slice(0, maximum);
 }
 function isServiceSummary(value) {
-  return isRecord3(value) && typeof value.service === "string" && typeof value.state === "string" && (value.health === undefined || typeof value.health === "string") && (value.exitCode === undefined || typeof value.exitCode === "number" && Number.isInteger(value.exitCode));
+  return isRecord3(value) && typeof value.service === "string" && typeof value.state === "string" && (value.health === undefined || typeof value.health === "string") && (value.exitCode === undefined || typeof value.exitCode === "number" && Number.isInteger(value.exitCode) && value.exitCode >= -1 && value.exitCode <= 255);
 }
 function boundedLogTail(value, maxLines, maxBytes) {
   const sanitized = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "\uFFFD").trimEnd();
