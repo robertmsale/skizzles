@@ -7942,14 +7942,12 @@ function selectFailedDiagnosticServices(runtime, services) {
     runtime.config.mode.commandService,
     ...runtime.config.ports.map((port) => port.service)
   ])];
-  const summaries = new Map(services.map((service) => [service.service, service]));
-  return candidates.filter((candidate) => {
-    const summary = summaries.get(candidate);
-    if (!summary)
+  return candidates.filter((candidate) => services.some((summary) => {
+    if (summary.service !== candidate)
       return false;
     const failedExit = summary.state.toLowerCase() === "exited" && summary.exitCode !== undefined && summary.exitCode !== 0;
     return failedExit || summary.health?.toLowerCase() === "unhealthy";
-  }).slice(0, 4);
+  })).slice(0, 4);
 }
 function divideDiagnosticBudget(total, count) {
   if (count <= 0)
@@ -7960,7 +7958,8 @@ function divideDiagnosticBudget(total, count) {
 }
 async function captureFailedServiceLogs(runtime, service, tailLines, segmentBytes, runner, environment) {
   const headerBytes = Buffer.byteLength(`--- service:${service} ---`);
-  const streamBytes = Math.max(1, Math.floor(Math.max(1, segmentBytes - headerBytes - 1) / 2));
+  const bodyBytes = Math.max(0, segmentBytes - headerBytes - 1);
+  const streamBytes = Math.floor(Math.max(0, bodyBytes - 1) / 2);
   let result;
   try {
     result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--tail", String(tailLines), service], {
