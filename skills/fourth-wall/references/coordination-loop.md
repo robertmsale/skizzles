@@ -91,7 +91,8 @@ When orchestration drifts:
 3. Queue nonurgent corrections with `send_message`.
 4. Reactivate an idle or completed task when its role and ownership still fit; otherwise prepare a fresh replacement.
 5. Interrupt only obsolete, unsafe, or irreconcilably overlapping work.
-6. Spawn a replacement only after its role, handoff packet, and ownership boundary are ready.
+6. If known or suspected duplicate roots share an outcome and base, compare their exact task paths, bases, branches or remote heads, and external artifacts before either publishes again. Name one canonical publisher, preserve useful existing artifacts, and reconcile additively; do not stop tasks or rewrite history from semantic similarity alone.
+7. Spawn a replacement only after its role, handoff packet, and ownership boundary are ready.
 
 Canonical paths are the routing graph. A task can use a short relative name for nearby tasks; use the full canonical path when communicating across branches of the tree or when names may be ambiguous.
 
