@@ -7908,12 +7908,11 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
 `);
   let transcriptTruncated = segments.some((segment) => segment.truncated);
   const privacyFailure = segments.some((segment) => segment.privacyFailure);
-  const aggregateSecret = secretValues.some((secret) => transcript.includes(secret));
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split(`
 `).length > 500;
-  if (privacyFailure || aggregateSecret || aggregateBounds) {
+  if (privacyFailure || aggregateBounds) {
     transcript = "";
-    transcriptTruncated ||= aggregateSecret || aggregateBounds;
+    transcriptTruncated ||= aggregateBounds;
   }
   const evidence = {
     kind: "compose-up",
@@ -7962,7 +7961,7 @@ async function captureFailedServiceLogs(runtime, service, tailLines, segmentByte
   const streamBytes = Math.floor(Math.max(0, bodyBytes - 1) / 2);
   let result;
   try {
-    result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--tail", String(tailLines), service], {
+    result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--no-log-prefix", "--tail", String(tailLines), service], {
       allowFailure: true,
       timeoutMs: 20000,
       maxOutputBytes: streamBytes,
@@ -7982,14 +7981,30 @@ async function captureFailedServiceLogs(runtime, service, tailLines, segmentByte
 function buildDiagnosticSegment(label, raw, runtime, secretValues, maxLines, maxBytes, upstreamTruncated) {
   const header = `--- ${label} ---`;
   const body = boundedLogTail(redactComposeFailure(raw, runtime, secretValues), Math.max(0, maxLines - 1), Math.max(0, maxBytes - Buffer.byteLength(header) - 1));
+  const privacyFailure = bodyContainsSecret(body.text, header, secretValues);
   const text = body.text ? `${header}
 ${body.text}` : header;
-  const privacyFailure = secretValues.some((secret) => text.includes(secret));
   return {
     text: privacyFailure ? "" : text,
     truncated: upstreamTruncated || body.truncated,
     privacyFailure
   };
+}
+function bodyContainsSecret(body, header, secretValues) {
+  if (!body)
+    return false;
+  const framed = `${header}
+${body}`;
+  const bodyStart = header.length + 1;
+  return secretValues.some((secret) => {
+    let start = framed.indexOf(secret);
+    while (start >= 0) {
+      if (start + secret.length > bodyStart)
+        return true;
+      start = framed.indexOf(secret, start + 1);
+    }
+    return false;
+  });
 }
 async function writeFailureTranscript(runtimeRoot, text) {
   const root = await lstat(runtimeRoot);

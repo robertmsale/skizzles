@@ -383,7 +383,11 @@ ports:
     expect(artifact).toContain("MIGRATION_ERROR_MARKER");
     expect(artifact).not.toContain("HEALTHY_SERVICE_MARKER");
     expect(artifact).not.toContain("UNEXPOSED_SIDECAR_MARKER");
-    expect(docker.runCalls.filter((call) => call.args.includes("logs")).map((call) => call.args.at(-1))).toEqual(["dev"]);
+    const logsCalls = docker.runCalls.filter((call) => call.args.includes("logs"));
+    expect(logsCalls.map((call) => call.args.at(-1))).toEqual(["dev"]);
+    const logsArgs = logsCalls[0]!.args;
+    const logsIndex = logsArgs.indexOf("logs");
+    expect(logsArgs.slice(logsIndex)).toEqual(["logs", "--no-color", "--no-log-prefix", "--tail", "374", "dev"]);
     expect(lab.provisioningFailure?.services).toEqual([
       { service: "dev", state: "exited", exitCode: 17 },
       { service: "api", state: "running", health: "healthy", exitCode: 0 },
@@ -394,6 +398,131 @@ ports:
     expect(diagnostic).toContain("MIGRATION_ERROR_MARKER");
     expect(diagnostic).not.toContain("HEALTHY_SERVICE_MARKER");
     await service.destroyLab(created.labId);
+  });
+
+  test("keeps safe service evidence when a secret equals the trusted service name", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-header-secret-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [LAB_SECRET]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const docker = new ServiceLogsDocker([{ Service: "dev", State: "exited", ExitCode: 17 }], {
+      dev: "SAFE_BODY_MARKER",
+    }, ["dev"], "SAFE_LIFECYCLE_MARKER");
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-header-secret", roots, docker, {
+      PATH: process.env.PATH,
+      LAB_SECRET: "dev",
+    });
+
+    const created = await service.createLab("header-secret", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-header-secret", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(artifact).toContain("--- service:dev ---");
+    expect(artifact).toContain("SAFE_BODY_MARKER");
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: expect.any(Number) });
+    await service.destroyLab(created.labId);
+  });
+
+  test("redacts a service-body secret without treating its trusted header as a leak", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-body-secret-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [LAB_SECRET]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const docker = new ServiceLogsDocker([{ Service: "dev", State: "exited", ExitCode: 17 }], {
+      dev: "BODY_dev_MARKER",
+    }, ["dev"], "SAFE_LIFECYCLE_MARKER");
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-body-secret", roots, docker, {
+      PATH: process.env.PATH,
+      LAB_SECRET: "dev",
+    });
+
+    const created = await service.createLab("body-secret", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-body-secret", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    const body = artifact.slice(artifact.indexOf("--- service:dev ---") + "--- service:dev ---".length);
+    expect(artifact).toContain("--- service:dev ---");
+    expect(artifact).toContain("[secret-value-redacted]");
+    expect(body).not.toContain("dev");
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true });
+    await service.destroyLab(created.labId);
+  });
+
+  test("erases the artifact when service-body control sanitization recreates a declared secret", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-control-secret-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [TOKEN_REPLACEMENT]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const docker = new ServiceLogsDocker([{ Service: "dev", State: "exited", ExitCode: 17 }], {
+      dev: "\u0001",
+    }, ["dev"], "SAFE_LIFECYCLE_MARKER");
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-control-secret", roots, docker, {
+      PATH: process.env.PATH,
+      TOKEN_REPLACEMENT: "�",
+    });
+
+    const created = await service.createLab("control-secret", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-control-secret", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(artifact).toBe("");
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0 });
+    await service.destroyLab(created.labId);
+  });
+
+  test("checks body and framing provenance for boundary, one-character, and newline secrets", async () => {
+    const scenarios = [
+      { name: "one-character-frame", secret: "d", body: "SAFE_BODY_MARKER", empty: false },
+      { name: "newline-frame", secret: "\n", body: "SAFE_BODY_MARKER", empty: false },
+      { name: "one-character-body", secret: "d", body: "BODY_d_MARKER", empty: true },
+      { name: "newline-body", secret: "\n", body: "BODY\nMARKER", empty: false },
+      { name: "mixed-boundary", secret: "-\nS", body: "SAFE_BODY_MARKER", empty: true },
+    ];
+    for (const scenario of scenarios) {
+      const root = await mkdtemp(join(tmpdir(), `container-lab-service-log-${scenario.name}-`));
+      temporary.push(root);
+      const source = join(root, "source");
+      await runCommand("git", ["init", source]);
+      await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [LAB_SECRET]\n");
+      await runCommand("git", ["-C", source, "add", "."]);
+      await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+      const docker = new ServiceLogsDocker([{ Service: "dev", State: "exited", ExitCode: 17 }], {
+        dev: scenario.body,
+      }, ["dev"], "SAFE_LIFECYCLE_MARKER");
+      const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+      const owner = `thread-service-log-${scenario.name}`;
+      const service = new ContainerLabService(owner, roots, docker, {
+        PATH: process.env.PATH,
+        LAB_SECRET: scenario.secret,
+      });
+
+      const created = await service.createLab(`service-${scenario.name}`, source);
+      expect(created.state).toBe("failed");
+      const lab = await readLab(roots, owner, created.labId);
+      const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+      if (scenario.empty) {
+        expect(artifact).toBe("");
+        expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0 });
+      } else {
+        const header = "--- service:dev ---";
+        expect(artifact).toContain(header);
+        const body = artifact.slice(artifact.indexOf(header) + header.length).replace(/^\n/, "");
+        expect(body).not.toContain(scenario.secret);
+      }
+      await service.destroyLab(created.labId);
+    }
   });
 
   test("captures unhealthy manifest services even with a zero or absent exit code", async () => {
