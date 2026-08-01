@@ -161,6 +161,9 @@ At a coherent integration boundary:
    - Original base: <sha>
    - Candidate target: <sha>
    - Primary diff: <base>..<target>
+   - Accepted integration base: <ref@sha at candidate freeze; refreshed before final verdict>
+   - Candidate merge-base: <sha; PR merge-base when a PR exists>
+   - Base-drift preflight: <unchanged/advanced; ahead/behind counts; path-interaction classification and bounded evidence>
    - Git status: <clean/dirty and exact status or bounded summary>
    - Uncommitted deltas: <paths, owners, and whether any can affect the target>
    - Reviewed source writers: quiescent
@@ -170,7 +173,8 @@ At a coherent integration boundary:
    ```
 
    Review inspects the committed target object and diff, not an assumed globally clean worktree, and must not issue independent acceptance against a moving target. QA may claim exact-target runtime proof only when its execution environment and source are verified at the candidate target and no undisclosed or relevant deltas can affect proof; otherwise QA waits for quiescence or labels provenance honestly. An architecture consultation may inspect uncommitted or incomplete material only as advisory input, never as independent acceptance.
-5. Findings return to the persistent specialist that owns the affected slice. After repair, the root creates an additive repair commit; the same Reviewer re-reviews source findings against both the repair delta (`<old-target>..<new-target>`) and cumulative diff (`<base>..<new-target>`), while the same QA owner reruns runtime proof against the repaired target and reports its provenance again.
+5. **Pre-acceptance base-drift check.** Immediately before each final Review/QA verdict, the root refreshes the accepted integration ref and records its SHA, the candidate target's merge-base (the PR merge-base when a PR exists), bounded ahead/behind counts, and a bounded path-interaction classification. Compare the paths changed since the accepted base recorded at freeze with the candidate's primary diff; classify the interaction as `none/independent`, `material overlap`, or `uncertain interaction` (shared interfaces, configuration, or runtime behavior can be uncertain even without an identical path). If the accepted base is unchanged, proceed. If it advanced but the evidence is `none/independent`, record that result and let the existing verdict stand. If overlap is material or interaction is uncertain, the prior verdict is stale: the root deliberately integrates or otherwise updates the candidate through the repository's normal workflow (never an automatic merge or rebase), re-quiesces, validates, creates a new immutable candidate, and obtains fresh exact-target Review/QA.
+6. Findings return to the persistent specialist that owns the affected slice. After repair, the root creates an additive repair commit; the same Reviewer re-reviews source findings against both the repair delta (`<old-target>..<new-target>`) and cumulative diff (`<base>..<new-target>`), while the same QA owner reruns runtime proof against the repaired target and reports its provenance again.
 
 ## Persistent Ownership And Review
 
