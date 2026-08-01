@@ -302,6 +302,40 @@ describe("attached service lifecycle", () => {
     await service.destroyLab(created.labId);
   });
 
+  test("falls back to an empty transcript when a secret collides with the replacement marker", async () => {
+    for (const [secret, name] of [["secret", "TOKEN_SECRET"], ["[secret-value-redacted]", "TOKEN_MARKER"]] as const) {
+      const root = await mkdtemp(join(tmpdir(), "container-lab-marker-secret-"));
+      temporary.push(root);
+      const source = join(root, "source");
+      await runCommand("git", ["init", source]);
+      await writeFile(join(source, ".codex-container-lab.yaml"), `image: { name: node:24, service: dev }\nsecret_environment: [${name}]\n`);
+      await runCommand("git", ["-C", source, "add", "."]);
+      await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+      const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+      const docker = new ComposeFailureServiceDocker(secret);
+      const service = new ContainerLabService(`thread-marker-${name.toLowerCase()}`, roots, docker, {
+        PATH: process.env.PATH,
+        [name]: secret,
+      });
+
+      const created = await service.createLab("marker-secret", source);
+      expect(created.state).toBe("failed");
+      const lab = await readLab(roots, `thread-marker-${name.toLowerCase()}`, created.labId);
+      expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0, truncated: false });
+      const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+      expect(artifact).toBe("");
+
+      const status = JSON.stringify(await service.labStatus(created.labId));
+      expect(status).toContain('"bytes":0');
+      expect(status).toContain('"lines":0');
+      expect(status).not.toContain("[secret-value-redacted]");
+      const diagnostic = await service.diagnostic(created.labId) as { diagnostic: { transcript: { text: string } } };
+      expect(diagnostic.diagnostic.transcript.text).toBe("");
+      expect(JSON.stringify(diagnostic.diagnostic.transcript)).not.toContain(secret);
+      await service.destroyLab(created.labId);
+    }
+  });
+
   test("keeps legacy failed manifests readable without diagnostics", async () => {
     const fixture = await durableFixture("thread-legacy-failed", "failed");
     const service = new ContainerLabService(fixture.owner, fixture.roots, new RecordingDocker());

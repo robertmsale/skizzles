@@ -318,7 +318,11 @@ function redactComposeFailure(value: string, runtime: LabRuntime, environment: N
   // Compose may print short container ids that are not covered by the public
   // text redactor's UUID/sha256 rules. They are not useful at this boundary.
   diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  return redactPublicText(diagnostic, 8 * 1024, 500);
+  const redacted = redactPublicText(diagnostic, 8 * 1024, 500);
+  // Replacement markers themselves can contain a declared secret (for
+  // example TOKEN=secret or TOKEN=[secret-value-redacted]). Never persist a
+  // transcript that still contains any literal secret, even after redaction.
+  return secretValues.some((secret) => redacted.includes(secret)) ? "" : redacted;
 }
 
 export async function stackLogs(

@@ -7889,7 +7889,8 @@ function redactComposeFailure(value, runtime, environment) {
       diagnostic = diagnostic.split(value2).join("[redacted]");
   }
   diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  return redactPublicText(diagnostic, 8 * 1024, 500);
+  const redacted = redactPublicText(diagnostic, 8 * 1024, 500);
+  return secretValues.some((secret) => redacted.includes(secret)) ? "" : redacted;
 }
 async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunner) {
   if (tailLines < 1 || tailLines > 500)
