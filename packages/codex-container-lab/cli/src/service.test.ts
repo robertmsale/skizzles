@@ -525,6 +525,68 @@ ports:
     }
   });
 
+  test("erases a secret reconstructed from lifecycle body into service framing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-lifecycle-boundary-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    const secret = "END\n--- service:dev ---";
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [LAB_SECRET]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const docker = new ServiceLogsDocker([{ Service: "dev", State: "exited", ExitCode: 17 }], {
+      dev: "SAFE_SERVICE_MARKER",
+    }, ["dev"], "END");
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-lifecycle-boundary", roots, docker, {
+      PATH: process.env.PATH,
+      LAB_SECRET: secret,
+    });
+
+    const created = await service.createLab("lifecycle-boundary", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-lifecycle-boundary", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(artifact).toBe("");
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0 });
+    await service.destroyLab(created.labId);
+  });
+
+  test("erases a secret reconstructed from one service body into the next service framing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-service-boundary-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    const secret = "END\n--- service:api ---";
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), `image: { name: node:24, service: dev }
+ports:
+  api: { service: api, target: 8080 }
+secret_environment: [LAB_SECRET]
+`);
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const docker = new ServiceLogsDocker([
+      { Service: "dev", State: "exited", ExitCode: 17 },
+      { Service: "api", State: "exited", ExitCode: 23 },
+    ], {
+      dev: "END",
+      api: "SAFE_API_MARKER",
+    }, ["dev", "api"], "SAFE_LIFECYCLE_MARKER");
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-service-log-service-boundary", roots, docker, {
+      PATH: process.env.PATH,
+      LAB_SECRET: secret,
+    });
+
+    const created = await service.createLab("service-boundary", source);
+    expect(created.state).toBe("failed");
+    const lab = await readLab(roots, "thread-service-log-service-boundary", created.labId);
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(artifact).toBe("");
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0 });
+    await service.destroyLab(created.labId);
+  });
+
   test("captures unhealthy manifest services even with a zero or absent exit code", async () => {
     const root = await mkdtemp(join(tmpdir(), "container-lab-service-log-unhealthy-"));
     temporary.push(root);

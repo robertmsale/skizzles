@@ -7904,10 +7904,10 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
     const captured = await captureFailedServiceLogs(runtime, service, Math.max(1, (serviceLines[index] ?? 1) - 1), Math.max(1, serviceBytes[index] ?? 1), runner, environment);
     segments.push(buildDiagnosticSegment(`service:${service}`, captured.raw, runtime, secretValues, serviceLines[index] ?? 1, serviceBytes[index] ?? 1, captured.truncated));
   }
-  let transcript = segments.map((segment) => segment.text).filter(Boolean).join(`
-`);
+  const aggregate = joinDiagnosticSegments(segments);
+  let transcript = aggregate.text;
   let transcriptTruncated = segments.some((segment) => segment.truncated);
-  const privacyFailure = segments.some((segment) => segment.privacyFailure);
+  const privacyFailure = segments.some((segment) => segment.privacyFailure) || aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split(`
 `).length > 500;
   if (privacyFailure || aggregateBounds) {
@@ -7987,8 +7987,43 @@ ${body.text}` : header;
   return {
     text: privacyFailure ? "" : text,
     truncated: upstreamTruncated || body.truncated,
-    privacyFailure
+    privacyFailure,
+    bodyStart: body.text ? header.length + 1 : undefined,
+    bodyEnd: body.text ? text.length : undefined
   };
+}
+function joinDiagnosticSegments(segments) {
+  let text = "";
+  const bodyRanges = [];
+  for (const segment of segments) {
+    if (!segment.text)
+      continue;
+    const separator = text ? `
+` : "";
+    const offset = text.length + separator.length;
+    text += `${separator}${segment.text}`;
+    if (segment.bodyStart !== undefined && segment.bodyEnd !== undefined && segment.bodyStart < segment.bodyEnd) {
+      bodyRanges.push({
+        start: offset + segment.bodyStart,
+        end: Math.min(offset + segment.bodyEnd, text.length)
+      });
+    }
+  }
+  return { text, bodyRanges };
+}
+function aggregateContainsSecret(text, bodyRanges, secretValues) {
+  return secretValues.some((secret) => {
+    if (!secret)
+      return false;
+    let start = text.indexOf(secret);
+    while (start >= 0) {
+      const end = start + secret.length;
+      if (bodyRanges.some((range) => start < range.end && end > range.start))
+        return true;
+      start = text.indexOf(secret, start + 1);
+    }
+    return false;
+  });
 }
 function bodyContainsSecret(body, header, secretValues) {
   if (!body)

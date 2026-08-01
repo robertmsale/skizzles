@@ -327,9 +327,11 @@ async function captureComposeFailure(
       captured.truncated,
     ));
   }
-  let transcript = segments.map((segment) => segment.text).filter(Boolean).join("\n");
+  const aggregate = joinDiagnosticSegments(segments);
+  let transcript = aggregate.text;
   let transcriptTruncated = segments.some((segment) => segment.truncated);
-  const privacyFailure = segments.some((segment) => segment.privacyFailure);
+  const privacyFailure = segments.some((segment) => segment.privacyFailure) ||
+    aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split("\n").length > 500;
   if (privacyFailure || aggregateBounds) {
     transcript = "";
@@ -417,7 +419,7 @@ function buildDiagnosticSegment(
   maxLines: number,
   maxBytes: number,
   upstreamTruncated: boolean,
-): { text: string; truncated: boolean; privacyFailure: boolean } {
+): DiagnosticSegment {
   // Treat captured Compose output as untrusted until it has been redacted,
   // bounded, control-sanitized, and checked. The synthetic label is trusted
   // framing and is added only after that body pipeline completes.
@@ -433,7 +435,57 @@ function buildDiagnosticSegment(
     text: privacyFailure ? "" : text,
     truncated: upstreamTruncated || body.truncated,
     privacyFailure,
+    bodyStart: body.text ? header.length + 1 : undefined,
+    bodyEnd: body.text ? text.length : undefined,
   };
+}
+
+type DiagnosticSegment = {
+  text: string;
+  truncated: boolean;
+  privacyFailure: boolean;
+  bodyStart?: number;
+  bodyEnd?: number;
+};
+
+type DiagnosticBodyRange = { start: number; end: number };
+
+function joinDiagnosticSegments(segments: readonly DiagnosticSegment[]): {
+  text: string;
+  bodyRanges: DiagnosticBodyRange[];
+} {
+  let text = "";
+  const bodyRanges: DiagnosticBodyRange[] = [];
+  for (const segment of segments) {
+    if (!segment.text) continue;
+    const separator = text ? "\n" : "";
+    const offset = text.length + separator.length;
+    text += `${separator}${segment.text}`;
+    if (segment.bodyStart !== undefined && segment.bodyEnd !== undefined && segment.bodyStart < segment.bodyEnd) {
+      bodyRanges.push({
+        start: offset + segment.bodyStart,
+        end: Math.min(offset + segment.bodyEnd, text.length),
+      });
+    }
+  }
+  return { text, bodyRanges };
+}
+
+function aggregateContainsSecret(
+  text: string,
+  bodyRanges: readonly DiagnosticBodyRange[],
+  secretValues: readonly string[],
+): boolean {
+  return secretValues.some((secret) => {
+    if (!secret) return false;
+    let start = text.indexOf(secret);
+    while (start >= 0) {
+      const end = start + secret.length;
+      if (bodyRanges.some((range) => start < range.end && end > range.start)) return true;
+      start = text.indexOf(secret, start + 1);
+    }
+    return false;
+  });
 }
 
 function bodyContainsSecret(body: string, header: string, secretValues: readonly string[]): boolean {
