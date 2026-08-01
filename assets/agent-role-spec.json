@@ -2,7 +2,7 @@
   "version": 1,
   "capabilities": {
     "luna_max": { "model": "gpt-5.6-luna", "reasoningEffort": "max" },
-    "sol_medium": { "model": "gpt-5.6-sol", "reasoningEffort": "medium" },
+    "terra_medium": { "model": "gpt-5.6-terra", "reasoningEffort": "medium" },
     "sol_high": { "model": "gpt-5.6-sol", "reasoningEffort": "high" },
     "sol_xhigh": { "model": "gpt-5.6-sol", "reasoningEffort": "xhigh" }
   },
@@ -18,8 +18,8 @@
     {
       "behavior": "triage",
       "description": "Evidence-first diagnosis, runtime reproduction, and implementation-path mapping.",
-      "defaultCapability": "sol_medium",
-      "capabilities": ["sol_medium"]
+      "defaultCapability": "terra_medium",
+      "capabilities": ["terra_medium"]
     },
     {
       "behavior": "worker",

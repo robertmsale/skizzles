@@ -17,10 +17,10 @@
     {
       "agentType": "triage",
       "behavior": "triage",
-      "capability": "sol_medium",
-      "model": "gpt-5.6-sol",
+      "capability": "terra_medium",
+      "model": "gpt-5.6-terra",
       "reasoningEffort": "medium",
-      "description": "Evidence-first diagnosis, runtime reproduction, and implementation-path mapping. Default capability: gpt-5.6-sol at medium effort.",
+      "description": "Evidence-first diagnosis, runtime reproduction, and implementation-path mapping. Default capability: gpt-5.6-terra at medium effort.",
       "configFile": "triage.toml"
     },
     {

@@ -29,7 +29,7 @@ describe("capability-bearing agent role generation", () => {
     expect(manifest.nativeRoleAliases).toEqual({ explorer: "triage" });
     expect(manifest.agents.map(({ agentType, model, reasoningEffort }) => ({ agentType, model, reasoningEffort }))).toEqual([
       { agentType: "default", model: "gpt-5.6-luna", reasoningEffort: "max" },
-      { agentType: "triage", model: "gpt-5.6-sol", reasoningEffort: "medium" },
+      { agentType: "triage", model: "gpt-5.6-terra", reasoningEffort: "medium" },
       { agentType: "worker", model: "gpt-5.6-luna", reasoningEffort: "max" },
       { agentType: "designer", model: "gpt-5.6-luna", reasoningEffort: "max" },
       { agentType: "qa", model: "gpt-5.6-luna", reasoningEffort: "max" },
