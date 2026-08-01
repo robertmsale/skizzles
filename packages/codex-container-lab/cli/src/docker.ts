@@ -149,6 +149,8 @@ export async function provisionLabStack(
       signal,
       allowFailure: true,
       maxOutputBytes: 4 * 1024 * 1024,
+      stdoutCapture: "tail",
+      stderrCapture: "tail",
       env: secretComposeEnvironment(runtime.config.secretEnvironment, environment),
     });
   } catch {
@@ -259,12 +261,13 @@ async function captureComposeFailure(
   if (secretValues.some((secret) => transcript.text.includes(secret))) {
     transcript = { text: "", truncated: false };
   }
+  const upstreamTruncated = provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true;
   const evidence = {
     kind: "compose-up" as const,
     available: false,
     bytes: 0,
     lines: 0,
-    truncated: transcript.truncated,
+    truncated: upstreamTruncated || transcript.truncated,
   };
   try {
     await writeFailureTranscript(runtime.metadata.runtimeRoot, transcript.text);
@@ -321,7 +324,7 @@ function redactComposeFailure(value: string, runtime: LabRuntime, secretValues: 
   // Compose may print short container ids that are not covered by the public
   // text redactor's UUID/sha256 rules. They are not useful at this boundary.
   diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  return redactPublicText(diagnostic, 8 * 1024, 500);
+  return redactPublicText(diagnostic, 8 * 1024, 500, { byteCapture: "tail" });
 }
 
 function declaredSecretValues(runtime: LabRuntime, environment: NodeJS.ProcessEnv): string[] {

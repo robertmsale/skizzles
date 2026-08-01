@@ -7586,23 +7586,11 @@ async function runCommand(command, args, options = {}) {
       stdio: ["ignore", "pipe", "pipe"]
     });
     const cap = options.maxOutputBytes ?? 4 * 1024 * 1024;
-    const stdout = [];
-    const stderr = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
+    const stdout = captureState(options.stdoutCapture);
+    const stderr = captureState(options.stderrCapture);
     let timedOut = false;
-    const collect = (chunks, chunk, current) => {
-      const remaining = cap - current;
-      if (remaining > 0)
-        chunks.push(chunk.subarray(0, remaining));
-      return current + chunk.byteLength;
-    };
-    child.stdout.on("data", (chunk) => {
-      stdoutBytes = collect(stdout, chunk, stdoutBytes);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderrBytes = collect(stderr, chunk, stderrBytes);
-    });
+    child.stdout.on("data", (chunk) => collect(stdout, chunk, cap));
+    child.stderr.on("data", (chunk) => collect(stderr, chunk, cap));
     const abort = () => child.kill("SIGKILL");
     options.signal?.addEventListener("abort", abort, { once: true });
     const timeout = options.timeoutMs ? setTimeout(() => {
@@ -7614,7 +7602,13 @@ async function runCommand(command, args, options = {}) {
       if (timeout)
         clearTimeout(timeout);
       options.signal?.removeEventListener("abort", abort);
-      const result = { code: code ?? (timedOut ? 124 : 1), stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
+      const result = {
+        code: code ?? (timedOut ? 124 : 1),
+        stdout: Buffer.concat(stdout.chunks),
+        stderr: Buffer.concat(stderr.chunks),
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated
+      };
       if (options.signal?.aborted)
         return reject(new Error(`${command} aborted`));
       if (result.code !== 0 && !options.allowFailure) {
@@ -7624,15 +7618,61 @@ async function runCommand(command, args, options = {}) {
     });
   });
 }
+function captureState(policy) {
+  return { chunks: [], bytes: 0, totalBytes: 0, truncated: false, policy: policy ?? "head" };
+}
+function collect(state, chunk, cap) {
+  state.totalBytes += chunk.byteLength;
+  if (state.totalBytes > cap)
+    state.truncated = true;
+  if (cap <= 0)
+    return;
+  if (state.policy === "head") {
+    const remaining = cap - state.bytes;
+    if (remaining > 0) {
+      const retained = chunk.subarray(0, remaining);
+      state.chunks.push(retained);
+      state.bytes += retained.byteLength;
+    }
+    return;
+  }
+  if (chunk.byteLength >= cap) {
+    const retained = Buffer.from(chunk.subarray(chunk.byteLength - cap));
+    state.chunks = [retained];
+    state.bytes = retained.byteLength;
+    return;
+  }
+  let excess = state.bytes + chunk.byteLength - cap;
+  while (excess > 0 && state.chunks.length > 0) {
+    const first = state.chunks[0];
+    if (first.byteLength <= excess) {
+      state.chunks.shift();
+      state.bytes -= first.byteLength;
+      excess -= first.byteLength;
+    } else {
+      state.chunks[0] = first.subarray(excess);
+      state.bytes -= excess;
+      excess = 0;
+    }
+  }
+  state.chunks.push(chunk);
+  state.bytes += chunk.byteLength;
+}
 
 // packages/codex-container-lab/cli/src/public-output.ts
-function redactPublicText(value, maxBytes = 2000, maxLines = 8) {
+function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
   const redacted = value.replace(/\/(?:[^\s"'\\]|\\.)+/g, "[path]").replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]").split(`
 `).slice(-maxLines).join(`
 `);
-  return truncateUtf8(redacted, maxBytes);
+  return truncateUtf8(redacted, maxBytes, options.byteCapture ?? "head");
 }
-function truncateUtf8(value, maxBytes) {
+function truncateUtf8(value, maxBytes, policy) {
+  if (policy === "tail") {
+    const bytes2 = Buffer.from(value);
+    if (bytes2.byteLength <= maxBytes)
+      return value;
+    return bytes2.subarray(bytes2.byteLength - maxBytes).toString("utf8").replace(/^\uFFFD/, "");
+  }
   let bytes = 0;
   let output = "";
   for (const character of value) {
@@ -7744,6 +7784,8 @@ async function provisionLabStack(runtime, signal, runner = defaultDockerRunner, 
       signal,
       allowFailure: true,
       maxOutputBytes: 4 * 1024 * 1024,
+      stdoutCapture: "tail",
+      stderrCapture: "tail",
       env: secretComposeEnvironment(runtime.config.secretEnvironment, environment)
     });
   } catch {
@@ -7835,12 +7877,13 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
   if (secretValues.some((secret) => transcript.text.includes(secret))) {
     transcript = { text: "", truncated: false };
   }
+  const upstreamTruncated = provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true;
   const evidence = {
     kind: "compose-up",
     available: false,
     bytes: 0,
     lines: 0,
-    truncated: transcript.truncated
+    truncated: upstreamTruncated || transcript.truncated
   };
   try {
     await writeFailureTranscript(runtime.metadata.runtimeRoot, transcript.text);
@@ -7892,7 +7935,7 @@ function redactComposeFailure(value, runtime, secretValues) {
       diagnostic = diagnostic.split(value2).join("[redacted]");
   }
   diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  return redactPublicText(diagnostic, 8 * 1024, 500);
+  return redactPublicText(diagnostic, 8 * 1024, 500, { byteCapture: "tail" });
 }
 function declaredSecretValues(runtime, environment) {
   return [...new Set(runtime.config.secretEnvironment.map((name) => environment[name]).filter((secret) => typeof secret === "string" && secret.length > 0))].sort((left, right) => right.length - left.length);

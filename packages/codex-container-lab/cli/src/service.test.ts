@@ -98,6 +98,33 @@ class ComposeFailureServiceDocker extends RecordingDocker {
   }
 }
 
+class LargeComposeFailureServiceDocker extends RecordingDocker {
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    this.calls.push(args);
+    this.runCalls.push({ args, options });
+    if (args.includes("config")) {
+      return { code: 0, stdout: Buffer.from(JSON.stringify({ services: { dev: {} } })), stderr: Buffer.alloc(0) };
+    }
+    if (args.includes("up")) {
+      const script = [
+        "const { writeSync } = require('node:fs');",
+        "const prefix = 'BUILD_EXPORT_PREFIX\\n'.repeat(300_000);",
+        "writeSync(1, prefix);",
+        "writeSync(2, prefix);",
+        "writeSync(2, '\\nTERMINAL_DEV_EXIT_17\\nTERMINAL_COMPOSE_FAILURE_DEV\\n');",
+        "process.exitCode = 1;",
+      ].join(" ");
+      return await runCommand(process.execPath, ["-e", script], options);
+    }
+    if (args.includes("ps") && args.includes("--all")) {
+      return { code: 0, stdout: Buffer.from(JSON.stringify([
+        { Service: "dev", State: "exited", ExitCode: 17 },
+      ])), stderr: Buffer.alloc(0) };
+    }
+    return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+}
+
 describe("attached service lifecycle", () => {
   test("create provisions synchronously and returns only lab identity and terminal state", async () => {
     const root = await mkdtemp(join(tmpdir(), "container-lab-create-"));
@@ -248,6 +275,44 @@ describe("attached service lifecycle", () => {
     expect((await fresh.destroyLab(created.labId)).destroyed).toBe(true);
     expect(await Bun.file(artifact).exists()).toBe(false);
     await expect(readLab(roots, "thread-failed-diagnostic", created.labId)).rejects.toThrow();
+  });
+
+  test("retains terminal Compose failure lines after the upstream output cap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-terminal-diagnostic-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const docker = new LargeComposeFailureServiceDocker();
+    const service = new ContainerLabService("thread-terminal-diagnostic", roots, docker, { PATH: process.env.PATH });
+
+    const created = await service.createLab("terminal", source);
+    expect(created.state).toBe("failed");
+    const up = docker.runCalls.find((call) => call.args.includes("up"));
+    expect(up?.options).toMatchObject({
+      maxOutputBytes: 4 * 1024 * 1024,
+      stdoutCapture: "tail",
+      stderrCapture: "tail",
+    });
+    const lab = await readLab(roots, "thread-terminal-diagnostic", created.labId);
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, truncated: true });
+    const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
+    expect(artifact).toContain("TERMINAL_DEV_EXIT_17");
+    expect(artifact).toContain("TERMINAL_COMPOSE_FAILURE_DEV");
+    expect(Buffer.byteLength(artifact)).toBeLessThanOrEqual(8 * 1024);
+    expect(artifact.split("\n").length).toBeLessThanOrEqual(500);
+
+    const status = JSON.stringify(await service.labStatus(created.labId));
+    expect(status).toContain('"truncated":true');
+    expect(status).not.toContain(lab.runtimeRoot);
+    const diagnostic = JSON.stringify(await service.diagnostic(created.labId));
+    expect(diagnostic).toContain("TERMINAL_COMPOSE_FAILURE_DEV");
+    expect(diagnostic).toContain("TERMINAL_DEV_EXIT_17");
+    expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(16 * 1024);
+    await service.destroyLab(created.labId);
   });
 
   test("omits an out-of-contract Compose exit code without masking the original failure", async () => {

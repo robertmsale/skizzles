@@ -1,4 +1,12 @@
-export function redactPublicText(value: string, maxBytes = 2_000, maxLines = 8): string {
+export type PublicTextCapturePolicy = "head" | "tail";
+export type RedactPublicTextOptions = { byteCapture?: PublicTextCapturePolicy };
+
+export function redactPublicText(
+  value: string,
+  maxBytes = 2_000,
+  maxLines = 8,
+  options: RedactPublicTextOptions = {},
+): string {
   const redacted = value
     .replace(/\/(?:[^\s"'\\]|\\.)+/g, "[path]")
     .replace(/\b[a-f0-9]{64}\b/gi, "[redacted]")
@@ -8,10 +16,15 @@ export function redactPublicText(value: string, maxBytes = 2_000, maxLines = 8):
     .replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]")
     .replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]")
     .split("\n").slice(-maxLines).join("\n");
-  return truncateUtf8(redacted, maxBytes);
+  return truncateUtf8(redacted, maxBytes, options.byteCapture ?? "head");
 }
 
-function truncateUtf8(value: string, maxBytes: number): string {
+function truncateUtf8(value: string, maxBytes: number, policy: PublicTextCapturePolicy): string {
+  if (policy === "tail") {
+    const bytes = Buffer.from(value);
+    if (bytes.byteLength <= maxBytes) return value;
+    return bytes.subarray(bytes.byteLength - maxBytes).toString("utf8").replace(/^�/, "");
+  }
   let bytes = 0;
   let output = "";
   for (const character of value) {
