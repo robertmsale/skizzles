@@ -1,6 +1,6 @@
 ---
 name: completion-contract
-description: Convert user intent, approved plans, and subagent handoffs into explicit completion contracts. Use when Codex is planning implementation, spawning subagents, setting or refining a /goal, defining acceptance criteria, avoiding scope shrink, deciding fan-out boundaries, or reviewing whether a claimed result satisfies the requested outcome.
+description: "**MANDATORY validation and completion gate** — use when planning, delegating, implementing, or accepting work, especially when validation is already failing, produces broad or high-volume diagnostics, or might tempt changes to lint, format, test, typecheck, CI, suppression, or quality-gate policy. Preserve validation strength, classify task-attributable versus repository-red failures, and report systemic baseline cost without silently expanding scope or manufacturing a passing result."
 ---
 
 # Completion Contract
@@ -31,11 +31,40 @@ Disallowed alternatives:
 Legacy/removal expectations:
 Regression expectations:
 Evidence expected:
+Validation baseline:
+Repository-red handling:
 Known valid blockers:
 Unknowns requiring clarification:
 ```
 
 If an unknown would materially change the contract, ask the user or parent orchestrator instead of silently narrowing scope.
+
+## Validation Integrity And Repository-Red Baselines
+
+A passing command is evidence only when the accepted validation contract remains at least as strong as its baseline. Do not manufacture a passing result by disabling checks or formatters, downgrading severity, broadening ignores, adding suppression directives, changing exit behavior, or replacing a canonical command with a weaker one. Treat those as validation-policy changes that require explicit owner approval, not implementation repairs.
+
+When practical, establish the relevant validation baseline before editing. If a gate fails after editing, classify it instead of assuming that every diagnostic belongs to the task:
+
+| Classification | Required response |
+|---|---|
+| **Task-attributable failure** | Repair it within the owned task, then rerun the affected proof. |
+| **Pre-existing bounded failure** | Preserve policy, run the narrowest supported proof for the changed surface, and report the remaining baseline failure without claiming the canonical gate passed. |
+| **Large or systemic repository-red failure** | Preserve policy, retain bounded evidence, measure and summarize the repository-health condition, finish only what can be truthfully proved, and recommend a separate cleanup campaign. |
+
+If no pre-edit baseline exists, use touched paths, changed behavior, diagnostic provenance, and repository history to distinguish attribution. Do not silently absorb broad pre-existing cleanup into a small task, and do not reinterpret recently created, modified, or untracked validation configuration as disposable scaffolding. Existing user and collaborator changes retain their ownership regardless of Git tracking state.
+
+Treat the baseline as systemically red when its breadth makes task attribution or useful inline inspection unreliable—for example, diagnostics span many unrelated files or rules, output is truncated or redirected to a managed artifact, or correction would materially exceed the requested ownership boundary. Numeric thresholds are signals rather than policy; a hundred repetitive findings in one generated file may be more bounded than twenty unrelated architectural failures.
+
+For a repository-red handoff, report a compact measurement rather than dumping the transcript:
+
+- Exact command, working directory, tool version when relevant, and exit status.
+- Error and warning counts, affected-file count, and touched-surface versus unrelated counts when available.
+- A few dominant rule or failure categories without unbounded examples.
+- Whether output was truncated and the bounded artifact path, with secrets and private data excluded.
+- Which narrower checks passed, which canonical gate remains red, and what therefore remains unverified.
+- The expected cost benefit of a dedicated cleanup: faster validation, smaller outputs, clearer attribution, fewer agent turns and retries, and lower risk of accidental suppression.
+
+Repository-red is a health finding, not permission to broaden the current task, automatically create another task, or weaken policy. Recommend cleanup for the owner to deliberate separately.
 
 ## Fan-Out
 
