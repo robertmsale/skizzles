@@ -20,7 +20,10 @@ function invoke(input: string): { exitCode: number; stdout: string; stderr: stri
   };
 }
 
-function event(toolInput: unknown, overrides: Record<string, unknown> = {}): string {
+function event(
+  toolInput: unknown,
+  overrides: Record<string, unknown> = {},
+): string {
   return JSON.stringify({
     hook_event_name: "PreToolUse",
     tool_name: "spawn_agent",
@@ -36,6 +39,31 @@ describe("spawn-agent fork guard", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
+  });
+
+  test("enforces the same contract for the flattened collaboration namespace", () => {
+    const valid = invoke(event(
+      { task_name: "worker__fixture", agent_type: "worker", fork_turns: "2" },
+      { tool_name: "collaborationspawn_agent" },
+    ));
+    expect(valid.exitCode).toBe(0);
+    expect(valid.stdout).toBe("");
+    expect(valid.stderr).toBe("");
+
+    for (const toolInput of [
+      { task_name: "worker__fixture", fork_turns: "1" },
+      { task_name: "worker__fixture", fork_turns: "all" },
+      { task_name: "worker__fixture", agent_type: "worker", fork_turns: "all" },
+    ]) {
+      const denied = invoke(event(toolInput, { tool_name: "collaborationspawn_agent" }));
+      expect(denied.exitCode).toBe(0);
+      expect(JSON.parse(denied.stdout).hookSpecificOutput).toEqual({
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: denialReason,
+      });
+      expect(denied.stderr).toBe("");
+    }
   });
 
   test("denies missing, full-history, context-free, zero, and malformed forks", () => {

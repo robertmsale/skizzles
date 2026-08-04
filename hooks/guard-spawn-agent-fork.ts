@@ -15,6 +15,7 @@ type JsonObject = Record<string, unknown>;
 export {};
 
 const positiveForkTurns = /^[1-9][0-9]*$/;
+const spawnAgentToolNames = new Set(["spawn_agent", "collaborationspawn_agent"]);
 const denialReason =
   'Select a non-empty agent_type role and use the smallest useful positive numbered fork_turns (for example, "1"); do not use full-history or context-free forks.';
 
@@ -55,7 +56,11 @@ async function main(): Promise<void> {
 
   if (!isJsonObject(event)) return;
   const hookEvent = event as HookEvent;
-  if (hookEvent.hook_event_name !== "PreToolUse" || hookEvent.tool_name !== "spawn_agent") return;
+  if (
+    hookEvent.hook_event_name !== "PreToolUse" ||
+    typeof hookEvent.tool_name !== "string" ||
+    !spawnAgentToolNames.has(hookEvent.tool_name)
+  ) return;
   if (!isMultiAgentV2Spawn(hookEvent.tool_input)) return;
   if (deniesSpawn(hookEvent.tool_input)) deny();
 }

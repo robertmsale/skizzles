@@ -46,7 +46,7 @@ describe("deterministic plugin packaging", () => {
             ],
           },
           {
-            matcher: "spawn_agent",
+            matcher: "^(spawn_agent|collaborationspawn_agent)$",
             hooks: [
               {
                 type: "command",
