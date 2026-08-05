@@ -94,6 +94,8 @@ describe("deterministic plugin packaging", () => {
     const stagedFourthWall = await readFile(join(staged, "skills/fourth-wall/SKILL.md"), "utf8");
     expect(stagedFourthWall).toContain("A failed local build, test, Container Lab run, or QA proof is evidence to preserve and classify");
     expect(stagedFourthWall).toContain("Reserve `blocked` for an unavailable external dependency, service, or permission");
+    expect(stagedFourthWall).toContain("Every Fourth Wall campaign that changes product source");
+    expect(stagedFourthWall).toContain("`UNREVIEWED CANDIDATE`");
     const stagedDelegation = await readFile(
       join(staged, "skills/fourth-wall/references/delegation-contract.md"),
       "utf8",
@@ -101,6 +103,16 @@ describe("deterministic plugin packaging", () => {
     expect(stagedDelegation).toContain("must not by itself mark a substantial goal or campaign `blocked`");
     expect(stagedDelegation).toContain("Route the evidence to the owning Worker or persistent Triage owner");
     expect(stagedDelegation).toContain("never infer an external blocker from a failed local proof alone");
+    expect(stagedDelegation).toContain("Every source-changing Fourth Wall campaign is Review-required regardless of diff size");
+    expect(stagedDelegation).toContain("Tests, builds, QA, screenshots, and root inspection do not replace");
+    for (const field of [
+      "review_required_checkpoints",
+      "review_receipts",
+      "review_deferred_handoffs",
+      "review_omissions",
+    ]) {
+      expect(stagedLearning).toContain(`\`${field}\``);
+    }
     expect(await Bun.file(join(staged, "skills/fourth-wall/resources/learning-log.md")).exists()).toBe(false);
 
     const stagedInstaller = await readFile(join(staged, "skills/install-skizzles/SKILL.md"), "utf8");

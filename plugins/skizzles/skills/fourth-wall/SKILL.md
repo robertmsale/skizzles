@@ -1,6 +1,6 @@
 ---
 name: fourth-wall
-description: Coordinate substantial work through a bounded native Codex MultiAgentV2 team. Read before the first subagent spawn or orchestration action. Use for evidence-first triage, parallel implementation slices, persistent specialist reuse, adversarial review, runtime QA, deployment, task messaging, long event-driven waits, goals, synchronization, and recovery. Do not use for routine single-agent work or unrelated top-level Desktop tasks.
+description: Coordinate substantial work through a bounded native Codex MultiAgentV2 team. Read before the first subagent spawn or orchestration action. Every source-changing campaign requires independent Review of a frozen coherent candidate before accepted, integration-ready, or complete status, regardless of apparent triviality. Use for evidence-first triage, parallel implementation slices, persistent specialist reuse, adversarial review, runtime QA, deployment, task messaging, long event-driven waits, goals, synchronization, and recovery. Do not use for routine single-agent, read-only, or no-code work or unrelated top-level Desktop tasks.
 ---
 
 # Fourth Wall
@@ -145,6 +145,12 @@ Reserve `blocked` for an unavailable external dependency, service, or permission
 
 ## Stable Review Checkpoints
 
+### Mandatory Review Gate
+
+Every Fourth Wall campaign that changes product source, project code, generated source, configuration, schema, or executable/runtime behavior requires an independent Reviewer verdict against a frozen coherent candidate before the root may claim `accepted`, `integration-ready`, or `complete`. This gate applies regardless of diff size or apparent triviality and is one campaign-level review, not one review per Worker.
+
+An intermediate handoff may proceed only as an explicitly labelled `UNREVIEWED CANDIDATE` that names the upstream Review owner, immutable target, and required Review scope. Shared or public contract checkpoints require that Review before downstream consumption. Tests, builds, QA, screenshots, root inspection, and Worker completion claims are evidence, never substitutes for independent Review. Read-only, evidence-only, monitoring, and no-code work remain outside this gate unless the task explicitly changes source.
+
 The default review topology is one shared worktree. Do not create extra branches or temporary worktrees, or require per-Worker commits, merely to make review possible. Review is a checkpoint against an immutable candidate, not an acceptance verdict on a moving worktree.
 
 The shared worktree need not be globally clean: unrelated user or agent changes may remain. The root must disclose them and keep any relevant, overlapping, or unreviewed source delta out of the candidate target.
@@ -217,7 +223,7 @@ Read [references/coordination-loop.md](references/coordination-loop.md) for exac
 6. After parallel edits stabilize, the root quiesces parallel writers. If integration repair or a serial build/test/fix lane is needed, activate exactly one integration Worker while all other writers remain quiescent; after it finishes, re-quiesce reviewed surfaces, integrate the final aggregate state, and run focused aggregate validation. The root retains Git mutations and acceptance.
 7. Commit one coherent stable candidate after that validation, excluding unrelated shared-worktree changes; do not create per-Worker commits or extra branches/worktrees for review.
    When task-launch ambiguity or later evidence reveals duplicate roots pursuing the same outcome and base, pause further external publication until the coordinating root names one canonical publisher and compares the exact task paths, bases, branches or remote heads, and existing artifacts. Preserve and reuse a useful commit, branch, or PR that a duplicate already published when safe; reconcile disjoint work additively and validate the cumulative result. Never infer duplicate ownership from title similarity alone, automatically stop tasks, force-push, rewrite history, or discard useful work. This is a recovery gate for known or suspected duplication, not a routine semantic-deduplication scan.
-8. Dispatch persistent Review or QA against the exact checkpoint packet when risk warrants it; return findings to the persistent specialist, then use an additive repair commit, same-Reviewer source re-review, and same-QA-owner rerun as described above.
+8. For every source-changing campaign, dispatch persistent Review against the exact checkpoint packet; dispatch QA as needed for runtime proof. Return findings to the persistent specialist, then use an additive repair commit, same-Reviewer source re-review, and same-QA-owner rerun as described above.
 9. Finish aggregate validation and make the explicit decision when possible; record the campaign terminal disposition as `accepted`, `rejected`, `blocked`, or `abandoned`.
 10. Once the campaign reaches any terminal disposition, finalize the bounded campaign-close learning packet described in [references/learning-loop.md](references/learning-loop.md) for every substantial campaign, even when KPIs are zero or not observed. Keep a bounded latest snapshot if useful, but forward only a new immutable revisioned artifact with campaign/revision metadata, supersession and correction details when applicable, and a verifiable integrity identity. A later correction explicitly reopens the campaign and never overwrites a prior forwarded revision. Separate repository friction, which belongs in the task-owner completion handoff, from harness candidates; forward only to an explicitly configured consumer. Learning packets are evidence only: never automatically change policy, roles, routing, hooks, tasks, configuration, or installs.
 

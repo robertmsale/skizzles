@@ -29,6 +29,7 @@ The packet contains:
 - the KPI table below with counts, denominators, per-slice/owner context, and `0` or `not observed` when appropriate; include `overflow_counts` when a bound truncates detail;
 - review-finding classification and outcomes;
 - Reviewer independence status per review cycle: `independent` or `reduced-independence-advisory` (the latter is required when that Reviewer supplied midstream Triage adjudication);
+- source-change Review-gate accounting: required checkpoints, exact-target receipts and scope, explicitly deferred `UNREVIEWED CANDIDATE` handoffs with their named upstream owner, and any omission;
 - a separate **repository friction** report for reproducible product/process obstacles (command or surface, evidence, affected owner, and suggested repository owner);
 - a **harness candidate** section for generalizable orchestration observations, evidence paths, confidence, and the smallest change worth deliberating. When observed, record `incorrect_terminal_block` for a root that treated failed local build/test/Lab/QA proof as terminal despite a plausible in-scope repair path, and `in_scope_runtime_failure_continued` when the failed proof stayed active, was repaired by the owning Worker/Triage loop, and fresh proof resumed;
 - forwarding status: optional configured learning consumer plus the immutable artifact path, revision, and integrity identity, or `not configured`/`ambiguous`.
@@ -43,6 +44,10 @@ Do not infer a missing event from silence. Counts are observations, not performa
 | `worker_to_triage_consultations` | bounded clarification requests to the named Triage peer | resolved/unresolved, and whether the report revision changed |
 | `attributable_reviewer_product_blockers` | Reviewer findings classified as Worker-introduced explicit-contract or correctness defects | severity, slice, review cycle; exclude adjacent healing, contract discovery, and evidence-only gaps |
 | `triage_to_review_adjudications` | root-authorized guarded Triage requests dispatched to Review, including unanswered requests | decision category, why two passes were insufficient, outcome `answered`/`unanswered`/`rejected`, and whether dispatch was authorized; rejected preauthorization attempts are context only; flag as a red-flag escalation |
+| `review_required_checkpoints` | frozen source-changing candidates and shared/public contract checkpoints that require independent Review | checkpoint type, exact target, Review owner, and required scope/oracle |
+| `review_receipts` | independent exact-target verdicts satisfying a required checkpoint | exact target, scope/exclusions, independence, verdict, and persistent Reviewer identity |
+| `review_deferred_handoffs` | explicit `UNREVIEWED CANDIDATE` handoffs that name an upstream Review owner | exact target, upstream owner, required scope, and whether later receipt was observed |
+| `review_omissions` | required checkpoints labelled accepted, integration-ready, complete, or consumed downstream without a covering receipt | exact target, missing scope or receipt, downstream effect, and terminal correction |
 
 Review findings use one of: **attributable Worker defect**, **adjacent pre-existing healing**, **contract discovery/RCA correction**, or **insufficient evidence**. Only the first category increments `attributable_reviewer_product_blockers`.
 

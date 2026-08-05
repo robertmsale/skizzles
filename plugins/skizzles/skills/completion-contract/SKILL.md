@@ -1,6 +1,6 @@
 ---
 name: completion-contract
-description: "**MANDATORY validation and completion gate** — use when planning, delegating, implementing, or accepting work, especially when validation is already failing, produces broad or high-volume diagnostics, or might tempt changes to lint, format, test, typecheck, CI, suppression, or quality-gate policy. Preserve validation strength, classify task-attributable versus repository-red failures, and report systemic baseline cost without silently expanding scope or manufacturing a passing result."
+description: "**MANDATORY validation and completion gate** — use when planning, delegating, implementing, or accepting work, especially when validation is already failing, produces broad or high-volume diagnostics, or might tempt changes to lint, format, test, typecheck, CI, suppression, or quality-gate policy. For source-changing work, require independent Review of a frozen coherent candidate before accepted, integration-ready, or complete status; tests, QA, screenshots, and root inspection do not replace it. Preserve validation strength, classify task-attributable versus repository-red failures, and report systemic baseline cost without silently expanding scope or manufacturing a passing result."
 ---
 
 # Completion Contract
@@ -38,6 +38,12 @@ Unknowns requiring clarification:
 ```
 
 If an unknown would materially change the contract, ask the user or parent orchestrator instead of silently narrowing scope.
+
+## Independent Review Gate
+
+For any Fourth Wall campaign that changes product source, project code, generated source, configuration, schema, or executable/runtime behavior, require an independent Reviewer verdict against a frozen coherent candidate before the root may call the work `accepted`, `integration-ready`, or `complete`, regardless of diff size or apparent triviality. This is one campaign-level gate, not one review per Worker.
+
+An intermediate handoff may proceed only as an explicitly labelled `UNREVIEWED CANDIDATE` naming the upstream Review owner, immutable target, and required Review scope. Shared or public contract checkpoints require Review before downstream consumption. Tests, builds, QA, screenshots, root inspection, and Worker completion claims are evidence, never substitutes for independent Review. Read-only, evidence-only, monitoring, and no-code work remain outside this gate unless the task explicitly changes source.
 
 ## Validation Integrity And Repository-Red Baselines
 

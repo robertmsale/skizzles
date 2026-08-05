@@ -12,12 +12,15 @@ Define:
 4. **Constraints:** user decisions, architecture boundaries, relevant skills, and forbidden scope changes.
 5. **Evidence:** exact checks, artifacts, screenshots, or source inspection expected at completion.
 6. **Return shape:** changed areas, validation performed, unresolved risks, and the next recommended action.
+7. **Assurance ownership:** whether source changes are expected, the Review owner, immutable-candidate trigger, and required Review scope or oracle.
 
 When Triage exists, also define its canonical task name, accepted report path, report revision, and the narrow conditions under which the recipient should reactivate it.
 
 For consequential or multi-owner work, include a **peer map** with only relevant canonical task paths and ownership/contact conditions. Workers receive Triage and relevant neighboring Workers; Triage receives affected Workers; Review receives Triage and reviewed Workers; QA/Designer receive owners when clarification or rework may need them. When a peer owns a relevant resource, record its stable identifier and locator plus the exact owner task path—for example, a Container Lab identifier and state/workspace path, an owned worktree/branch, or a critical evidence artifact. Route evidence or runtime requests to the current resource owner; the request does not transfer custody or create shared control. Review may request one bounded existing artifact or missing observation from that owner, while root coordinates repair or ownership changes. Paths are callable peer identities, not ownership transfer, and child contact never authorizes spawning.
 
 State assurance explicitly: a Worker completion claim is unverified; accepted Triage evidence is provisional causal authority after root checks plausibility/source support; an independent Reviewer verdict is the highest independent-assurance recommendation; a Reviewer that supplied midstream Triage adjudication must label later verdicts reduced-independence/advisory; root owns final acceptance and uses a fresh Reviewer when consequential independent acceptance is required. Do not infer assurance from role metadata or configured effort.
+
+Every source-changing Fourth Wall campaign is Review-required regardless of diff size. Assign Review ownership before implementation: either this root reviews the frozen coherent candidate, or a named upstream root owns that Review. A child that delegates Review upward returns only an `UNREVIEWED CANDIDATE` with the immutable target and required scope; neither root may call it accepted, integration-ready, or complete until an independent Review receipt covers that exact target and scope. Shared or public contract checkpoints require the receipt before downstream consumption. Read-only, evidence-only, monitoring, and no-code campaigns record that the source-change gate is not applicable.
 
 ## Complete Slice Test
 
@@ -79,10 +82,11 @@ Require the task to report:
 - What validation ran and its result.
 - What did not run and why.
 - Remaining risks, decisions, or downstream work.
+- For source changes, the exact Review receipt and scope, or `UNREVIEWED CANDIDATE` plus the named upstream Review owner and immutable target.
 
 After aggregate validation and an explicit decision when possible, root records the campaign terminal disposition (`accepted`, `rejected`, `blocked`, or `abandoned`) and finalizes a bounded latest snapshot at `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` on every terminal path, with the KPI schema and denominators in [learning-loop.md](learning-loop.md), even when values are zero or not observed. Forward only immutable revisioned artifacts with campaign/revision metadata, `supersedes` and correction details when applicable, and a verifiable integrity identity; an explicitly reopened campaign never overwrites an earlier forwarded revision. Separate repository friction from harness candidates. Forwarding is optional and explicit; observations never auto-mutate harness policy, roles, routing, hooks, tasks, configuration, or installs.
 
-The root verifies this claim before integration or completion.
+The root verifies this claim before integration or completion. Tests, builds, QA, screenshots, and root inspection do not replace the required independent Review receipt.
 
 Completion releases active ownership but does not destroy the child. Use `followup_task` for reviewer-directed corrections or coherent next work by the same owner. Classify review findings: an explicit-contract miss is attributable rework, an adjacent existing defect is healing rather than failure, and a newly discovered invariant returns to Triage for clarification. Use a fresh task only for changed ownership, poisoned context, a genuinely independent second opinion, or a materially new slice.
 

@@ -167,7 +167,9 @@ describe("Codex configuration lifecycle", () => {
     expect(hints.every((hint) => hint.includes("$fourth-wall"))).toBe(true);
     const rootHintKey = "features.multi_agent_v2.root_agent_usage_hint_text";
     const rootHint = edits.find(({ keyPath }) => keyPath === rootHintKey)?.value as string;
-    expect(rootHint.length).toBeLessThan(500);
+    expect(rootHint.length).toBeLessThan(650);
+    expect(rootHint).toMatch(/Source changes.*independent Review.*frozen coherent candidate.*accepted\/integration-ready\/complete/);
+    expect(rootHint).toMatch(/Before Review.*UNREVIEWED CANDIDATE.*named upstream Review owner/);
     expect(rootHint).toMatch(/Before update_goal\(blocked\).*acceptance evidence.*active\/pending owners/);
     expect(rootHint).toMatch(/Failed local proof.*unverified runtime.*branch\/base\/config defect.*continue.*route repair.*fresh proof/);
     expect(rootHint).toMatch(/Blocked only.*external dependency\/permission.*contradictory requirement.*owner-only decision.*safety boundary/);
