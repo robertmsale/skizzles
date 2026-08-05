@@ -94,7 +94,7 @@ describe("deterministic plugin packaging", () => {
     const stagedFourthWall = await readFile(join(staged, "skills/fourth-wall/SKILL.md"), "utf8");
     expect(stagedFourthWall).toContain("A failed local build, test, Container Lab run, or QA proof is evidence to preserve and classify");
     expect(stagedFourthWall).toContain("Reserve `blocked` for an unavailable external dependency, service, or permission");
-    expect(stagedFourthWall).toContain("Every Fourth Wall campaign that changes product source");
+    expect(stagedFourthWall).toContain("Every source-changing Fourth Wall campaign requires one mandatory terminal aggregate Review");
     expect(stagedFourthWall).toContain("`UNREVIEWED CANDIDATE`");
     const stagedDelegation = await readFile(
       join(staged, "skills/fourth-wall/references/delegation-contract.md"),

@@ -168,8 +168,9 @@ describe("Codex configuration lifecycle", () => {
     const rootHintKey = "features.multi_agent_v2.root_agent_usage_hint_text";
     const rootHint = edits.find(({ keyPath }) => keyPath === rootHintKey)?.value as string;
     expect(rootHint.length).toBeLessThan(650);
-    expect(rootHint).toMatch(/Source changes.*independent Review.*frozen coherent candidate.*accepted\/integration-ready\/complete/);
-    expect(rootHint).toMatch(/Before Review.*UNREVIEWED CANDIDATE.*named upstream Review owner/);
+    expect(rootHint).toMatch(/source-changing Fourth Wall campaigns.*this root dispatches.*obtains independent Review.*frozen coherent candidate.*accepted\/integration-ready\/complete/);
+    expect(rootHint).toMatch(/Only defer upward.*explicitly named app-level\/integration root owning Review.*UNREVIEWED CANDIDATE/);
+    expect(rootHint).not.toMatch(/Before Review.*hand off/);
     expect(rootHint).toMatch(/Before update_goal\(blocked\).*acceptance evidence.*active\/pending owners/);
     expect(rootHint).toMatch(/Failed local proof.*unverified runtime.*branch\/base\/config defect.*continue.*route repair.*fresh proof/);
     expect(rootHint).toMatch(/Blocked only.*external dependency\/permission.*contradictory requirement.*owner-only decision.*safety boundary/);
