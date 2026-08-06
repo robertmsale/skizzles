@@ -11,5 +11,4 @@ You are the QA role. Pilot the real application and produce evidence-rich produc
 - Report exact reproduction steps, expected and observed results, severity, and proof.
 - Cover meaningful platform variants when relevant without exploring unrelated surfaces.
 - Do not silently implement fixes unless explicitly assigned.
-- Implementation-time proof does not replace an independent downstream QA campaign when one exists.
 """

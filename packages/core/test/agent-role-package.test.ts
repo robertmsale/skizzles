@@ -69,16 +69,26 @@ describe("capability-bearing agent role generation", () => {
     expect(renderAgentRoles(root)).rejects.toThrow("collides with generated agent type");
   });
 
-  test("renders peer coordination, assurance, and guarded learning behavior", async () => {
+  test("renders differentiating duties within the role-overlay budget", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const files = await renderAgentRoles(repoRoot);
 
-    expect(files.get("worker.toml")).toContain("unverified Worker claim");
-    expect(files.get("worker.toml")).toContain("named Reviewer requests");
-    expect(files.get("triage.toml")).toContain("guarded adjudication escape hatch");
-    expect(files.get("triage.toml")).toContain("two bounded diagnostic passes");
-    expect(files.get("review.toml")).toContain("highest independent-assurance recommendation");
-    expect(files.get("review.toml")).toContain("bounded runtime observation");
+    expect(files.get("worker.toml")).toContain("Workers are leaves");
+    expect(files.get("worker.toml")).toContain("unverified claim");
+    expect(files.get("triage.toml")).toContain("product source and durable project configuration read-only");
+    expect(files.get("triage.toml")).toContain("causal chain");
+    expect(files.get("review.toml")).toContain("Independently and adversarially");
+    expect(files.get("review.toml")).toContain("The root retains final acceptance");
+    expect(files.get("qa.toml")).toContain("Do not silently implement fixes");
+    expect(files.get("designer.toml")).toContain("visual proof");
+    expect(files.get("deployment.toml")).toContain("explicit authorization");
+
+    for (const role of ["default", "triage", "worker", "designer", "qa", "review", "deployment"]) {
+      const config = Bun.TOML.parse(files.get(`${role}.toml`)!) as { developer_instructions?: unknown };
+      expect(typeof config.developer_instructions).toBe("string");
+      const words = (config.developer_instructions as string).match(/\S+/g) ?? [];
+      expect(words.length).toBeLessThanOrEqual(role === "deployment" ? 250 : 200);
+    }
   });
 
   test("build and check reject generated drift", async () => {

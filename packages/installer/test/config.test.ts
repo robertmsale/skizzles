@@ -103,6 +103,23 @@ describe("Codex configuration lifecycle", () => {
     ]);
   });
 
+  test("canonical prompts stay within their context budgets", () => {
+    const root = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_instructions.md"), "utf8");
+    const subagent = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_subagent_instructions.md"), "utf8");
+    const wordCount = (contents: string) => (contents.match(/\S+/g) ?? []).length;
+
+    expect(wordCount(root)).toBeLessThanOrEqual(1200);
+    expect(wordCount(subagent)).toBeLessThanOrEqual(600);
+    expect(root).toContain("Source-changing campaigns require independent Review of a frozen candidate before acceptance.");
+    expect(root).toContain("If context is compacted, continue from the resulting summary");
+    expect(root).toContain("For monitoring or waiting, use the native wait or monitoring primitive");
+    expect(root).toContain("preserve generated artifacts through their canonical source and generator");
+    expect(subagent).toContain("The parent owns the user relationship");
+    expect(subagent).toContain("You are a leaf: do not spawn");
+    expect(subagent).toContain("Own the slice through focused implementation");
+    expect(subagent).toContain("Send the parent a concise message");
+  });
+
   test("Skizzles instructions configure fixed capability-bearing generated roles", () => {
     const agents = {
       default: { description: "Default Luna", configFile: "/skizzles/assets/agents/default.toml" },
@@ -167,17 +184,14 @@ describe("Codex configuration lifecycle", () => {
     expect(hints.every((hint) => hint.includes("$fourth-wall"))).toBe(true);
     const rootHintKey = "features.multi_agent_v2.root_agent_usage_hint_text";
     const rootHint = edits.find(({ keyPath }) => keyPath === rootHintKey)?.value as string;
-    expect(rootHint.length).toBeLessThan(650);
-    expect(rootHint).toMatch(/source-changing Fourth Wall campaigns.*this root dispatches.*obtains independent Review.*frozen coherent candidate.*accepted\/integration-ready\/complete/);
-    expect(rootHint).toMatch(/Only defer upward.*explicitly named app-level\/integration root owning Review.*UNREVIEWED CANDIDATE/);
-    expect(rootHint).not.toMatch(/Before Review.*hand off/);
-    expect(rootHint).toMatch(/Before update_goal\(blocked\).*acceptance evidence.*active\/pending owners/);
-    expect(rootHint).toMatch(/Failed local proof.*unverified runtime.*branch\/base\/config defect.*continue.*route repair.*fresh proof/);
-    expect(rootHint).toMatch(/Blocked only.*external dependency\/permission.*contradictory requirement.*owner-only decision.*safety boundary/);
+    expect(rootHint.length).toBeLessThan(300);
+    expect(rootHint).toMatch(/source-changing work.*use \$fourth-wall/);
+    expect(rootHint).toMatch(/full goal active through in-scope failures/);
+    expect(rootHint).toMatch(/independent Review of a frozen candidate before acceptance/);
     const nonRootHints = edits
       .filter(({ keyPath }) => keyPath !== rootHintKey && keyPath.endsWith("_hint_text"))
       .map(({ value }) => value as string);
-    expect(nonRootHints.every((hint) => hint.length < 180)).toBe(true);
+    expect(nonRootHints.every((hint) => hint.length < 120)).toBe(true);
     expect(edits[2]?.value).toBe(14);
   });
 

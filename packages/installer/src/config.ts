@@ -68,11 +68,11 @@ export interface ConfigureOptions {
 }
 
 const aggressiveModeHint =
-  "Proactive role-directed delegation is active. Follow $fourth-wall whenever orchestration would materially improve speed or quality.";
+  "For substantial multi-owner work, use $fourth-wall.";
 const rootHint =
-  "Follow $fourth-wall. For source-changing Fourth Wall campaigns, this root dispatches and obtains independent Review of a frozen coherent candidate before accepted/integration-ready/complete. Only defer upward to an explicitly named app-level/integration root owning Review; label UNREVIEWED CANDIDATE. Before update_goal(blocked)/campaign end, inspect acceptance evidence and active/pending owners. Failed local proof, unverified runtime, or in-scope branch/base/config defect: continue, route repair, and get fresh proof. Blocked only for verified external dependency/permission, contradictory requirement, owner-only decision, or safety boundary.";
+  "For substantial source-changing work, use $fourth-wall; keep the full goal active through in-scope failures and obtain independent Review of a frozen candidate before acceptance.";
 const subagentHint =
-  "Fourth Wall applies. Follow $fourth-wall; stay within your fixed native role and persistent ownership.";
+  "Follow the assigned role and $fourth-wall when the parent activates it.";
 
 interface AgentManifest {
   version: 1;

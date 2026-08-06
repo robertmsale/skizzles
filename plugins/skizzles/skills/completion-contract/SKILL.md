@@ -1,11 +1,11 @@
 ---
 name: completion-contract
-description: "**MANDATORY validation and completion gate** — use when planning, delegating, implementing, or accepting work, especially when validation is already failing, produces broad or high-volume diagnostics, or might tempt changes to lint, format, test, typecheck, CI, suppression, or quality-gate policy. For source-changing Fourth Wall campaigns, require the ordinary root to dispatch and obtain independent Review of a frozen coherent candidate before accepted, integration-ready, or complete status; the root never self-reviews. This gate does not govern routine pair-programming, read-only, evidence-only, monitoring, or no-code work. Preserve validation strength, classify task-attributable versus repository-red failures, and report systemic baseline cost without silently expanding scope or manufacturing a passing result."
+description: "**MANDATORY validation and completion gate** — use before a completion or acceptance decision when meaningful validation is required, validation fails or is repository-red/broad, or a lint/format/test/typecheck/CI/suppression policy change is contemplated. Preserve validation strength, classify task-attributable versus repository-red failures, and report systemic baseline cost without silently expanding scope or manufacturing a passing result. For Fourth Wall review and checkpoint lifecycle, use $fourth-wall. Do not use for routine pair-programming, read-only, evidence-only, monitoring, or no-code work."
 ---
 
 # Completion Contract
 
-Use this skill to turn a task into a concrete completion contract. A completion contract is not a plan, estimate, suggestion list, or escape hatch. It is the smallest explicit statement of what must be true before the work can be called done.
+Use this skill before a completion or acceptance decision when its trigger applies. A completion contract is not a general planning, delegation, estimate, suggestion list, or escape hatch; it is the smallest explicit statement of what must be true before the work can be called done.
 
 ## Authority Order
 
@@ -39,11 +39,9 @@ Unknowns requiring clarification:
 
 If an unknown would materially change the contract, ask the user or parent orchestrator instead of silently narrowing scope.
 
-## Independent Review Gate
+## Fourth Wall Review And Checkpoints
 
-For every source-changing Fourth Wall campaign, require one mandatory terminal aggregate Review against a frozen coherent candidate before the root may call the work `accepted`, `integration-ready`, or `complete`, regardless of diff size or apparent triviality. The ordinary campaign root owns dispatching the Reviewer and obtaining the independent verdict; it never self-reviews. This is one campaign-level review, not one review per Worker.
-
-Only a cross-root or external integration handoff may use the explicitly labelled `UNREVIEWED CANDIDATE` deferral: the handing root must first freeze a coherent target and name a real upstream root that owns the Review, immutable target, and required scope. Ordinary Worker returns remain unverified completion claims and need not provide a SHA or Review receipt. A root may deliberately freeze and declare a source-level shared or public contract checkpoint; that checkpoint requires an additional Review before downstream consumption. Ordinary Worker or dependency handoffs do not trigger per-Worker review. Tests, builds, QA, screenshots, root inspection, and Worker completion claims are evidence, never substitutes for independent Review. Routine pair-programming, read-only, evidence-only, monitoring, and no-code work remain outside this gate.
+For source-changing Fourth Wall campaigns, `$fourth-wall` owns the mandatory terminal aggregate Review, frozen-candidate and quiescence protocol, checkpoint commits, repair/re-review loop, resource ledger, and terminal disposition. Do not call a campaign `accepted`, `integration-ready`, or `complete` without that skill's independent Review receipt. This skill owns the validation contract and does not create per-Worker commits, extra branches, or a second review lifecycle.
 
 ## Validation Integrity And Repository-Red Baselines
 
@@ -72,29 +70,9 @@ For a repository-red handoff, report a compact measurement rather than dumping t
 
 Repository-red is a health finding, not permission to broaden the current task, automatically create another task, or weaken policy. Recommend cleanup for the owner to deliberate separately.
 
-## Fan-Out
+## Delegation Scope
 
-Split large work before execution, not by letting a worker shrink scope during execution.
-
-Good boundaries:
-
-- API/contracts
-- storage or persistence
-- backend implementation
-- frontend integration
-- design polish
-- QA validation
-- deployment/infrastructure
-
-Bad boundaries:
-
-- first slice
-- make a start
-- easiest part
-- best effort
-- docs-only substitute
-
-Each delegated package must cover the full responsibility for its boundary and map back to the top-level outcome.
+When Fourth Wall applies, use its dispatch and ownership contract for decomposition, peer routing, and worker persistence. Delegated packages still must cover the full responsibility of their boundary and map back to the top-level outcome; do not relabel a first, easiest, best-effort, or docs-only slice as completion. This skill does not define the role graph.
 
 ## Requirements
 
@@ -175,10 +153,6 @@ Before execution or final acceptance, ask:
 
 Final responses should include the concrete evidence used: changed files, tests or commands, screenshots, source inspection, artifacts, or exact blockers.
 
-## Forward-Progress Checkpoints
+## Campaign Lifecycle
 
-Treat commits as validated repository checkpoints, independent of `/goal` lifecycle. A goal tracks the overall outcome; a commit records one coherent causal state. Do not require or create a goal merely to obtain commit boundaries.
-
-Commit when a coherent ownership slice is integrated, its focused proof passes, and no known breakage remains in that slice. Prefer a checkpoint before switching causal surfaces, beginning a risky refactor, transferring substantial ownership, or starting independent QA or Review. Keep unrelated slices separate and write commit messages in terms of the behavioral outcome.
-
-Do not commit every child completion automatically. The root first inspects shared-worktree ownership, integrates the slice, excludes unrelated user or agent changes, and verifies the evidence. Do not checkpoint a known-broken intermediate state merely to reduce diff size. Preserve reviewer corrections as later commits when practical so accepted history remains inspectable. Before final acceptance, validate the aggregate commit series and working tree, not only the newest checkpoint.
+For Fourth Wall work, follow `$fourth-wall` for quiescence, immutable candidate freezing, root-owned Git checkpoints, independent Review/QA, additive repairs, resource release, and campaign close. A goal tracks the outcome; it is not a substitute for those acceptance gates. For non-Fourth-Wall work, retain the user's or repository's ordinary checkpoint and validation rules.

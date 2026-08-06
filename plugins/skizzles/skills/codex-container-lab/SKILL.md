@@ -23,15 +23,23 @@ Use this skill when work benefits from an isolated Linux workspace or disposable
 ## Safe workflow
 
 1. Confirm the consuming repository commits `.codex-container-lab.yaml` in the intended checkout or Desktop worktree. Discover the project wrapper as described above, then use that invocation for every step below; substitute the bundled launcher only as the generic fallback. In the examples, replace `LAUNCHER` with that selected literal invocation—do not type `LAUNCHER` itself. Run `LAUNCHER health` to verify Docker and owner state. The CLI uses the current `CODEX_THREAD_ID` automatically.
-2. Run `LAUNCHER lab create --name NAME`. Provisioning stays attached and returns a compact `{labId,state}` result after durable state reaches `ready` or `failed`.
+2. Add a provisional Lab entry with the requested name, current owner task, and release condition before running `LAUNCHER lab create --name NAME`. Provisioning stays attached and returns a compact `{labId,state}` result after durable state reaches `ready` or `failed`; update the entry with the returned `labId`, any caller-selected state/runtime roots or documented workspace locator before doing work in the Lab.
 3. Read `findings` before running code. They report trusted-project privilege surfaces such as host binds, sockets, devices, capabilities, host namespaces, secrets, configs, and exposed ports. They are review guidance, not policy rejections.
 4. Run work with `LAUNCHER --owner THREAD_ID --state-root /tmp/ccl-state --runtime-root /tmp/ccl-runtime run --lab ID [--cwd REPO_RELATIVE_PATH] [--env KEY=VALUE] [--timeout-seconds N] -- COMMAND...`. `--cwd` is relative to the isolated repository workspace root (for example `packages/api`); it is never an absolute container path such as `/workspace/packages/api`. Arguments after `--` are an argv, not a shell-encoded command. The CLI remains attached while output streams; Codex unified execution owns backgrounding, polling, stdin, signals, and the final exit status. Put intentional persistent services in Compose.
 5. Read bounded service output with `LAUNCHER logs --lab ID --service SERVICE`. Use only service names declared by the consuming project.
 6. Finish or cancel the attached run before synchronizing. Run `LAUNCHER sync preview --lab ID --direction pull` to bring a result to the host, or use `push` to refresh the lab.
 7. Resolve every reported conflict and preview again. Apply exactly the returned token with `LAUNCHER sync apply --lab ID --direction DIRECTION --token TOKEN`; tokens expire, are single-use, and fail if either side changed.
-8. Validate synchronized host changes normally, then run `LAUNCHER lab destroy --lab ID`. Use `lab destroy-all` to remove every lab owned by the current thread.
+8. Validate synchronized host changes normally, then run `LAUNCHER lab destroy --lab ID`. Destroy failed, rejected, or abandoned Labs as well; use `lab destroy-all` to remove every Lab owned by the current thread.
 
 For intentional manual use outside Codex, place `--owner THREAD_ID` before the command. Never borrow another task's id or invent a shared owner.
+
+## Lab Resource Lifecycle
+
+The creating task owns a Lab across CLI invocations, attached-run completion, sync, failure, and stopped-but-unarchived state. The creator keeps cleanup custody unless the root explicitly reassigns it. A request from Review or another peer for logs, diagnostics, or a sync result never transfers Lab ownership or grants shared control. Record every Lab and its state/runtime locators in the campaign resource ledger, and update the release condition when the work changes.
+
+`lab destroy` (or `lab destroy-all`) is the supported Lab cleanup operation and is required when the Lab is released; Compose shutdown, process exit, sync, and host reboot are not proof that Lab state or runtime artifacts were reclaimed. The periodic reaper is a fail-closed fallback for exact-labeled owners, not a replacement for deliberate destruction. This skill owns Lab lifecycle only: project-created bind mounts, worktrees, branches, and proof artifacts remain governed by the Fourth Wall resource ledger and consuming-repository guidance.
+
+Do not create additional Labs, clones, worktrees, branches, or immutable proof copies merely to make Review possible. Keep one owner per Lab and synchronize only the selected result.
 
 ## Output interpretation
 
