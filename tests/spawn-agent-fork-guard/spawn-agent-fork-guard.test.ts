@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const hook = join(repositoryRoot, "hooks/guard-spawn-agent-fork.ts");
 const denialReason =
-  'Select a non-empty agent_type role and use the smallest useful positive numbered fork_turns (for example, "1"); do not use full-history or context-free forks.';
+  'Select a non-empty agent_type role, omit model/reasoning overrides so the role catalog remains authoritative, and use the smallest useful positive numbered fork_turns (for example, "1"); do not use full-history or context-free forks.';
 
 function invoke(input: string): { exitCode: number; stdout: string; stderr: string } {
   const result = Bun.spawnSync(["bun", hook], {
@@ -103,6 +103,33 @@ describe("spawn-agent fork guard", () => {
 
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(result.stderr).toBe("");
+    }
+  });
+
+  test("denies model and reasoning overrides even when the role and fork are valid", () => {
+    for (const override of [
+      { model: "gpt-5.6-sol" },
+      { reasoning_effort: "none" },
+      { model_reasoning_effort: "low" },
+      { thinking: "medium" },
+      { effort: "high" },
+      { model: null },
+      { reasoning_effort: null },
+    ]) {
+      const result = invoke(event({
+        task_name: "review__fixture",
+        agent_type: "review",
+        fork_turns: "1",
+        ...override,
+      }));
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout).hookSpecificOutput).toEqual({
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: denialReason,
+      });
       expect(result.stderr).toBe("");
     }
   });

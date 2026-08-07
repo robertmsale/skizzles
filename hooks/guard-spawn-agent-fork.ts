@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
 /**
- * Keeps spawn-agent children on an explicit role and a bounded context fork.
+ * Keeps spawn-agent children on an explicit role-owned configuration and a
+ * bounded context fork.
  * This hook only denies invalid requests; it never rewrites tool arguments.
  */
 type HookEvent = {
@@ -16,8 +17,15 @@ export {};
 
 const positiveForkTurns = /^[1-9][0-9]*$/;
 const spawnAgentToolNames = new Set(["spawn_agent", "collaborationspawn_agent"]);
+const roleOwnedOverrideNames = [
+  "model",
+  "reasoning_effort",
+  "model_reasoning_effort",
+  "thinking",
+  "effort",
+] as const;
 const denialReason =
-  'Select a non-empty agent_type role and use the smallest useful positive numbered fork_turns (for example, "1"); do not use full-history or context-free forks.';
+  'Select a non-empty agent_type role, omit model/reasoning overrides so the role catalog remains authoritative, and use the smallest useful positive numbered fork_turns (for example, "1"); do not use full-history or context-free forks.';
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -29,7 +37,8 @@ function deniesSpawn(input: unknown): boolean {
   const agentType = input.agent_type;
   const forkTurns = input.fork_turns;
   return typeof agentType !== "string" || agentType.trim() === "" ||
-    typeof forkTurns !== "string" || !positiveForkTurns.test(forkTurns);
+    typeof forkTurns !== "string" || !positiveForkTurns.test(forkTurns) ||
+    roleOwnedOverrideNames.some((name) => Object.hasOwn(input, name));
 }
 
 function isMultiAgentV2Spawn(input: unknown): input is JsonObject {
