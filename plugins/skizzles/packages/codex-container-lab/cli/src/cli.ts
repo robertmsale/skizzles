@@ -8059,6 +8059,9 @@ async function writeFailureTranscript(runtimeRoot, text) {
   }
 }
 function redactComposeFailure(value, runtime, secretValues) {
+  return redactPublicText(redactComposeText(value, runtime, secretValues), 8 * 1024, 500, { byteCapture: "tail" });
+}
+function redactComposeText(value, runtime, secretValues) {
   let diagnostic = value;
   for (const secret of secretValues) {
     diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
@@ -8079,22 +8082,30 @@ function redactComposeFailure(value, runtime, secretValues) {
       diagnostic = diagnostic.split(value2).join("[redacted]");
   }
   diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  return redactPublicText(diagnostic, 8 * 1024, 500, { byteCapture: "tail" });
+  return redactPublicText(diagnostic, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
 }
 function declaredSecretValues(runtime, environment) {
   return [...new Set(runtime.config.secretEnvironment.map((name) => environment[name]).filter((secret) => typeof secret === "string" && secret.length > 0))].sort((left, right) => right.length - left.length);
 }
-async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunner) {
+async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunner, environment = process.env) {
   if (tailLines < 1 || tailLines > 500)
     throw new Error("tail-lines must be 1..500");
-  const model = await normalizedModel(runtime.composeArgs, runner, scrubSecretEnvironment(runtime.config.secretEnvironment, process.env));
+  const model = await normalizedModel(runtime.composeArgs, runner, scrubSecretEnvironment(runtime.config.secretEnvironment, environment));
   if (!Object.hasOwn(model.services ?? {}, service))
     throw new Error(`unknown Compose service: ${service}`);
   const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
     allowFailure: true,
-    timeoutMs: 20000
+    timeoutMs: 20000,
+    environment
   }, runner);
-  return boundedLogTail(`${result.stdout}${result.stderr}`, tailLines, 8 * 1024);
+  const raw = [result.stdout.toString(), result.stderr.toString()].filter((part) => part.length > 0).join(`
+`);
+  const redacted = redactComposeText(raw, runtime, declaredSecretValues(runtime, environment));
+  const bounded = boundedLogTail(redacted, tailLines, 8 * 1024);
+  return {
+    ...bounded,
+    truncated: bounded.truncated || result.stdoutTruncated === true || result.stderrTruncated === true
+  };
 }
 async function destroyLabStack(runtime, runner = defaultDockerRunner) {
   await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner);
@@ -9715,7 +9726,7 @@ class ContainerLabService {
   async logs(id, service, tailLines) {
     await this.reconcileOwner();
     const lab = await this.requireReady(id);
-    const transcript = await stackLogs(runtimeFromLab(lab), service, tailLines, this.docker);
+    const transcript = await stackLogs(runtimeFromLab(lab), service, tailLines, this.docker, this.environment);
     return { labId: id, service, transcript: { ...transcript, bytes: Buffer.byteLength(transcript.text), lines: transcript.text ? transcript.text.split(`
 `).length : 0 } };
   }
