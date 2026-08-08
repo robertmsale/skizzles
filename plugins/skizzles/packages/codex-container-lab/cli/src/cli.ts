@@ -8098,7 +8098,10 @@ async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunn
     timeoutMs: 20000,
     environment
   }, runner);
-  const raw = [result.stdout.toString(), result.stderr.toString()].filter((part) => part.length > 0).join(`
+  const raw = [
+    result.stdoutTruncated === true ? "[stdout-truncated]" : result.stdout.toString(),
+    result.stderrTruncated === true ? "[stderr-truncated]" : result.stderr.toString()
+  ].filter((part) => part.length > 0).join(`
 `);
   const redacted = redactComposeText(raw, runtime, declaredSecretValues(runtime, environment));
   const bounded = boundedLogTail(redacted, tailLines, 8 * 1024);

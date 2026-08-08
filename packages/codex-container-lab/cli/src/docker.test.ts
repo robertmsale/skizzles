@@ -431,6 +431,28 @@ describe("exact Docker cleanup", () => {
     expect(encoded).not.toContain("\u0001");
   });
 
+  test("never publishes retained prefixes from truncated stdout or stderr captures", async () => {
+    const secret = "declared-secret-value-split-at-capture-8f31";
+    const prefix = secret.slice(0, -1);
+    for (const stream of ["stdout", "stderr"] as const) {
+      const docker = new MockDocker();
+      const configured = runtime();
+      configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+      docker.responses.push(result('{"services":{"dev":{}}}'), {
+        code: 0,
+        stdout: stream === "stdout" ? Buffer.from(`prefix=${prefix}`) : Buffer.alloc(0),
+        stderr: stream === "stderr" ? Buffer.from(`prefix=${prefix}`) : Buffer.alloc(0),
+        ...(stream === "stdout" ? { stdoutTruncated: true } : { stderrTruncated: true }),
+      });
+
+      const transcript = await stackLogs(configured, "dev", 4, docker, { REGISTRY_TOKEN: secret });
+
+      expect(transcript.truncated).toBe(true);
+      expect(transcript.text).toContain(`[${stream}-truncated]`);
+      expect(transcript.text).not.toContain(prefix);
+    }
+  });
+
   test("stack status reduces Compose output to purpose-built service summaries", async () => {
     const docker = new MockDocker();
     docker.responses.push(result(JSON.stringify([{ Service: "dev", State: "running", Health: "healthy", ExitCode: 0,
