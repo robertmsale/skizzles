@@ -252,7 +252,7 @@ export class ContainerLabService {
   async logs(id: string, service: string, tailLines: number): Promise<unknown> {
     await this.reconcileOwner();
     const lab = await this.requireReady(id);
-    const transcript = await stackLogs(runtimeFromLab(lab), service, tailLines, this.docker);
+    const transcript = await stackLogs(runtimeFromLab(lab), service, tailLines, this.docker, this.environment);
     return { labId: id, service, transcript: { ...transcript, bytes: Buffer.byteLength(transcript.text), lines: transcript.text ? transcript.text.split("\n").length : 0 } };
   }
 

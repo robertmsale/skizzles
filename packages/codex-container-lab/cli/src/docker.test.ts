@@ -388,6 +388,49 @@ describe("exact Docker cleanup", () => {
     expect(Buffer.byteLength(JSON.stringify({ labId: "lab-1", service: "dev", transcript }))).toBeLessThan(16 * 1024);
   });
 
+  test("stack logs redact paths, URL-ish text, controls, and declared secrets before public bounds", async () => {
+    const docker = new MockDocker();
+    const secret = "registry-token-from-environment-8f31";
+    const configured = runtime();
+    configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+    docker.responses.push(
+      result('{"services":{"dev":{}}}'),
+      {
+        code: 0,
+        stdout: Buffer.from([
+          `build secret=${secret}\u0000\u0001`,
+          "compiler: failed at C:\\Users\\Robert\\Library\\Application Support\\Codex\\src\\main.ts",
+          "request: GET https://example.invalid/api/v1/workspace/secret",
+          "unc=\\\\server\\share name\\artifact",
+        ].join("\n")),
+        stderr: Buffer.from("stderr path /Users/robertsale/private logs\n"),
+        stdoutTruncated: true,
+      },
+    );
+
+    const transcript = await stackLogs(configured, "dev", 4, docker, { REGISTRY_TOKEN: secret });
+    const publicTranscript = {
+      ...transcript,
+      bytes: Buffer.byteLength(transcript.text),
+      lines: transcript.text ? transcript.text.split("\n").length : 0,
+    };
+    const encoded = JSON.stringify({ labId: "lab-1", service: "dev", transcript: publicTranscript });
+
+    expect(transcript.truncated).toBe(true);
+    expect(publicTranscript.bytes).toBe(Buffer.byteLength(transcript.text));
+    expect(publicTranscript.lines).toBe(transcript.text ? transcript.text.split("\n").length : 0);
+    expect(publicTranscript.lines).toBeLessThanOrEqual(4);
+    expect(publicTranscript.bytes).toBeLessThanOrEqual(8 * 1024);
+    expect(transcript.text).toContain("[path]");
+    expect(encoded).not.toContain(secret);
+    expect(encoded).not.toContain("/Users/robertsale/private logs");
+    expect(encoded).not.toContain("C:\\Users\\Robert\\Library\\Application Support\\Codex\\src\\main.ts");
+    expect(encoded).not.toContain("\\\\server\\share name\\artifact");
+    expect(encoded).not.toContain("https://example.invalid/api/v1/workspace/secret");
+    expect(encoded).not.toContain("\u0000");
+    expect(encoded).not.toContain("\u0001");
+  });
+
   test("stack status reduces Compose output to purpose-built service summaries", async () => {
     const docker = new MockDocker();
     docker.responses.push(result(JSON.stringify([{ Service: "dev", State: "running", Health: "healthy", ExitCode: 0,

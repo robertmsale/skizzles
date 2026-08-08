@@ -158,7 +158,52 @@ class ServiceLogsDocker extends RecordingDocker {
   }
 }
 
+class ReadyServiceLogsDocker extends RecordingDocker {
+  constructor(private readonly log: string) { super(); }
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    if (args.includes("logs")) {
+      this.calls.push(args);
+      this.runCalls.push({ args, options });
+      return { code: 0, stdout: Buffer.from(this.log), stderr: Buffer.alloc(0) };
+    }
+    return await super.run(args, options);
+  }
+}
+
 describe("attached service lifecycle", () => {
+  test("public service logs use the configured secret environment for redaction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-ready-service-logs-"));
+    temporary.push(root);
+    const source = join(root, "source");
+    const secret = "ready-service-log-secret-8f31";
+    await runCommand("git", ["init", source]);
+    await writeFile(join(source, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\nsecret_environment: [REGISTRY_TOKEN]\n");
+    await runCommand("git", ["-C", source, "add", "."]);
+    await runCommand("git", ["-C", source, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]);
+    const docker = new ReadyServiceLogsDocker(`secret=${secret} path=/Users/robertsale/Library/Application Support/Codex\n`);
+    const roots = { stateRoot: join(root, "state"), runtimeRoot: join(root, "runtime") };
+    const service = new ContainerLabService("thread-ready-service-logs", roots, docker, {
+      PATH: process.env.PATH,
+      REGISTRY_TOKEN: secret,
+    });
+
+    const created = await service.createLab("ready-service-logs", source);
+    expect(created.state).toBe("ready");
+    const response = await service.logs(created.labId, "dev", 4) as {
+      labId: string;
+      service: string;
+      transcript: { text: string; bytes: number; lines: number; truncated: boolean };
+    };
+    expect(response.labId).toBe(created.labId);
+    expect(response.service).toBe("dev");
+    expect(response.transcript.text).toContain("[path]");
+    expect(response.transcript.text).not.toContain(secret);
+    expect(response.transcript.text).not.toContain("/Users/robertsale/Library/Application Support/Codex");
+    expect(response.transcript.bytes).toBe(Buffer.byteLength(response.transcript.text));
+    expect(response.transcript.lines).toBe(response.transcript.text.split("\n").length);
+    await service.destroyLab(created.labId);
+  });
+
   test("create provisions synchronously and returns only lab identity and terminal state", async () => {
     const root = await mkdtemp(join(tmpdir(), "container-lab-create-"));
     temporary.push(root);

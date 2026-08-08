@@ -520,6 +520,10 @@ async function writeFailureTranscript(runtimeRoot: string, text: string): Promis
 }
 
 function redactComposeFailure(value: string, runtime: LabRuntime, secretValues: readonly string[]): string {
+  return redactPublicText(redactComposeText(value, runtime, secretValues), 8 * 1024, 500, { byteCapture: "tail" });
+}
+
+function redactComposeText(value: string, runtime: LabRuntime, secretValues: readonly string[]): string {
   let diagnostic = value;
   for (const secret of secretValues) {
     diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
@@ -541,7 +545,9 @@ function redactComposeFailure(value: string, runtime: LabRuntime, secretValues: 
   // Compose may print short container ids that are not covered by the public
   // text redactor's UUID/sha256 rules. They are not useful at this boundary.
   diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  return redactPublicText(diagnostic, 8 * 1024, 500, { byteCapture: "tail" });
+  // Callers apply their own line and byte caps only after this complete
+  // redaction pass so returned metadata describes public text.
+  return redactPublicText(diagnostic, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
 }
 
 function declaredSecretValues(runtime: LabRuntime, environment: NodeJS.ProcessEnv): string[] {
@@ -556,18 +562,25 @@ export async function stackLogs(
   service: string,
   tailLines: number,
   runner: DockerRunner = defaultDockerRunner,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<{ text: string; truncated: boolean }> {
   if (tailLines < 1 || tailLines > 500) throw new Error("tail-lines must be 1..500");
   const model = await normalizedModel(
     runtime.composeArgs,
     runner,
-    scrubSecretEnvironment(runtime.config.secretEnvironment, process.env),
+    scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
   );
   if (!Object.hasOwn(model.services ?? {}, service)) throw new Error(`unknown Compose service: ${service}`);
   const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
-    allowFailure: true, timeoutMs: 20_000,
+    allowFailure: true, timeoutMs: 20_000, environment,
   }, runner);
-  return boundedLogTail(`${result.stdout}${result.stderr}`, tailLines, 8 * 1024);
+  const raw = [result.stdout.toString(), result.stderr.toString()].filter((part) => part.length > 0).join("\n");
+  const redacted = redactComposeText(raw, runtime, declaredSecretValues(runtime, environment));
+  const bounded = boundedLogTail(redacted, tailLines, 8 * 1024);
+  return {
+    ...bounded,
+    truncated: bounded.truncated || result.stdoutTruncated === true || result.stderrTruncated === true,
+  };
 }
 
 export async function destroyLabStack(runtime: LabRuntime, runner: DockerRunner = defaultDockerRunner): Promise<void> {
