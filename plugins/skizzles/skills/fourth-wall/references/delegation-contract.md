@@ -26,7 +26,7 @@ Every source-changing Fourth Wall campaign is Review-required regardless of diff
 
 Prefer a handoff that gives one child the complete causal loop: inspect the owned surface, implement the change, run focused validation, correct in-scope failures, and collect relevant runtime proof. A code-only handoff is too narrow when it predictably leaves the root with the longer test, integration, or proof campaign.
 
-Keep shared Git mutations and final acceptance at the root. When parallel edits prevent lock-heavy checks, defer those checks until the tree stabilizes, then dispatch one integration Worker, Review, or QA leaf with the complete serial command or piloting contract.
+Keep final acceptance and, by default, shared Git mutations at the root. Exact current-task user authority may delegate one scoped Git operation to a named serialized owner under the execution-safety procedure in [coordination-loop.md](coordination-loop.md). When parallel edits prevent lock-heavy checks, defer those checks until the tree stabilizes, then dispatch one integration Worker, Review, or QA leaf with the complete serial command or piloting contract.
 
 ## Spawn Shape
 

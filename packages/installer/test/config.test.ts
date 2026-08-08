@@ -129,6 +129,10 @@ describe("Codex configuration lifecycle", () => {
       "utf8",
     );
     const fourthWall = readFileSync(resolve(import.meta.dir, "../../../skills/fourth-wall/SKILL.md"), "utf8");
+    const delegation = readFileSync(
+      resolve(import.meta.dir, "../../../skills/fourth-wall/references/delegation-contract.md"),
+      "utf8",
+    );
 
     expect(policy).toContain("Explicit current-task user authority");
     for (const operation of ["rebase", "cherry-pick", "reset", "exact-path restore", "branch or ref deletion", "force-push"]) {
@@ -166,9 +170,24 @@ describe("Codex configuration lifecycle", () => {
     expect(fourthWall).toContain("never by an automatic merge or rebase");
     expect(fourthWall).toContain("An exact user-authorized serialized integration may use its approved Git operation");
     expect(fourthWall).toContain("An exact current-task user authorization may permit one named serialized owner");
+    expect(fourthWall).toContain("Git integration stays with the root by default");
+    expect(fourthWall).toContain("acceptance always remains with the root");
     expect(coordination).toContain("an exact authorized history operation must not be rejected or replaced with additive patch re-expression");
     expect(coordination).toContain("never an automatic merge/rebase");
     expect(coordination).toContain("explicitly user-authorized, serialized integration");
+    expect(coordination).toContain("By default, the root retains Git mutations; the exact-authority exception above");
+    expect(delegation).toContain("Keep final acceptance and, by default, shared Git mutations at the root");
+    expect(delegation).toContain("Exact current-task user authority may delegate one scoped Git operation");
+
+    for (const contradictoryRule of [
+      "The root retains Git mutations,",
+      "The root retains Git mutations;",
+      "The root retains Git mutations and acceptance.",
+      "The root owns Git integration, task-graph shape",
+      "Keep shared Git mutations and final acceptance at the root.",
+    ]) {
+      expect(`${fourthWall}\n${coordination}\n${delegation}`).not.toContain(contradictoryRule);
+    }
   });
 
   test("Skizzles instructions configure fixed capability-bearing generated roles", () => {
