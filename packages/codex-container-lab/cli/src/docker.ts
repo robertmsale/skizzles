@@ -576,10 +576,15 @@ export async function stackLogs(
   }, runner);
   // A truncated stream may end with a strict prefix of a declared secret;
   // discard the retained bytes instead of attempting incomplete replacement.
-  const raw = [
+  const streams = [
     result.stdoutTruncated === true ? "[stdout-truncated]" : result.stdout.toString(),
     result.stderrTruncated === true ? "[stderr-truncated]" : result.stderr.toString(),
-  ].filter((part) => part.length > 0).join("\n");
+  ].filter((part) => part.length > 0);
+  const raw = streams.reduce((joined, part) => {
+    if (!joined) return part;
+    const separator = joined.endsWith("\n") || part.startsWith("\n") ? "" : "\n";
+    return `${joined}${separator}${part}`;
+  }, "");
   const redacted = redactComposeText(raw, runtime, declaredSecretValues(runtime, environment));
   const bounded = boundedLogTail(redacted, tailLines, 8 * 1024);
   return {

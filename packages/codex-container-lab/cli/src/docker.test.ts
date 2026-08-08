@@ -453,6 +453,29 @@ describe("exact Docker cleanup", () => {
     }
   });
 
+  test("joins stream boundaries without synthetic blank lines and preserves tail metadata", async () => {
+    const cases = [
+      { stdout: "stdout-line\n", stderr: "stderr-line\n", expected: "stdout-line\nstderr-line", truncated: false },
+      { stdout: "stdout-line", stderr: "stderr-line", expected: "stdout-line\nstderr-line", truncated: false },
+      { stdout: "stdout-line", stderr: "\nstderr-line", expected: "stdout-line\nstderr-line", truncated: false },
+      { stdout: "old-line\ncurrent-line\n", stderr: "new-line\n", expected: "current-line\nnew-line", truncated: true },
+    ];
+    for (const entry of cases) {
+      const docker = new MockDocker();
+      docker.responses.push(result('{"services":{"dev":{}}}'), {
+        code: 0,
+        stdout: Buffer.from(entry.stdout),
+        stderr: Buffer.from(entry.stderr),
+      });
+
+      const transcript = await stackLogs(runtime(), "dev", 2, docker);
+
+      expect(transcript.text).toBe(entry.expected);
+      expect(transcript.text.split("\n").length).toBe(2);
+      expect(transcript.truncated).toBe(entry.truncated);
+    }
+  });
+
   test("stack status reduces Compose output to purpose-built service summaries", async () => {
     const docker = new MockDocker();
     docker.responses.push(result(JSON.stringify([{ Service: "dev", State: "running", Health: "healthy", ExitCode: 0,
