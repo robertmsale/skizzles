@@ -12,8 +12,13 @@ export function redactPublicText(
     // POSIX form below.  Docker can report host paths from either platform;
     // preserving only POSIX redaction would leak drive and UNC paths.
     .replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]")
+    .replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]")
     .replace(/\b[A-Za-z]:[\\/](?:[^\s"'\\]|\\.)+/g, "[path]")
     .replace(/\\\\(?:[^\s"'\\]|\\.)+/g, "[path]")
+    // Unquoted POSIX paths may contain spaces in directory names.  A final
+    // path component remains token-shaped so a following diagnostic sentence
+    // is not swallowed as part of the redaction.
+    .replace(/\/(?:[^\/"'\\\n]+\/)+[^\s\/"'\\]+/g, "[path]")
     .replace(/\/(?:[^\s"'\\]|\\.)+/g, "[path]")
     .replace(/\b[a-f0-9]{64}\b/gi, "[redacted]")
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]")
