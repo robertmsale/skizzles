@@ -120,6 +120,57 @@ describe("Codex configuration lifecycle", () => {
     expect(subagent).toContain("Send the parent a concise message");
   });
 
+  test("canonical execution-safety policy permits only verified user-authorized Git surgery", () => {
+    const policy = readFileSync(resolve(import.meta.dir, "../../../assets/auto_review_policy.md"), "utf8");
+    const root = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_instructions.md"), "utf8");
+    const subagent = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_subagent_instructions.md"), "utf8");
+    const coordination = readFileSync(
+      resolve(import.meta.dir, "../../../skills/fourth-wall/references/coordination-loop.md"),
+      "utf8",
+    );
+    const fourthWall = readFileSync(resolve(import.meta.dir, "../../../skills/fourth-wall/SKILL.md"), "utf8");
+
+    expect(policy).toContain("Explicit current-task user authority");
+    for (const operation of ["rebase", "cherry-pick", "reset", "exact-path restore", "branch or ref deletion", "force-push"]) {
+      expect(policy).toContain(operation);
+    }
+    for (const boundary of [
+      "exact repository and Git common-dir",
+      "configured remote and fetch/push URLs",
+      "explicit disposition for every local delta",
+      "no concurrent writer",
+      "source commits or refs are preserved or recoverable",
+      "one exact non-default branch",
+      "--force-with-lease",
+      "verify final refs, status, and relevant remote URLs",
+    ]) {
+      expect(policy).toContain(boundary);
+    }
+    expect(policy).toContain("uncommitted merge");
+    expect(policy).toContain("exact named-path restore to `HEAD`");
+    expect(policy).toContain("not blanket permission for broad refspecs, default or protected branches, globs or unknown paths");
+    expect(policy).toContain("Do not require additive patch re-expression solely because the authorized operation changes history");
+    for (const allowedShape of [
+      "resetting to one verified ref before a rebase",
+      "rebasing a detached checkout from a preserved published tip",
+      "cherry-picking one exact commit",
+      "restoring exact known unrelated paths during an uncommitted merge",
+      "deleting one exact integrated or deliberately abandoned branch",
+      "force-pushing one exact non-default branch with lease protection",
+    ]) {
+      expect(policy).toContain(allowedShape);
+    }
+
+    expect(root).toContain("do not substitute additive re-expression merely because the authorized operation changes history");
+    expect(subagent).toContain("delegates one scoped Git action to you as the named serialized owner");
+    expect(fourthWall).toContain("never by an automatic merge or rebase");
+    expect(fourthWall).toContain("An exact user-authorized serialized integration may use its approved Git operation");
+    expect(fourthWall).toContain("An exact current-task user authorization may permit one named serialized owner");
+    expect(coordination).toContain("an exact authorized history operation must not be rejected or replaced with additive patch re-expression");
+    expect(coordination).toContain("never an automatic merge/rebase");
+    expect(coordination).toContain("explicitly user-authorized, serialized integration");
+  });
+
   test("Skizzles instructions configure fixed capability-bearing generated roles", () => {
     const agents = {
       default: { description: "Default Luna", configFile: "/skizzles/assets/agents/default.toml" },
