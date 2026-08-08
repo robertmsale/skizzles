@@ -7108,76 +7108,13 @@ function collect(state, chunk, cap) {
 
 // packages/codex-container-lab/cli/src/public-output.ts
 function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
-  const pathsRedacted = redactPosixPaths(value.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]").replace(/\b[A-Za-z]:[\\/](?:[^\s"'\\]|\\.)+/g, "[path]").replace(/\\\\(?:[^\s"'\\]|\\.)+/g, "[path]")).replace(/\/(?:[^\s"'\\]|\\.)+/g, "[path]");
+  const quotedAndTagsRedacted = value.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
+  const unquotedPathStart = quotedAndTagsRedacted.search(/(?:\b[A-Za-z]:[\\/]|\\\\|\/)/);
+  const pathsRedacted = unquotedPathStart < 0 ? quotedAndTagsRedacted : `${quotedAndTagsRedacted.slice(0, unquotedPathStart)}[path]`;
   const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]").split(`
 `).slice(-maxLines).join(`
 `);
   return truncateUtf8(redacted, maxBytes, options.byteCapture ?? "head");
-}
-function redactPosixPaths(value) {
-  let output = "";
-  let cursor = 0;
-  while (cursor < value.length) {
-    const start = value.indexOf("/", cursor);
-    if (start < 0) {
-      output += value.slice(cursor);
-      break;
-    }
-    output += value.slice(cursor, start);
-    const end = consumePosixPath(value, start);
-    if (end === start + 1) {
-      output += "/";
-      cursor = end;
-      continue;
-    }
-    output += "[path]";
-    cursor = end;
-  }
-  return output;
-}
-function consumePosixPath(value, start) {
-  let cursor = start + 1;
-  let hasComponent = false;
-  let hasAnyComponent = false;
-  while (cursor < value.length) {
-    const character = value[cursor];
-    if (character === "\\" && cursor + 1 < value.length) {
-      hasComponent = true;
-      hasAnyComponent = true;
-      cursor += 2;
-      continue;
-    }
-    if (character === `
-` || character === "\r" || character === '"' || character === "'")
-      break;
-    if (character === "/") {
-      if (!hasComponent)
-        break;
-      hasComponent = false;
-      cursor += 1;
-      continue;
-    }
-    if (isPosixPathDelimiter(character))
-      break;
-    if (isWhitespace(character)) {
-      const whitespaceStart = cursor;
-      while (cursor < value.length && isWhitespace(value[cursor]))
-        cursor += 1;
-      if (cursor >= value.length || value[cursor] === "/")
-        return whitespaceStart;
-      continue;
-    }
-    hasComponent = true;
-    hasAnyComponent = true;
-    cursor += 1;
-  }
-  return hasAnyComponent ? cursor : start + 1;
-}
-function isPosixPathDelimiter(character) {
-  return ",;:()[]{}".includes(character);
-}
-function isWhitespace(character) {
-  return character === " " || character === "\t";
 }
 function truncateUtf8(value, maxBytes, policy) {
   if (policy === "tail") {
