@@ -29,6 +29,7 @@ export type DockerSpawnOptions = { env?: NodeJS.ProcessEnv };
 
 /** The only durable path used for a failed Compose-up transcript. */
 export const PROVISIONING_FAILURE_DIAGNOSTIC_FILE = "provisioning-failure.compose-up.log";
+const BUILDX_CONFIG_DIRECTORY = "buildx";
 
 export class DockerProvisioningFailure extends Error {
   constructor(
@@ -52,6 +53,38 @@ export const defaultDockerRunner: DockerRunner = {
   }),
 };
 
+function buildxConfigPath(runtimeRoot: string): string {
+  return join(runtimeRoot, BUILDX_CONFIG_DIRECTORY);
+}
+
+async function ensurePrivateDirectory(path: string, errorMessage: string): Promise<void> {
+  try {
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    const details = await lstat(path);
+    if (!details.isDirectory() || details.isSymbolicLink() || (details.mode & 0o777) !== 0o700) {
+      throw new Error(errorMessage);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === errorMessage) throw error;
+    throw new Error(errorMessage);
+  }
+}
+
+async function ensureBuildxConfig(runtimeRoot: string): Promise<string> {
+  await ensurePrivateDirectory(runtimeRoot, "invalid lab runtime root");
+  const path = buildxConfigPath(runtimeRoot);
+  await ensurePrivateDirectory(path, "invalid lab Buildx config root");
+  return path;
+}
+
+function injectBuildxConfig(environment: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEnv {
+  return { ...environment, BUILDX_CONFIG: path };
+}
+
+async function labEnvironment(runtimeRoot: string, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
+  return injectBuildxConfig(environment, await ensureBuildxConfig(runtimeRoot));
+}
+
 export async function dockerAvailable(
   runner: DockerRunner = defaultDockerRunner,
   secretEnvironment: readonly string[] = [],
@@ -70,14 +103,14 @@ export async function prepareLabRuntime(
   runner: DockerRunner = defaultDockerRunner,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LabRuntime> {
-  await mkdir(metadata.runtimeRoot, { recursive: true, mode: 0o700 });
+  const buildxConfig = await ensureBuildxConfig(metadata.runtimeRoot);
   const base = generateBaseCompose(config);
   const baseFile = base === undefined ? undefined : join(metadata.runtimeRoot, "base.compose.yaml");
   if (baseFile && base !== undefined) await writeFile(baseFile, base, { mode: 0o600 });
   const overrideFile = join(metadata.runtimeRoot, "override.compose.yaml");
   await writeFile(overrideFile, "{}\n", { mode: 0o600 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
-  const composeEnvironment = secretComposeEnvironment(config.secretEnvironment, environment);
+  const composeEnvironment = injectBuildxConfig(secretComposeEnvironment(config.secretEnvironment, environment), buildxConfig);
   const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
   validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
   const findings = inspectComposeModel(sourceModel);
@@ -127,12 +160,16 @@ export async function composeCommand(
   options: { timeoutMs?: number; allowFailure?: boolean; signal?: AbortSignal; environment?: NodeJS.ProcessEnv } = {},
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<CommandResult> {
+  const environment = await labEnvironment(
+    runtime.metadata.runtimeRoot,
+    scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env),
+  );
   return await runner.run([...runtime.composeArgs, ...args], {
     timeoutMs: options.timeoutMs,
     allowFailure: options.allowFailure,
     maxOutputBytes: 4 * 1024 * 1024,
     signal: options.signal,
-    env: scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env),
+    env: environment,
   });
 }
 
@@ -144,6 +181,10 @@ export async function provisionLabStack(
 ): Promise<Endpoint[]> {
   let provisioned: CommandResult;
   try {
+    const composeEnvironment = await labEnvironment(
+      runtime.metadata.runtimeRoot,
+      secretComposeEnvironment(runtime.config.secretEnvironment, environment),
+    );
     provisioned = await runner.run([...runtime.composeArgs, "up", "-d", "--wait", "--wait-timeout", "180"], {
       timeoutMs: 30 * 60_000,
       signal,
@@ -151,7 +192,7 @@ export async function provisionLabStack(
       maxOutputBytes: 4 * 1024 * 1024,
       stdoutCapture: "tail",
       stderrCapture: "tail",
-      env: secretComposeEnvironment(runtime.config.secretEnvironment, environment),
+      env: composeEnvironment,
     });
   } catch {
     const message = signal?.aborted
@@ -172,13 +213,13 @@ export async function provisionLabStack(
   ].join(" && ");
   const verified = await composeCommand(runtime, [
     "exec", "-T", runtime.config.mode.commandService, ...runtime.config.runtime.shell, compatibility,
-  ], { allowFailure: true, timeoutMs: 20_000, signal }, runner);
+  ], { allowFailure: true, timeoutMs: 20_000, signal, environment }, runner);
   if (verified.code !== 0) {
     throw new Error("command service compatibility check failed: configured shell, writable workspace, and setsid are required");
   }
   const endpoints: Endpoint[] = [];
   for (const port of runtime.config.ports) {
-    const result = await composeCommand(runtime, ["port", port.service, String(port.target)], { timeoutMs: 20_000 }, runner);
+    const result = await composeCommand(runtime, ["port", port.service, String(port.target)], { timeoutMs: 20_000, environment }, runner);
     const loopback = result.stdout.toString().trim().split("\n")
       .map((line) => line.trim().match(/^127\.0\.0\.1:(\d+)$/)?.[1])
       .filter((value): value is string => value !== undefined);
@@ -394,13 +435,17 @@ async function captureFailedServiceLogs(
   const streamBytes = Math.floor(Math.max(0, bodyBytes - 1) / 2);
   let result: CommandResult;
   try {
+    const composeEnvironment = await labEnvironment(
+      runtime.metadata.runtimeRoot,
+      scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
+    );
     result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--no-log-prefix", "--tail", String(tailLines), service], {
       allowFailure: true,
       timeoutMs: 20_000,
       maxOutputBytes: streamBytes,
       stdoutCapture: "tail",
       stderrCapture: "tail",
-      env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
+      env: composeEnvironment,
     });
   } catch {
     return { raw: "", truncated: true };
@@ -565,10 +610,14 @@ export async function stackLogs(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<{ text: string; truncated: boolean }> {
   if (tailLines < 1 || tailLines > 500) throw new Error("tail-lines must be 1..500");
+  const modelEnvironment = await labEnvironment(
+    runtime.metadata.runtimeRoot,
+    scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
+  );
   const model = await normalizedModel(
     runtime.composeArgs,
     runner,
-    scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
+    modelEnvironment,
   );
   if (!Object.hasOwn(model.services ?? {}, service)) throw new Error(`unknown Compose service: ${service}`);
   const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
@@ -593,8 +642,12 @@ export async function stackLogs(
   };
 }
 
-export async function destroyLabStack(runtime: LabRuntime, runner: DockerRunner = defaultDockerRunner): Promise<void> {
-  await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner);
+export async function destroyLabStack(
+  runtime: LabRuntime,
+  runner: DockerRunner = defaultDockerRunner,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner, environment);
 }
 
 export async function cleanupLabLabels(
@@ -753,7 +806,11 @@ export function launchDockerRun(
     runtime.config.mode.commandService, ...runtime.config.runtime.shell, wrapper,
     "codex-container-lab-run", ...invocation.argv,
   ];
-  return runner.spawn(args, { env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment) });
+  const dockerEnvironment = injectBuildxConfig(
+    scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
+    buildxConfigPath(runtime.metadata.runtimeRoot),
+  );
+  return runner.spawn(args, { env: dockerEnvironment });
 }
 
 export async function terminateDockerRun(
@@ -761,6 +818,7 @@ export async function terminateDockerRun(
   identity: Pick<DockerRunIdentity, "runId">,
   signal: "INT" | "TERM" | "KILL",
   runner: DockerRunner = defaultDockerRunner,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<DockerRunTerminationResult> {
   const pidFile = `/tmp/.codex-container-lab-run-${identity.runId}.pid`;
   const expectedIdentity = `CODEX_CONTAINER_LAB_RUN_ID=${identity.runId}`;
@@ -783,7 +841,7 @@ export async function terminateDockerRun(
   try {
     result = await composeCommand(runtime, [
       "exec", "-T", runtime.config.mode.commandService, ...runtime.config.runtime.shell, killScript,
-    ], { allowFailure: true, timeoutMs: 10_000 }, runner);
+    ], { allowFailure: true, timeoutMs: 10_000, environment }, runner);
   } catch {
     return { confirmed: false, status: "docker-failure" };
   }

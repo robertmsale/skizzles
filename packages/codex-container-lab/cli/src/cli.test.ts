@@ -301,7 +301,7 @@ async function attachedFixture() {
   lab.modeKind = "image";
   const baseFile = join(lab.runtimeRoot, "base.compose.yaml");
   const overrideFile = join(lab.runtimeRoot, "override.compose.yaml");
-  await mkdir(lab.workspace, { recursive: true });
+  await mkdir(lab.workspace, { recursive: true, mode: 0o700 });
   await mkdir(lab.sourceRoot, { recursive: true });
   await writeFile(lab.manifestPath, "image: { name: node:24, service: dev }\n");
   await writeFile(baseFile, "services: {}\n");

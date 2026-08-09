@@ -1,13 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupLabLabels, DockerProvisioningFailure, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
+import { cleanupLabLabels, destroyLabStack, DockerProvisioningFailure, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
 import { parseLabConfig } from "./config";
 import type { RunOptions, CommandResult } from "./process";
 import type { LabMetadata } from "./types";
+
+const TEST_RUNTIME_ROOT = "/tmp/codex-container-lab-docker-test-runtime";
+afterEach(async () => await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true }));
 
 class MockDocker implements DockerRunner {
   calls: string[][] = [];
@@ -22,6 +25,14 @@ class MockDocker implements DockerRunner {
     this.spawnCalls.push(args);
     this.spawnOptions.push(options);
     return new EventEmitter() as ChildProcessWithoutNullStreams;
+  }
+}
+
+class EnvironmentRecordingDocker extends MockDocker {
+  runOptions: Array<RunOptions | undefined> = [];
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    this.runOptions.push(options);
+    return await super.run(args, options);
   }
 }
 
@@ -133,6 +144,81 @@ secret_environment: [REGISTRY_TOKEN]
       expect((upError as Error).message).not.toContain(sentinel);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("per-Lab Buildx configuration", () => {
+  test("isolates Buildx state, overrides ambient config, preserves Docker config, and cleans up", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-buildx-isolation-"));
+    const sentinel = "buildx-secret-91af";
+    const environment = {
+      PATH: "/usr/bin:/bin",
+      DOCKER_CONFIG: "/tmp/selected-docker-config",
+      BUILDX_CONFIG: "/tmp/ambient-buildx-config",
+      REGISTRY_TOKEN: sentinel,
+    };
+    const config = parseLabConfig("image: { name: node:24, service: dev }\nsecret_environment: [REGISTRY_TOKEN]\n", join(root, "source"));
+    const docker = new EnvironmentRecordingDocker();
+    docker.responses.push(result('{"services":{"dev":{}}}'), result('{"services":{"dev":{}}}'), result(""), result(""),
+      result('{"services":{"dev":{}}}'), result(`failed at ${join(root, "runtime", "buildx", "activity")}`));
+    try {
+      const prepared = await prepareLabRuntime(labAt(root), config, docker, environment);
+      prepared.metadata.secretEnvironment = ["REGISTRY_TOKEN"];
+      const buildxConfig = join(prepared.metadata.runtimeRoot, "buildx");
+      const details = await lstat(buildxConfig);
+      expect(details.isDirectory()).toBe(true);
+      expect(details.mode & 0o777).toBe(0o700);
+      expect(JSON.stringify(prepared)).not.toContain(buildxConfig);
+
+      await provisionLabStack(prepared, undefined, docker, environment);
+      const transcript = await stackLogs(prepared, "dev", 4, docker, environment);
+      launchDockerRun(prepared, {
+        runId: "11111111-1111-4111-8111-111111111111",
+        cwd: ".",
+        argv: ["true"],
+        environment: {},
+      }, docker, environment);
+
+      const observed = docker.runOptions.map((options) => options?.env).filter((value): value is NodeJS.ProcessEnv => value !== undefined);
+      expect(observed.length).toBe(6);
+      expect(observed.every((value) => value.BUILDX_CONFIG === buildxConfig)).toBe(true);
+      expect(observed.every((value) => value.DOCKER_CONFIG === environment.DOCKER_CONFIG)).toBe(true);
+      expect(observed.slice(0, 3).every((value) => value.REGISTRY_TOKEN === sentinel)).toBe(true);
+      expect(observed.slice(3).every((value) => value.REGISTRY_TOKEN === undefined)).toBe(true);
+      expect(docker.spawnOptions[0]?.env?.BUILDX_CONFIG).toBe(buildxConfig);
+      expect(docker.spawnOptions[0]?.env?.DOCKER_CONFIG).toBe(environment.DOCKER_CONFIG);
+      expect(docker.spawnOptions[0]?.env?.REGISTRY_TOKEN).toBeUndefined();
+      expect(transcript.text).not.toContain(buildxConfig);
+      expect(transcript.text).toContain("[path]");
+      docker.responses.push(...emptyResourceListings());
+      await destroyLabStack(prepared, docker, environment);
+      const cleanupEnvironments = docker.runOptions.slice(6).map((options) => options?.env).filter((value): value is NodeJS.ProcessEnv => value !== undefined);
+      expect(cleanupEnvironments.every((value) => value.DOCKER_CONFIG === environment.DOCKER_CONFIG)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+    await expect(lstat(join(root, "runtime", "buildx"))).rejects.toThrow();
+  });
+
+  test("uses a distinct private Buildx directory for each Lab", async () => {
+    const roots = await Promise.all([
+      mkdtemp(join(tmpdir(), "container-lab-buildx-one-")),
+      mkdtemp(join(tmpdir(), "container-lab-buildx-two-")),
+    ]);
+    const config = (root: string) => parseLabConfig("image: { name: node:24, service: dev }\n", join(root, "source"));
+    const environments = { BUILDX_CONFIG: "/tmp/shared-ambient-buildx", DOCKER_CONFIG: "/tmp/shared-docker" };
+    const dockers = roots.map(() => new EnvironmentRecordingDocker());
+    for (const docker of dockers) docker.responses.push(result('{"services":{"dev":{}}}'), result('{"services":{"dev":{}}}'));
+    try {
+      const prepared = await Promise.all(roots.map((root, index) => prepareLabRuntime(labAt(root), config(root), dockers[index]!, environments)));
+      const paths = prepared.map((lab) => join(lab.metadata.runtimeRoot, "buildx"));
+      expect(new Set(paths).size).toBe(2);
+      expect(paths.every((path) => path !== environments.BUILDX_CONFIG)).toBe(true);
+      expect(dockers.every((docker, index) => docker.runOptions.every((options) => options?.env?.BUILDX_CONFIG === paths[index]))).toBe(true);
+      expect(dockers.every((docker) => docker.runOptions.every((options) => options?.env?.DOCKER_CONFIG === environments.DOCKER_CONFIG))).toBe(true);
+    } finally {
+      await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
     }
   });
 });
@@ -291,9 +377,10 @@ describe("exact Docker cleanup", () => {
   });
 
   test("binds cancellation to an ephemeral run identity and removes the pid file on normal completion", async () => {
-    const docker = new MockDocker();
+    const docker = new EnvironmentRecordingDocker();
+    const environment = { DOCKER_CONFIG: "/tmp/selected-docker-config", BUILDX_CONFIG: "/tmp/ambient-buildx-config" };
     const identity = { runId: "11111111-1111-4111-8111-111111111111", cwd: ".", argv: ["echo", "hello"], environment: {} };
-    launchDockerRun(runtime(), identity, docker);
+    launchDockerRun(runtime(), identity, docker, environment);
     const spawned = docker.spawnCalls[0]!;
     const shell = spawned.indexOf("/bin/sh");
     expect(spawned.slice(shell, shell + 2)).toEqual(["/bin/sh", "-lc"]);
@@ -309,8 +396,12 @@ describe("exact Docker cleanup", () => {
     expect(wrapper.indexOf("kill -KILL")).toBeLessThan(wrapper.indexOf("rm -f"));
 
     docker.responses.push(result("codex-container-lab-termination:signaled\n"));
-    const termination = await terminateDockerRun(runtime(), identity, "TERM", docker);
+    const termination = await terminateDockerRun(runtime(), identity, "TERM", docker, environment);
     expect(termination).toEqual({ confirmed: true, status: "signaled" });
+    expect(docker.spawnOptions[0]?.env?.BUILDX_CONFIG).toBe(`${TEST_RUNTIME_ROOT}/buildx`);
+    expect(docker.spawnOptions[0]?.env?.DOCKER_CONFIG).toBe(environment.DOCKER_CONFIG);
+    expect(docker.runOptions.at(-1)?.env?.BUILDX_CONFIG).toBe(`${TEST_RUNTIME_ROOT}/buildx`);
+    expect(docker.runOptions.at(-1)?.env?.DOCKER_CONFIG).toBe(environment.DOCKER_CONFIG);
     const killScript = docker.calls.at(-1)!.at(-1)!;
     expect(killScript).toContain("/proc/$pid/environ");
     expect(killScript).toContain(`CODEX_CONTAINER_LAB_RUN_ID=${identity.runId}`);
@@ -511,7 +602,7 @@ function runtime(): LabRuntime {
       secretEnvironment: [],
     },
     composeArgs: ["compose", "--project-name", "ccl-project"],
-    overrideFile: "/tmp/runtime/override.compose.yaml",
+    overrideFile: `${TEST_RUNTIME_ROOT}/override.compose.yaml`,
     findings: [],
   };
 }
@@ -536,8 +627,8 @@ function lab(): LabMetadata {
     composeProject: "ccl-project",
     state: "failed",
     sourceRoot: "/tmp/source",
-    runtimeRoot: "/tmp/runtime",
-    workspace: "/tmp/runtime/workspace",
+    runtimeRoot: TEST_RUNTIME_ROOT,
+    workspace: `${TEST_RUNTIME_ROOT}/workspace`,
     manifestPath: "/tmp/source/.codex-container-lab.yaml",
     commandService: "dev",
     createdAt: new Date(0).toISOString(),

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { readFileSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
@@ -189,6 +189,9 @@ describe("attached service lifecycle", () => {
 
     const created = await service.createLab("ready-service-logs", source);
     expect(created.state).toBe("ready");
+    const persisted = await readLab(roots, "thread-ready-service-logs", created.labId);
+    const buildxConfig = join(persisted.runtimeRoot, "buildx");
+    expect((await lstat(buildxConfig)).mode & 0o777).toBe(0o700);
     const response = await service.logs(created.labId, "dev", 4) as {
       labId: string;
       service: string;
@@ -202,6 +205,7 @@ describe("attached service lifecycle", () => {
     expect(response.transcript.bytes).toBe(Buffer.byteLength(response.transcript.text));
     expect(response.transcript.lines).toBe(response.transcript.text.split("\n").length);
     await service.destroyLab(created.labId);
+    await expect(lstat(buildxConfig)).rejects.toThrow();
   });
 
   test("create provisions synchronously and returns only lab identity and terminal state", async () => {
