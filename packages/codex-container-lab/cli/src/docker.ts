@@ -10,6 +10,7 @@ import {
   generateOverrideCompose,
   internalImageTag,
   inspectComposeModel,
+  validateReservedBuildxConfigModel,
   validateSecretEnvironmentModel,
   type ComposeInspectionFinding,
   type ComposeModel,
@@ -30,6 +31,7 @@ export type DockerSpawnOptions = { env?: NodeJS.ProcessEnv };
 /** The only durable path used for a failed Compose-up transcript. */
 export const PROVISIONING_FAILURE_DIAGNOSTIC_FILE = "provisioning-failure.compose-up.log";
 const BUILDX_CONFIG_DIRECTORY = "buildx";
+const BUILDX_CONFIG_ENVIRONMENT = "BUILDX_CONFIG";
 
 export class DockerProvisioningFailure extends Error {
   constructor(
@@ -78,7 +80,7 @@ async function ensureBuildxConfig(runtimeRoot: string): Promise<string> {
 }
 
 function injectBuildxConfig(environment: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEnv {
-  return { ...environment, BUILDX_CONFIG: path };
+  return { ...environment, [BUILDX_CONFIG_ENVIRONMENT]: path };
 }
 
 async function labEnvironment(runtimeRoot: string, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
@@ -103,16 +105,16 @@ export async function prepareLabRuntime(
   runner: DockerRunner = defaultDockerRunner,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LabRuntime> {
-  const buildxConfig = await ensureBuildxConfig(metadata.runtimeRoot);
+  await ensureBuildxConfig(metadata.runtimeRoot);
   const base = generateBaseCompose(config);
   const baseFile = base === undefined ? undefined : join(metadata.runtimeRoot, "base.compose.yaml");
   if (baseFile && base !== undefined) await writeFile(baseFile, base, { mode: 0o600 });
   const overrideFile = join(metadata.runtimeRoot, "override.compose.yaml");
   await writeFile(overrideFile, "{}\n", { mode: 0o600 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
-  const composeEnvironment = injectBuildxConfig(secretComposeEnvironment(config.secretEnvironment, environment), buildxConfig);
-  const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
-  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
+  const modelEnvironment = composeModelEnvironment(config.secretEnvironment, environment);
+  const sourceModel = await normalizedModel(composeArgs, runner, modelEnvironment);
+  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, modelEnvironment);
   const findings = inspectComposeModel(sourceModel);
   const override = generateOverrideCompose(config, sourceModel, {
     workspaceHostPath: metadata.workspace,
@@ -121,8 +123,8 @@ export async function prepareLabRuntime(
     labId: metadata.id,
   });
   await writeFile(overrideFile, override, { mode: 0o600 });
-  const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
-  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
+  const finalModel = await normalizedModel(composeArgs, runner, modelEnvironment);
+  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, modelEnvironment);
   return { metadata, config, composeArgs, baseFile, overrideFile, findings };
 }
 
@@ -140,7 +142,13 @@ async function normalizedModel(
     throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
   }
   if (result.code === 0) {
-    try { return JSON.parse(result.stdout.toString()) as ComposeModel; } catch {}
+    try {
+      const model = JSON.parse(result.stdout.toString()) as ComposeModel;
+      validateReservedBuildxConfigModel(model);
+      return model;
+    } catch (error) {
+      if (error instanceof Error && error.message === "Compose model consumes or forwards reserved BUILDX_CONFIG") throw error;
+    }
   }
   let yaml: CommandResult;
   try {
@@ -151,7 +159,9 @@ async function normalizedModel(
     throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
   }
   if (yaml.code !== 0) throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
-  return parseYaml(yaml.stdout.toString()) as ComposeModel;
+  const model = parseYaml(yaml.stdout.toString()) as ComposeModel;
+  validateReservedBuildxConfigModel(model);
+  return model;
 }
 
 export async function composeCommand(
@@ -610,10 +620,7 @@ export async function stackLogs(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<{ text: string; truncated: boolean }> {
   if (tailLines < 1 || tailLines > 500) throw new Error("tail-lines must be 1..500");
-  const modelEnvironment = await labEnvironment(
-    runtime.metadata.runtimeRoot,
-    scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
-  );
+  const modelEnvironment = composeModelEnvironment(runtime.config.secretEnvironment, environment);
   const model = await normalizedModel(
     runtime.composeArgs,
     runner,
@@ -916,6 +923,12 @@ function secretComposeEnvironment(names: readonly string[], environment: NodeJS.
   for (const name of names) {
     if (Object.hasOwn(environment, name) && typeof environment[name] === "string") result[name] = environment[name];
   }
+  return result;
+}
+
+function composeModelEnvironment(names: readonly string[], environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result = secretComposeEnvironment(names, environment);
+  delete result[BUILDX_CONFIG_ENVIRONMENT];
   return result;
 }
 

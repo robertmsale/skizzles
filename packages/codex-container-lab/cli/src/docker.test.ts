@@ -182,10 +182,14 @@ describe("per-Lab Buildx configuration", () => {
 
       const observed = docker.runOptions.map((options) => options?.env).filter((value): value is NodeJS.ProcessEnv => value !== undefined);
       expect(observed.length).toBe(6);
-      expect(observed.every((value) => value.BUILDX_CONFIG === buildxConfig)).toBe(true);
+      const buildxEnvironments = observed.filter((value) => value.BUILDX_CONFIG !== undefined);
+      const modelEnvironments = observed.filter((value) => value.BUILDX_CONFIG === undefined);
+      expect(buildxEnvironments).toHaveLength(3);
+      expect(buildxEnvironments.every((value) => value.BUILDX_CONFIG === buildxConfig)).toBe(true);
+      expect(modelEnvironments).toHaveLength(3);
       expect(observed.every((value) => value.DOCKER_CONFIG === environment.DOCKER_CONFIG)).toBe(true);
-      expect(observed.slice(0, 3).every((value) => value.REGISTRY_TOKEN === sentinel)).toBe(true);
-      expect(observed.slice(3).every((value) => value.REGISTRY_TOKEN === undefined)).toBe(true);
+      expect(observed.filter((value) => value.REGISTRY_TOKEN === sentinel)).toHaveLength(4);
+      expect(observed.filter((value) => value.REGISTRY_TOKEN === undefined)).toHaveLength(2);
       expect(docker.spawnOptions[0]?.env?.BUILDX_CONFIG).toBe(buildxConfig);
       expect(docker.spawnOptions[0]?.env?.DOCKER_CONFIG).toBe(environment.DOCKER_CONFIG);
       expect(docker.spawnOptions[0]?.env?.REGISTRY_TOKEN).toBeUndefined();
@@ -215,7 +219,9 @@ describe("per-Lab Buildx configuration", () => {
       const paths = prepared.map((lab) => join(lab.metadata.runtimeRoot, "buildx"));
       expect(new Set(paths).size).toBe(2);
       expect(paths.every((path) => path !== environments.BUILDX_CONFIG)).toBe(true);
-      expect(dockers.every((docker, index) => docker.runOptions.every((options) => options?.env?.BUILDX_CONFIG === paths[index]))).toBe(true);
+      expect(dockers.every((docker, index) => docker.runOptions
+        .filter((options) => options?.env?.BUILDX_CONFIG !== undefined)
+        .every((options) => options?.env?.BUILDX_CONFIG === paths[index]))).toBe(true);
       expect(dockers.every((docker) => docker.runOptions.every((options) => options?.env?.DOCKER_CONFIG === environments.DOCKER_CONFIG))).toBe(true);
     } finally {
       await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));

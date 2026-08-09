@@ -17,6 +17,11 @@ export interface LabComposeContext {
 }
 
 const labelPrefix = "io.openai.codex-container-lab";
+const RESERVED_BUILDX_CONFIG = "BUILDX_CONFIG";
+const MAX_RESERVED_ENVIRONMENT_MODEL_NODES = 100_000;
+const MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH = 128;
+const MAX_RESERVED_ENVIRONMENT_MODEL_STRING_BYTES = 1 * 1024 * 1024;
+const RESERVED_BUILDX_CONFIG_ERROR = "Compose model consumes or forwards reserved BUILDX_CONFIG";
 
 export function generateBaseCompose(config: LabConfig): string | undefined {
   if (config.mode.kind === "compose") return undefined;
@@ -227,6 +232,77 @@ export function validateSecretEnvironmentModel(
 
   const referenced = referencedSecretNameInModel(model, declaredNames);
   if (referenced) throw new Error(`Compose model references declared secret environment source: ${referenced}`);
+}
+
+/**
+ * Keep the launcher-owned Buildx configuration variable private to the host
+ * process. This model is produced with Compose interpolation disabled, so a
+ * project must not be able to consume or forward the reserved variable when
+ * a normal Compose command later receives it.
+ */
+export function validateReservedBuildxConfigModel(model: ComposeModel): void {
+  const pending: Array<{ value: unknown; parentKey?: string; depth: number }> = [{ value: model, depth: 0 }];
+  let nodes = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    nodes++;
+    if (nodes > MAX_RESERVED_ENVIRONMENT_MODEL_NODES || current.depth > MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH) {
+      throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+    }
+    const value = current.value;
+    if (typeof value === "string") {
+      if (Buffer.byteLength(value) > MAX_RESERVED_ENVIRONMENT_MODEL_STRING_BYTES || hasComposeVariableReference(value)) {
+        throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+      }
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (current.parentKey === "environment" || current.parentKey === "args") {
+          if (typeof entry === "string" && composeEnvironmentEntryName(entry) === RESERVED_BUILDX_CONFIG) {
+            throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+          }
+        }
+        pending.push({ value: entry, parentKey: current.parentKey, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (!isRecord(value)) continue;
+    for (const [key, nested] of Object.entries(value)) {
+      if (key === RESERVED_BUILDX_CONFIG || hasComposeVariableReference(key)) {
+        throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+      }
+      pending.push({ value: nested, parentKey: key, depth: current.depth + 1 });
+    }
+  }
+}
+
+function composeEnvironmentEntryName(entry: string): string {
+  const separator = entry.indexOf("=");
+  return separator < 0 ? entry : entry.slice(0, separator);
+}
+
+function hasComposeVariableReference(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    if (value[index] !== "$") continue;
+    if (value[index + 1] === "$") {
+      index++;
+      continue;
+    }
+    if (value.startsWith(RESERVED_BUILDX_CONFIG, index + 1) &&
+        isVariableBoundary(value[index + 1 + RESERVED_BUILDX_CONFIG.length])) {
+      return true;
+    }
+    if (value[index + 1] !== "{") continue;
+    const start = index + 2;
+    if (value.slice(start, start + RESERVED_BUILDX_CONFIG.length) !== RESERVED_BUILDX_CONFIG) continue;
+    if (isVariableBoundary(value[start + RESERVED_BUILDX_CONFIG.length])) return true;
+  }
+  return false;
+}
+
+function isVariableBoundary(character: string | undefined): boolean {
+  return character === undefined || !/[A-Za-z0-9_]/.test(character);
 }
 
 function referencedSecretName(value: unknown, names: readonly string[]): string | undefined {

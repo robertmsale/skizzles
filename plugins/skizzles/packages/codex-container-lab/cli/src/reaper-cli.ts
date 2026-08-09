@@ -7003,6 +7003,7 @@ var $visit = visit.visit;
 var $visitAsync = visit.visitAsync;
 
 // packages/codex-container-lab/cli/src/compose.ts
+var MAX_RESERVED_ENVIRONMENT_MODEL_STRING_BYTES = 1 * 1024 * 1024;
 function composeCommandArgs(config, options) {
   const sourceFiles = config.mode.kind === "compose" ? config.mode.files : options.baseFile ? [options.baseFile] : [];
   if (sourceFiles.length === 0) {

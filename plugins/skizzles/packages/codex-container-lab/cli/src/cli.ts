@@ -7304,6 +7304,11 @@ function formatIssue(issue) {
 
 // packages/codex-container-lab/cli/src/compose.ts
 var labelPrefix = "io.openai.codex-container-lab";
+var RESERVED_BUILDX_CONFIG = "BUILDX_CONFIG";
+var MAX_RESERVED_ENVIRONMENT_MODEL_NODES = 1e5;
+var MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH = 128;
+var MAX_RESERVED_ENVIRONMENT_MODEL_STRING_BYTES = 1 * 1024 * 1024;
+var RESERVED_BUILDX_CONFIG_ERROR = "Compose model consumes or forwards reserved BUILDX_CONFIG";
 function generateBaseCompose(config) {
   if (config.mode.kind === "compose")
     return;
@@ -7478,6 +7483,71 @@ function validateSecretEnvironmentModel(model, declaredNames, environment) {
   const referenced = referencedSecretNameInModel(model, declaredNames);
   if (referenced)
     throw new Error(`Compose model references declared secret environment source: ${referenced}`);
+}
+function validateReservedBuildxConfigModel(model) {
+  const pending = [{ value: model, depth: 0 }];
+  let nodes = 0;
+  while (pending.length > 0) {
+    const current = pending.pop();
+    nodes++;
+    if (nodes > MAX_RESERVED_ENVIRONMENT_MODEL_NODES || current.depth > MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH) {
+      throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+    }
+    const value = current.value;
+    if (typeof value === "string") {
+      if (Buffer.byteLength(value) > MAX_RESERVED_ENVIRONMENT_MODEL_STRING_BYTES || hasComposeVariableReference(value)) {
+        throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+      }
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (current.parentKey === "environment" || current.parentKey === "args") {
+          if (typeof entry === "string" && composeEnvironmentEntryName(entry) === RESERVED_BUILDX_CONFIG) {
+            throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+          }
+        }
+        pending.push({ value: entry, parentKey: current.parentKey, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (!isRecord2(value))
+      continue;
+    for (const [key, nested] of Object.entries(value)) {
+      if (key === RESERVED_BUILDX_CONFIG || hasComposeVariableReference(key)) {
+        throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+      }
+      pending.push({ value: nested, parentKey: key, depth: current.depth + 1 });
+    }
+  }
+}
+function composeEnvironmentEntryName(entry) {
+  const separator = entry.indexOf("=");
+  return separator < 0 ? entry : entry.slice(0, separator);
+}
+function hasComposeVariableReference(value) {
+  for (let index = 0;index < value.length; index++) {
+    if (value[index] !== "$")
+      continue;
+    if (value[index + 1] === "$") {
+      index++;
+      continue;
+    }
+    if (value.startsWith(RESERVED_BUILDX_CONFIG, index + 1) && isVariableBoundary(value[index + 1 + RESERVED_BUILDX_CONFIG.length])) {
+      return true;
+    }
+    if (value[index + 1] !== "{")
+      continue;
+    const start = index + 2;
+    if (value.slice(start, start + RESERVED_BUILDX_CONFIG.length) !== RESERVED_BUILDX_CONFIG)
+      continue;
+    if (isVariableBoundary(value[start + RESERVED_BUILDX_CONFIG.length]))
+      return true;
+  }
+  return false;
+}
+function isVariableBoundary(character) {
+  return character === undefined || !/[A-Za-z0-9_]/.test(character);
 }
 function referencedSecretName(value, names) {
   if (typeof value !== "string")
@@ -7691,6 +7761,7 @@ function truncateUtf8(value, maxBytes, policy) {
 // packages/codex-container-lab/cli/src/docker.ts
 var PROVISIONING_FAILURE_DIAGNOSTIC_FILE = "provisioning-failure.compose-up.log";
 var BUILDX_CONFIG_DIRECTORY = "buildx";
+var BUILDX_CONFIG_ENVIRONMENT = "BUILDX_CONFIG";
 
 class DockerProvisioningFailure extends Error {
   diagnostic;
@@ -7730,7 +7801,7 @@ async function ensureBuildxConfig(runtimeRoot) {
   return path;
 }
 function injectBuildxConfig(environment, path) {
-  return { ...environment, BUILDX_CONFIG: path };
+  return { ...environment, [BUILDX_CONFIG_ENVIRONMENT]: path };
 }
 async function labEnvironment(runtimeRoot, environment) {
   return injectBuildxConfig(environment, await ensureBuildxConfig(runtimeRoot));
@@ -7743,7 +7814,7 @@ async function dockerAvailable(runner = defaultDockerRunner, secretEnvironment =
   })).code === 0;
 }
 async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner, environment = process.env) {
-  const buildxConfig = await ensureBuildxConfig(metadata.runtimeRoot);
+  await ensureBuildxConfig(metadata.runtimeRoot);
   const base = generateBaseCompose(config);
   const baseFile = base === undefined ? undefined : join(metadata.runtimeRoot, "base.compose.yaml");
   if (baseFile && base !== undefined)
@@ -7752,9 +7823,9 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
   await writeFile(overrideFile, `{}
 `, { mode: 384 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
-  const composeEnvironment = injectBuildxConfig(secretComposeEnvironment(config.secretEnvironment, environment), buildxConfig);
-  const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
-  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
+  const modelEnvironment = composeModelEnvironment(config.secretEnvironment, environment);
+  const sourceModel = await normalizedModel(composeArgs, runner, modelEnvironment);
+  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, modelEnvironment);
   const findings = inspectComposeModel(sourceModel);
   const override = generateOverrideCompose(config, sourceModel, {
     workspaceHostPath: metadata.workspace,
@@ -7763,8 +7834,8 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
     labId: metadata.id
   });
   await writeFile(overrideFile, override, { mode: 384 });
-  const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
-  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
+  const finalModel = await normalizedModel(composeArgs, runner, modelEnvironment);
+  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, modelEnvironment);
   return { metadata, config, composeArgs, baseFile, overrideFile, findings };
 }
 async function normalizedModel(composeArgs, runner, environment = process.env) {
@@ -7781,8 +7852,13 @@ async function normalizedModel(composeArgs, runner, environment = process.env) {
   }
   if (result.code === 0) {
     try {
-      return JSON.parse(result.stdout.toString());
-    } catch {}
+      const model2 = JSON.parse(result.stdout.toString());
+      validateReservedBuildxConfigModel(model2);
+      return model2;
+    } catch (error) {
+      if (error instanceof Error && error.message === "Compose model consumes or forwards reserved BUILDX_CONFIG")
+        throw error;
+    }
   }
   let yaml;
   try {
@@ -7797,7 +7873,9 @@ async function normalizedModel(composeArgs, runner, environment = process.env) {
   }
   if (yaml.code !== 0)
     throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
-  return $parse(yaml.stdout.toString());
+  const model = $parse(yaml.stdout.toString());
+  validateReservedBuildxConfigModel(model);
+  return model;
 }
 async function composeCommand(runtime, args, options = {}, runner = defaultDockerRunner) {
   const environment = await labEnvironment(runtime.metadata.runtimeRoot, scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env));
@@ -8122,7 +8200,7 @@ function declaredSecretValues(runtime, environment) {
 async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunner, environment = process.env) {
   if (tailLines < 1 || tailLines > 500)
     throw new Error("tail-lines must be 1..500");
-  const modelEnvironment = await labEnvironment(runtime.metadata.runtimeRoot, scrubSecretEnvironment(runtime.config.secretEnvironment, environment));
+  const modelEnvironment = composeModelEnvironment(runtime.config.secretEnvironment, environment);
   const model = await normalizedModel(runtime.composeArgs, runner, modelEnvironment);
   if (!Object.hasOwn(model.services ?? {}, service))
     throw new Error(`unknown Compose service: ${service}`);
@@ -8429,6 +8507,11 @@ function secretComposeEnvironment(names, environment) {
     if (Object.hasOwn(environment, name) && typeof environment[name] === "string")
       result[name] = environment[name];
   }
+  return result;
+}
+function composeModelEnvironment(names, environment) {
+  const result = secretComposeEnvironment(names, environment);
+  delete result[BUILDX_CONFIG_ENVIRONMENT];
   return result;
 }
 function scrubSecretEnvironment(names, environment) {

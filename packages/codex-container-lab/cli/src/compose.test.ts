@@ -6,6 +6,7 @@ import {
   generateBaseCompose,
   generateOverrideCompose,
   inspectComposeModel,
+  validateReservedBuildxConfigModel,
   validateSecretEnvironmentModel,
   type ComposeModel,
 } from "./compose";
@@ -258,5 +259,67 @@ describe("validateSecretEnvironmentModel", () => {
       services: { api: { secrets: ["REGISTRY_TOKEN", { source: "REGISTRY_TOKEN", target: "registry-token" }] } },
       secrets: { REGISTRY_TOKEN: { environment: "REGISTRY_TOKEN" } },
     }, ["REGISTRY_TOKEN"], { REGISTRY_TOKEN: "sentinel-value" })).not.toThrow();
+  });
+});
+
+describe("validateReservedBuildxConfigModel", () => {
+  test("rejects reserved environment keys and list entries", () => {
+    const models: ComposeModel[] = [
+      { services: { api: { environment: ["BUILDX_CONFIG"] } } },
+      { services: { api: { environment: ["BUILDX_CONFIG=/tmp/forwarded"] } } },
+      { services: { api: { environment: { BUILDX_CONFIG: "/tmp/forwarded" } } } },
+      { services: { api: { build: { args: ["BUILDX_CONFIG", "OTHER=value"] } } } },
+      { services: { api: { build: { args: { BUILDX_CONFIG: "/tmp/forwarded" } } } } },
+    ];
+    for (const model of models) {
+      expect(() => validateReservedBuildxConfigModel(model)).toThrow("reserved BUILDX_CONFIG");
+    }
+  });
+
+  test("rejects interpolation references across bind sources, nested build args, labels, and commands", () => {
+    const references = [
+      "$BUILDX_CONFIG",
+      "${BUILDX_CONFIG}",
+      "${BUILDX_CONFIG:-/fallback}",
+      "${BUILDX_CONFIG-/fallback}",
+      "${BUILDX_CONFIG:?required}",
+      "${BUILDX_CONFIG?required}",
+      "${BUILDX_CONFIG:+/replacement}",
+      "${BUILDX_CONFIG+/replacement}",
+    ];
+    for (const reference of references) {
+      for (const model of [
+        { services: { api: { volumes: [{ type: "bind", source: reference, target: "/config" }] } } },
+        { services: { api: { build: { args: { NESTED: { value: reference } } } } } },
+        { services: { api: { labels: { "example.value": reference } } } },
+        { services: { api: { command: ["/bin/sh", "-lc", reference] } } },
+      ] satisfies ComposeModel[]) {
+        expect(() => validateReservedBuildxConfigModel(model)).toThrow("reserved BUILDX_CONFIG");
+      }
+    }
+  });
+
+  test("allows similar names, literal prose, and Compose-escaped dollar signs", () => {
+    expect(() => validateReservedBuildxConfigModel({
+      services: {
+        api: {
+          command: ["echo BUILDX_CONFIG", "$BUILDX_CONFIGURATION", "${BUILDX_CONFIG_SUFFIX}"],
+          labels: { "example.text": "a literal BUILDX_CONFIG appears here" },
+          volumes: ["$$BUILDX_CONFIG:/literal"],
+          environment: ["OTHER=BUILDX_CONFIG"],
+        },
+      },
+    })).not.toThrow();
+  });
+
+  test("walks nested arrays and objects without allowing a bypass", () => {
+    expect(() => validateReservedBuildxConfigModel({
+      services: { api: { extension: [{ nested: [{ deeper: { value: "${BUILDX_CONFIG}" } }] }] } },
+    })).toThrow("reserved BUILDX_CONFIG");
+  });
+
+  test("fails closed on structurally unbounded models", () => {
+    const values = Array.from({ length: 100_001 }, () => "literal");
+    expect(() => validateReservedBuildxConfigModel({ services: { api: { command: values } } })).toThrow("reserved BUILDX_CONFIG");
   });
 });
