@@ -546,6 +546,18 @@ describe("exact Docker cleanup", () => {
     expect(redacted).toEqual({ text: "", contentRedacted: true, incomplete: true });
   });
 
+  test("fails closed when compose-up redaction markers reconstruct a secret", () => {
+    const secret = "[redacted]TAIL";
+    const redacted = redactComposeFailureWithMetadata(
+      "abcdef123456\nTAIL",
+      runtime(),
+      [secret],
+      ["abcdef123456", "TAIL"],
+    );
+
+    expect(redacted).toEqual({ text: "", contentRedacted: true, incomplete: true });
+  });
+
   test("fails closed for one-character and newline-bearing declared secrets", async () => {
     for (const secret of ["x", "line\r\nsecret"]) {
       const docker = new MockDocker();
@@ -622,6 +634,27 @@ describe("exact Docker cleanup", () => {
     expect(transcript.text).toBe("[stdout-unavailable]");
     expect(transcript.truncated).toBe(true);
     expect(transcript.contentRedacted).toBe(true);
+  });
+
+  test("fails closed when public markers reconstruct a declared secret across captures", async () => {
+    const scenarios = [
+      { secret: "[stdout-unavailable]TAIL", stdout: "not-a-framed-record\n", stderr: frameComposeLog("TAIL") },
+      { secret: "[redacted]TAIL", stdout: frameComposeLog("abcdef123456"), stderr: frameComposeLog("TAIL") },
+    ];
+    for (const scenario of scenarios) {
+      const docker = new MockDocker();
+      const configured = runtime();
+      configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+      docker.responses.push(result('{"services":{"dev":{}}}'), {
+        code: 0,
+        stdout: Buffer.from(scenario.stdout),
+        stderr: Buffer.from(scenario.stderr),
+      });
+
+      const transcript = await stackLogs(configured, "dev", 20, docker, { REGISTRY_TOKEN: scenario.secret });
+
+      expect(transcript).toEqual({ text: "", truncated: true, contentRedacted: true });
+    }
   });
 
   test("fails closed when a declared secret collides with a public marker", async () => {

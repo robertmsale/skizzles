@@ -337,14 +337,18 @@ async function captureComposeFailure(
   let transcript = aggregate.text;
   let transcriptTruncated = segments.some((segment) => segment.truncated);
   const aggregateSecret = aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
+  const aggregatePublicBoundary = secretCrossesFragmentBoundary(
+    segments.map((segment) => segment.text),
+    secretValues,
+  );
   const privacyFailure = secretValues.some((secret) => /[\r\n]/.test(secret)) ||
     segments.some((segment) => segment.privacyFailure) ||
-    aggregateSecret.found;
+    aggregateSecret.found || aggregatePublicBoundary;
   const contentRedacted = segments.some((segment) => segment.contentRedacted) || privacyFailure;
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split("\n").length > 500;
   if (privacyFailure || aggregateBounds) {
     transcript = "";
-    transcriptTruncated ||= aggregateSecret.boundary || aggregateBounds;
+    transcriptTruncated ||= aggregateSecret.boundary || aggregatePublicBoundary || aggregateBounds;
   }
   const evidence = {
     kind: "compose-up" as const,
@@ -563,12 +567,13 @@ export async function stackLogs(
     { name: "stdout", value: result.stdout.toString(), truncated: result.stdoutTruncated === true },
     { name: "stderr", value: result.stderr.toString(), truncated: result.stderrTruncated === true },
   ], result.code, runtime, secretValues);
-  const privacyFailure = secretValues.some((secret) => secret.length > 0 && capture.redacted.text.includes(secret));
+  const publicBoundary = secretCrossesFragmentBoundary([capture.redacted.text], secretValues);
+  const privacyFailure = publicBoundary || secretValues.some((secret) => secret.length > 0 && capture.redacted.text.includes(secret));
   const publicText = privacyFailure ? "" : capture.redacted.text;
   const bounded = boundedLogTail(publicText, tailLines, 8 * 1024);
   return {
     ...bounded,
-    truncated: bounded.truncated || capture.truncated,
+    truncated: bounded.truncated || capture.truncated || publicBoundary,
     contentRedacted: capture.redacted.contentRedacted || privacyFailure,
   };
 }

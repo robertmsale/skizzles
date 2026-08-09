@@ -7703,9 +7703,10 @@ function truncateUtf8(value, maxBytes, policy) {
 
 // packages/codex-container-lab/cli/src/log-framing.ts
 function redactComposeFailureWithMetadata(value, runtime, secretValues, fragments = [value]) {
-  const incomplete = secretValues.some((secret) => /[\r\n]/.test(secret)) || secretCrossesFragmentBoundary(fragments, secretValues);
+  const rawIncomplete = secretValues.some((secret) => /[\r\n]/.test(secret)) || secretCrossesFragmentBoundary(fragments, secretValues);
   const redacted = redactComposeTextWithMetadata(value, runtime, secretValues);
   const publicText = redactPublicTextWithMetadata(redacted.text, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, { byteCapture: "tail" });
+  const incomplete = rawIncomplete || secretCrossesFragmentBoundary([publicText.text], secretValues);
   const result = {
     text: incomplete ? "" : publicText.text,
     contentRedacted: incomplete || redacted.contentRedacted || publicText.contentRedacted
@@ -7879,10 +7880,18 @@ function redactComposeLogStreams(streams, resultCode, runtime, secretValues) {
   }).filter((marker) => marker !== undefined);
   if (resultCode !== 0)
     markers.unshift("[compose-command-failed]");
+  const publicFragments = [...markers, ...merged.text.split(/\r\n|\r|\n/)].filter((part) => part.length > 0);
+  if (secretCrossesFragmentBoundary(publicFragments, secretValues)) {
+    return {
+      redacted: { text: "", contentRedacted: true, incomplete: true },
+      truncated: true
+    };
+  }
+  const text = [...markers, merged.text].filter((part) => part.length > 0).join(`
+`);
   return {
     redacted: {
-      text: [...markers, merged.text].filter((part) => part.length > 0).join(`
-`),
+      text,
       contentRedacted: merged.contentRedacted || markers.length > 0
     },
     truncated: resultCode !== 0 || streams.some((stream, index) => stream.truncated || !captures[index].valid && stream.value.length > 0)
@@ -8113,13 +8122,14 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
   let transcript = aggregate.text;
   let transcriptTruncated = segments.some((segment) => segment.truncated);
   const aggregateSecret = aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
-  const privacyFailure = secretValues.some((secret) => /[\r\n]/.test(secret)) || segments.some((segment) => segment.privacyFailure) || aggregateSecret.found;
+  const aggregatePublicBoundary = secretCrossesFragmentBoundary(segments.map((segment) => segment.text), secretValues);
+  const privacyFailure = secretValues.some((secret) => /[\r\n]/.test(secret)) || segments.some((segment) => segment.privacyFailure) || aggregateSecret.found || aggregatePublicBoundary;
   const contentRedacted = segments.some((segment) => segment.contentRedacted) || privacyFailure;
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split(`
 `).length > 500;
   if (privacyFailure || aggregateBounds) {
     transcript = "";
-    transcriptTruncated ||= aggregateSecret.boundary || aggregateBounds;
+    transcriptTruncated ||= aggregateSecret.boundary || aggregatePublicBoundary || aggregateBounds;
   }
   const evidence = {
     kind: "compose-up",
@@ -8283,12 +8293,13 @@ async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunn
     { name: "stdout", value: result.stdout.toString(), truncated: result.stdoutTruncated === true },
     { name: "stderr", value: result.stderr.toString(), truncated: result.stderrTruncated === true }
   ], result.code, runtime, secretValues);
-  const privacyFailure = secretValues.some((secret) => secret.length > 0 && capture.redacted.text.includes(secret));
+  const publicBoundary = secretCrossesFragmentBoundary([capture.redacted.text], secretValues);
+  const privacyFailure = publicBoundary || secretValues.some((secret) => secret.length > 0 && capture.redacted.text.includes(secret));
   const publicText = privacyFailure ? "" : capture.redacted.text;
   const bounded = boundedLogTail(publicText, tailLines, 8 * 1024);
   return {
     ...bounded,
-    truncated: bounded.truncated || capture.truncated,
+    truncated: bounded.truncated || capture.truncated || publicBoundary,
     contentRedacted: capture.redacted.contentRedacted || privacyFailure
   };
 }

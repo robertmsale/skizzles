@@ -14,7 +14,7 @@ export function redactComposeFailureWithMetadata(
   secretValues: readonly string[],
   fragments: readonly string[] = [value],
 ): RedactionResult {
-  const incomplete = secretValues.some((secret) => /[\r\n]/.test(secret)) ||
+  const rawIncomplete = secretValues.some((secret) => /[\r\n]/.test(secret)) ||
     secretCrossesFragmentBoundary(fragments, secretValues);
   const redacted = redactComposeTextWithMetadata(value, runtime, secretValues);
   // Apply lifecycle segment bounds only in the caller, where the resulting
@@ -25,6 +25,7 @@ export function redactComposeFailureWithMetadata(
     Number.MAX_SAFE_INTEGER,
     { byteCapture: "tail" },
   );
+  const incomplete = rawIncomplete || secretCrossesFragmentBoundary([publicText.text], secretValues);
   const result: RedactionResult = {
     text: incomplete ? "" : publicText.text,
     contentRedacted: incomplete || redacted.contentRedacted || publicText.contentRedacted,
@@ -247,9 +248,17 @@ export function redactComposeLogStreams(
     return `[${stream.name}-${stream.truncated ? "truncated" : "unavailable"}]`;
   }).filter((marker): marker is string => marker !== undefined);
   if (resultCode !== 0) markers.unshift("[compose-command-failed]");
+  const publicFragments = [...markers, ...merged.text.split(/\r\n|\r|\n/)].filter((part) => part.length > 0);
+  if (secretCrossesFragmentBoundary(publicFragments, secretValues)) {
+    return {
+      redacted: { text: "", contentRedacted: true, incomplete: true },
+      truncated: true,
+    };
+  }
+  const text = [...markers, merged.text].filter((part) => part.length > 0).join("\n");
   return {
     redacted: {
-      text: [...markers, merged.text].filter((part) => part.length > 0).join("\n"),
+      text,
       contentRedacted: merged.contentRedacted || markers.length > 0,
     },
     truncated: resultCode !== 0 || streams.some((stream, index) => stream.truncated ||
