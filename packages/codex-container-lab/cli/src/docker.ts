@@ -16,6 +16,11 @@ import {
 } from "./compose";
 import { runCommand, type RunOptions, type CommandResult } from "./process";
 import { redactPublicText } from "./public-output";
+import {
+  redactComposeFailureWithMetadata,
+  redactComposeLogStreams,
+  type RedactionResult,
+} from "./log-framing";
 import type { Endpoint, LabMetadata, PersistedLabRuntime, ProvisioningFailureDiagnostic } from "./types";
 
 export type LabRuntime = PersistedLabRuntime & { metadata: LabMetadata };
@@ -298,12 +303,11 @@ async function captureComposeFailure(
   const lifecycleLines = candidates.length > 0 ? 125 : 500;
   const lifecycle = buildDiagnosticSegment(
     "compose-up",
-    raw,
-    runtime,
-    secretValues,
     lifecycleLines,
     lifecycleBytes,
     provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true,
+    redactComposeFailureWithMetadata(raw, runtime, secretValues),
+    secretValues,
   );
   const serviceBytes = divideDiagnosticBudget(6 * 1024 - Math.max(0, candidates.length - 1), candidates.length);
   const serviceLines = divideDiagnosticBudget(375, candidates.length);
@@ -316,21 +320,23 @@ async function captureComposeFailure(
       Math.max(1, serviceBytes[index] ?? 1),
       runner,
       environment,
+      secretValues,
     );
     segments.push(buildDiagnosticSegment(
       `service:${service}`,
-      captured.raw,
-      runtime,
-      secretValues,
       serviceLines[index] ?? 1,
       serviceBytes[index] ?? 1,
       captured.truncated,
+      captured.redacted,
+      secretValues,
     ));
   }
   const aggregate = joinDiagnosticSegments(segments);
   let transcript = aggregate.text;
   let transcriptTruncated = segments.some((segment) => segment.truncated);
-  const privacyFailure = segments.some((segment) => segment.privacyFailure) ||
+  const contentRedacted = segments.some((segment) => segment.contentRedacted);
+  const privacyFailure = secretValues.some((secret) => /[\r\n]/.test(secret)) ||
+    segments.some((segment) => segment.privacyFailure) ||
     aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split("\n").length > 500;
   if (privacyFailure || aggregateBounds) {
@@ -343,6 +349,7 @@ async function captureComposeFailure(
     bytes: 0,
     lines: 0,
     truncated: transcriptTruncated,
+    contentRedacted,
   };
   try {
     await writeFailureTranscript(runtime.metadata.runtimeRoot, transcript);
@@ -388,13 +395,14 @@ async function captureFailedServiceLogs(
   segmentBytes: number,
   runner: DockerRunner,
   environment: NodeJS.ProcessEnv,
-): Promise<{ raw: string; truncated: boolean }> {
+  secretValues: readonly string[],
+): Promise<{ redacted: RedactionResult; truncated: boolean }> {
   const headerBytes = Buffer.byteLength(`--- service:${service} ---`);
   const bodyBytes = Math.max(0, segmentBytes - headerBytes - 1);
   const streamBytes = Math.floor(Math.max(0, bodyBytes - 1) / 2);
   let result: CommandResult;
   try {
-    result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--no-log-prefix", "--tail", String(tailLines), service], {
+    result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--timestamps", "--no-log-prefix", "--tail", String(tailLines), service], {
       allowFailure: true,
       timeoutMs: 20_000,
       maxOutputBytes: streamBytes,
@@ -403,29 +411,35 @@ async function captureFailedServiceLogs(
       env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
     });
   } catch {
-    return { raw: "", truncated: true };
+    return {
+      redacted: { text: "[logs-unavailable]", contentRedacted: true },
+      truncated: true,
+    };
   }
+  const capture = redactComposeLogStreams([
+    { name: "stdout", value: result.stdout.toString(), truncated: result.stdoutTruncated === true },
+    { name: "stderr", value: result.stderr.toString(), truncated: result.stderrTruncated === true },
+  ], result.code, runtime, secretValues);
   return {
-    raw: [result.stdout.toString(), result.stderr.toString()].filter((part) => part.length > 0).join("\n"),
-    truncated: result.code !== 0 || result.stdoutTruncated === true || result.stderrTruncated === true,
+    redacted: capture.redacted,
+    truncated: capture.truncated,
   };
 }
 
 function buildDiagnosticSegment(
   label: string,
-  raw: string,
-  runtime: LabRuntime,
-  secretValues: readonly string[],
   maxLines: number,
   maxBytes: number,
   upstreamTruncated: boolean,
+  redacted: RedactionResult,
+  secretValues: readonly string[],
 ): DiagnosticSegment {
   // Treat captured Compose output as untrusted until it has been redacted,
   // bounded, control-sanitized, and checked. The synthetic label is trusted
   // framing and is added only after that body pipeline completes.
   const header = `--- ${label} ---`;
   const body = boundedLogTail(
-    redactComposeFailure(raw, runtime, secretValues),
+    redacted.text,
     Math.max(0, maxLines - 1),
     Math.max(0, maxBytes - Buffer.byteLength(header) - 1),
   );
@@ -434,6 +448,7 @@ function buildDiagnosticSegment(
   return {
     text: privacyFailure ? "" : text,
     truncated: upstreamTruncated || body.truncated,
+    contentRedacted: redacted.contentRedacted,
     privacyFailure,
     bodyStart: body.text ? header.length + 1 : undefined,
     bodyEnd: body.text ? text.length : undefined,
@@ -444,6 +459,7 @@ type DiagnosticSegment = {
   text: string;
   truncated: boolean;
   privacyFailure: boolean;
+  contentRedacted: boolean;
   bodyStart?: number;
   bodyEnd?: number;
 };
@@ -519,37 +535,6 @@ async function writeFailureTranscript(runtimeRoot: string, text: string): Promis
   }
 }
 
-function redactComposeFailure(value: string, runtime: LabRuntime, secretValues: readonly string[]): string {
-  return redactPublicText(redactComposeText(value, runtime, secretValues), 8 * 1024, 500, { byteCapture: "tail" });
-}
-
-function redactComposeText(value: string, runtime: LabRuntime, secretValues: readonly string[]): string {
-  let diagnostic = value;
-  for (const secret of secretValues) {
-    diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
-  }
-  const metadata = [
-    runtime.metadata.owner,
-    runtime.metadata.ownerKey,
-    runtime.metadata.id,
-    runtime.metadata.composeProject,
-    runtime.metadata.sourceRoot,
-    runtime.metadata.manifestPath,
-    runtime.metadata.runtimeRoot,
-    runtime.metadata.workspace,
-    ...runtime.composeArgs,
-  ];
-  for (const value of metadata) {
-    if (value) diagnostic = diagnostic.split(value).join("[redacted]");
-  }
-  // Compose may print short container ids that are not covered by the public
-  // text redactor's UUID/sha256 rules. They are not useful at this boundary.
-  diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  // Callers apply their own line and byte caps only after this complete
-  // redaction pass so returned metadata describes public text.
-  return redactPublicText(diagnostic, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
-}
-
 function declaredSecretValues(runtime: LabRuntime, environment: NodeJS.ProcessEnv): string[] {
   return [...new Set(runtime.config.secretEnvironment
     .map((name) => environment[name])
@@ -563,7 +548,7 @@ export async function stackLogs(
   tailLines: number,
   runner: DockerRunner = defaultDockerRunner,
   environment: NodeJS.ProcessEnv = process.env,
-): Promise<{ text: string; truncated: boolean }> {
+): Promise<{ text: string; truncated: boolean; contentRedacted: boolean }> {
   if (tailLines < 1 || tailLines > 500) throw new Error("tail-lines must be 1..500");
   const model = await normalizedModel(
     runtime.composeArgs,
@@ -571,25 +556,21 @@ export async function stackLogs(
     scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
   );
   if (!Object.hasOwn(model.services ?? {}, service)) throw new Error(`unknown Compose service: ${service}`);
-  const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
+  const result = await composeCommand(runtime, ["logs", "--no-color", "--timestamps", "--no-log-prefix", "--tail", String(tailLines), service], {
     allowFailure: true, timeoutMs: 20_000, environment,
   }, runner);
-  // A truncated stream may end with a strict prefix of a declared secret;
-  // discard the retained bytes instead of attempting incomplete replacement.
-  const streams = [
-    result.stdoutTruncated === true ? "[stdout-truncated]" : result.stdout.toString(),
-    result.stderrTruncated === true ? "[stderr-truncated]" : result.stderr.toString(),
-  ].filter((part) => part.length > 0);
-  const raw = streams.reduce((joined, part) => {
-    if (!joined) return part;
-    const separator = joined.endsWith("\n") || part.startsWith("\n") ? "" : "\n";
-    return `${joined}${separator}${part}`;
-  }, "");
-  const redacted = redactComposeText(raw, runtime, declaredSecretValues(runtime, environment));
-  const bounded = boundedLogTail(redacted, tailLines, 8 * 1024);
+  const secretValues = declaredSecretValues(runtime, environment);
+  const capture = redactComposeLogStreams([
+    { name: "stdout", value: result.stdout.toString(), truncated: result.stdoutTruncated === true },
+    { name: "stderr", value: result.stderr.toString(), truncated: result.stderrTruncated === true },
+  ], result.code, runtime, secretValues);
+  const privacyFailure = secretValues.some((secret) => secret.length > 0 && capture.redacted.text.includes(secret));
+  const publicText = privacyFailure ? "" : capture.redacted.text;
+  const bounded = boundedLogTail(publicText, tailLines, 8 * 1024);
   return {
     ...bounded,
-    truncated: bounded.truncated || result.stdoutTruncated === true || result.stderrTruncated === true,
+    truncated: bounded.truncated || capture.truncated,
+    contentRedacted: capture.redacted.contentRedacted || privacyFailure,
   };
 }
 

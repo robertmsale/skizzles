@@ -294,7 +294,8 @@ function isProvisioningEvidence(value: unknown): boolean {
   return isRecord(value) && value.kind === "compose-up" && typeof value.available === "boolean" &&
     typeof value.bytes === "number" && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 &&
     typeof value.lines === "number" && Number.isInteger(value.lines) && value.lines >= 0 && value.lines <= 500 &&
-    typeof value.truncated === "boolean";
+    typeof value.truncated === "boolean" &&
+    (value.contentRedacted === undefined || typeof value.contentRedacted === "boolean");
 }
 
 function isSafeDiagnosticText(value: string, maximum: number): boolean {

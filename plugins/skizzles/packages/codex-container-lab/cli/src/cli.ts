@@ -7660,14 +7660,27 @@ function collect(state, chunk, cap) {
 }
 
 // packages/codex-container-lab/cli/src/public-output.ts
-function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
-  const quotedAndTagsRedacted = value.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
+function redactPublicTextWithMetadata(value, maxBytes = 2000, maxLines = 8, options = {}) {
+  let contentRedacted = false;
+  const controlsRedacted = value.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
+  contentRedacted ||= controlsRedacted !== value;
+  const quotedAndTagsRedacted = controlsRedacted.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
+  contentRedacted ||= quotedAndTagsRedacted !== controlsRedacted;
   const unquotedPathStart = quotedAndTagsRedacted.search(/(?:\b[A-Za-z]:[\\/]|\\\\|\/)/);
   const pathsRedacted = unquotedPathStart < 0 ? quotedAndTagsRedacted : `${quotedAndTagsRedacted.slice(0, unquotedPathStart)}[path]`;
-  const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]").split(`
+  contentRedacted ||= pathsRedacted !== quotedAndTagsRedacted;
+  const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]");
+  contentRedacted ||= redacted !== pathsRedacted;
+  const bounded = redacted.split(`
 `).slice(-maxLines).join(`
 `);
-  return truncateUtf8(redacted, maxBytes, options.byteCapture ?? "head");
+  return {
+    text: truncateUtf8(bounded, maxBytes, options.byteCapture ?? "head"),
+    contentRedacted
+  };
+}
+function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
+  return redactPublicTextWithMetadata(value, maxBytes, maxLines, options).text;
 }
 function truncateUtf8(value, maxBytes, policy) {
   if (policy === "tail") {
@@ -7686,6 +7699,135 @@ function truncateUtf8(value, maxBytes, policy) {
     bytes += size;
   }
   return output;
+}
+
+// packages/codex-container-lab/cli/src/log-framing.ts
+function redactComposeFailureWithMetadata(value, runtime, secretValues) {
+  const redacted = redactComposeTextWithMetadata(value, runtime, secretValues);
+  const publicText = redactPublicTextWithMetadata(redacted.text, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, { byteCapture: "tail" });
+  return {
+    text: publicText.text,
+    contentRedacted: redacted.contentRedacted || publicText.contentRedacted
+  };
+}
+function redactComposeTextWithMetadata(value, runtime, secretValues) {
+  let diagnostic = value;
+  let contentRedacted = false;
+  for (const secret of secretValues) {
+    if (!secret)
+      continue;
+    const replacement = diagnostic.split(secret).join("[secret-value-redacted]");
+    contentRedacted ||= replacement !== diagnostic;
+    diagnostic = replacement;
+  }
+  const metadata = [
+    runtime.metadata.owner,
+    runtime.metadata.ownerKey,
+    runtime.metadata.id,
+    runtime.metadata.composeProject,
+    runtime.metadata.sourceRoot,
+    runtime.metadata.manifestPath,
+    runtime.metadata.runtimeRoot,
+    runtime.metadata.workspace,
+    ...runtime.composeArgs
+  ];
+  for (const metadataValue of metadata) {
+    if (!metadataValue)
+      continue;
+    const replacement = diagnostic.split(metadataValue).join("[redacted]");
+    contentRedacted ||= replacement !== diagnostic;
+    diagnostic = replacement;
+  }
+  const idsRedacted = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
+  contentRedacted ||= idsRedacted !== diagnostic;
+  return { text: idsRedacted, contentRedacted };
+}
+function redactComposeLogCapture(value, runtime, secretValues) {
+  if (secretValues.some((secret) => /[\r\n]/.test(secret))) {
+    return { records: [], contentRedacted: true, valid: false };
+  }
+  const parsed = parseComposeLogRecords(value);
+  if (!parsed.valid) {
+    return { records: [], contentRedacted: true, valid: false };
+  }
+  const records = [];
+  let contentRedacted = false;
+  for (const record of parsed.records) {
+    const composeRedacted = redactComposeTextWithMetadata(record.text, runtime, secretValues);
+    const publicText = redactPublicTextWithMetadata(composeRedacted.text, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
+    records.push({ timestamp: record.timestamp, text: publicText.text, sequence: record.sequence });
+    contentRedacted ||= composeRedacted.contentRedacted || publicText.contentRedacted;
+  }
+  return { records, contentRedacted, valid: true };
+}
+function parseComposeLogRecords(value) {
+  if (!value)
+    return { records: [], valid: true };
+  const frame = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z)(?:[ \t]+(.*))?$/;
+  const timestampLike = /^\d{4}-\d{2}-\d{2}T/;
+  const records = [];
+  let current;
+  let sequence = 0;
+  let cursor = 0;
+  while (cursor < value.length) {
+    const newline = value.indexOf(`
+`, cursor);
+    const end = newline < 0 ? value.length : newline;
+    const line = value.slice(cursor, end).replace(/\r$/, "");
+    const match = frame.exec(line);
+    if (match) {
+      if (Number.isNaN(Date.parse(match[1])))
+        return { records: [], valid: false };
+      if (current !== undefined)
+        records.push(current);
+      current = { timestamp: match[1], text: match[2] ?? "", sequence: sequence++ };
+    } else if (timestampLike.test(line)) {
+      return { records: [], valid: false };
+    } else if (current === undefined) {
+      return { records: [], valid: false };
+    } else {
+      current.text += `
+${line}`;
+    }
+    cursor = newline < 0 ? value.length : newline + 1;
+  }
+  if (current !== undefined)
+    records.push(current);
+  return { records, valid: true };
+}
+function mergeComposeLogRecords(captures) {
+  const records = captures.flatMap((capture) => capture.records).sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence);
+  return {
+    text: records.map((record) => record.text).join(`
+`),
+    contentRedacted: captures.some((capture) => capture.contentRedacted)
+  };
+}
+function redactComposeLogStreams(streams, resultCode, runtime, secretValues) {
+  const captures = streams.map((stream) => {
+    if (stream.truncated)
+      return { records: [], contentRedacted: true, valid: false };
+    if (!stream.value)
+      return { records: [], contentRedacted: false, valid: true };
+    return redactComposeLogCapture(stream.value, runtime, secretValues);
+  });
+  const merged = mergeComposeLogRecords(captures);
+  const markers = captures.map((capture, index) => {
+    if (capture.valid)
+      return;
+    const stream = streams[index];
+    return `[${stream.name}-${stream.truncated ? "truncated" : "unavailable"}]`;
+  }).filter((marker) => marker !== undefined);
+  if (resultCode !== 0)
+    markers.unshift("[compose-command-failed]");
+  return {
+    redacted: {
+      text: [...markers, merged.text].filter((part) => part.length > 0).join(`
+`),
+      contentRedacted: merged.contentRedacted || markers.length > 0
+    },
+    truncated: resultCode !== 0 || streams.some((stream, index) => stream.truncated || !captures[index].valid && stream.value.length > 0)
+  };
 }
 
 // packages/codex-container-lab/cli/src/docker.ts
@@ -7899,18 +8041,19 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
   const secretValues = declaredSecretValues(runtime, environment);
   const lifecycleBytes = candidates.length > 0 ? 2048 - 1 : 8 * 1024;
   const lifecycleLines = candidates.length > 0 ? 125 : 500;
-  const lifecycle = buildDiagnosticSegment("compose-up", raw, runtime, secretValues, lifecycleLines, lifecycleBytes, provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true);
+  const lifecycle = buildDiagnosticSegment("compose-up", lifecycleLines, lifecycleBytes, provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true, redactComposeFailureWithMetadata(raw, runtime, secretValues), secretValues);
   const serviceBytes = divideDiagnosticBudget(6 * 1024 - Math.max(0, candidates.length - 1), candidates.length);
   const serviceLines = divideDiagnosticBudget(375, candidates.length);
   const segments = [lifecycle];
   for (const [index, service] of candidates.entries()) {
-    const captured = await captureFailedServiceLogs(runtime, service, Math.max(1, (serviceLines[index] ?? 1) - 1), Math.max(1, serviceBytes[index] ?? 1), runner, environment);
-    segments.push(buildDiagnosticSegment(`service:${service}`, captured.raw, runtime, secretValues, serviceLines[index] ?? 1, serviceBytes[index] ?? 1, captured.truncated));
+    const captured = await captureFailedServiceLogs(runtime, service, Math.max(1, (serviceLines[index] ?? 1) - 1), Math.max(1, serviceBytes[index] ?? 1), runner, environment, secretValues);
+    segments.push(buildDiagnosticSegment(`service:${service}`, serviceLines[index] ?? 1, serviceBytes[index] ?? 1, captured.truncated, captured.redacted, secretValues));
   }
   const aggregate = joinDiagnosticSegments(segments);
   let transcript = aggregate.text;
   let transcriptTruncated = segments.some((segment) => segment.truncated);
-  const privacyFailure = segments.some((segment) => segment.privacyFailure) || aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
+  const contentRedacted = segments.some((segment) => segment.contentRedacted);
+  const privacyFailure = secretValues.some((secret) => /[\r\n]/.test(secret)) || segments.some((segment) => segment.privacyFailure) || aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split(`
 `).length > 500;
   if (privacyFailure || aggregateBounds) {
@@ -7922,7 +8065,8 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
     available: false,
     bytes: 0,
     lines: 0,
-    truncated: transcriptTruncated
+    truncated: transcriptTruncated,
+    contentRedacted
   };
   try {
     await writeFailureTranscript(runtime.metadata.runtimeRoot, transcript);
@@ -7958,13 +8102,13 @@ function divideDiagnosticBudget(total, count) {
   const remainder = total - base * count;
   return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1 : 0));
 }
-async function captureFailedServiceLogs(runtime, service, tailLines, segmentBytes, runner, environment) {
+async function captureFailedServiceLogs(runtime, service, tailLines, segmentBytes, runner, environment, secretValues) {
   const headerBytes = Buffer.byteLength(`--- service:${service} ---`);
   const bodyBytes = Math.max(0, segmentBytes - headerBytes - 1);
   const streamBytes = Math.floor(Math.max(0, bodyBytes - 1) / 2);
   let result;
   try {
-    result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--no-log-prefix", "--tail", String(tailLines), service], {
+    result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--timestamps", "--no-log-prefix", "--tail", String(tailLines), service], {
       allowFailure: true,
       timeoutMs: 20000,
       maxOutputBytes: streamBytes,
@@ -7973,23 +8117,30 @@ async function captureFailedServiceLogs(runtime, service, tailLines, segmentByte
       env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment)
     });
   } catch {
-    return { raw: "", truncated: true };
+    return {
+      redacted: { text: "[logs-unavailable]", contentRedacted: true },
+      truncated: true
+    };
   }
+  const capture = redactComposeLogStreams([
+    { name: "stdout", value: result.stdout.toString(), truncated: result.stdoutTruncated === true },
+    { name: "stderr", value: result.stderr.toString(), truncated: result.stderrTruncated === true }
+  ], result.code, runtime, secretValues);
   return {
-    raw: [result.stdout.toString(), result.stderr.toString()].filter((part) => part.length > 0).join(`
-`),
-    truncated: result.code !== 0 || result.stdoutTruncated === true || result.stderrTruncated === true
+    redacted: capture.redacted,
+    truncated: capture.truncated
   };
 }
-function buildDiagnosticSegment(label, raw, runtime, secretValues, maxLines, maxBytes, upstreamTruncated) {
+function buildDiagnosticSegment(label, maxLines, maxBytes, upstreamTruncated, redacted, secretValues) {
   const header = `--- ${label} ---`;
-  const body = boundedLogTail(redactComposeFailure(raw, runtime, secretValues), Math.max(0, maxLines - 1), Math.max(0, maxBytes - Buffer.byteLength(header) - 1));
+  const body = boundedLogTail(redacted.text, Math.max(0, maxLines - 1), Math.max(0, maxBytes - Buffer.byteLength(header) - 1));
   const privacyFailure = bodyContainsSecret(body.text, header, secretValues);
   const text = body.text ? `${header}
 ${body.text}` : header;
   return {
     text: privacyFailure ? "" : text,
     truncated: upstreamTruncated || body.truncated,
+    contentRedacted: redacted.contentRedacted,
     privacyFailure,
     bodyStart: body.text ? header.length + 1 : undefined,
     bodyEnd: body.text ? text.length : undefined
@@ -8058,32 +8209,6 @@ async function writeFailureTranscript(runtimeRoot, text) {
     await rm(temporary, { force: true });
   }
 }
-function redactComposeFailure(value, runtime, secretValues) {
-  return redactPublicText(redactComposeText(value, runtime, secretValues), 8 * 1024, 500, { byteCapture: "tail" });
-}
-function redactComposeText(value, runtime, secretValues) {
-  let diagnostic = value;
-  for (const secret of secretValues) {
-    diagnostic = diagnostic.split(secret).join("[secret-value-redacted]");
-  }
-  const metadata = [
-    runtime.metadata.owner,
-    runtime.metadata.ownerKey,
-    runtime.metadata.id,
-    runtime.metadata.composeProject,
-    runtime.metadata.sourceRoot,
-    runtime.metadata.manifestPath,
-    runtime.metadata.runtimeRoot,
-    runtime.metadata.workspace,
-    ...runtime.composeArgs
-  ];
-  for (const value2 of metadata) {
-    if (value2)
-      diagnostic = diagnostic.split(value2).join("[redacted]");
-  }
-  diagnostic = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  return redactPublicText(diagnostic, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
-}
 function declaredSecretValues(runtime, environment) {
   return [...new Set(runtime.config.secretEnvironment.map((name) => environment[name]).filter((secret) => typeof secret === "string" && secret.length > 0))].sort((left, right) => right.length - left.length);
 }
@@ -8093,29 +8218,23 @@ async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunn
   const model = await normalizedModel(runtime.composeArgs, runner, scrubSecretEnvironment(runtime.config.secretEnvironment, environment));
   if (!Object.hasOwn(model.services ?? {}, service))
     throw new Error(`unknown Compose service: ${service}`);
-  const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
+  const result = await composeCommand(runtime, ["logs", "--no-color", "--timestamps", "--no-log-prefix", "--tail", String(tailLines), service], {
     allowFailure: true,
     timeoutMs: 20000,
     environment
   }, runner);
-  const streams = [
-    result.stdoutTruncated === true ? "[stdout-truncated]" : result.stdout.toString(),
-    result.stderrTruncated === true ? "[stderr-truncated]" : result.stderr.toString()
-  ].filter((part) => part.length > 0);
-  const raw = streams.reduce((joined, part) => {
-    if (!joined)
-      return part;
-    const separator = joined.endsWith(`
-`) || part.startsWith(`
-`) ? "" : `
-`;
-    return `${joined}${separator}${part}`;
-  }, "");
-  const redacted = redactComposeText(raw, runtime, declaredSecretValues(runtime, environment));
-  const bounded = boundedLogTail(redacted, tailLines, 8 * 1024);
+  const secretValues = declaredSecretValues(runtime, environment);
+  const capture = redactComposeLogStreams([
+    { name: "stdout", value: result.stdout.toString(), truncated: result.stdoutTruncated === true },
+    { name: "stderr", value: result.stderr.toString(), truncated: result.stderrTruncated === true }
+  ], result.code, runtime, secretValues);
+  const privacyFailure = secretValues.some((secret) => secret.length > 0 && capture.redacted.text.includes(secret));
+  const publicText = privacyFailure ? "" : capture.redacted.text;
+  const bounded = boundedLogTail(publicText, tailLines, 8 * 1024);
   return {
     ...bounded,
-    truncated: bounded.truncated || result.stdoutTruncated === true || result.stderrTruncated === true
+    truncated: bounded.truncated || capture.truncated,
+    contentRedacted: capture.redacted.contentRedacted || privacyFailure
   };
 }
 async function destroyLabStack(runtime, runner = defaultDockerRunner) {
@@ -8957,7 +9076,7 @@ function isProvisioningService(value) {
   return isRecord5(value) && typeof value.service === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value.service) && typeof value.state === "string" && isSafeDiagnosticText(value.state, 64) && (value.health === undefined || typeof value.health === "string" && isSafeDiagnosticText(value.health, 64)) && (value.exitCode === undefined || typeof value.exitCode === "number" && Number.isInteger(value.exitCode) && value.exitCode >= -1 && value.exitCode <= 255);
 }
 function isProvisioningEvidence(value) {
-  return isRecord5(value) && value.kind === "compose-up" && typeof value.available === "boolean" && typeof value.bytes === "number" && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 && typeof value.lines === "number" && Number.isInteger(value.lines) && value.lines >= 0 && value.lines <= 500 && typeof value.truncated === "boolean";
+  return isRecord5(value) && value.kind === "compose-up" && typeof value.available === "boolean" && typeof value.bytes === "number" && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 && typeof value.lines === "number" && Number.isInteger(value.lines) && value.lines >= 0 && value.lines <= 500 && typeof value.truncated === "boolean" && (value.contentRedacted === undefined || typeof value.contentRedacted === "boolean");
 }
 function isSafeDiagnosticText(value, maximum) {
   return value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value);
@@ -9653,7 +9772,13 @@ class ContainerLabService {
         services: failure.services,
         serviceCount: failure.serviceCount,
         evidence: failure.evidence,
-        transcript: { text, truncated: failure.evidence.truncated, bytes: Buffer.byteLength(text), lines }
+        transcript: {
+          text,
+          truncated: failure.evidence.truncated,
+          contentRedacted: failure.evidence.contentRedacted === true,
+          bytes: Buffer.byteLength(text),
+          lines
+        }
       }
     };
   }

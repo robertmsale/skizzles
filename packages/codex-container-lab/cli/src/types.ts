@@ -41,6 +41,7 @@ export type ProvisioningFailureDiagnostic = {
     bytes: number;
     lines: number;
     truncated: boolean;
+    contentRedacted?: boolean;
   };
 };
 

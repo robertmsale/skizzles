@@ -150,9 +150,20 @@ class ServiceLogsDocker extends RecordingDocker {
       const service = args.at(-1)!;
       const log = this.logs[service] ?? "";
       if (log instanceof Error) throw log;
-      if (typeof log === "function") return log(options);
-      if (typeof log === "string") return { code: 0, stdout: Buffer.from(log), stderr: Buffer.alloc(0) };
-      return log;
+      if (typeof log === "function") {
+        const result = log(options);
+        return {
+          ...result,
+          stdout: result.stdoutTruncated === true ? result.stdout : Buffer.from(frameComposeLog(service, result.stdout.toString())),
+          stderr: result.stderrTruncated === true ? result.stderr : Buffer.from(frameComposeLog(service, result.stderr.toString())),
+        };
+      }
+      if (typeof log === "string") return { code: 0, stdout: Buffer.from(frameComposeLog(service, log)), stderr: Buffer.alloc(0) };
+      return {
+        ...log,
+        stdout: log.stdoutTruncated === true ? log.stdout : Buffer.from(frameComposeLog(service, log.stdout.toString())),
+        stderr: log.stderrTruncated === true ? log.stderr : Buffer.from(frameComposeLog(service, log.stderr.toString())),
+      };
     }
     return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   }
@@ -164,10 +175,15 @@ class ReadyServiceLogsDocker extends RecordingDocker {
     if (args.includes("logs")) {
       this.calls.push(args);
       this.runCalls.push({ args, options });
-      return { code: 0, stdout: Buffer.from(this.log), stderr: Buffer.alloc(0) };
+      return { code: 0, stdout: Buffer.from(frameComposeLog("dev", this.log)), stderr: Buffer.alloc(0) };
     }
     return await super.run(args, options);
   }
+}
+
+function frameComposeLog(service: string, value: string): string {
+  const timestamp = "2026-08-08T00:00:00.000000000Z";
+  return value.split("\n").map((line) => `${timestamp} ${line}`).join("\n");
 }
 
 describe("attached service lifecycle", () => {
@@ -432,7 +448,7 @@ ports:
     expect(logsCalls.map((call) => call.args.at(-1))).toEqual(["dev"]);
     const logsArgs = logsCalls[0]!.args;
     const logsIndex = logsArgs.indexOf("logs");
-    expect(logsArgs.slice(logsIndex)).toEqual(["logs", "--no-color", "--no-log-prefix", "--tail", "374", "dev"]);
+    expect(logsArgs.slice(logsIndex)).toEqual(["logs", "--no-color", "--timestamps", "--no-log-prefix", "--tail", "374", "dev"]);
     expect(lab.provisioningFailure?.services).toEqual([
       { service: "dev", state: "exited", exitCode: 17 },
       { service: "api", state: "running", health: "healthy", exitCode: 0 },
@@ -530,9 +546,9 @@ ports:
   test("checks body and framing provenance for boundary, one-character, and newline secrets", async () => {
     const scenarios = [
       { name: "one-character-frame", secret: "d", body: "SAFE_BODY_MARKER", empty: false },
-      { name: "newline-frame", secret: "\n", body: "SAFE_BODY_MARKER", empty: false },
+      { name: "newline-frame", secret: "\n", body: "SAFE_BODY_MARKER", empty: true },
       { name: "one-character-body", secret: "d", body: "BODY_d_MARKER", empty: true },
-      { name: "newline-body", secret: "\n", body: "BODY\nMARKER", empty: false },
+      { name: "newline-body", secret: "\n", body: "BODY\nMARKER", empty: true },
       { name: "mixed-boundary", secret: "-\nS", body: "SAFE_BODY_MARKER", empty: true },
     ];
     for (const scenario of scenarios) {

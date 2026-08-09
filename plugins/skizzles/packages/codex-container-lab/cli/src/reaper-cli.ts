@@ -7107,14 +7107,27 @@ function collect(state, chunk, cap) {
 }
 
 // packages/codex-container-lab/cli/src/public-output.ts
-function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
-  const quotedAndTagsRedacted = value.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
+function redactPublicTextWithMetadata(value, maxBytes = 2000, maxLines = 8, options = {}) {
+  let contentRedacted = false;
+  const controlsRedacted = value.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
+  contentRedacted ||= controlsRedacted !== value;
+  const quotedAndTagsRedacted = controlsRedacted.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
+  contentRedacted ||= quotedAndTagsRedacted !== controlsRedacted;
   const unquotedPathStart = quotedAndTagsRedacted.search(/(?:\b[A-Za-z]:[\\/]|\\\\|\/)/);
   const pathsRedacted = unquotedPathStart < 0 ? quotedAndTagsRedacted : `${quotedAndTagsRedacted.slice(0, unquotedPathStart)}[path]`;
-  const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]").split(`
+  contentRedacted ||= pathsRedacted !== quotedAndTagsRedacted;
+  const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]");
+  contentRedacted ||= redacted !== pathsRedacted;
+  const bounded = redacted.split(`
 `).slice(-maxLines).join(`
 `);
-  return truncateUtf8(redacted, maxBytes, options.byteCapture ?? "head");
+  return {
+    text: truncateUtf8(bounded, maxBytes, options.byteCapture ?? "head"),
+    contentRedacted
+  };
+}
+function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
+  return redactPublicTextWithMetadata(value, maxBytes, maxLines, options).text;
 }
 function truncateUtf8(value, maxBytes, policy) {
   if (policy === "tail") {
@@ -7801,7 +7814,7 @@ function isProvisioningService(value) {
   return isRecord3(value) && typeof value.service === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value.service) && typeof value.state === "string" && isSafeDiagnosticText(value.state, 64) && (value.health === undefined || typeof value.health === "string" && isSafeDiagnosticText(value.health, 64)) && (value.exitCode === undefined || typeof value.exitCode === "number" && Number.isInteger(value.exitCode) && value.exitCode >= -1 && value.exitCode <= 255);
 }
 function isProvisioningEvidence(value) {
-  return isRecord3(value) && value.kind === "compose-up" && typeof value.available === "boolean" && typeof value.bytes === "number" && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 && typeof value.lines === "number" && Number.isInteger(value.lines) && value.lines >= 0 && value.lines <= 500 && typeof value.truncated === "boolean";
+  return isRecord3(value) && value.kind === "compose-up" && typeof value.available === "boolean" && typeof value.bytes === "number" && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 && typeof value.lines === "number" && Number.isInteger(value.lines) && value.lines >= 0 && value.lines <= 500 && typeof value.truncated === "boolean" && (value.contentRedacted === undefined || typeof value.contentRedacted === "boolean");
 }
 function isSafeDiagnosticText(value, maximum) {
   return value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value);

@@ -380,7 +380,7 @@ describe("exact Docker cleanup", () => {
 
   test("service logs enforce both line and hard UTF-8 byte caps", async () => {
     const docker = new MockDocker();
-    docker.responses.push(result('{"services":{"dev":{}}}'), result(Array.from({ length: 900 }, (_, index) => `${index}: ${"\\\"".repeat(40)}`).join("\n")));
+    docker.responses.push(result('{"services":{"dev":{}}}'), result(frameComposeLog(Array.from({ length: 900 }, (_, index) => `${index}: ${"\\\"".repeat(40)}`).join("\n"))));
     const transcript = await stackLogs(runtime(), "dev", 500, docker);
     expect(transcript.truncated).toBe(true);
     expect(Buffer.byteLength(transcript.text)).toBeLessThanOrEqual(8 * 1024);
@@ -397,14 +397,13 @@ describe("exact Docker cleanup", () => {
       result('{"services":{"dev":{}}}'),
       {
         code: 0,
-        stdout: Buffer.from([
+        stdout: Buffer.from(frameComposeLog([
           `build secret=${secret}\u0000\u0001`,
           "compiler: failed at C:\\Users\\Robert\\Library\\Application Support\\Codex\\src\\main.ts",
           "request: GET https://example.invalid/api/v1/workspace/secret",
           "unc=\\\\server\\share name\\artifact",
-        ].join("\n")),
-        stderr: Buffer.from("stderr path /Users/robertsale/private logs\n"),
-        stdoutTruncated: true,
+        ].join("\n"))),
+        stderr: Buffer.from(frameComposeLog("stderr path /Users/robertsale/private logs\n")),
       },
     );
 
@@ -431,6 +430,84 @@ describe("exact Docker cleanup", () => {
     expect(encoded).not.toContain("\u0001");
   });
 
+  test("redacts each Compose frame without erasing later causal records", async () => {
+    const docker = new MockDocker();
+    const secret = "declared-log-secret-0d9f";
+    const configured = runtime();
+    configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+    const frames = [
+      "INFO request method=GET path=/healthz/ready",
+      "ERROR database readiness failed: tenant schema unavailable",
+      "POSIX /private/tmp/cause",
+      "Windows C:\\Users\\Robert\\AppData\\Local\\cause",
+      "UNC \\\\server\\share\\cause",
+      "URL https://example.invalid/api/v1/secret",
+      `secret=${secret}\u0001`,
+    ].join("\n");
+    docker.responses.push(result('{"services":{"dev":{}}}'), {
+      code: 0,
+      stdout: Buffer.from(frameComposeLog(frames)),
+      stderr: Buffer.alloc(0),
+    });
+
+    const transcript = await stackLogs(configured, "dev", 20, docker, { REGISTRY_TOKEN: secret });
+
+    expect(transcript.text).toContain("ERROR database readiness failed: tenant schema unavailable");
+    expect(transcript.text).toContain("[path]");
+    expect(transcript.text).not.toContain("/private/tmp/cause");
+    expect(transcript.text).not.toContain("C:\\Users\\Robert\\AppData\\Local\\cause");
+    expect(transcript.text).not.toContain("\\\\server\\share\\cause");
+    expect(transcript.text).not.toContain("https://example.invalid/api/v1/secret");
+    expect(transcript.text).not.toContain(secret);
+    expect(transcript.text).not.toContain("\u0001");
+    expect(transcript.truncated).toBe(false);
+    expect(transcript.contentRedacted).toBe(true);
+  });
+
+  test("keeps newline-bearing path continuations fail-closed within one frame", async () => {
+    const docker = new MockDocker();
+    docker.responses.push(result('{"services":{"dev":{}}}'), result(
+      "2026-08-08T00:00:00.000000000Z open /Users/me/Application\nSupport\nnext diagnostic\n" +
+        "2026-08-08T00:00:01.000000000Z DB_READINESS_FALSE",
+    ));
+
+    const transcript = await stackLogs(runtime(), "dev", 20, docker);
+
+    expect(transcript.text).toBe("open [path]\nDB_READINESS_FALSE");
+    expect(transcript.text).not.toContain("Support");
+    expect(transcript.text).not.toContain("next diagnostic");
+    expect(transcript.contentRedacted).toBe(true);
+  });
+
+  test("rejects malformed or unframed Compose output without publishing a prefix", async () => {
+    const docker = new MockDocker();
+    docker.responses.push(result('{"services":{"dev":{}}}'), result(
+      "INFO request path=/healthz/ready\nERROR database readiness failed\n",
+    ));
+
+    const transcript = await stackLogs(runtime(), "dev", 20, docker);
+
+    expect(transcript.text).toBe("[stdout-unavailable]");
+    expect(transcript.truncated).toBe(true);
+    expect(transcript.contentRedacted).toBe(true);
+  });
+
+  test("fails closed when a declared secret collides with a public marker", async () => {
+    const docker = new MockDocker();
+    const configured = runtime();
+    configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+    docker.responses.push(result('{"services":{"dev":{}}}'), result(
+      "not-a-framed-record\n",
+    ));
+
+    const transcript = await stackLogs(configured, "dev", 20, docker, {
+      REGISTRY_TOKEN: "stdout-unavailable",
+    });
+
+    expect(transcript.text).toBe("");
+    expect(transcript.contentRedacted).toBe(true);
+  });
+
   test("never publishes retained prefixes from truncated stdout or stderr captures", async () => {
     const secret = "declared-secret-value-split-at-capture-8f31";
     const prefix = secret.slice(0, -1);
@@ -453,27 +530,20 @@ describe("exact Docker cleanup", () => {
     }
   });
 
-  test("joins stream boundaries without synthetic blank lines and preserves tail metadata", async () => {
-    const cases = [
-      { stdout: "stdout-line\n", stderr: "stderr-line\n", expected: "stdout-line\nstderr-line", truncated: false },
-      { stdout: "stdout-line", stderr: "stderr-line", expected: "stdout-line\nstderr-line", truncated: false },
-      { stdout: "stdout-line", stderr: "\nstderr-line", expected: "stdout-line\nstderr-line", truncated: false },
-      { stdout: "old-line\ncurrent-line\n", stderr: "new-line\n", expected: "current-line\nnew-line", truncated: true },
-    ];
-    for (const entry of cases) {
-      const docker = new MockDocker();
-      docker.responses.push(result('{"services":{"dev":{}}}'), {
-        code: 0,
-        stdout: Buffer.from(entry.stdout),
-        stderr: Buffer.from(entry.stderr),
-      });
+  test("merges independently framed stdout and stderr records by timestamp", async () => {
+    const docker = new MockDocker();
+    docker.responses.push(result('{"services":{"dev":{}}}'), {
+      code: 0,
+      stdout: Buffer.from(frameComposeLog("2026-08-08T00:00:02.000000000Z stdout-later")),
+      stderr: Buffer.from(frameComposeLog("2026-08-08T00:00:01.000000000Z stderr-earlier")),
+    });
 
-      const transcript = await stackLogs(runtime(), "dev", 2, docker);
+    const transcript = await stackLogs(runtime(), "dev", 2, docker);
 
-      expect(transcript.text).toBe(entry.expected);
-      expect(transcript.text.split("\n").length).toBe(2);
-      expect(transcript.truncated).toBe(entry.truncated);
-    }
+    expect(transcript.text).toBe("stderr-earlier\nstdout-later");
+    expect(transcript.text.split("\n").length).toBe(2);
+    expect(transcript.truncated).toBe(false);
+    expect(transcript.contentRedacted).toBe(false);
   });
 
   test("stack status reduces Compose output to purpose-built service summaries", async () => {
@@ -514,6 +584,11 @@ function runtime(): LabRuntime {
     overrideFile: "/tmp/runtime/override.compose.yaml",
     findings: [],
   };
+}
+
+function frameComposeLog(value: string): string {
+  const timestamp = "2026-08-08T00:00:00.000000000Z";
+  return value.split("\n").map((line) => /^\d{4}-\d{2}-\d{2}T/.test(line) ? line : `${timestamp} ${line}`).join("\n");
 }
 
 async function streamText(stream: NodeJS.ReadableStream): Promise<string> {

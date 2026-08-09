@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { redactPublicText } from "./public-output";
+import { redactPublicText, redactPublicTextWithMetadata } from "./public-output";
 
 describe("redactPublicText", () => {
   test("redacts quoted POSIX paths with spaces", () => {
@@ -49,5 +49,16 @@ describe("redactPublicText", () => {
   test("redacts unquoted spaced Windows and UNC paths through their tails", () => {
     expect(redactPublicText("open C:\\Users\\Foo Bar\\secret and later prose")).toBe("open [path]");
     expect(redactPublicText("open \\\\server\\share name\\secret and later prose")).toBe("open [path]");
+  });
+
+  test("reports intentional content removal separately from capture bounds", () => {
+    expect(redactPublicTextWithMetadata("request path=/healthz/ready")).toEqual({
+      text: "request path=[path]",
+      contentRedacted: true,
+    });
+    expect(redactPublicTextWithMetadata("safe diagnostic")).toEqual({
+      text: "safe diagnostic",
+      contentRedacted: false,
+    });
   });
 });

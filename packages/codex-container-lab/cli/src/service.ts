@@ -167,7 +167,13 @@ export class ContainerLabService {
         services: failure.services,
         serviceCount: failure.serviceCount,
         evidence: failure.evidence,
-        transcript: { text, truncated: failure.evidence.truncated, bytes: Buffer.byteLength(text), lines },
+        transcript: {
+          text,
+          truncated: failure.evidence.truncated,
+          contentRedacted: failure.evidence.contentRedacted === true,
+          bytes: Buffer.byteLength(text),
+          lines,
+        },
       },
     };
   }
