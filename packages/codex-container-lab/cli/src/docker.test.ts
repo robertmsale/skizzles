@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupLabLabels, DockerProvisioningFailure, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
 import { parseLabConfig } from "./config";
+import { redactComposeFailureWithMetadata } from "./log-framing";
 import type { RunOptions, CommandResult } from "./process";
 import type { LabMetadata } from "./types";
 
@@ -513,6 +514,36 @@ describe("exact Docker cleanup", () => {
     expect(transcript.text).toContain("later-safe-error");
     expect(transcript.truncated).toBe(false);
     expect(transcript.contentRedacted).toBe(true);
+  });
+
+  test("fails closed when a declared secret crosses embedded continuation boundaries", async () => {
+    const secret = "DECLARED_SECRET_12345";
+    for (const value of [
+      "2026-08-08T00:00:00.000000000Z DECLARED_SECRET_\n12345",
+      "2026-08-08T00:00:00.000000000Z DECLARED_\n\nSECRET_\n12345",
+      "2026-08-08T00:00:00.000000000Z DECLARED_\nSECRET_\n2026-08-08T00:00:01.000000000Z 12345",
+    ]) {
+      const docker = new MockDocker();
+      const configured = runtime();
+      configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+      docker.responses.push(result('{"services":{"dev":{}}}'), result(value));
+
+      const transcript = await stackLogs(configured, "dev", 20, docker, { REGISTRY_TOKEN: secret });
+
+      expect(transcript).toEqual({ text: "", truncated: true, contentRedacted: true });
+    }
+  });
+
+  test("scans compose-up stdout and stderr fragments before joining them", () => {
+    const secret = "DECLARED_SECRET_12345";
+    const redacted = redactComposeFailureWithMetadata(
+      "DECLARED_\nSECRET_12345",
+      runtime(),
+      [secret],
+      ["DECLARED_\nSECRET_", "12345"],
+    );
+
+    expect(redacted).toEqual({ text: "", contentRedacted: true, incomplete: true });
   });
 
   test("fails closed for one-character and newline-bearing declared secrets", async () => {

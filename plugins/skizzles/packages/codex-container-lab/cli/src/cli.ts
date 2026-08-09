@@ -7815,7 +7815,8 @@ function isLeapYear(year) {
   return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 function secretCrossesFragmentBoundary(fragments, secretValues) {
-  const nonEmpty = fragments.filter((fragment) => fragment.length > 0);
+  const pieces = fragments.flatMap((fragment) => fragment.split(/\r\n|\r|\n/));
+  const nonEmpty = pieces.filter((piece) => piece.length > 0);
   if (nonEmpty.length < 2)
     return false;
   const joined = nonEmpty.join("");

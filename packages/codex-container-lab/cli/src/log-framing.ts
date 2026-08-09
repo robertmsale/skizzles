@@ -170,17 +170,19 @@ function isLeapYear(year: number): boolean {
 
 /**
  * Return true when a declared secret occurs only after joining distinct
- * trusted output fragments.  Compose timestamps and diagnostic separators
- * are framing, not payload; omitting them here prevents a secret split at a
- * record, stream, or synthetic marker boundary from publishing reconstructable
- * halves.  A wholly-contained occurrence remains eligible for ordinary
- * replacement by the per-record redactor.
+ * trusted output fragments.  Compose timestamps, embedded newlines, and
+ * diagnostic separators are framing, not payload; omitting them here prevents
+ * a secret split at a record, stream, continuation, or synthetic marker
+ * boundary from publishing reconstructable halves.  A wholly-contained
+ * occurrence on one line remains eligible for ordinary replacement by the
+ * per-record redactor.
  */
 export function secretCrossesFragmentBoundary(
   fragments: readonly string[],
   secretValues: readonly string[],
 ): boolean {
-  const nonEmpty = fragments.filter((fragment) => fragment.length > 0);
+  const pieces = fragments.flatMap((fragment) => fragment.split(/\r\n|\r|\n/));
+  const nonEmpty = pieces.filter((piece) => piece.length > 0);
   if (nonEmpty.length < 2) return false;
   const joined = nonEmpty.join("");
   return secretValues.some((secret) => {
