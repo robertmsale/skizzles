@@ -273,14 +273,12 @@ async function oversizedPreviewFixture() {
   lab.repoHash = createHash("sha256").update(await realpath(commonGit)).digest("hex").slice(0, 12);
   const baseFile = join(lab.runtimeRoot, "base.compose.yaml");
   const overrideFile = join(lab.runtimeRoot, "override.compose.yaml");
-  const frozenFile = join(lab.runtimeRoot, "frozen.compose.json");
   await writeFile(baseFile, "services: {}\n");
   await writeFile(overrideFile, "services: {}\n");
-  await writeFile(frozenFile, '{"services":{}}\n', { mode: 0o600 });
   lab.runtime = {
     config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
-    composeArgs: ["compose", "--project-directory", lab.sourceRoot, "--project-name", lab.composeProject, "-f", frozenFile],
-    baseFile, overrideFile, frozenFile, findings: [],
+    composeArgs: ["compose", "--project-directory", lab.sourceRoot, "--project-name", lab.composeProject, "-f", baseFile, "-f", overrideFile],
+    baseFile, overrideFile, findings: [],
   };
   await ensureOwner(stateRoot, owner);
   await writeLab({ stateRoot, runtimeRoot }, lab);
@@ -303,17 +301,15 @@ async function attachedFixture() {
   lab.modeKind = "image";
   const baseFile = join(lab.runtimeRoot, "base.compose.yaml");
   const overrideFile = join(lab.runtimeRoot, "override.compose.yaml");
-  const frozenFile = join(lab.runtimeRoot, "frozen.compose.json");
-  await mkdir(lab.workspace, { recursive: true, mode: 0o700 });
+  await mkdir(lab.workspace, { recursive: true });
   await mkdir(lab.sourceRoot, { recursive: true });
   await writeFile(lab.manifestPath, "image: { name: node:24, service: dev }\n");
   await writeFile(baseFile, "services: {}\n");
   await writeFile(overrideFile, "services: {}\n");
-  await writeFile(frozenFile, '{"services":{}}\n', { mode: 0o600 });
   lab.runtime = {
     config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
-    composeArgs: ["compose", "--project-directory", lab.sourceRoot, "--project-name", lab.composeProject, "-f", frozenFile],
-    baseFile, overrideFile, frozenFile, findings: [],
+    composeArgs: ["compose", "--project-directory", lab.sourceRoot, "--project-name", lab.composeProject, "-f", baseFile, "-f", overrideFile],
+    baseFile, overrideFile, findings: [],
   };
   await ensureOwner(stateRoot, owner);
   await writeLab({ stateRoot, runtimeRoot }, lab);

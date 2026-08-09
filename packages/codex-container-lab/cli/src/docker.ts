@@ -1,24 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { LabConfig } from "./config";
 import {
   composeCommandArgs,
-  frozenComposeCommandArgs,
   generateBaseCompose,
   generateOverrideCompose,
   internalImageTag,
   inspectComposeModel,
-  validateReservedBuildxConfigModel,
   validateSecretEnvironmentModel,
   type ComposeInspectionFinding,
   type ComposeModel,
 } from "./compose";
 import { runCommand, type RunOptions, type CommandResult } from "./process";
 import { redactPublicText } from "./public-output";
-import { FROZEN_COMPOSE_FILE_NAME, type Endpoint, type LabMetadata, type PersistedLabRuntime, type ProvisioningFailureDiagnostic } from "./types";
+import type { Endpoint, LabMetadata, PersistedLabRuntime, ProvisioningFailureDiagnostic } from "./types";
 
 export type LabRuntime = PersistedLabRuntime & { metadata: LabMetadata };
 
@@ -31,8 +29,6 @@ export type DockerSpawnOptions = { env?: NodeJS.ProcessEnv };
 
 /** The only durable path used for a failed Compose-up transcript. */
 export const PROVISIONING_FAILURE_DIAGNOSTIC_FILE = "provisioning-failure.compose-up.log";
-const BUILDX_CONFIG_DIRECTORY = "buildx";
-const BUILDX_CONFIG_ENVIRONMENT = "BUILDX_CONFIG";
 
 export class DockerProvisioningFailure extends Error {
   constructor(
@@ -56,38 +52,6 @@ export const defaultDockerRunner: DockerRunner = {
   }),
 };
 
-function buildxConfigPath(runtimeRoot: string): string {
-  return join(runtimeRoot, BUILDX_CONFIG_DIRECTORY);
-}
-
-async function ensurePrivateDirectory(path: string, errorMessage: string): Promise<void> {
-  try {
-    await mkdir(path, { recursive: true, mode: 0o700 });
-    const details = await lstat(path);
-    if (!details.isDirectory() || details.isSymbolicLink() || (details.mode & 0o777) !== 0o700) {
-      throw new Error(errorMessage);
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message === errorMessage) throw error;
-    throw new Error(errorMessage);
-  }
-}
-
-async function ensureBuildxConfig(runtimeRoot: string): Promise<string> {
-  await ensurePrivateDirectory(runtimeRoot, "invalid lab runtime root");
-  const path = buildxConfigPath(runtimeRoot);
-  await ensurePrivateDirectory(path, "invalid lab Buildx config root");
-  return path;
-}
-
-function injectBuildxConfig(environment: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEnv {
-  return { ...environment, [BUILDX_CONFIG_ENVIRONMENT]: path };
-}
-
-async function labEnvironment(runtimeRoot: string, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
-  return injectBuildxConfig(environment, await ensureBuildxConfig(runtimeRoot));
-}
-
 export async function dockerAvailable(
   runner: DockerRunner = defaultDockerRunner,
   secretEnvironment: readonly string[] = [],
@@ -106,16 +70,16 @@ export async function prepareLabRuntime(
   runner: DockerRunner = defaultDockerRunner,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<LabRuntime> {
-  await ensureBuildxConfig(metadata.runtimeRoot);
+  await mkdir(metadata.runtimeRoot, { recursive: true, mode: 0o700 });
   const base = generateBaseCompose(config);
   const baseFile = base === undefined ? undefined : join(metadata.runtimeRoot, "base.compose.yaml");
   if (baseFile && base !== undefined) await writeFile(baseFile, base, { mode: 0o600 });
   const overrideFile = join(metadata.runtimeRoot, "override.compose.yaml");
   await writeFile(overrideFile, "{}\n", { mode: 0o600 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
-  const modelEnvironment = composeModelEnvironment(config.secretEnvironment, environment);
-  const sourceModel = await normalizedModel(composeArgs, runner, modelEnvironment);
-  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, modelEnvironment);
+  const composeEnvironment = secretComposeEnvironment(config.secretEnvironment, environment);
+  const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
+  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
   const findings = inspectComposeModel(sourceModel);
   const override = generateOverrideCompose(config, sourceModel, {
     workspaceHostPath: metadata.workspace,
@@ -124,41 +88,9 @@ export async function prepareLabRuntime(
     labId: metadata.id,
   });
   await writeFile(overrideFile, override, { mode: 0o600 });
-  const finalModel = await normalizedModel(composeArgs, runner, modelEnvironment);
-  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, modelEnvironment);
-  const frozenFile = join(metadata.runtimeRoot, FROZEN_COMPOSE_FILE_NAME);
-  await writeFrozenComposeModel(frozenFile, finalModel);
-  return {
-    metadata,
-    config,
-    composeArgs: frozenComposeCommandArgs(config, { projectName: metadata.composeProject, frozenFile }),
-    baseFile,
-    overrideFile,
-    frozenFile,
-    findings,
-  };
-}
-
-async function writeFrozenComposeModel(path: string, model: ComposeModel): Promise<void> {
-  let serialized: string;
-  try { serialized = JSON.stringify(model); }
-  catch { throw new Error("unable to persist frozen Compose model"); }
-  if (serialized === undefined || Buffer.byteLength(serialized) > 16 * 1024 * 1024) {
-    throw new Error("unable to persist frozen Compose model");
-  }
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(path, "wx", 0o600);
-    await handle.chmod(0o600);
-    const details = await handle.stat();
-    if (!details.isFile() || (details.mode & 0o777) !== 0o600) throw new Error("invalid frozen Compose model file");
-    await handle.writeFile(`${serialized}\n`);
-  } catch (error) {
-    if (error instanceof Error && error.message === "invalid frozen Compose model file") throw error;
-    throw new Error("unable to persist frozen Compose model");
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
+  const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
+  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
+  return { metadata, config, composeArgs, baseFile, overrideFile, findings };
 }
 
 async function normalizedModel(
@@ -175,13 +107,7 @@ async function normalizedModel(
     throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
   }
   if (result.code === 0) {
-    try {
-      const model = JSON.parse(result.stdout.toString()) as ComposeModel;
-      validateReservedBuildxConfigModel(model);
-      return model;
-    } catch (error) {
-      if (error instanceof Error && error.message === "Compose model consumes or forwards reserved BUILDX_CONFIG") throw error;
-    }
+    try { return JSON.parse(result.stdout.toString()) as ComposeModel; } catch {}
   }
   let yaml: CommandResult;
   try {
@@ -192,9 +118,7 @@ async function normalizedModel(
     throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
   }
   if (yaml.code !== 0) throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
-  const model = parseYaml(yaml.stdout.toString()) as ComposeModel;
-  validateReservedBuildxConfigModel(model);
-  return model;
+  return parseYaml(yaml.stdout.toString()) as ComposeModel;
 }
 
 export async function composeCommand(
@@ -203,16 +127,12 @@ export async function composeCommand(
   options: { timeoutMs?: number; allowFailure?: boolean; signal?: AbortSignal; environment?: NodeJS.ProcessEnv } = {},
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<CommandResult> {
-  const environment = await labEnvironment(
-    runtime.metadata.runtimeRoot,
-    scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env),
-  );
   return await runner.run([...runtime.composeArgs, ...args], {
     timeoutMs: options.timeoutMs,
     allowFailure: options.allowFailure,
     maxOutputBytes: 4 * 1024 * 1024,
     signal: options.signal,
-    env: environment,
+    env: scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env),
   });
 }
 
@@ -224,10 +144,6 @@ export async function provisionLabStack(
 ): Promise<Endpoint[]> {
   let provisioned: CommandResult;
   try {
-    const composeEnvironment = await labEnvironment(
-      runtime.metadata.runtimeRoot,
-      secretComposeEnvironment(runtime.config.secretEnvironment, environment),
-    );
     provisioned = await runner.run([...runtime.composeArgs, "up", "-d", "--wait", "--wait-timeout", "180"], {
       timeoutMs: 30 * 60_000,
       signal,
@@ -235,7 +151,7 @@ export async function provisionLabStack(
       maxOutputBytes: 4 * 1024 * 1024,
       stdoutCapture: "tail",
       stderrCapture: "tail",
-      env: composeEnvironment,
+      env: secretComposeEnvironment(runtime.config.secretEnvironment, environment),
     });
   } catch {
     const message = signal?.aborted
@@ -256,13 +172,13 @@ export async function provisionLabStack(
   ].join(" && ");
   const verified = await composeCommand(runtime, [
     "exec", "-T", runtime.config.mode.commandService, ...runtime.config.runtime.shell, compatibility,
-  ], { allowFailure: true, timeoutMs: 20_000, signal, environment }, runner);
+  ], { allowFailure: true, timeoutMs: 20_000, signal }, runner);
   if (verified.code !== 0) {
     throw new Error("command service compatibility check failed: configured shell, writable workspace, and setsid are required");
   }
   const endpoints: Endpoint[] = [];
   for (const port of runtime.config.ports) {
-    const result = await composeCommand(runtime, ["port", port.service, String(port.target)], { timeoutMs: 20_000, environment }, runner);
+    const result = await composeCommand(runtime, ["port", port.service, String(port.target)], { timeoutMs: 20_000 }, runner);
     const loopback = result.stdout.toString().trim().split("\n")
       .map((line) => line.trim().match(/^127\.0\.0\.1:(\d+)$/)?.[1])
       .filter((value): value is string => value !== undefined);
@@ -478,17 +394,13 @@ async function captureFailedServiceLogs(
   const streamBytes = Math.floor(Math.max(0, bodyBytes - 1) / 2);
   let result: CommandResult;
   try {
-    const composeEnvironment = await labEnvironment(
-      runtime.metadata.runtimeRoot,
-      scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
-    );
     result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--no-log-prefix", "--tail", String(tailLines), service], {
       allowFailure: true,
       timeoutMs: 20_000,
       maxOutputBytes: streamBytes,
       stdoutCapture: "tail",
       stderrCapture: "tail",
-      env: composeEnvironment,
+      env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
     });
   } catch {
     return { raw: "", truncated: true };
@@ -653,11 +565,10 @@ export async function stackLogs(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<{ text: string; truncated: boolean }> {
   if (tailLines < 1 || tailLines > 500) throw new Error("tail-lines must be 1..500");
-  const modelEnvironment = composeModelEnvironment(runtime.config.secretEnvironment, environment);
   const model = await normalizedModel(
     runtime.composeArgs,
     runner,
-    modelEnvironment,
+    scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
   );
   if (!Object.hasOwn(model.services ?? {}, service)) throw new Error(`unknown Compose service: ${service}`);
   const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
@@ -682,12 +593,8 @@ export async function stackLogs(
   };
 }
 
-export async function destroyLabStack(
-  runtime: LabRuntime,
-  runner: DockerRunner = defaultDockerRunner,
-  environment: NodeJS.ProcessEnv = process.env,
-): Promise<void> {
-  await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner, environment);
+export async function destroyLabStack(runtime: LabRuntime, runner: DockerRunner = defaultDockerRunner): Promise<void> {
+  await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner);
 }
 
 export async function cleanupLabLabels(
@@ -846,11 +753,7 @@ export function launchDockerRun(
     runtime.config.mode.commandService, ...runtime.config.runtime.shell, wrapper,
     "codex-container-lab-run", ...invocation.argv,
   ];
-  const dockerEnvironment = injectBuildxConfig(
-    scrubSecretEnvironment(runtime.config.secretEnvironment, environment),
-    buildxConfigPath(runtime.metadata.runtimeRoot),
-  );
-  return runner.spawn(args, { env: dockerEnvironment });
+  return runner.spawn(args, { env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment) });
 }
 
 export async function terminateDockerRun(
@@ -858,7 +761,6 @@ export async function terminateDockerRun(
   identity: Pick<DockerRunIdentity, "runId">,
   signal: "INT" | "TERM" | "KILL",
   runner: DockerRunner = defaultDockerRunner,
-  environment: NodeJS.ProcessEnv = process.env,
 ): Promise<DockerRunTerminationResult> {
   const pidFile = `/tmp/.codex-container-lab-run-${identity.runId}.pid`;
   const expectedIdentity = `CODEX_CONTAINER_LAB_RUN_ID=${identity.runId}`;
@@ -881,7 +783,7 @@ export async function terminateDockerRun(
   try {
     result = await composeCommand(runtime, [
       "exec", "-T", runtime.config.mode.commandService, ...runtime.config.runtime.shell, killScript,
-    ], { allowFailure: true, timeoutMs: 10_000, environment }, runner);
+    ], { allowFailure: true, timeoutMs: 10_000 }, runner);
   } catch {
     return { confirmed: false, status: "docker-failure" };
   }
@@ -956,12 +858,6 @@ function secretComposeEnvironment(names: readonly string[], environment: NodeJS.
   for (const name of names) {
     if (Object.hasOwn(environment, name) && typeof environment[name] === "string") result[name] = environment[name];
   }
-  return result;
-}
-
-function composeModelEnvironment(names: readonly string[], environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const result = secretComposeEnvironment(names, environment);
-  delete result[BUILDX_CONFIG_ENVIRONMENT];
   return result;
 }
 

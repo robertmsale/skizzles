@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { readFileSync, writeFileSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
@@ -189,9 +189,6 @@ describe("attached service lifecycle", () => {
 
     const created = await service.createLab("ready-service-logs", source);
     expect(created.state).toBe("ready");
-    const persisted = await readLab(roots, "thread-ready-service-logs", created.labId);
-    const buildxConfig = join(persisted.runtimeRoot, "buildx");
-    expect((await lstat(buildxConfig)).mode & 0o777).toBe(0o700);
     const response = await service.logs(created.labId, "dev", 4) as {
       labId: string;
       service: string;
@@ -205,7 +202,6 @@ describe("attached service lifecycle", () => {
     expect(response.transcript.bytes).toBe(Buffer.byteLength(response.transcript.text));
     expect(response.transcript.lines).toBe(response.transcript.text.split("\n").length);
     await service.destroyLab(created.labId);
-    await expect(lstat(buildxConfig)).rejects.toThrow();
   });
 
   test("create provisions synchronously and returns only lab identity and terminal state", async () => {
@@ -252,7 +248,6 @@ describe("attached service lifecycle", () => {
     expect(readFileSync(labManifestPath(roots.stateRoot, lab.owner, lab.id), "utf8")).not.toContain(sentinel);
     expect(readFileSync(lab.runtime!.baseFile!, "utf8")).not.toContain(sentinel);
     expect(readFileSync(lab.runtime!.overrideFile, "utf8")).not.toContain(sentinel);
-    expect(readFileSync(lab.runtime!.frozenFile, "utf8")).not.toContain(sentinel);
     expect(JSON.stringify(await service.labStatus(lab.id))).not.toContain(sentinel);
 
     const carryingSecret = docker.runCalls.filter((call) => call.options?.env?.REGISTRY_TOKEN === sentinel);
@@ -1164,7 +1159,6 @@ async function durableFixture(owner: string, state: LabMetadata["state"], create
     await writeFile(join(sourceRoot, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\n");
     await writeFile(join(runtimeRoot, "base.compose.yaml"), "services: {}\n");
     await writeFile(join(runtimeRoot, "override.compose.yaml"), "services: {}\n");
-    await writeFile(join(runtimeRoot, "frozen.compose.json"), '{"services":{}}\n', { mode: 0o600 });
   }
   await ensureOwner(roots.stateRoot, owner);
   const lab: LabMetadata = {
@@ -1181,10 +1175,9 @@ async function durableFixture(owner: string, state: LabMetadata["state"], create
 function readyRuntime(sourceRoot: string, runtimeRoot: string): NonNullable<LabMetadata["runtime"]> {
   const baseFile = join(runtimeRoot, "base.compose.yaml");
   const overrideFile = join(runtimeRoot, "override.compose.yaml");
-  const frozenFile = join(runtimeRoot, "frozen.compose.json");
   return {
     config: { repoRoot: sourceRoot, manifestPath: join(sourceRoot, ".codex-container-lab.yaml"), mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
-    composeArgs: ["compose", "--project-directory", sourceRoot, "--project-name", "ccl-durable", "-f", frozenFile],
-    baseFile, overrideFile, frozenFile, findings: [],
+    composeArgs: ["compose", "--project-directory", sourceRoot, "--project-name", "ccl-durable", "-f", baseFile, "-f", overrideFile],
+    baseFile, overrideFile, findings: [],
   };
 }

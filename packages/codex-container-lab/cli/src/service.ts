@@ -128,7 +128,7 @@ export class ContainerLabService {
     await this.reconcileOwner();
     const lab = await readLab(this.roots, this.owner, id);
     return compactLabStatus(lab, lab.state === "ready" && lab.runtime
-        ? await stackStatus(runtimeFromLab(lab), this.docker, { environment: this.environment })
+        ? await stackStatus(runtimeFromLab(lab), this.docker)
         : undefined);
   }
 
@@ -201,7 +201,7 @@ export class ContainerLabService {
         requestedExit ??= exitCode;
         if (!stopping) stopping = (async () => {
           for (let attempt = 0; attempt < 20; attempt++) {
-            const result = await terminateDockerRun(runtime, identity, first, this.docker, this.environment);
+            const result = await terminateDockerRun(runtime, identity, first, this.docker);
             if (result.confirmed) break;
             if (!result.confirmed && result.status !== "unavailable") break;
             await Bun.sleep(100);
@@ -209,9 +209,9 @@ export class ContainerLabService {
           await Promise.race([onceClosed(child), Bun.sleep(2_000)]);
           if (child.exitCode === null) {
             try {
-              const final = await terminateDockerRun(runtime, identity, "KILL", this.docker, this.environment);
+              const final = await terminateDockerRun(runtime, identity, "KILL", this.docker);
               if (!final.confirmed) {
-                await destroyLabStack(runtime, this.docker, this.environment);
+                await destroyLabStack(runtime, this.docker);
                 await withFileLock(this.labLock(id), async () => {
                   const current = await readLab(this.roots, this.owner, id);
                   if (current.state === "ready") {
@@ -301,7 +301,7 @@ export class ContainerLabService {
       return true;
     }, { attempts: 600, delayMs: 50 });
     if (!exists || !claimed) return { labId: id, destroyed: false };
-    if (claimed.runtime) await destroyLabStack(runtimeFromLab(claimed), this.docker, this.environment);
+    if (claimed.runtime) await destroyLabStack(runtimeFromLab(claimed), this.docker);
     else await cleanupLabLabels(claimed, claimed.modeKind === "dockerfile", this.docker, this.environment);
     return await withFileLock(this.activityLock(id), async () => await withFileLock(this.labLock(id), async () => {
       let lab: LabMetadata;
@@ -312,7 +312,7 @@ export class ContainerLabService {
       }
       const runtimePresent = await this.assertDestroyFilesystem(lab);
       await recoverLabSync(this.roots, lab);
-      if (lab.runtime) await destroyLabStack(runtimeFromLab(lab), this.docker, this.environment);
+      if (lab.runtime) await destroyLabStack(runtimeFromLab(lab), this.docker);
       else await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker, this.environment);
       if (runtimePresent) {
         if (!await exactDirectoryChain(this.roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory")) {
@@ -397,7 +397,6 @@ export class ContainerLabService {
           composeArgs: runtime.composeArgs,
           baseFile: runtime.baseFile,
           overrideFile: runtime.overrideFile,
-          frozenFile: runtime.frozenFile,
           findings: runtime.findings,
         };
         lab = await this.updateProvisioning(id, (current) => {
@@ -417,7 +416,7 @@ export class ContainerLabService {
             current.provisioningFailure = provisioningFailure;
           }).catch(() => undefined);
         }
-        if (runtime) await destroyLabStack(runtime, this.docker, provisioningEnvironment).catch(() => undefined);
+        if (runtime) await destroyLabStack(runtime, this.docker).catch(() => undefined);
         else if (dockerMaterializationStarted) await cleanupLabLabels(
           lab,
           lab.modeKind === "dockerfile",

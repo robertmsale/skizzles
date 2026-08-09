@@ -7304,11 +7304,6 @@ function formatIssue(issue) {
 
 // packages/codex-container-lab/cli/src/compose.ts
 var labelPrefix = "io.openai.codex-container-lab";
-var RESERVED_BUILDX_CONFIG = "BUILDX_CONFIG";
-var MAX_RESERVED_ENVIRONMENT_MODEL_NODES = 1e5;
-var MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH = 128;
-var MAX_RESERVED_ENVIRONMENT_MODEL_STRING_BYTES = 1 * 1024 * 1024;
-var RESERVED_BUILDX_CONFIG_ERROR = "Compose model consumes or forwards reserved BUILDX_CONFIG";
 function generateBaseCompose(config) {
   if (config.mode.kind === "compose")
     return;
@@ -7394,17 +7389,6 @@ function composeCommandArgs(config, options) {
     ...sourceFiles.flatMap((file) => ["-f", file]),
     "-f",
     options.overrideFile
-  ];
-}
-function frozenComposeCommandArgs(config, options) {
-  return [
-    "compose",
-    "--project-directory",
-    config.repoRoot,
-    "--project-name",
-    options.projectName,
-    "-f",
-    options.frozenFile
   ];
 }
 function internalImageTag(ownerKey, labId) {
@@ -7494,86 +7478,6 @@ function validateSecretEnvironmentModel(model, declaredNames, environment) {
   const referenced = referencedSecretNameInModel(model, declaredNames);
   if (referenced)
     throw new Error(`Compose model references declared secret environment source: ${referenced}`);
-}
-function validateReservedBuildxConfigModel(model) {
-  const pending = [{ value: model, depth: 0 }];
-  let discovered = 1;
-  let nodes = 0;
-  while (pending.length > 0) {
-    const current = pending.pop();
-    nodes++;
-    if (nodes > MAX_RESERVED_ENVIRONMENT_MODEL_NODES || current.depth > MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH) {
-      throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
-    }
-    const value = current.value;
-    if (typeof value === "string") {
-      if (Buffer.byteLength(value) > MAX_RESERVED_ENVIRONMENT_MODEL_STRING_BYTES || hasComposeVariableReference(value)) {
-        throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
-      }
-      continue;
-    }
-    if (Array.isArray(value)) {
-      for (let index = 0;index < value.length; index++) {
-        if (current.depth >= MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH)
-          throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
-        if (discovered >= MAX_RESERVED_ENVIRONMENT_MODEL_NODES)
-          throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
-        const entry = value[index];
-        if (current.parentKey === "environment" || current.parentKey === "args") {
-          if (typeof entry === "string" && composeEnvironmentEntryName(entry) === RESERVED_BUILDX_CONFIG) {
-            throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
-          }
-        }
-        discovered++;
-        pending.push({ value: entry, parentKey: current.parentKey, depth: current.depth + 1 });
-      }
-      continue;
-    }
-    if (!isRecord2(value))
-      continue;
-    for (const key in value) {
-      if (!Object.hasOwn(value, key))
-        continue;
-      if (current.depth >= MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH)
-        throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
-      if (discovered >= MAX_RESERVED_ENVIRONMENT_MODEL_NODES)
-        throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
-      const nested = value[key];
-      if (key === RESERVED_BUILDX_CONFIG || hasComposeVariableReference(key)) {
-        throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
-      }
-      discovered++;
-      pending.push({ value: nested, parentKey: key, depth: current.depth + 1 });
-    }
-  }
-}
-function composeEnvironmentEntryName(entry) {
-  const separator = entry.indexOf("=");
-  return separator < 0 ? entry : entry.slice(0, separator);
-}
-function hasComposeVariableReference(value) {
-  for (let index = 0;index < value.length; index++) {
-    if (value[index] !== "$")
-      continue;
-    if (value[index + 1] === "$") {
-      index++;
-      continue;
-    }
-    if (value.startsWith(RESERVED_BUILDX_CONFIG, index + 1) && isVariableBoundary(value[index + 1 + RESERVED_BUILDX_CONFIG.length])) {
-      return true;
-    }
-    if (value[index + 1] !== "{")
-      continue;
-    const start = index + 2;
-    if (value.slice(start, start + RESERVED_BUILDX_CONFIG.length) !== RESERVED_BUILDX_CONFIG)
-      continue;
-    if (isVariableBoundary(value[start + RESERVED_BUILDX_CONFIG.length]))
-      return true;
-  }
-  return false;
-}
-function isVariableBoundary(character) {
-  return character === undefined || !/[A-Za-z0-9_]/.test(character);
 }
 function referencedSecretName(value, names) {
   if (typeof value !== "string")
@@ -7669,7 +7573,7 @@ function isRecord2(value) {
 // packages/codex-container-lab/cli/src/docker.ts
 import { randomUUID } from "crypto";
 import { spawn as spawn2 } from "child_process";
-import { lstat, mkdir, open, rename, rm, writeFile } from "fs/promises";
+import { lstat, mkdir, rename, rm, writeFile } from "fs/promises";
 import { join, posix as posix2 } from "path";
 
 // packages/codex-container-lab/cli/src/process.ts
@@ -7784,13 +7688,8 @@ function truncateUtf8(value, maxBytes, policy) {
   return output;
 }
 
-// packages/codex-container-lab/cli/src/types.ts
-var FROZEN_COMPOSE_FILE_NAME = "frozen.compose.json";
-
 // packages/codex-container-lab/cli/src/docker.ts
 var PROVISIONING_FAILURE_DIAGNOSTIC_FILE = "provisioning-failure.compose-up.log";
-var BUILDX_CONFIG_DIRECTORY = "buildx";
-var BUILDX_CONFIG_ENVIRONMENT = "BUILDX_CONFIG";
 
 class DockerProvisioningFailure extends Error {
   diagnostic;
@@ -7807,34 +7706,6 @@ var defaultDockerRunner = {
     stdio: ["pipe", "pipe", "pipe"]
   })
 };
-function buildxConfigPath(runtimeRoot) {
-  return join(runtimeRoot, BUILDX_CONFIG_DIRECTORY);
-}
-async function ensurePrivateDirectory(path, errorMessage) {
-  try {
-    await mkdir(path, { recursive: true, mode: 448 });
-    const details = await lstat(path);
-    if (!details.isDirectory() || details.isSymbolicLink() || (details.mode & 511) !== 448) {
-      throw new Error(errorMessage);
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message === errorMessage)
-      throw error;
-    throw new Error(errorMessage);
-  }
-}
-async function ensureBuildxConfig(runtimeRoot) {
-  await ensurePrivateDirectory(runtimeRoot, "invalid lab runtime root");
-  const path = buildxConfigPath(runtimeRoot);
-  await ensurePrivateDirectory(path, "invalid lab Buildx config root");
-  return path;
-}
-function injectBuildxConfig(environment, path) {
-  return { ...environment, [BUILDX_CONFIG_ENVIRONMENT]: path };
-}
-async function labEnvironment(runtimeRoot, environment) {
-  return injectBuildxConfig(environment, await ensureBuildxConfig(runtimeRoot));
-}
 async function dockerAvailable(runner = defaultDockerRunner, secretEnvironment = [], environment = process.env) {
   return (await runner.run(["info", "--format", "{{.ServerVersion}}"], {
     allowFailure: true,
@@ -7843,7 +7714,7 @@ async function dockerAvailable(runner = defaultDockerRunner, secretEnvironment =
   })).code === 0;
 }
 async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner, environment = process.env) {
-  await ensureBuildxConfig(metadata.runtimeRoot);
+  await mkdir(metadata.runtimeRoot, { recursive: true, mode: 448 });
   const base = generateBaseCompose(config);
   const baseFile = base === undefined ? undefined : join(metadata.runtimeRoot, "base.compose.yaml");
   if (baseFile && base !== undefined)
@@ -7852,9 +7723,9 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
   await writeFile(overrideFile, `{}
 `, { mode: 384 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
-  const modelEnvironment = composeModelEnvironment(config.secretEnvironment, environment);
-  const sourceModel = await normalizedModel(composeArgs, runner, modelEnvironment);
-  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, modelEnvironment);
+  const composeEnvironment = secretComposeEnvironment(config.secretEnvironment, environment);
+  const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
+  validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
   const findings = inspectComposeModel(sourceModel);
   const override = generateOverrideCompose(config, sourceModel, {
     workspaceHostPath: metadata.workspace,
@@ -7863,48 +7734,9 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
     labId: metadata.id
   });
   await writeFile(overrideFile, override, { mode: 384 });
-  const finalModel = await normalizedModel(composeArgs, runner, modelEnvironment);
-  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, modelEnvironment);
-  const frozenFile = join(metadata.runtimeRoot, FROZEN_COMPOSE_FILE_NAME);
-  await writeFrozenComposeModel(frozenFile, finalModel);
-  return {
-    metadata,
-    config,
-    composeArgs: frozenComposeCommandArgs(config, { projectName: metadata.composeProject, frozenFile }),
-    baseFile,
-    overrideFile,
-    frozenFile,
-    findings
-  };
-}
-async function writeFrozenComposeModel(path, model) {
-  let serialized;
-  try {
-    serialized = JSON.stringify(model);
-  } catch {
-    throw new Error("unable to persist frozen Compose model");
-  }
-  if (serialized === undefined || Buffer.byteLength(serialized) > 16 * 1024 * 1024) {
-    throw new Error("unable to persist frozen Compose model");
-  }
-  let handle;
-  try {
-    handle = await open(path, "wx", 384);
-    await handle.chmod(384);
-    const details = await handle.stat();
-    if (!details.isFile() || (details.mode & 511) !== 384)
-      throw new Error("invalid frozen Compose model file");
-    await handle.writeFile(`${serialized}
-`);
-  } catch (error) {
-    if (error instanceof Error && error.message === "invalid frozen Compose model file")
-      throw error;
-    throw new Error("unable to persist frozen Compose model");
-  } finally {
-    await handle?.close().catch(() => {
-      return;
-    });
-  }
+  const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
+  validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
+  return { metadata, config, composeArgs, baseFile, overrideFile, findings };
 }
 async function normalizedModel(composeArgs, runner, environment = process.env) {
   let result;
@@ -7920,13 +7752,8 @@ async function normalizedModel(composeArgs, runner, environment = process.env) {
   }
   if (result.code === 0) {
     try {
-      const model2 = JSON.parse(result.stdout.toString());
-      validateReservedBuildxConfigModel(model2);
-      return model2;
-    } catch (error) {
-      if (error instanceof Error && error.message === "Compose model consumes or forwards reserved BUILDX_CONFIG")
-        throw error;
-    }
+      return JSON.parse(result.stdout.toString());
+    } catch {}
   }
   let yaml;
   try {
@@ -7941,24 +7768,20 @@ async function normalizedModel(composeArgs, runner, environment = process.env) {
   }
   if (yaml.code !== 0)
     throw new Error("Docker Compose configuration failed; secret-bearing diagnostics redacted");
-  const model = $parse(yaml.stdout.toString());
-  validateReservedBuildxConfigModel(model);
-  return model;
+  return $parse(yaml.stdout.toString());
 }
 async function composeCommand(runtime, args, options = {}, runner = defaultDockerRunner) {
-  const environment = await labEnvironment(runtime.metadata.runtimeRoot, scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env));
   return await runner.run([...runtime.composeArgs, ...args], {
     timeoutMs: options.timeoutMs,
     allowFailure: options.allowFailure,
     maxOutputBytes: 4 * 1024 * 1024,
     signal: options.signal,
-    env: environment
+    env: scrubSecretEnvironment(runtime.config.secretEnvironment, options.environment ?? process.env)
   });
 }
 async function provisionLabStack(runtime, signal, runner = defaultDockerRunner, environment = process.env) {
   let provisioned;
   try {
-    const composeEnvironment = await labEnvironment(runtime.metadata.runtimeRoot, secretComposeEnvironment(runtime.config.secretEnvironment, environment));
     provisioned = await runner.run([...runtime.composeArgs, "up", "-d", "--wait", "--wait-timeout", "180"], {
       timeoutMs: 30 * 60000,
       signal,
@@ -7966,7 +7789,7 @@ async function provisionLabStack(runtime, signal, runner = defaultDockerRunner, 
       maxOutputBytes: 4 * 1024 * 1024,
       stdoutCapture: "tail",
       stderrCapture: "tail",
-      env: composeEnvironment
+      env: secretComposeEnvironment(runtime.config.secretEnvironment, environment)
     });
   } catch {
     const message = signal?.aborted ? "Docker Compose up aborted; secret-bearing diagnostics redacted" : "Docker Compose up failed; secret-bearing diagnostics redacted";
@@ -7986,13 +7809,13 @@ async function provisionLabStack(runtime, signal, runner = defaultDockerRunner, 
     runtime.config.mode.commandService,
     ...runtime.config.runtime.shell,
     compatibility
-  ], { allowFailure: true, timeoutMs: 20000, signal, environment }, runner);
+  ], { allowFailure: true, timeoutMs: 20000, signal }, runner);
   if (verified.code !== 0) {
     throw new Error("command service compatibility check failed: configured shell, writable workspace, and setsid are required");
   }
   const endpoints = [];
   for (const port of runtime.config.ports) {
-    const result = await composeCommand(runtime, ["port", port.service, String(port.target)], { timeoutMs: 20000, environment }, runner);
+    const result = await composeCommand(runtime, ["port", port.service, String(port.target)], { timeoutMs: 20000 }, runner);
     const loopback = result.stdout.toString().trim().split(`
 `).map((line) => line.trim().match(/^127\.0\.0\.1:(\d+)$/)?.[1]).filter((value) => value !== undefined);
     if (loopback.length !== 1)
@@ -8141,14 +7964,13 @@ async function captureFailedServiceLogs(runtime, service, tailLines, segmentByte
   const streamBytes = Math.floor(Math.max(0, bodyBytes - 1) / 2);
   let result;
   try {
-    const composeEnvironment = await labEnvironment(runtime.metadata.runtimeRoot, scrubSecretEnvironment(runtime.config.secretEnvironment, environment));
     result = await runner.run([...runtime.composeArgs, "logs", "--no-color", "--no-log-prefix", "--tail", String(tailLines), service], {
       allowFailure: true,
       timeoutMs: 20000,
       maxOutputBytes: streamBytes,
       stdoutCapture: "tail",
       stderrCapture: "tail",
-      env: composeEnvironment
+      env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment)
     });
   } catch {
     return { raw: "", truncated: true };
@@ -8268,8 +8090,7 @@ function declaredSecretValues(runtime, environment) {
 async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunner, environment = process.env) {
   if (tailLines < 1 || tailLines > 500)
     throw new Error("tail-lines must be 1..500");
-  const modelEnvironment = composeModelEnvironment(runtime.config.secretEnvironment, environment);
-  const model = await normalizedModel(runtime.composeArgs, runner, modelEnvironment);
+  const model = await normalizedModel(runtime.composeArgs, runner, scrubSecretEnvironment(runtime.config.secretEnvironment, environment));
   if (!Object.hasOwn(model.services ?? {}, service))
     throw new Error(`unknown Compose service: ${service}`);
   const result = await composeCommand(runtime, ["logs", "--no-color", "--tail", String(tailLines), service], {
@@ -8297,8 +8118,8 @@ async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunn
     truncated: bounded.truncated || result.stdoutTruncated === true || result.stderrTruncated === true
   };
 }
-async function destroyLabStack(runtime, runner = defaultDockerRunner, environment = process.env) {
-  await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner, environment);
+async function destroyLabStack(runtime, runner = defaultDockerRunner) {
+  await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner);
 }
 async function cleanupLabLabels(metadata, removeInternalImage, runner = defaultDockerRunner, environment = process.env) {
   runner = scrubDockerRunnerEnvironment(runner, metadata.secretEnvironment, environment);
@@ -8464,10 +8285,9 @@ function launchDockerRun(runtime, invocation, runner = defaultDockerRunner, envi
     "codex-container-lab-run",
     ...invocation.argv
   ];
-  const dockerEnvironment = injectBuildxConfig(scrubSecretEnvironment(runtime.config.secretEnvironment, environment), buildxConfigPath(runtime.metadata.runtimeRoot));
-  return runner.spawn(args, { env: dockerEnvironment });
+  return runner.spawn(args, { env: scrubSecretEnvironment(runtime.config.secretEnvironment, environment) });
 }
-async function terminateDockerRun(runtime, identity2, signal, runner = defaultDockerRunner, environment = process.env) {
+async function terminateDockerRun(runtime, identity2, signal, runner = defaultDockerRunner) {
   const pidFile = `/tmp/.codex-container-lab-run-${identity2.runId}.pid`;
   const expectedIdentity = `CODEX_CONTAINER_LAB_RUN_ID=${identity2.runId}`;
   const marker = "codex-container-lab-termination:";
@@ -8493,7 +8313,7 @@ async function terminateDockerRun(runtime, identity2, signal, runner = defaultDo
       runtime.config.mode.commandService,
       ...runtime.config.runtime.shell,
       killScript
-    ], { allowFailure: true, timeoutMs: 1e4, environment }, runner);
+    ], { allowFailure: true, timeoutMs: 1e4 }, runner);
   } catch {
     return { confirmed: false, status: "docker-failure" };
   }
@@ -8575,11 +8395,6 @@ function secretComposeEnvironment(names, environment) {
     if (Object.hasOwn(environment, name) && typeof environment[name] === "string")
       result[name] = environment[name];
   }
-  return result;
-}
-function composeModelEnvironment(names, environment) {
-  const result = secretComposeEnvironment(names, environment);
-  delete result[BUILDX_CONFIG_ENVIRONMENT];
   return result;
 }
 function scrubSecretEnvironment(names, environment) {
@@ -8697,7 +8512,7 @@ async function removeIfPresent(file, options = {}) {
 }
 
 // packages/codex-container-lab/cli/src/locks.ts
-import { link, lstat as lstat3, mkdir as mkdir3, open as open2, readFile as readFile3, rm as rm3, writeFile as writeFile3 } from "fs/promises";
+import { link, lstat as lstat3, mkdir as mkdir3, open, readFile as readFile3, rm as rm3, writeFile as writeFile3 } from "fs/promises";
 import { dirname } from "path";
 async function withFileLock(path2, operation, options = {}) {
   const attempts = options.attempts ?? 100;
@@ -8746,7 +8561,7 @@ async function removeConfirmedStaleLock(path2, staleMs, processProbe) {
   let handle;
   try {
     try {
-      handle = await open2(path2, "r");
+      handle = await open(path2, "r");
     } catch (error) {
       if (error.code === "ENOENT")
         return;
@@ -8830,7 +8645,7 @@ async function removeConfirmedOrphanClaim(claimPath, staleMs, processProbe) {
   let handle;
   try {
     try {
-      handle = await open2(claimPath, "r");
+      handle = await open(claimPath, "r");
     } catch (error) {
       if (error.code === "ENOENT")
         return true;
@@ -9059,7 +8874,6 @@ async function assertReadyLabFilesystem(roots, lab) {
   await realFileInside(runtime, lab.runtime.overrideFile, "Compose override");
   if (lab.runtime.baseFile)
     await realFileInside(runtime, lab.runtime.baseFile, "internal Compose base");
-  await realPrivateFileInside(runtime, lab.runtime.frozenFile, "frozen Compose model");
   const mode = lab.runtime.config.mode;
   if (mode.kind === "compose") {
     for (const path2 of mode.files)
@@ -9190,10 +9004,13 @@ function validatePersistedRuntime(lab, runtime) {
   const runtimeRoot = lab.runtimeRoot;
   const expectedOverride = join2(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join2(runtimeRoot, "base.compose.yaml");
-  const expectedFrozen = join2(runtimeRoot, FROZEN_COMPOSE_FILE_NAME);
-  if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase || runtime.frozenFile !== expectedFrozen || !Array.isArray(runtime.findings) || !runtime.findings.every(isFinding) || JSON.stringify(runtime.findings) !== JSON.stringify(lab.findings))
+  if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase || !Array.isArray(runtime.findings) || !runtime.findings.every(isFinding) || JSON.stringify(runtime.findings) !== JSON.stringify(lab.findings))
     throw new Error("invalid runtime files or findings");
-  const expectedArgs = frozenComposeCommandArgs(config, { projectName: lab.composeProject, frozenFile: expectedFrozen });
+  const expectedArgs = composeCommandArgs(config, {
+    projectName: lab.composeProject,
+    overrideFile: expectedOverride,
+    baseFile: expectedBase
+  });
   if (!Array.isArray(runtime.composeArgs) || runtime.composeArgs.length !== expectedArgs.length || !runtime.composeArgs.every((arg, index) => arg === expectedArgs[index]))
     throw new Error("invalid Compose arguments");
 }
@@ -9239,13 +9056,6 @@ async function realFileInside(root, path2, label) {
   const info = await lstat4(path2);
   if (!info.isFile() || info.isSymbolicLink())
     throw new Error(`${label} is not a real file`);
-  assertCanonicalInside(root, await realpath3(path2), label, false);
-}
-async function realPrivateFileInside(root, path2, label) {
-  const info = await lstat4(path2);
-  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 511) !== 384) {
-    throw new Error(`${label} is not a private regular file`);
-  }
   assertCanonicalInside(root, await realpath3(path2), label, false);
 }
 async function realDirectoryInside(root, path2, label) {
@@ -9805,7 +9615,7 @@ class ContainerLabService {
   async labStatus(id) {
     await this.reconcileOwner();
     const lab = await readLab(this.roots, this.owner, id);
-    return compactLabStatus(lab, lab.state === "ready" && lab.runtime ? await stackStatus(runtimeFromLab(lab), this.docker, { environment: this.environment }) : undefined);
+    return compactLabStatus(lab, lab.state === "ready" && lab.runtime ? await stackStatus(runtimeFromLab(lab), this.docker) : undefined);
   }
   async diagnostic(id) {
     await this.reconcileOwner();
@@ -9872,7 +9682,7 @@ class ContainerLabService {
           if (!stopping)
             stopping = (async () => {
               for (let attempt = 0;attempt < 20; attempt++) {
-                const result = await terminateDockerRun(runtime, identity3, first, this.docker, this.environment);
+                const result = await terminateDockerRun(runtime, identity3, first, this.docker);
                 if (result.confirmed)
                   break;
                 if (!result.confirmed && result.status !== "unavailable")
@@ -9882,9 +9692,9 @@ class ContainerLabService {
               await Promise.race([onceClosed(child), Bun.sleep(2000)]);
               if (child.exitCode === null) {
                 try {
-                  const final = await terminateDockerRun(runtime, identity3, "KILL", this.docker, this.environment);
+                  const final = await terminateDockerRun(runtime, identity3, "KILL", this.docker);
                   if (!final.confirmed) {
-                    await destroyLabStack(runtime, this.docker, this.environment);
+                    await destroyLabStack(runtime, this.docker);
                     await withFileLock(this.labLock(id), async () => {
                       const current = await readLab(this.roots, this.owner, id);
                       if (current.state === "ready") {
@@ -9985,7 +9795,7 @@ class ContainerLabService {
     if (!exists || !claimed)
       return { labId: id, destroyed: false };
     if (claimed.runtime)
-      await destroyLabStack(runtimeFromLab(claimed), this.docker, this.environment);
+      await destroyLabStack(runtimeFromLab(claimed), this.docker);
     else
       await cleanupLabLabels(claimed, claimed.modeKind === "dockerfile", this.docker, this.environment);
     return await withFileLock(this.activityLock(id), async () => await withFileLock(this.labLock(id), async () => {
@@ -10000,7 +9810,7 @@ class ContainerLabService {
       const runtimePresent = await this.assertDestroyFilesystem(lab);
       await recoverLabSync(this.roots, lab);
       if (lab.runtime)
-        await destroyLabStack(runtimeFromLab(lab), this.docker, this.environment);
+        await destroyLabStack(runtimeFromLab(lab), this.docker);
       else
         await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker, this.environment);
       if (runtimePresent) {
@@ -10088,7 +9898,6 @@ class ContainerLabService {
         composeArgs: runtime.composeArgs,
         baseFile: runtime.baseFile,
         overrideFile: runtime.overrideFile,
-        frozenFile: runtime.frozenFile,
         findings: runtime.findings
       };
       lab = await this.updateProvisioning(id, (current) => {
@@ -10109,7 +9918,7 @@ class ContainerLabService {
         });
       }
       if (runtime)
-        await destroyLabStack(runtime, this.docker, provisioningEnvironment).catch(() => {
+        await destroyLabStack(runtime, this.docker).catch(() => {
           return;
         });
       else if (dockerMaterializationStarted)
