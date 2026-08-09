@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { LabConfig } from "./config";
 import {
   composeCommandArgs,
+  frozenComposeCommandArgs,
   generateBaseCompose,
   generateOverrideCompose,
   internalImageTag,
@@ -17,7 +18,7 @@ import {
 } from "./compose";
 import { runCommand, type RunOptions, type CommandResult } from "./process";
 import { redactPublicText } from "./public-output";
-import type { Endpoint, LabMetadata, PersistedLabRuntime, ProvisioningFailureDiagnostic } from "./types";
+import { FROZEN_COMPOSE_FILE_NAME, type Endpoint, type LabMetadata, type PersistedLabRuntime, type ProvisioningFailureDiagnostic } from "./types";
 
 export type LabRuntime = PersistedLabRuntime & { metadata: LabMetadata };
 
@@ -125,7 +126,39 @@ export async function prepareLabRuntime(
   await writeFile(overrideFile, override, { mode: 0o600 });
   const finalModel = await normalizedModel(composeArgs, runner, modelEnvironment);
   validateSecretEnvironmentModel(finalModel, config.secretEnvironment, modelEnvironment);
-  return { metadata, config, composeArgs, baseFile, overrideFile, findings };
+  const frozenFile = join(metadata.runtimeRoot, FROZEN_COMPOSE_FILE_NAME);
+  await writeFrozenComposeModel(frozenFile, finalModel);
+  return {
+    metadata,
+    config,
+    composeArgs: frozenComposeCommandArgs(config, { projectName: metadata.composeProject, frozenFile }),
+    baseFile,
+    overrideFile,
+    frozenFile,
+    findings,
+  };
+}
+
+async function writeFrozenComposeModel(path: string, model: ComposeModel): Promise<void> {
+  let serialized: string;
+  try { serialized = JSON.stringify(model); }
+  catch { throw new Error("unable to persist frozen Compose model"); }
+  if (serialized === undefined || Buffer.byteLength(serialized) > 16 * 1024 * 1024) {
+    throw new Error("unable to persist frozen Compose model");
+  }
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(path, "wx", 0o600);
+    await handle.chmod(0o600);
+    const details = await handle.stat();
+    if (!details.isFile() || (details.mode & 0o777) !== 0o600) throw new Error("invalid frozen Compose model file");
+    await handle.writeFile(`${serialized}\n`);
+  } catch (error) {
+    if (error instanceof Error && error.message === "invalid frozen Compose model file") throw error;
+    throw new Error("unable to persist frozen Compose model");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 async function normalizedModel(

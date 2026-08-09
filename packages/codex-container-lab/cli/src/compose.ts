@@ -112,6 +112,11 @@ export interface ComposeCommandOptions {
   baseFile?: string;
 }
 
+export interface FrozenComposeCommandOptions {
+  projectName: string;
+  frozenFile: string;
+}
+
 /** Arguments following the docker executable. File ordering is semantically significant. */
 export function composeCommandArgs(config: LabConfig, options: ComposeCommandOptions): string[] {
   const sourceFiles = config.mode.kind === "compose"
@@ -126,6 +131,16 @@ export function composeCommandArgs(config: LabConfig, options: ComposeCommandOpt
     "--project-name", options.projectName,
     ...sourceFiles.flatMap((file) => ["-f", file]),
     "-f", options.overrideFile,
+  ];
+}
+
+/** Build Compose arguments that read only the immutable validated model. */
+export function frozenComposeCommandArgs(config: LabConfig, options: FrozenComposeCommandOptions): string[] {
+  return [
+    "compose",
+    "--project-directory", config.repoRoot,
+    "--project-name", options.projectName,
+    "-f", options.frozenFile,
   ];
 }
 

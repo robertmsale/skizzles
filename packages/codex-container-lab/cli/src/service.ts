@@ -397,6 +397,7 @@ export class ContainerLabService {
           composeArgs: runtime.composeArgs,
           baseFile: runtime.baseFile,
           overrideFile: runtime.overrideFile,
+          frozenFile: runtime.frozenFile,
           findings: runtime.findings,
         };
         lab = await this.updateProvisioning(id, (current) => {

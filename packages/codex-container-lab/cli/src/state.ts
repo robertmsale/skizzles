@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, parse, posix, relative, resolve, sep } from "node:path";
 import { lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
-import { composeCommandArgs, internalImageTag } from "./compose";
+import { frozenComposeCommandArgs, internalImageTag } from "./compose";
 import { manifestName } from "./config";
 import { readJson, safeStateName, writeJsonAtomic } from "./files";
-import type { LabMetadata, OwnerManifest, PersistedLabRuntime } from "./types";
+import { FROZEN_COMPOSE_FILE_NAME, type LabMetadata, type OwnerManifest, type PersistedLabRuntime } from "./types";
 
 export type StateRoots = { stateRoot: string; runtimeRoot: string };
 export type ReapedOwnerManifest = {
@@ -210,6 +210,7 @@ export async function assertReadyLabFilesystem(roots: StateRoots, lab: LabMetada
   await realFileInside(source, lab.manifestPath, "lab manifest");
   await realFileInside(runtime, lab.runtime.overrideFile, "Compose override");
   if (lab.runtime.baseFile) await realFileInside(runtime, lab.runtime.baseFile, "internal Compose base");
+  await realPrivateFileInside(runtime, lab.runtime.frozenFile, "frozen Compose model");
   const mode = lab.runtime.config.mode;
   if (mode.kind === "compose") {
     for (const path of mode.files) await realFileInside(source, path, "project Compose file");
@@ -347,14 +348,11 @@ function validatePersistedRuntime(lab: Record<string, unknown>, runtime: unknown
   const runtimeRoot = lab.runtimeRoot as string;
   const expectedOverride = join(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join(runtimeRoot, "base.compose.yaml");
-  if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase ||
+  const expectedFrozen = join(runtimeRoot, FROZEN_COMPOSE_FILE_NAME);
+  if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase || runtime.frozenFile !== expectedFrozen ||
       !Array.isArray(runtime.findings) || !runtime.findings.every(isFinding) ||
       JSON.stringify(runtime.findings) !== JSON.stringify(lab.findings)) throw new Error("invalid runtime files or findings");
-  const expectedArgs = composeCommandArgs(config as never, {
-    projectName: lab.composeProject as string,
-    overrideFile: expectedOverride,
-    baseFile: expectedBase,
-  });
+  const expectedArgs = frozenComposeCommandArgs(config as never, { projectName: lab.composeProject as string, frozenFile: expectedFrozen });
   if (!Array.isArray(runtime.composeArgs) || runtime.composeArgs.length !== expectedArgs.length ||
       !runtime.composeArgs.every((arg, index) => arg === expectedArgs[index])) throw new Error("invalid Compose arguments");
 }
@@ -413,6 +411,14 @@ async function realDirectory(path: string, label: string): Promise<string> {
 async function realFileInside(root: string, path: string, label: string): Promise<void> {
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${label} is not a real file`);
+  assertCanonicalInside(root, await realpath(path), label, false);
+}
+
+async function realPrivateFileInside(root: string, path: string, label: string): Promise<void> {
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600) {
+    throw new Error(`${label} is not a private regular file`);
+  }
   assertCanonicalInside(root, await realpath(path), label, false);
 }
 

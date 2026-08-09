@@ -1,6 +1,8 @@
 import type { LabConfig } from "./config";
 import type { ComposeInspectionFinding } from "./compose";
 
+export const FROZEN_COMPOSE_FILE_NAME = "frozen.compose.json";
+
 export type LabState = "provisioning" | "ready" | "failed" | "destroying";
 
 export type Endpoint = {
@@ -15,6 +17,7 @@ export type PersistedLabRuntime = {
   composeArgs: string[];
   baseFile?: string;
   overrideFile: string;
+  frozenFile: string;
   findings: ComposeInspectionFinding[];
 };
 

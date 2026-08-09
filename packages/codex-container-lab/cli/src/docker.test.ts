@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupLabLabels, destroyLabStack, DockerProvisioningFailure, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
@@ -170,8 +170,20 @@ describe("per-Lab Buildx configuration", () => {
       expect(details.isDirectory()).toBe(true);
       expect(details.mode & 0o777).toBe(0o700);
       expect(JSON.stringify(prepared)).not.toContain(buildxConfig);
+      const frozenDetails = await lstat(prepared.frozenFile);
+      expect(frozenDetails.isFile()).toBe(true);
+      expect(frozenDetails.isSymbolicLink()).toBe(false);
+      expect(frozenDetails.mode & 0o777).toBe(0o600);
+      const frozenBefore = await readFile(prepared.frozenFile, "utf8");
+      await writeFile(prepared.overrideFile, 'services:\n  dev:\n    environment: [BUILDX_CONFIG]\n');
+      await writeFile(prepared.baseFile!, 'services:\n  dev:\n    image: forbidden\n');
 
       await provisionLabStack(prepared, undefined, docker, environment);
+      const upArgs = docker.calls.find((args) => args.includes("up"))!;
+      expect(upArgs).toContain(prepared.frozenFile);
+      expect(upArgs).not.toContain(prepared.overrideFile);
+      expect(upArgs).not.toContain(prepared.baseFile!);
+      expect(await readFile(prepared.frozenFile, "utf8")).toBe(frozenBefore);
       const transcript = await stackLogs(prepared, "dev", 4, docker, environment);
       launchDockerRun(prepared, {
         runId: "11111111-1111-4111-8111-111111111111",
@@ -225,6 +237,32 @@ describe("per-Lab Buildx configuration", () => {
       expect(dockers.every((docker) => docker.runOptions.every((options) => options?.env?.DOCKER_CONFIG === environments.DOCKER_CONFIG))).toBe(true);
     } finally {
       await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+    }
+  });
+
+  test("uses the YAML fallback and rejects a pre-existing frozen snapshot symlink", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-frozen-fallback-"));
+    try {
+      const config = parseLabConfig("image: { name: node:24, service: dev }\n", join(root, "source"));
+      const docker = new MockDocker();
+      docker.responses.push(resultWithError("json unsupported"), result("services:\n  dev: {}\n"),
+        resultWithError("json unsupported"), result("services:\n  dev: {}\n"));
+      const prepared = await prepareLabRuntime(labAt(root), config, docker);
+      expect(JSON.parse(await readFile(prepared.frozenFile, "utf8"))).toEqual({ services: { dev: {} } });
+
+      const symlinkRoot = await mkdtemp(join(tmpdir(), "container-lab-frozen-symlink-"));
+      const metadata = labAt(symlinkRoot);
+      await mkdir(metadata.runtimeRoot, { recursive: true, mode: 0o700 });
+      const outside = join(symlinkRoot, "outside.json");
+      await writeFile(outside, "outside\n");
+      await symlink(outside, join(metadata.runtimeRoot, "frozen.compose.json"));
+      const symlinkDocker = new MockDocker();
+      symlinkDocker.responses.push(result('{"services":{"dev":{}}}'), result('{"services":{"dev":{}}}'));
+      await expect(prepareLabRuntime(metadata, config, symlinkDocker)).rejects.toThrow("unable to persist frozen Compose model");
+      expect(await readFile(outside, "utf8")).toBe("outside\n");
+      await rm(symlinkRoot, { recursive: true, force: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
@@ -607,8 +645,9 @@ function runtime(): LabRuntime {
       forwardEnvironment: [],
       secretEnvironment: [],
     },
-    composeArgs: ["compose", "--project-name", "ccl-project"],
+    composeArgs: ["compose", "--project-name", "ccl-project", "-f", `${TEST_RUNTIME_ROOT}/frozen.compose.json`],
     overrideFile: `${TEST_RUNTIME_ROOT}/override.compose.yaml`,
+    frozenFile: `${TEST_RUNTIME_ROOT}/frozen.compose.json`,
     findings: [],
   };
 }

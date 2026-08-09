@@ -7004,20 +7004,15 @@ var $visitAsync = visit.visitAsync;
 
 // packages/codex-container-lab/cli/src/compose.ts
 var MAX_RESERVED_ENVIRONMENT_MODEL_STRING_BYTES = 1 * 1024 * 1024;
-function composeCommandArgs(config, options) {
-  const sourceFiles = config.mode.kind === "compose" ? config.mode.files : options.baseFile ? [options.baseFile] : [];
-  if (sourceFiles.length === 0) {
-    throw new Error("an internal base Compose file is required for image and dockerfile modes");
-  }
+function frozenComposeCommandArgs(config, options) {
   return [
     "compose",
     "--project-directory",
     config.repoRoot,
     "--project-name",
     options.projectName,
-    ...sourceFiles.flatMap((file) => ["-f", file]),
     "-f",
-    options.overrideFile
+    options.frozenFile
   ];
 }
 function internalImageTag(ownerKey, labId) {
@@ -7135,6 +7130,9 @@ function truncateUtf8(value, maxBytes, policy) {
   }
   return output;
 }
+
+// packages/codex-container-lab/cli/src/types.ts
+var FROZEN_COMPOSE_FILE_NAME = "frozen.compose.json";
 
 // packages/codex-container-lab/cli/src/docker.ts
 var defaultDockerRunner = {
@@ -7849,13 +7847,10 @@ function validatePersistedRuntime(lab, runtime) {
   const runtimeRoot = lab.runtimeRoot;
   const expectedOverride = join(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join(runtimeRoot, "base.compose.yaml");
-  if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase || !Array.isArray(runtime.findings) || !runtime.findings.every(isFinding) || JSON.stringify(runtime.findings) !== JSON.stringify(lab.findings))
+  const expectedFrozen = join(runtimeRoot, FROZEN_COMPOSE_FILE_NAME);
+  if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase || runtime.frozenFile !== expectedFrozen || !Array.isArray(runtime.findings) || !runtime.findings.every(isFinding) || JSON.stringify(runtime.findings) !== JSON.stringify(lab.findings))
     throw new Error("invalid runtime files or findings");
-  const expectedArgs = composeCommandArgs(config, {
-    projectName: lab.composeProject,
-    overrideFile: expectedOverride,
-    baseFile: expectedBase
-  });
+  const expectedArgs = frozenComposeCommandArgs(config, { projectName: lab.composeProject, frozenFile: expectedFrozen });
   if (!Array.isArray(runtime.composeArgs) || runtime.composeArgs.length !== expectedArgs.length || !runtime.composeArgs.every((arg, index) => arg === expectedArgs[index]))
     throw new Error("invalid Compose arguments");
 }

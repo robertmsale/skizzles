@@ -3,6 +3,7 @@ import { parse as parseYaml } from "yaml";
 import { parseLabConfig } from "./config";
 import {
   composeCommandArgs,
+  frozenComposeCommandArgs,
   generateBaseCompose,
   generateOverrideCompose,
   inspectComposeModel,
@@ -142,6 +143,19 @@ compose:
       "-f", `${repoRoot}/compose.yaml`,
       "-f", `${repoRoot}/compose.local.yaml`,
       "-f", "/tmp/lab/override.yaml",
+    ]);
+  });
+
+  test("references only the frozen model while preserving project directory semantics", () => {
+    const config = parseLabConfig("image: { name: node:24, service: dev }", repoRoot);
+    expect(frozenComposeCommandArgs(config, {
+      projectName: "ccl-session-lab",
+      frozenFile: "/tmp/lab/frozen.compose.json",
+    })).toEqual([
+      "compose",
+      "--project-directory", repoRoot,
+      "--project-name", "ccl-session-lab",
+      "-f", "/tmp/lab/frozen.compose.json",
     ]);
   });
 });

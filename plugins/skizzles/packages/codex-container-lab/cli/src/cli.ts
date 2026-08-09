@@ -7396,6 +7396,17 @@ function composeCommandArgs(config, options) {
     options.overrideFile
   ];
 }
+function frozenComposeCommandArgs(config, options) {
+  return [
+    "compose",
+    "--project-directory",
+    config.repoRoot,
+    "--project-name",
+    options.projectName,
+    "-f",
+    options.frozenFile
+  ];
+}
 function internalImageTag(ownerKey, labId) {
   return `codex-container-lab:${ownerKey.slice(0, 24)}-${labId}`;
 }
@@ -7658,7 +7669,7 @@ function isRecord2(value) {
 // packages/codex-container-lab/cli/src/docker.ts
 import { randomUUID } from "crypto";
 import { spawn as spawn2 } from "child_process";
-import { lstat, mkdir, rename, rm, writeFile } from "fs/promises";
+import { lstat, mkdir, open, rename, rm, writeFile } from "fs/promises";
 import { join, posix as posix2 } from "path";
 
 // packages/codex-container-lab/cli/src/process.ts
@@ -7773,6 +7784,9 @@ function truncateUtf8(value, maxBytes, policy) {
   return output;
 }
 
+// packages/codex-container-lab/cli/src/types.ts
+var FROZEN_COMPOSE_FILE_NAME = "frozen.compose.json";
+
 // packages/codex-container-lab/cli/src/docker.ts
 var PROVISIONING_FAILURE_DIAGNOSTIC_FILE = "provisioning-failure.compose-up.log";
 var BUILDX_CONFIG_DIRECTORY = "buildx";
@@ -7851,7 +7865,46 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
   await writeFile(overrideFile, override, { mode: 384 });
   const finalModel = await normalizedModel(composeArgs, runner, modelEnvironment);
   validateSecretEnvironmentModel(finalModel, config.secretEnvironment, modelEnvironment);
-  return { metadata, config, composeArgs, baseFile, overrideFile, findings };
+  const frozenFile = join(metadata.runtimeRoot, FROZEN_COMPOSE_FILE_NAME);
+  await writeFrozenComposeModel(frozenFile, finalModel);
+  return {
+    metadata,
+    config,
+    composeArgs: frozenComposeCommandArgs(config, { projectName: metadata.composeProject, frozenFile }),
+    baseFile,
+    overrideFile,
+    frozenFile,
+    findings
+  };
+}
+async function writeFrozenComposeModel(path, model) {
+  let serialized;
+  try {
+    serialized = JSON.stringify(model);
+  } catch {
+    throw new Error("unable to persist frozen Compose model");
+  }
+  if (serialized === undefined || Buffer.byteLength(serialized) > 16 * 1024 * 1024) {
+    throw new Error("unable to persist frozen Compose model");
+  }
+  let handle;
+  try {
+    handle = await open(path, "wx", 384);
+    await handle.chmod(384);
+    const details = await handle.stat();
+    if (!details.isFile() || (details.mode & 511) !== 384)
+      throw new Error("invalid frozen Compose model file");
+    await handle.writeFile(`${serialized}
+`);
+  } catch (error) {
+    if (error instanceof Error && error.message === "invalid frozen Compose model file")
+      throw error;
+    throw new Error("unable to persist frozen Compose model");
+  } finally {
+    await handle?.close().catch(() => {
+      return;
+    });
+  }
 }
 async function normalizedModel(composeArgs, runner, environment = process.env) {
   let result;
@@ -8644,7 +8697,7 @@ async function removeIfPresent(file, options = {}) {
 }
 
 // packages/codex-container-lab/cli/src/locks.ts
-import { link, lstat as lstat3, mkdir as mkdir3, open, readFile as readFile3, rm as rm3, writeFile as writeFile3 } from "fs/promises";
+import { link, lstat as lstat3, mkdir as mkdir3, open as open2, readFile as readFile3, rm as rm3, writeFile as writeFile3 } from "fs/promises";
 import { dirname } from "path";
 async function withFileLock(path2, operation, options = {}) {
   const attempts = options.attempts ?? 100;
@@ -8693,7 +8746,7 @@ async function removeConfirmedStaleLock(path2, staleMs, processProbe) {
   let handle;
   try {
     try {
-      handle = await open(path2, "r");
+      handle = await open2(path2, "r");
     } catch (error) {
       if (error.code === "ENOENT")
         return;
@@ -8777,7 +8830,7 @@ async function removeConfirmedOrphanClaim(claimPath, staleMs, processProbe) {
   let handle;
   try {
     try {
-      handle = await open(claimPath, "r");
+      handle = await open2(claimPath, "r");
     } catch (error) {
       if (error.code === "ENOENT")
         return true;
@@ -9006,6 +9059,7 @@ async function assertReadyLabFilesystem(roots, lab) {
   await realFileInside(runtime, lab.runtime.overrideFile, "Compose override");
   if (lab.runtime.baseFile)
     await realFileInside(runtime, lab.runtime.baseFile, "internal Compose base");
+  await realPrivateFileInside(runtime, lab.runtime.frozenFile, "frozen Compose model");
   const mode = lab.runtime.config.mode;
   if (mode.kind === "compose") {
     for (const path2 of mode.files)
@@ -9136,13 +9190,10 @@ function validatePersistedRuntime(lab, runtime) {
   const runtimeRoot = lab.runtimeRoot;
   const expectedOverride = join2(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join2(runtimeRoot, "base.compose.yaml");
-  if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase || !Array.isArray(runtime.findings) || !runtime.findings.every(isFinding) || JSON.stringify(runtime.findings) !== JSON.stringify(lab.findings))
+  const expectedFrozen = join2(runtimeRoot, FROZEN_COMPOSE_FILE_NAME);
+  if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase || runtime.frozenFile !== expectedFrozen || !Array.isArray(runtime.findings) || !runtime.findings.every(isFinding) || JSON.stringify(runtime.findings) !== JSON.stringify(lab.findings))
     throw new Error("invalid runtime files or findings");
-  const expectedArgs = composeCommandArgs(config, {
-    projectName: lab.composeProject,
-    overrideFile: expectedOverride,
-    baseFile: expectedBase
-  });
+  const expectedArgs = frozenComposeCommandArgs(config, { projectName: lab.composeProject, frozenFile: expectedFrozen });
   if (!Array.isArray(runtime.composeArgs) || runtime.composeArgs.length !== expectedArgs.length || !runtime.composeArgs.every((arg, index) => arg === expectedArgs[index]))
     throw new Error("invalid Compose arguments");
 }
@@ -9188,6 +9239,13 @@ async function realFileInside(root, path2, label) {
   const info = await lstat4(path2);
   if (!info.isFile() || info.isSymbolicLink())
     throw new Error(`${label} is not a real file`);
+  assertCanonicalInside(root, await realpath3(path2), label, false);
+}
+async function realPrivateFileInside(root, path2, label) {
+  const info = await lstat4(path2);
+  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 511) !== 384) {
+    throw new Error(`${label} is not a private regular file`);
+  }
   assertCanonicalInside(root, await realpath3(path2), label, false);
 }
 async function realDirectoryInside(root, path2, label) {
@@ -10030,6 +10088,7 @@ class ContainerLabService {
         composeArgs: runtime.composeArgs,
         baseFile: runtime.baseFile,
         overrideFile: runtime.overrideFile,
+        frozenFile: runtime.frozenFile,
         findings: runtime.findings
       };
       lab = await this.updateProvisioning(id, (current) => {

@@ -252,6 +252,7 @@ describe("attached service lifecycle", () => {
     expect(readFileSync(labManifestPath(roots.stateRoot, lab.owner, lab.id), "utf8")).not.toContain(sentinel);
     expect(readFileSync(lab.runtime!.baseFile!, "utf8")).not.toContain(sentinel);
     expect(readFileSync(lab.runtime!.overrideFile, "utf8")).not.toContain(sentinel);
+    expect(readFileSync(lab.runtime!.frozenFile, "utf8")).not.toContain(sentinel);
     expect(JSON.stringify(await service.labStatus(lab.id))).not.toContain(sentinel);
 
     const carryingSecret = docker.runCalls.filter((call) => call.options?.env?.REGISTRY_TOKEN === sentinel);
@@ -1163,6 +1164,7 @@ async function durableFixture(owner: string, state: LabMetadata["state"], create
     await writeFile(join(sourceRoot, ".codex-container-lab.yaml"), "image: { name: node:24, service: dev }\n");
     await writeFile(join(runtimeRoot, "base.compose.yaml"), "services: {}\n");
     await writeFile(join(runtimeRoot, "override.compose.yaml"), "services: {}\n");
+    await writeFile(join(runtimeRoot, "frozen.compose.json"), '{"services":{}}\n', { mode: 0o600 });
   }
   await ensureOwner(roots.stateRoot, owner);
   const lab: LabMetadata = {
@@ -1179,9 +1181,10 @@ async function durableFixture(owner: string, state: LabMetadata["state"], create
 function readyRuntime(sourceRoot: string, runtimeRoot: string): NonNullable<LabMetadata["runtime"]> {
   const baseFile = join(runtimeRoot, "base.compose.yaml");
   const overrideFile = join(runtimeRoot, "override.compose.yaml");
+  const frozenFile = join(runtimeRoot, "frozen.compose.json");
   return {
     config: { repoRoot: sourceRoot, manifestPath: join(sourceRoot, ".codex-container-lab.yaml"), mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
-    composeArgs: ["compose", "--project-directory", sourceRoot, "--project-name", "ccl-durable", "-f", baseFile, "-f", overrideFile],
-    baseFile, overrideFile, findings: [],
+    composeArgs: ["compose", "--project-directory", sourceRoot, "--project-name", "ccl-durable", "-f", frozenFile],
+    baseFile, overrideFile, frozenFile, findings: [],
   };
 }
