@@ -322,4 +322,30 @@ describe("validateReservedBuildxConfigModel", () => {
     const values = Array.from({ length: 100_001 }, () => "literal");
     expect(() => validateReservedBuildxConfigModel({ services: { api: { command: values } } })).toThrow("reserved BUILDX_CONFIG");
   });
+
+  test("stops before traversing a wide array or object fanout", () => {
+    let arrayReads = 0;
+    const wideArray = new Proxy([], {
+      get(target, property, receiver) {
+        if (property === "length") return 1_000_000;
+        if (typeof property === "string" && /^\d+$/.test(property)) arrayReads++;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(() => validateReservedBuildxConfigModel({ services: { api: { command: wideArray } } })).toThrow("reserved BUILDX_CONFIG");
+    expect(arrayReads).toBeLessThan(100_000);
+
+    const keys = Array.from({ length: 100_001 }, (_, index) => `literal-${index}`);
+    let objectReads = 0;
+    const wideObject = new Proxy(Object.create(null) as Record<string, unknown>, {
+      ownKeys: () => keys,
+      getOwnPropertyDescriptor: () => ({ configurable: true, enumerable: true, value: "literal" }),
+      get: (_target, property) => {
+        if (typeof property === "string") objectReads++;
+        return "literal";
+      },
+    });
+    expect(() => validateReservedBuildxConfigModel({ services: { api: { extension: wideObject } } })).toThrow("reserved BUILDX_CONFIG");
+    expect(objectReads).toBeLessThan(keys.length);
+  });
 });

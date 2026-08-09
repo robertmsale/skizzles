@@ -242,6 +242,7 @@ export function validateSecretEnvironmentModel(
  */
 export function validateReservedBuildxConfigModel(model: ComposeModel): void {
   const pending: Array<{ value: unknown; parentKey?: string; depth: number }> = [{ value: model, depth: 0 }];
+  let discovered = 1;
   let nodes = 0;
   while (pending.length > 0) {
     const current = pending.pop()!;
@@ -257,21 +258,30 @@ export function validateReservedBuildxConfigModel(model: ComposeModel): void {
       continue;
     }
     if (Array.isArray(value)) {
-      for (const entry of value) {
+      for (let index = 0; index < value.length; index++) {
+        if (current.depth >= MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH) throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+        if (discovered >= MAX_RESERVED_ENVIRONMENT_MODEL_NODES) throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+        const entry = value[index];
         if (current.parentKey === "environment" || current.parentKey === "args") {
           if (typeof entry === "string" && composeEnvironmentEntryName(entry) === RESERVED_BUILDX_CONFIG) {
             throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
           }
         }
+        discovered++;
         pending.push({ value: entry, parentKey: current.parentKey, depth: current.depth + 1 });
       }
       continue;
     }
     if (!isRecord(value)) continue;
-    for (const [key, nested] of Object.entries(value)) {
+    for (const key in value) {
+      if (!Object.hasOwn(value, key)) continue;
+      if (current.depth >= MAX_RESERVED_ENVIRONMENT_MODEL_DEPTH) throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+      if (discovered >= MAX_RESERVED_ENVIRONMENT_MODEL_NODES) throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
+      const nested = value[key];
       if (key === RESERVED_BUILDX_CONFIG || hasComposeVariableReference(key)) {
         throw new Error(RESERVED_BUILDX_CONFIG_ERROR);
       }
+      discovered++;
       pending.push({ value: nested, parentKey: key, depth: current.depth + 1 });
     }
   }
