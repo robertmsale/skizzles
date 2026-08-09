@@ -7702,13 +7702,17 @@ function truncateUtf8(value, maxBytes, policy) {
 }
 
 // packages/codex-container-lab/cli/src/log-framing.ts
-function redactComposeFailureWithMetadata(value, runtime, secretValues) {
+function redactComposeFailureWithMetadata(value, runtime, secretValues, fragments = [value]) {
+  const incomplete = secretValues.some((secret) => /[\r\n]/.test(secret)) || secretCrossesFragmentBoundary(fragments, secretValues);
   const redacted = redactComposeTextWithMetadata(value, runtime, secretValues);
   const publicText = redactPublicTextWithMetadata(redacted.text, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, { byteCapture: "tail" });
-  return {
-    text: publicText.text,
-    contentRedacted: redacted.contentRedacted || publicText.contentRedacted
+  const result = {
+    text: incomplete ? "" : publicText.text,
+    contentRedacted: incomplete || redacted.contentRedacted || publicText.contentRedacted
   };
+  if (incomplete)
+    result.incomplete = true;
+  return result;
 }
 function redactComposeTextWithMetadata(value, runtime, secretValues) {
   let diagnostic = value;
@@ -7744,11 +7748,11 @@ function redactComposeTextWithMetadata(value, runtime, secretValues) {
 }
 function redactComposeLogCapture(value, runtime, secretValues) {
   if (secretValues.some((secret) => /[\r\n]/.test(secret))) {
-    return { records: [], contentRedacted: true, valid: false };
+    return { records: [], rawRecords: [], contentRedacted: true, valid: false };
   }
   const parsed = parseComposeLogRecords(value);
   if (!parsed.valid) {
-    return { records: [], contentRedacted: true, valid: false };
+    return { records: [], rawRecords: [], contentRedacted: true, valid: false };
   }
   const records = [];
   let contentRedacted = false;
@@ -7758,7 +7762,7 @@ function redactComposeLogCapture(value, runtime, secretValues) {
     records.push({ timestamp: record.timestamp, text: publicText.text, sequence: record.sequence });
     contentRedacted ||= composeRedacted.contentRedacted || publicText.contentRedacted;
   }
-  return { records, contentRedacted, valid: true };
+  return { records, rawRecords: parsed.records, contentRedacted, valid: true };
 }
 function parseComposeLogRecords(value) {
   if (!value)
@@ -7776,7 +7780,7 @@ function parseComposeLogRecords(value) {
     const line = value.slice(cursor, end).replace(/\r$/, "");
     const match = frame.exec(line);
     if (match) {
-      if (Number.isNaN(Date.parse(match[1])))
+      if (!isCanonicalComposeTimestamp(match[1]))
         return { records: [], valid: false };
       if (current !== undefined)
         records.push(current);
@@ -7795,6 +7799,52 @@ ${line}`;
     records.push(current);
   return { records, valid: true };
 }
+function isCanonicalComposeTimestamp(timestamp) {
+  const year = Number(timestamp.slice(0, 4));
+  const month = Number(timestamp.slice(5, 7));
+  const day = Number(timestamp.slice(8, 10));
+  const hour = Number(timestamp.slice(11, 13));
+  const minute = Number(timestamp.slice(14, 16));
+  const second = Number(timestamp.slice(17, 19));
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59)
+    return false;
+  const daysInMonth = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return day >= 1 && day <= daysInMonth;
+}
+function isLeapYear(year) {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+function secretCrossesFragmentBoundary(fragments, secretValues) {
+  const nonEmpty = fragments.filter((fragment) => fragment.length > 0);
+  if (nonEmpty.length < 2)
+    return false;
+  const joined = nonEmpty.join("");
+  return secretValues.some((secret) => {
+    if (!secret || /[\r\n]/.test(secret))
+      return false;
+    let start = joined.indexOf(secret);
+    while (start >= 0) {
+      let offset = 0;
+      let firstFragment = -1;
+      let lastFragment = -1;
+      const end = start + secret.length;
+      for (const [index, fragment] of nonEmpty.entries()) {
+        const fragmentEnd = offset + fragment.length;
+        if (firstFragment < 0 && start < fragmentEnd)
+          firstFragment = index;
+        if (end <= fragmentEnd) {
+          lastFragment = index;
+          break;
+        }
+        offset = fragmentEnd;
+      }
+      if (firstFragment >= 0 && lastFragment > firstFragment)
+        return true;
+      start = joined.indexOf(secret, start + 1);
+    }
+    return false;
+  });
+}
 function mergeComposeLogRecords(captures) {
   const records = captures.flatMap((capture) => capture.records).sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence);
   return {
@@ -7806,11 +7856,19 @@ function mergeComposeLogRecords(captures) {
 function redactComposeLogStreams(streams, resultCode, runtime, secretValues) {
   const captures = streams.map((stream) => {
     if (stream.truncated)
-      return { records: [], contentRedacted: true, valid: false };
+      return { records: [], rawRecords: [], contentRedacted: true, valid: false };
     if (!stream.value)
-      return { records: [], contentRedacted: false, valid: true };
+      return { records: [], rawRecords: [], contentRedacted: false, valid: true };
     return redactComposeLogCapture(stream.value, runtime, secretValues);
   });
+  const rawRecords = captures.flatMap((capture) => capture.rawRecords).sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence);
+  const unsafeSecret = secretValues.some((secret) => /[\r\n]/.test(secret));
+  if (unsafeSecret || secretCrossesFragmentBoundary(rawRecords.map((record) => record.text), secretValues)) {
+    return {
+      redacted: { text: "", contentRedacted: true, incomplete: true },
+      truncated: true
+    };
+  }
   const merged = mergeComposeLogRecords(captures);
   const markers = captures.map((capture, index) => {
     if (capture.valid)
@@ -8036,12 +8094,13 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
       candidates = selectFailedDiagnosticServices(runtime, allServices);
     }
   } catch {}
-  const raw = provisioned === undefined ? "" : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0).join(`
+  const rawFragments = provisioned === undefined ? [] : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0);
+  const raw = rawFragments.join(`
 `);
   const secretValues = declaredSecretValues(runtime, environment);
   const lifecycleBytes = candidates.length > 0 ? 2048 - 1 : 8 * 1024;
   const lifecycleLines = candidates.length > 0 ? 125 : 500;
-  const lifecycle = buildDiagnosticSegment("compose-up", lifecycleLines, lifecycleBytes, provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true, redactComposeFailureWithMetadata(raw, runtime, secretValues), secretValues);
+  const lifecycle = buildDiagnosticSegment("compose-up", lifecycleLines, lifecycleBytes, provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true, redactComposeFailureWithMetadata(raw, runtime, secretValues, rawFragments), secretValues);
   const serviceBytes = divideDiagnosticBudget(6 * 1024 - Math.max(0, candidates.length - 1), candidates.length);
   const serviceLines = divideDiagnosticBudget(375, candidates.length);
   const segments = [lifecycle];
@@ -8052,13 +8111,14 @@ async function captureComposeFailure(runtime, provisioned, runner, environment) 
   const aggregate = joinDiagnosticSegments(segments);
   let transcript = aggregate.text;
   let transcriptTruncated = segments.some((segment) => segment.truncated);
-  const contentRedacted = segments.some((segment) => segment.contentRedacted);
-  const privacyFailure = secretValues.some((secret) => /[\r\n]/.test(secret)) || segments.some((segment) => segment.privacyFailure) || aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
+  const aggregateSecret = aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
+  const privacyFailure = secretValues.some((secret) => /[\r\n]/.test(secret)) || segments.some((segment) => segment.privacyFailure) || aggregateSecret.found;
+  const contentRedacted = segments.some((segment) => segment.contentRedacted) || privacyFailure;
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split(`
 `).length > 500;
   if (privacyFailure || aggregateBounds) {
     transcript = "";
-    transcriptTruncated ||= aggregateBounds;
+    transcriptTruncated ||= aggregateSecret.boundary || aggregateBounds;
   }
   const evidence = {
     kind: "compose-up",
@@ -8139,7 +8199,7 @@ function buildDiagnosticSegment(label, maxLines, maxBytes, upstreamTruncated, re
 ${body.text}` : header;
   return {
     text: privacyFailure ? "" : text,
-    truncated: upstreamTruncated || body.truncated,
+    truncated: upstreamTruncated || redacted.incomplete === true || body.truncated,
     contentRedacted: redacted.contentRedacted,
     privacyFailure,
     bodyStart: body.text ? header.length + 1 : undefined,
@@ -8166,18 +8226,12 @@ function joinDiagnosticSegments(segments) {
   return { text, bodyRanges };
 }
 function aggregateContainsSecret(text, bodyRanges, secretValues) {
-  return secretValues.some((secret) => {
-    if (!secret)
-      return false;
-    let start = text.indexOf(secret);
-    while (start >= 0) {
-      const end = start + secret.length;
-      if (bodyRanges.some((range) => start < range.end && end > range.start))
-        return true;
-      start = text.indexOf(secret, start + 1);
-    }
-    return false;
-  });
+  const fragments = bodyRanges.map((range) => text.slice(range.start, range.end));
+  const joined = fragments.join("");
+  return {
+    found: secretValues.some((secret) => secret.length > 0 && joined.includes(secret)),
+    boundary: secretCrossesFragmentBoundary(fragments, secretValues)
+  };
 }
 function bodyContainsSecret(body, header, secretValues) {
   if (!body)

@@ -19,6 +19,7 @@ import { redactPublicText } from "./public-output";
 import {
   redactComposeFailureWithMetadata,
   redactComposeLogStreams,
+  secretCrossesFragmentBoundary,
   type RedactionResult,
 } from "./log-framing";
 import type { Endpoint, LabMetadata, PersistedLabRuntime, ProvisioningFailureDiagnostic } from "./types";
@@ -295,9 +296,10 @@ async function captureComposeFailure(
     // Compose failure remains authoritative when Docker is unavailable.
   }
 
-  const raw = provisioned === undefined
-    ? ""
-    : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0).join("\n");
+  const rawFragments = provisioned === undefined
+    ? []
+    : [provisioned.stdout.toString(), provisioned.stderr.toString()].filter((part) => part.length > 0);
+  const raw = rawFragments.join("\n");
   const secretValues = declaredSecretValues(runtime, environment);
   const lifecycleBytes = candidates.length > 0 ? 2_048 - 1 : 8 * 1024;
   const lifecycleLines = candidates.length > 0 ? 125 : 500;
@@ -306,7 +308,7 @@ async function captureComposeFailure(
     lifecycleLines,
     lifecycleBytes,
     provisioned?.stdoutTruncated === true || provisioned?.stderrTruncated === true,
-    redactComposeFailureWithMetadata(raw, runtime, secretValues),
+    redactComposeFailureWithMetadata(raw, runtime, secretValues, rawFragments),
     secretValues,
   );
   const serviceBytes = divideDiagnosticBudget(6 * 1024 - Math.max(0, candidates.length - 1), candidates.length);
@@ -334,14 +336,15 @@ async function captureComposeFailure(
   const aggregate = joinDiagnosticSegments(segments);
   let transcript = aggregate.text;
   let transcriptTruncated = segments.some((segment) => segment.truncated);
-  const contentRedacted = segments.some((segment) => segment.contentRedacted);
+  const aggregateSecret = aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
   const privacyFailure = secretValues.some((secret) => /[\r\n]/.test(secret)) ||
     segments.some((segment) => segment.privacyFailure) ||
-    aggregateContainsSecret(transcript, aggregate.bodyRanges, secretValues);
+    aggregateSecret.found;
+  const contentRedacted = segments.some((segment) => segment.contentRedacted) || privacyFailure;
   const aggregateBounds = Buffer.byteLength(transcript) > 8 * 1024 || transcript.split("\n").length > 500;
   if (privacyFailure || aggregateBounds) {
     transcript = "";
-    transcriptTruncated ||= aggregateBounds;
+    transcriptTruncated ||= aggregateSecret.boundary || aggregateBounds;
   }
   const evidence = {
     kind: "compose-up" as const,
@@ -447,7 +450,7 @@ function buildDiagnosticSegment(
   const text = body.text ? `${header}\n${body.text}` : header;
   return {
     text: privacyFailure ? "" : text,
-    truncated: upstreamTruncated || body.truncated,
+    truncated: upstreamTruncated || redacted.incomplete === true || body.truncated,
     contentRedacted: redacted.contentRedacted,
     privacyFailure,
     bodyStart: body.text ? header.length + 1 : undefined,
@@ -491,17 +494,13 @@ function aggregateContainsSecret(
   text: string,
   bodyRanges: readonly DiagnosticBodyRange[],
   secretValues: readonly string[],
-): boolean {
-  return secretValues.some((secret) => {
-    if (!secret) return false;
-    let start = text.indexOf(secret);
-    while (start >= 0) {
-      const end = start + secret.length;
-      if (bodyRanges.some((range) => start < range.end && end > range.start)) return true;
-      start = text.indexOf(secret, start + 1);
-    }
-    return false;
-  });
+): { found: boolean; boundary: boolean } {
+  const fragments = bodyRanges.map((range) => text.slice(range.start, range.end));
+  const joined = fragments.join("");
+  return {
+    found: secretValues.some((secret) => secret.length > 0 && joined.includes(secret)),
+    boundary: secretCrossesFragmentBoundary(fragments, secretValues),
+  };
 }
 
 function bodyContainsSecret(body: string, header: string, secretValues: readonly string[]): boolean {

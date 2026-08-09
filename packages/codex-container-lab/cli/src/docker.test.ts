@@ -464,6 +464,107 @@ describe("exact Docker cleanup", () => {
     expect(transcript.contentRedacted).toBe(true);
   });
 
+  test("fails closed when a declared secret crosses same-stream or merged-stream frames", async () => {
+    const secret = "DECLARED_SECRET_12345";
+    for (const streams of [
+      {
+        stdout: [
+          "2026-08-08T00:00:00.000000000Z DECLARED_",
+          "2026-08-08T00:00:01.000000000Z SECRET_",
+          "2026-08-08T00:00:02.000000000Z 12345",
+        ].join("\n"),
+        stderr: "",
+      },
+      {
+        stdout: "2026-08-08T00:00:02.000000000Z DECLARED_SECRET_",
+        stderr: "2026-08-08T00:00:03.000000000Z 12345",
+      },
+    ]) {
+      const docker = new MockDocker();
+      const configured = runtime();
+      configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+      docker.responses.push(result('{"services":{"dev":{}}}'), {
+        code: 0,
+        stdout: Buffer.from(streams.stdout),
+        stderr: Buffer.from(streams.stderr),
+      });
+
+      const transcript = await stackLogs(configured, "dev", 20, docker, { REGISTRY_TOKEN: secret });
+
+      expect(transcript).toEqual({ text: "", truncated: true, contentRedacted: true });
+      expect(transcript.text).not.toContain("DECLARED_SECRET_");
+      expect(transcript.text).not.toContain("12345");
+    }
+  });
+
+  test("keeps ordinary whole-frame secret replacement available", async () => {
+    const docker = new MockDocker();
+    const secret = "DECLARED_SECRET_12345";
+    const configured = runtime();
+    configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+    docker.responses.push(result('{"services":{"dev":{}}}'), result(
+      "2026-08-08T00:00:00.000000000Z secret=DECLARED_SECRET_12345\n" +
+        "2026-08-08T00:00:01.000000000Z later-safe-error",
+    ));
+
+    const transcript = await stackLogs(configured, "dev", 20, docker, { REGISTRY_TOKEN: secret });
+
+    expect(transcript.text).toContain("secret=[secret-value-redacted]");
+    expect(transcript.text).toContain("later-safe-error");
+    expect(transcript.truncated).toBe(false);
+    expect(transcript.contentRedacted).toBe(true);
+  });
+
+  test("fails closed for one-character and newline-bearing declared secrets", async () => {
+    for (const secret of ["x", "line\r\nsecret"]) {
+      const docker = new MockDocker();
+      const configured = runtime();
+      configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+      docker.responses.push(result('{"services":{"dev":{}}}'), result(
+        `2026-08-08T00:00:00.000000000Z value=${secret}`,
+      ));
+
+      const transcript = await stackLogs(configured, "dev", 20, docker, { REGISTRY_TOKEN: secret });
+
+      if (secret === "x") {
+        expect(transcript.text).toContain("value=[secret-value-redacted]");
+        expect(transcript.truncated).toBe(false);
+        expect(transcript.contentRedacted).toBe(true);
+      } else {
+        expect(transcript).toEqual({ text: "", truncated: true, contentRedacted: true });
+      }
+    }
+  });
+
+  test.each([
+    "2026-00-01T00:00:00.000000000Z value=bad-month",
+    "2026-13-01T00:00:00.000000000Z value=bad-month",
+    "2026-01-00T00:00:00.000000000Z value=bad-day",
+    "2026-04-31T00:00:00.000000000Z value=bad-day",
+    "2026-02-29T00:00:00.000000000Z value=bad-non-leap-day",
+    "2026-08-08T24:00:00.000000000Z value=bad-hour",
+    "2026-08-08T00:60:00.000000000Z value=bad-minute",
+    "2026-08-08T00:00:60.000000000Z value=bad-second",
+  ])("rejects noncanonical Compose timestamp %s", async (line) => {
+    const docker = new MockDocker();
+    docker.responses.push(result('{"services":{"dev":{}}}'), result(line));
+
+    const transcript = await stackLogs(runtime(), "dev", 20, docker);
+
+    expect(transcript).toEqual({ text: "[stdout-unavailable]", truncated: true, contentRedacted: true });
+  });
+
+  test("accepts leap-day timestamps only on leap years", async () => {
+    const docker = new MockDocker();
+    docker.responses.push(result('{"services":{"dev":{}}}'), result(
+      "2024-02-29T23:59:59.000000000Z leap-day-valid",
+    ));
+
+    const transcript = await stackLogs(runtime(), "dev", 20, docker);
+
+    expect(transcript).toEqual({ text: "leap-day-valid", truncated: false, contentRedacted: false });
+  });
+
   test("keeps newline-bearing path continuations fail-closed within one frame", async () => {
     const docker = new MockDocker();
     docker.responses.push(result('{"services":{"dev":{}}}'), result(
