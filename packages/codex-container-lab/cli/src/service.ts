@@ -128,7 +128,7 @@ export class ContainerLabService {
     await this.reconcileOwner();
     const lab = await readLab(this.roots, this.owner, id);
     return compactLabStatus(lab, lab.state === "ready" && lab.runtime
-        ? await stackStatus(runtimeFromLab(lab), this.docker)
+        ? await stackStatus(runtimeFromLab(lab), this.docker, { environment: this.environment })
         : undefined);
   }
 

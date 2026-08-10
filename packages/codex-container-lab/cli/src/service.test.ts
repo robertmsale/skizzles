@@ -181,6 +181,18 @@ class ReadyServiceLogsDocker extends RecordingDocker {
   }
 }
 
+class StatusFailureDocker extends RecordingDocker {
+  constructor(private readonly stderr: string) { super(); }
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    if (args.includes("ps")) {
+      this.calls.push(args);
+      this.runCalls.push({ args, options });
+      return resultWithError(this.stderr);
+    }
+    return await super.run(args, options);
+  }
+}
+
 function frameComposeLog(service: string, value: string): string {
   const timestamp = "2026-08-08T00:00:00.000000000Z";
   return value.split("\n").map((line) => `${timestamp} ${line}`).join("\n");
@@ -217,6 +229,31 @@ describe("attached service lifecycle", () => {
     expect(response.transcript.bytes).toBe(Buffer.byteLength(response.transcript.text));
     expect(response.transcript.lines).toBe(response.transcript.text.split("\n").length);
     await service.destroyLab(created.labId);
+  });
+
+  test("ready status uses the service environment for exact secret redaction", async () => {
+    const fixture = await durableFixture("thread-ready-status-secret", "ready", true);
+    const secret = "ready-status-secret-9c0f";
+    fixture.lab.secretEnvironment = ["REGISTRY_TOKEN"];
+    fixture.lab.runtime!.config.secretEnvironment = ["REGISTRY_TOKEN"];
+    await writeLab(fixture.roots, fixture.lab);
+    const docker = new StatusFailureDocker(
+      `safe=/opt/status/override.yaml URL=https://example.invalid/healthz/ready id=123e4567-e89b-42d3-a456-426614174000 status check failed: ${secret}`,
+    );
+    const service = new ContainerLabService(fixture.owner, fixture.roots, docker, {
+      PATH: process.env.PATH,
+      REGISTRY_TOKEN: secret,
+    });
+
+    const encoded = JSON.stringify(await service.labStatus(fixture.lab.id));
+
+    expect(encoded).toContain("/opt/status/override.yaml");
+    expect(encoded).toContain("https://example.invalid/healthz/ready");
+    expect(encoded).toContain("123e4567-e89b-42d3-a456-426614174000");
+    expect(encoded).toContain("status check failed");
+    expect(encoded).not.toContain(secret);
+    const statusCall = docker.runCalls.find((call) => call.args.includes("ps"));
+    expect(statusCall?.options?.env?.REGISTRY_TOKEN).toBeUndefined();
   });
 
   test("create provisions synchronously and returns only lab identity and terminal state", async () => {
@@ -1199,4 +1236,8 @@ function readyRuntime(sourceRoot: string, runtimeRoot: string): NonNullable<LabM
     composeArgs: ["compose", "--project-directory", sourceRoot, "--project-name", "ccl-durable", "-f", baseFile, "-f", overrideFile],
     baseFile, overrideFile, findings: [],
   };
+}
+
+function resultWithError(stderr: string): CommandResult {
+  return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(stderr) };
 }
