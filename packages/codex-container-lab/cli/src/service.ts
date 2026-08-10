@@ -155,8 +155,8 @@ export class ContainerLabService {
       throw new Error("terminal provisioning diagnostic is unavailable");
     }
     const stored = await readFile(path, "utf8");
-    if (Buffer.byteLength(stored) > 8 * 1024) throw new Error("terminal provisioning diagnostic is unavailable");
-    const text = redactPublicText(stored.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "�"), 8 * 1024, 500);
+    const text = stored.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "�");
+    if (Buffer.byteLength(text) > 8 * 1024) throw new Error("terminal provisioning diagnostic is unavailable");
     const lines = text ? text.split("\n").length : 0;
     if (lines > 500) throw new Error("terminal provisioning diagnostic is unavailable");
     return {

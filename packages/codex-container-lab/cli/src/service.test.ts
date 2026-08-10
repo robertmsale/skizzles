@@ -212,9 +212,8 @@ describe("attached service lifecycle", () => {
     };
     expect(response.labId).toBe(created.labId);
     expect(response.service).toBe("dev");
-    expect(response.transcript.text).toContain("[path]");
+    expect(response.transcript.text).toContain("/Users/robertsale/Library/Application Support/Codex");
     expect(response.transcript.text).not.toContain(secret);
-    expect(response.transcript.text).not.toContain("/Users/robertsale/Library/Application Support/Codex");
     expect(response.transcript.bytes).toBe(Buffer.byteLength(response.transcript.text));
     expect(response.transcript.lines).toBe(response.transcript.text.split("\n").length);
     await service.destroyLab(created.labId);
@@ -359,8 +358,8 @@ describe("attached service lifecycle", () => {
     const diagnostic = JSON.stringify(await fresh.diagnostic(created.labId));
     expect(diagnostic).toContain('"phase":"compose-up"');
     expect(diagnostic).toContain("exited");
+    expect(diagnostic).toContain("/private/tmp/project");
     expect(diagnostic).not.toContain(sentinel);
-    expect(diagnostic).not.toContain("/private/tmp");
     expect(diagnostic).not.toContain(lab.runtimeRoot);
     expect(diagnostic).not.toContain(PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
     expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(16 * 1024);
@@ -851,19 +850,23 @@ ports:
     const lab = await readLab(roots, "thread-service-log-redaction", created.labId);
     const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
     const status = JSON.stringify(await service.labStatus(created.labId));
-    const diagnostic = JSON.stringify(await service.diagnostic(created.labId));
     const logsCall = docker.runCalls.find((call) => call.args.includes("logs"));
     expect(logsCall).toBeDefined();
     expect(logsCall?.options?.env?.REGISTRY_TOKEN).toBeUndefined();
-    for (const value of [artifact, status, diagnostic]) {
+    const diagnosticText = (await service.diagnostic(created.labId) as {
+      diagnostic: { transcript: { text: string } };
+    }).diagnostic.transcript.text;
+    for (const value of [artifact, diagnosticText]) {
       expect(value).not.toContain(secret);
-      expect(value).not.toContain("/private/tmp");
-      expect(value).not.toContain("C:\\Users\\adversarial\\AppData\\Local\\Docker\\secret");
-      expect(value).not.toContain("\\\\server\\share\\secret");
-      expect(value).not.toContain("ccl-private");
-      expect(value).not.toContain("a".repeat(64));
+      expect(value).toContain("/private/tmp/adversarial");
+      expect(value).toContain("C:\\Users\\adversarial\\AppData\\Local\\Docker\\secret");
+      expect(value).toContain("\\\\server\\share\\secret");
+      expect(value).toContain("ccl-private");
+      expect(value).toContain("a".repeat(64));
       expect(value).not.toContain("\u0001");
     }
+    expect(status).not.toContain(secret);
+    expect(status).not.toContain("\u0001");
     expect(Buffer.byteLength(artifact)).toBeLessThanOrEqual(8 * 1024);
     await service.destroyLab(created.labId);
   });
@@ -959,7 +962,7 @@ ports:
       const created = await service.createLab("marker-secret", source);
       expect(created.state).toBe("failed");
       const lab = await readLab(roots, `thread-marker-${name.toLowerCase()}`, created.labId);
-      expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0, truncated: false });
+      expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0, truncated: true });
       const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
       expect(artifact).toBe("");
 
@@ -994,7 +997,7 @@ ports:
     expect(created.state).toBe("failed");
     const lab = await readLab(roots, "thread-sanitized-secret", created.labId);
     expect(lab.error).toBe("Docker Compose up failed; secret-bearing diagnostics redacted");
-    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0, truncated: false });
+    expect(lab.provisioningFailure?.evidence).toMatchObject({ available: true, bytes: 0, lines: 0, truncated: true });
     const artifact = await Bun.file(join(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE)).text();
     expect(artifact).toBe("");
 

@@ -15,7 +15,6 @@ import {
   type ComposeModel,
 } from "./compose";
 import { runCommand, type RunOptions, type CommandResult } from "./process";
-import { redactPublicText } from "./public-output";
 import {
   redactComposeFailureWithMetadata,
   redactComposeLogStreams,
@@ -244,7 +243,12 @@ async function listStackServiceSummaries(
     return { available: false, services: [], serviceCount: 0, error: "Docker returned an unavailable status response" };
   }
   if (result.code !== 0) {
-    return { available: false, services: [], serviceCount: 0, error: compactError(result.stderr.toString()) };
+    return {
+      available: false,
+      services: [],
+      serviceCount: 0,
+      error: compactError(result.stderr.toString(), runtime, environment),
+    };
   }
   const raw = result.stdout.toString().trim();
   if (!raw) return { available: true, services: [], serviceCount: 0 };
@@ -450,7 +454,7 @@ function buildDiagnosticSegment(
     Math.max(0, maxLines - 1),
     Math.max(0, maxBytes - Buffer.byteLength(header) - 1),
   );
-  const privacyFailure = bodyContainsSecret(body.text, header, secretValues);
+  const privacyFailure = redacted.incomplete === true || bodyContainsSecret(body.text, header, secretValues);
   const text = body.text ? `${header}\n${body.text}` : header;
   return {
     text: privacyFailure ? "" : text,
@@ -834,8 +838,17 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function compactError(value: string): string {
-  return redactPublicText(value.trim(), 2_000, 6);
+function compactError(value: string, runtime: LabRuntime, environment?: NodeJS.ProcessEnv): string {
+  const redacted = redactComposeFailureWithMetadata(
+    value.trim(),
+    runtime,
+    declaredSecretValues(runtime, environment ?? process.env),
+  );
+  if (redacted.incomplete) return "";
+  const bounded = redacted.text.split("\n").slice(-6).join("\n");
+  const bytes = Buffer.from(bounded);
+  if (bytes.byteLength <= 2_000) return bounded;
+  return bytes.subarray(bytes.byteLength - 2_000).toString("utf8").replace(/^�/, "");
 }
 
 function secretComposeEnvironment(names: readonly string[], environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

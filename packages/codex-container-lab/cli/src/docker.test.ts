@@ -167,7 +167,8 @@ describe("failed Compose diagnostics", () => {
       expect(info.mode & 0o777).toBe(0o600);
       const text = await readFile(artifact, "utf8");
       expect(text).not.toContain(sentinel);
-      expect(text).not.toContain("/private/tmp");
+      expect(text).toContain("/private/tmp");
+      expect(text).toContain("failed");
       expect(text).not.toContain("ccl-private");
       expect(text).not.toContain("a".repeat(64));
       expect(Buffer.byteLength(text)).toBeLessThanOrEqual(8 * 1024);
@@ -389,7 +390,7 @@ describe("exact Docker cleanup", () => {
     expect(Buffer.byteLength(JSON.stringify({ labId: "lab-1", service: "dev", transcript }))).toBeLessThan(16 * 1024);
   });
 
-  test("stack logs redact paths, URL-ish text, controls, and declared secrets before public bounds", async () => {
+  test("stack logs preserve safe diagnostics while replacing declared secrets and controls", async () => {
     const docker = new MockDocker();
     const secret = "registry-token-from-environment-8f31";
     const configured = runtime();
@@ -408,7 +409,7 @@ describe("exact Docker cleanup", () => {
       },
     );
 
-    const transcript = await stackLogs(configured, "dev", 4, docker, { REGISTRY_TOKEN: secret });
+    const transcript = await stackLogs(configured, "dev", 8, docker, { REGISTRY_TOKEN: secret });
     const publicTranscript = {
       ...transcript,
       bytes: Buffer.byteLength(transcript.text),
@@ -416,22 +417,24 @@ describe("exact Docker cleanup", () => {
     };
     const encoded = JSON.stringify({ labId: "lab-1", service: "dev", transcript: publicTranscript });
 
-    expect(transcript.truncated).toBe(true);
+    expect(transcript.truncated).toBe(false);
     expect(publicTranscript.bytes).toBe(Buffer.byteLength(transcript.text));
     expect(publicTranscript.lines).toBe(transcript.text ? transcript.text.split("\n").length : 0);
-    expect(publicTranscript.lines).toBeLessThanOrEqual(4);
+    expect(publicTranscript.lines).toBeLessThanOrEqual(8);
     expect(publicTranscript.bytes).toBeLessThanOrEqual(8 * 1024);
-    expect(transcript.text).toContain("[path]");
+    expect(transcript.text).toContain("secret=[secret-value-redacted]��");
+    expect(transcript.text).toContain("/Users/robertsale/private logs");
+    expect(transcript.text).toContain("C:\\Users\\Robert\\Library\\Application Support\\Codex\\src\\main.ts");
+    expect(transcript.text).toContain("\\\\server\\share name\\artifact");
+    expect(transcript.text).toContain("https://example.invalid/api/v1/workspace/secret");
     expect(encoded).not.toContain(secret);
-    expect(encoded).not.toContain("/Users/robertsale/private logs");
-    expect(encoded).not.toContain("C:\\Users\\Robert\\Library\\Application Support\\Codex\\src\\main.ts");
-    expect(encoded).not.toContain("\\\\server\\share name\\artifact");
-    expect(encoded).not.toContain("https://example.invalid/api/v1/workspace/secret");
+    expect(encoded).toContain("/Users/robertsale/private logs");
+    expect(encoded).toContain("https://example.invalid/api/v1/workspace/secret");
     expect(encoded).not.toContain("\u0000");
     expect(encoded).not.toContain("\u0001");
   });
 
-  test("redacts each Compose frame without erasing later causal records", async () => {
+  test("preserves each Compose frame and later causal records while replacing secrets", async () => {
     const docker = new MockDocker();
     const secret = "declared-log-secret-0d9f";
     const configured = runtime();
@@ -439,6 +442,8 @@ describe("exact Docker cleanup", () => {
     const frames = [
       "INFO request method=GET path=/healthz/ready",
       "ERROR database readiness failed: tenant schema unavailable",
+      "Error: readiness failed\n    at bootstrap (/app/server.ts:12:7)",
+      "request-id=123e4567-e89b-42d3-a456-426614174000",
       "POSIX /private/tmp/cause",
       "Windows C:\\Users\\Robert\\AppData\\Local\\cause",
       "UNC \\\\server\\share\\cause",
@@ -454,12 +459,15 @@ describe("exact Docker cleanup", () => {
     const transcript = await stackLogs(configured, "dev", 20, docker, { REGISTRY_TOKEN: secret });
 
     expect(transcript.text).toContain("ERROR database readiness failed: tenant schema unavailable");
-    expect(transcript.text).toContain("[path]");
-    expect(transcript.text).not.toContain("/private/tmp/cause");
-    expect(transcript.text).not.toContain("C:\\Users\\Robert\\AppData\\Local\\cause");
-    expect(transcript.text).not.toContain("\\\\server\\share\\cause");
-    expect(transcript.text).not.toContain("https://example.invalid/api/v1/secret");
+    expect(transcript.text).toContain("at bootstrap (/app/server.ts:12:7)");
+    expect(transcript.text).toContain("123e4567-e89b-42d3-a456-426614174000");
+    expect(transcript.text).toContain("path=/healthz/ready");
+    expect(transcript.text).toContain("/private/tmp/cause");
+    expect(transcript.text).toContain("C:\\Users\\Robert\\AppData\\Local\\cause");
+    expect(transcript.text).toContain("\\\\server\\share\\cause");
+    expect(transcript.text).toContain("https://example.invalid/api/v1/secret");
     expect(transcript.text).not.toContain(secret);
+    expect(transcript.text).toContain("secret=[secret-value-redacted]�");
     expect(transcript.text).not.toContain("\u0001");
     expect(transcript.truncated).toBe(false);
     expect(transcript.contentRedacted).toBe(true);
@@ -549,10 +557,10 @@ describe("exact Docker cleanup", () => {
   test("fails closed when compose-up redaction markers reconstruct a secret", () => {
     const secret = "[redacted]TAIL";
     const redacted = redactComposeFailureWithMetadata(
-      "abcdef123456\nTAIL",
+      `${runtime().metadata.ownerKey}\nTAIL`,
       runtime(),
       [secret],
-      ["abcdef123456", "TAIL"],
+      [runtime().metadata.ownerKey, "TAIL"],
     );
 
     expect(redacted).toEqual({ text: "", contentRedacted: true, incomplete: true });
@@ -608,7 +616,7 @@ describe("exact Docker cleanup", () => {
     expect(transcript).toEqual({ text: "leap-day-valid", truncated: false, contentRedacted: false });
   });
 
-  test("keeps newline-bearing path continuations fail-closed within one frame", async () => {
+  test("preserves newline-bearing path continuations within one frame", async () => {
     const docker = new MockDocker();
     docker.responses.push(result('{"services":{"dev":{}}}'), result(
       "2026-08-08T00:00:00.000000000Z open /Users/me/Application\nSupport\nnext diagnostic\n" +
@@ -617,10 +625,10 @@ describe("exact Docker cleanup", () => {
 
     const transcript = await stackLogs(runtime(), "dev", 20, docker);
 
-    expect(transcript.text).toBe("open [path]\nDB_READINESS_FALSE");
-    expect(transcript.text).not.toContain("Support");
-    expect(transcript.text).not.toContain("next diagnostic");
-    expect(transcript.contentRedacted).toBe(true);
+    expect(transcript.text).toBe("open /Users/me/Application\nSupport\nnext diagnostic\nDB_READINESS_FALSE");
+    expect(transcript.text).toContain("Support");
+    expect(transcript.text).toContain("next diagnostic");
+    expect(transcript.contentRedacted).toBe(false);
   });
 
   test("rejects malformed or unframed Compose output without publishing a prefix", async () => {
@@ -639,7 +647,7 @@ describe("exact Docker cleanup", () => {
   test("fails closed when public markers reconstruct a declared secret across captures", async () => {
     const scenarios = [
       { secret: "[stdout-unavailable]TAIL", stdout: "not-a-framed-record\n", stderr: frameComposeLog("TAIL") },
-      { secret: "[redacted]TAIL", stdout: frameComposeLog("abcdef123456"), stderr: frameComposeLog("TAIL") },
+      { secret: "[redacted]TAIL", stdout: frameComposeLog(runtime().metadata.ownerKey), stderr: frameComposeLog("TAIL") },
     ];
     for (const scenario of scenarios) {
       const docker = new MockDocker();
@@ -720,15 +728,23 @@ describe("exact Docker cleanup", () => {
     ] });
   });
 
-  test("stack status failures redact internal paths, owner hashes, projects, and image bookkeeping", async () => {
+  test("stack status failures preserve safe evidence while masking exact runtime metadata", async () => {
     const docker = new MockDocker();
-    docker.responses.push(resultWithError(`compose -f /private/tmp/runtime/override.yaml --project-name ccl-secret failed for ${"a".repeat(64)} codex-container-lab:private-image`));
-    const encoded = JSON.stringify(await stackStatus(runtime(), docker));
-    expect(encoded).toContain("[path]");
-    expect(encoded).not.toContain("/private/tmp");
-    expect(encoded).not.toContain("a".repeat(64));
-    expect(encoded).not.toContain("ccl-secret");
-    expect(encoded).not.toContain("private-image");
+    const configured = runtime();
+    configured.config.secretEnvironment = ["REGISTRY_TOKEN"];
+    const secret = "stack-status-secret-8f31";
+    const ownerHash = "b".repeat(64);
+    docker.responses.push(resultWithError(
+      `compose -f /private/tmp/status/override.yaml --project-name ccl-secret failed for ${ownerHash} ${secret} codex-container-lab:private-image`,
+    ));
+    const encoded = JSON.stringify(await stackStatus(configured, docker, { environment: { REGISTRY_TOKEN: secret } }));
+    expect(encoded).toContain("/private/tmp/status/override.yaml");
+    expect(encoded).toContain(ownerHash);
+    expect(encoded).toContain("ccl-secret");
+    expect(encoded).toContain("codex-container-lab:private-image");
+    expect(encoded).toContain("failed");
+    expect(encoded).not.toContain(secret);
+    expect(encoded).not.toContain(configured.metadata.runtimeRoot);
   });
 });
 

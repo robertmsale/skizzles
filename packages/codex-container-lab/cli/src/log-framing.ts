@@ -1,4 +1,3 @@
-import { redactPublicTextWithMetadata } from "./public-output";
 import type { LabMetadata } from "./types";
 
 export type RedactionResult = { text: string; contentRedacted: boolean; incomplete?: boolean };
@@ -19,22 +18,23 @@ export function redactComposeFailureWithMetadata(
   const redacted = redactComposeTextWithMetadata(value, runtime, secretValues);
   // Apply lifecycle segment bounds only in the caller, where the resulting
   // truncation is reflected in its explicit metadata.
-  const publicText = redactPublicTextWithMetadata(
-    redacted.text,
-    Number.MAX_SAFE_INTEGER,
-    Number.MAX_SAFE_INTEGER,
-    { byteCapture: "tail" },
-  );
-  const incomplete = rawIncomplete || secretCrossesFragmentBoundary([publicText.text], secretValues);
+  const incomplete = rawIncomplete || redacted.incomplete === true ||
+    secretCrossesFragmentBoundary([redacted.text], secretValues);
   const result: RedactionResult = {
-    text: incomplete ? "" : publicText.text,
-    contentRedacted: incomplete || redacted.contentRedacted || publicText.contentRedacted,
+    text: incomplete ? "" : redacted.text,
+    contentRedacted: incomplete || redacted.contentRedacted,
   };
   if (incomplete) result.incomplete = true;
   return result;
 }
 
-function redactComposeTextWithMetadata(
+/**
+ * Sanitize Compose diagnostic text without applying category-based public
+ * output censorship. Exact declared secret values and internal runtime
+ * metadata are replaced; ordinary paths, URLs, identifiers, and stack text
+ * remain visible to the owner.
+ */
+export function redactComposeTextWithMetadata(
   value: string,
   runtime: ComposeLogRuntime,
   secretValues: readonly string[],
@@ -64,11 +64,14 @@ function redactComposeTextWithMetadata(
     contentRedacted ||= replacement !== diagnostic;
     diagnostic = replacement;
   }
-  // Compose may print short container ids that are not covered by the public
-  // text redactor's UUID/sha256 rules. They are not useful at this boundary.
-  const idsRedacted = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  contentRedacted ||= idsRedacted !== diagnostic;
-  return { text: idsRedacted, contentRedacted };
+  const normalized = diagnostic.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "�");
+  contentRedacted ||= normalized !== diagnostic;
+  const incomplete = secretValues.some((secret) => secret.length > 0 && normalized.includes(secret));
+  return {
+    text: normalized,
+    contentRedacted,
+    ...(incomplete ? { incomplete: true } : {}),
+  };
 }
 
 function redactComposeLogCapture(
@@ -88,13 +91,8 @@ function redactComposeLogCapture(
   let contentRedacted = false;
   for (const record of parsed.records) {
     const composeRedacted = redactComposeTextWithMetadata(record.text, runtime, secretValues);
-    const publicText = redactPublicTextWithMetadata(
-      composeRedacted.text,
-      Number.MAX_SAFE_INTEGER,
-      Number.MAX_SAFE_INTEGER,
-    );
-    records.push({ timestamp: record.timestamp, text: publicText.text, sequence: record.sequence });
-    contentRedacted ||= composeRedacted.contentRedacted || publicText.contentRedacted;
+    records.push({ timestamp: record.timestamp, text: composeRedacted.text, sequence: record.sequence });
+    contentRedacted ||= composeRedacted.contentRedacted;
   }
   return { records, rawRecords: parsed.records, contentRedacted, valid: true };
 }
@@ -143,8 +141,8 @@ function parseComposeLogRecords(value: string): { records: ComposeLogRecord[]; v
       return { records: [], valid: false };
     } else {
       // Docker records may contain embedded newlines. Keep continuations in
-      // the same record so the conservative path redactor consumes any
-      // ambiguous suffix instead of treating it as a fresh public line.
+      // the same record so framing and fragment-boundary checks see the full
+      // diagnostic record instead of treating it as a fresh public line.
       current.text += `\n${line}`;
     }
     cursor = newline < 0 ? value.length : newline + 1;
@@ -242,6 +240,13 @@ export function redactComposeLogStreams(
     };
   }
   const merged = mergeComposeLogRecords(captures);
+  const normalizedSecret = secretValues.some((secret) => secret.length > 0 && merged.text.includes(secret));
+  if (normalizedSecret) {
+    return {
+      redacted: { text: "", contentRedacted: true, incomplete: true },
+      truncated: true,
+    };
+  }
   const markers = captures.map((capture, index) => {
     if (capture.valid) return undefined;
     const stream = streams[index]!;
