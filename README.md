@@ -51,7 +51,7 @@ After installing the complete plugin surface, Skizzles can safely finish the Cod
 - **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
 - **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for parallel work, and adds tiny role and ownership hints. 🚀
 - **Native instructions** (the default) leave Codex's model instructions untouched.
-- **Skizzles instructions** install a tiny orchestration hint plus four fixed capability-bearing roles from the generated role catalog: Default/Worker use Luna Max, Explorer uses Terra Medium, and Reviewer uses Sol High. Select the generated `agent_type` without separate model overrides, and use a positive numbered fork so Codex applies the selected role instead of inheriting full parent context.
+- **Skizzles instructions** replace Codex's base model instructions with the full Skizzles harness contract and configure four fixed capability-bearing roles from the generated role catalog: Default/Worker use Luna Max, Explorer uses Terra Medium, and Reviewer uses Sol High. Select the generated `agent_type` without separate model overrides, and use a positive numbered fork so Codex applies the selected role instead of inheriting full parent context.
 
 Preview the full developer setup from the checkout:
 

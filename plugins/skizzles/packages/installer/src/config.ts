@@ -68,11 +68,11 @@ export interface ConfigureOptions {
 }
 
 const aggressiveModeHint =
-  "Use subagents when independent work can materially improve speed or quality; keep concurrent write ownership clear.";
+  "Fan out genuinely independent work when it improves speed or quality, keep concurrent write ownership clear, and batch failures and review findings.";
 const rootHint =
-  "Use Default/Worker (Luna Max) for implementation, Explorer (Terra Medium) for read-only investigation, and Reviewer (Sol High) for independent review. Fan out independent work aggressively, batch failures and findings, and obtain one adversarial Review of a frozen coherent candidate before accepting substantial source changes.";
+  "Use Default or Worker (Luna Max) for implementation, Explorer (Terra Medium) for read-only investigation, and Reviewer (Sol High) for independent adversarial review. Obtain one adversarial Review of a frozen coherent candidate before accepting substantial source changes. Validate proportionally, never weaken checks to manufacture green, and distinguish attributable failures from existing repository failures.";
 const subagentHint =
-  "Own the assigned coherent slice through proportionate validation; fan out only genuinely independent work and avoid overlapping writers.";
+  "Complete the assigned coherent slice, preserve unrelated work, and keep concurrent write ownership clear. Own implementation or investigation through proportionate validation, and resolve ordinary in-scope failures instead of stopping early. Fan out only genuinely independent work; do not create overlapping writers or delegate command errands. Return the outcome, changed areas, validation, and remaining risks concisely.";
 
 interface AgentManifest {
   version: 1;

@@ -104,19 +104,48 @@ describe("Codex configuration lifecycle", () => {
     ]);
   });
 
-  test("canonical prompts stay within their context budgets", () => {
+  test("canonical prompts preserve the Codex harness contract", () => {
     const root = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_instructions.md"), "utf8");
     const subagent = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_subagent_instructions.md"), "utf8");
     const wordCount = (contents: string) => (contents.match(/\S+/g) ?? []).length;
 
-    expect(wordCount(root)).toBeLessThanOrEqual(100);
-    expect(wordCount(subagent)).toBeLessThanOrEqual(100);
-    expect(root).toContain("Luna Max");
-    expect(root).toContain("Terra Medium");
-    expect(root).toContain("Sol High");
-    expect(root).toContain("one adversarial Review of a frozen coherent candidate");
-    expect(subagent).toContain("Fan out only genuinely independent work");
-    expect(subagent).toContain("do not create overlapping writers");
+    expect(wordCount(root)).toBeGreaterThan(700);
+    expect(wordCount(root)).toBeLessThanOrEqual(1_200);
+    expect(wordCount(subagent)).toBeGreaterThan(300);
+    expect(wordCount(subagent)).toBeLessThanOrEqual(700);
+
+    for (const contract of [
+      "Own the user's requested outcome",
+      "Working relationship and communication",
+      "Request classification and execution",
+      "If context is compacted",
+      "Read applicable `AGENTS.md`",
+      "never weaken validation to manufacture a green result",
+      "Never overwrite, reset, clean, discard, rewrite history, push, publish, or alter production without exact authority",
+      "Assume the workspace may be shared",
+      "concise evidence-backed handoff",
+    ]) {
+      expect(root).toContain(contract);
+    }
+    for (const contract of [
+      "parent agent's bounded task graph",
+      "preserve unrelated work",
+      "Do not broaden scope or create overlapping ownership",
+      "Own the slice through focused implementation",
+      "keep validation proportional",
+      "Send the parent a concise message when you hit a material blocker",
+      "Report changed areas, resulting behavior, validation",
+    ]) {
+      expect(subagent).toContain(contract);
+    }
+    for (const obsoleteSkill of ["$fourth-wall", "$completion-contract"]) {
+      expect(root).not.toContain(obsoleteSkill);
+      expect(subagent).not.toContain(obsoleteSkill);
+    }
+    for (const roleDetail of ["Luna Max", "Terra Medium", "Sol High"]) {
+      expect(root).not.toContain(roleDetail);
+      expect(subagent).not.toContain(roleDetail);
+    }
   });
 
   test("canonical execution-safety policy permits only verified user-authorized Git surgery", () => {
@@ -220,7 +249,7 @@ describe("Codex configuration lifecycle", () => {
     expect(hints.some((hint) => hint.includes("$fourth-wall"))).toBe(false);
     const rootHintKey = "features.multi_agent_v2.root_agent_usage_hint_text";
     const rootHint = edits.find(({ keyPath }) => keyPath === rootHintKey)?.value as string;
-    expect(rootHint.length).toBeLessThan(400);
+    expect(rootHint.length).toBeLessThan(500);
     expect(rootHint).toContain("Luna Max");
     expect(rootHint).toContain("Terra Medium");
     expect(rootHint).toContain("Sol High");
@@ -228,7 +257,9 @@ describe("Codex configuration lifecycle", () => {
     const nonRootHints = edits
       .filter(({ keyPath }) => keyPath !== rootHintKey && keyPath.endsWith("_hint_text"))
       .map(({ value }) => value as string);
-    expect(nonRootHints.every((hint) => hint.length < 160)).toBe(true);
+    expect(nonRootHints.every((hint) => hint.length < 500)).toBe(true);
+    expect(nonRootHints.some((hint) => hint.includes("Fan out genuinely independent work"))).toBe(true);
+    expect(nonRootHints.some((hint) => hint.includes("Complete the assigned coherent slice"))).toBe(true);
     expect(edits[2]?.value).toBe(14);
   });
 

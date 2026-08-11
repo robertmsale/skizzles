@@ -61,7 +61,7 @@ Ask the user to choose an orchestration mode:
 Also ask whether Codex should keep its native model instructions or use the Skizzles split:
 
 - `native` is the default and does not write instruction or agent-role config.
-- `skizzles` writes the tiny canonical orchestration hint to `model_instructions_file` and configures four fixed roles advertised by `assets/agents/manifest.json`: Default/Worker use Luna Max, Explorer uses Terra Medium, and Reviewer uses Sol High. Generated role files combine one behavioral duty with one durable model/reasoning pair. This mode requires an absolute `--source-root` whose assets remain available after installation.
+- `skizzles` writes the full canonical Skizzles harness contract to `model_instructions_file`, replacing Codex's base model instructions, and configures four fixed roles advertised by `assets/agents/manifest.json`: Default/Worker use Luna Max, Explorer uses Terra Medium, and Reviewer uses Sol High. Generated role files combine one behavioral duty with one durable model/reasoning pair. This mode requires an absolute `--source-root` whose assets remain available after installation.
 
 With the Skizzles split, select the generated `agent_type`, omit independent model/reasoning overrides, and use a positive integer for `fork_turns`. Do not use `fork_turns="none"` or `fork_turns="all"`: context-free and full-history spawning discard the handoff or inherit the parent role, respectively, bypassing selected-role application.
 
