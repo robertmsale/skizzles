@@ -1,17 +1,19 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "PermissionRequest": [
       {
-        "matcher": "Bash",
+        "matcher": "^(Bash|apply_patch)$",
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"${PLUGIN_ROOT}/hooks/manage-command-output.ts\"",
+            "command": "bun \"${PLUGIN_ROOT}/hooks/approve-safe-operations.ts\"",
             "timeout": 3,
-            "statusMessage": "checking command output management"
+            "statusMessage": "checking local development permission policy"
           }
         ]
-      },
+      }
+    ],
+    "PreToolUse": [
       {
         "matcher": "^(spawn_agent|collaborationspawn_agent)$",
         "hooks": [

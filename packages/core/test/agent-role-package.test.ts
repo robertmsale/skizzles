@@ -26,19 +26,15 @@ describe("capability-bearing agent role generation", () => {
     };
 
     expect(manifest.routes).toEqual({});
-    expect(manifest.nativeRoleAliases).toEqual({ explorer: "triage" });
+    expect(manifest.nativeRoleAliases).toEqual({});
     expect(manifest.agents.map(({ agentType, model, reasoningEffort }) => ({ agentType, model, reasoningEffort }))).toEqual([
       { agentType: "default", model: "gpt-5.6-luna", reasoningEffort: "max" },
-      { agentType: "triage", model: "gpt-5.6-terra", reasoningEffort: "medium" },
       { agentType: "worker", model: "gpt-5.6-luna", reasoningEffort: "max" },
-      { agentType: "designer", model: "gpt-5.6-luna", reasoningEffort: "max" },
-      { agentType: "qa", model: "gpt-5.6-luna", reasoningEffort: "max" },
+      { agentType: "explorer", model: "gpt-5.6-terra", reasoningEffort: "medium" },
       { agentType: "review", model: "gpt-5.6-sol", reasoningEffort: "high" },
-      { agentType: "deployment", model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
     ]);
     expect([...files.keys()].sort()).toEqual([
-      "default.toml", "deployment.toml", "designer.toml", "manifest.json",
-      "qa.toml", "review.toml", "triage.toml", "worker.toml",
+      "default.toml", "explorer.toml", "manifest.json", "review.toml", "worker.toml",
     ]);
     expect(files.get("worker.toml")).toContain('model = "gpt-5.6-luna"\nmodel_reasoning_effort = "max"');
   });
@@ -49,7 +45,7 @@ describe("capability-bearing agent role generation", () => {
     roots.push(root);
     await mkdir(join(root, "assets"), { recursive: true });
     const spec = JSON.parse(await Bun.file(join(sourceRoot, "assets", "agent-role-spec.json")).text());
-    spec.nativeRoleAliases.explorer = "missing";
+    spec.nativeRoleAliases.investigator = "missing";
     await writeFile(join(root, "assets", "agent-role-spec.json"), `${JSON.stringify(spec)}\n`);
     await cp(join(sourceRoot, "assets", "agent-role-templates"), join(root, "assets", "agent-role-templates"), { recursive: true });
 
@@ -62,7 +58,7 @@ describe("capability-bearing agent role generation", () => {
     roots.push(root);
     await mkdir(join(root, "assets"), { recursive: true });
     const spec = JSON.parse(await Bun.file(join(sourceRoot, "assets", "agent-role-spec.json")).text());
-    spec.nativeRoleAliases.triage = "triage";
+    spec.nativeRoleAliases.explorer = "worker";
     await writeFile(join(root, "assets", "agent-role-spec.json"), `${JSON.stringify(spec)}\n`);
     await cp(join(sourceRoot, "assets", "agent-role-templates"), join(root, "assets", "agent-role-templates"), { recursive: true });
 
@@ -73,21 +69,18 @@ describe("capability-bearing agent role generation", () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const files = await renderAgentRoles(repoRoot);
 
-    expect(files.get("worker.toml")).toContain("Workers are leaves");
-    expect(files.get("worker.toml")).toContain("unverified claim");
-    expect(files.get("triage.toml")).toContain("product source and durable project configuration read-only");
-    expect(files.get("triage.toml")).toContain("causal chain");
+    expect(files.get("worker.toml")).toContain("Fan out genuinely independent work");
+    expect(files.get("worker.toml")).toContain("do not create overlapping writers");
+    expect(files.get("explorer.toml")).toContain("without modifying product source");
+    expect(files.get("explorer.toml")).toContain("Do not create a formal report unless asked");
     expect(files.get("review.toml")).toContain("Independently and adversarially");
     expect(files.get("review.toml")).toContain("The root retains final acceptance");
-    expect(files.get("qa.toml")).toContain("Do not silently implement fixes");
-    expect(files.get("designer.toml")).toContain("visual proof");
-    expect(files.get("deployment.toml")).toContain("explicit authorization");
 
-    for (const role of ["default", "triage", "worker", "designer", "qa", "review", "deployment"]) {
+    for (const role of ["default", "worker", "explorer", "review"]) {
       const config = Bun.TOML.parse(files.get(`${role}.toml`)!) as { developer_instructions?: unknown };
       expect(typeof config.developer_instructions).toBe("string");
       const words = (config.developer_instructions as string).match(/\S+/g) ?? [];
-      expect(words.length).toBeLessThanOrEqual(role === "deployment" ? 250 : 200);
+      expect(words.length).toBeLessThanOrEqual(200);
     }
   });
 

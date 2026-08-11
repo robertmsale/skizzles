@@ -1,9 +1,7 @@
 {
   "version": 1,
   "routes": {},
-  "nativeRoleAliases": {
-    "explorer": "triage"
-  },
+  "nativeRoleAliases": {},
   "agents": [
     {
       "agentType": "default",
@@ -15,40 +13,22 @@
       "configFile": "default.toml"
     },
     {
-      "agentType": "triage",
-      "behavior": "triage",
-      "capability": "terra_medium",
-      "model": "gpt-5.6-terra",
-      "reasoningEffort": "medium",
-      "description": "Evidence-first diagnosis, runtime reproduction, and implementation-path mapping. Default capability: gpt-5.6-terra at medium effort.",
-      "configFile": "triage.toml"
-    },
-    {
       "agentType": "worker",
       "behavior": "worker",
       "capability": "luna_max",
       "model": "gpt-5.6-luna",
       "reasoningEffort": "max",
-      "description": "Bounded implementation ownership through focused validation and evidence. Default capability: gpt-5.6-luna at max effort.",
+      "description": "Implementation ownership through focused validation and evidence. Default capability: gpt-5.6-luna at max effort.",
       "configFile": "worker.toml"
     },
     {
-      "agentType": "designer",
-      "behavior": "designer",
-      "capability": "luna_max",
-      "model": "gpt-5.6-luna",
-      "reasoningEffort": "max",
-      "description": "Frontend and product UI implementation with visual and accessibility proof. Default capability: gpt-5.6-luna at max effort.",
-      "configFile": "designer.toml"
-    },
-    {
-      "agentType": "qa",
-      "behavior": "qa",
-      "capability": "luna_max",
-      "model": "gpt-5.6-luna",
-      "reasoningEffort": "max",
-      "description": "Runtime piloting and evidence-rich product verification without silent fixes. Default capability: gpt-5.6-luna at max effort.",
-      "configFile": "qa.toml"
+      "agentType": "explorer",
+      "behavior": "explorer",
+      "capability": "terra_medium",
+      "model": "gpt-5.6-terra",
+      "reasoningEffort": "medium",
+      "description": "Read-only investigation, runtime reproduction, and implementation-path mapping. Default capability: gpt-5.6-terra at medium effort.",
+      "configFile": "explorer.toml"
     },
     {
       "agentType": "review",
@@ -58,15 +38,6 @@
       "reasoningEffort": "high",
       "description": "Independent adversarial review, verification, and acceptance assessment. Default capability: gpt-5.6-sol at high effort.",
       "configFile": "review.toml"
-    },
-    {
-      "agentType": "deployment",
-      "behavior": "deployment",
-      "capability": "sol_xhigh",
-      "model": "gpt-5.6-sol",
-      "reasoningEffort": "xhigh",
-      "description": "Authorized deployment and production-adjacent procedures with rollback discipline. Default capability: gpt-5.6-sol at xhigh effort.",
-      "configFile": "deployment.toml"
     }
   ]
 }

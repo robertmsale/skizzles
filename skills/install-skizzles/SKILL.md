@@ -11,7 +11,7 @@ Keep installation deliberate and reversible. Never mutate a live Codex home, plu
 
 - Use plain-skill mode when the user only wants skills. It manages selected directories below an explicit `CODEX_HOME/skills` and never activates hooks or runtime helpers.
 - Use full-harness mode only when the user wants the generated Skizzles plugin and accepts that its hooks may become available through the target marketplace.
-- After the complete plugin surface is installed, choose `passive` orchestration to enable hooks without overriding Codex's native MultiAgentV2 defaults, or `aggressive` orchestration to activate proactive Fourth Wall routing.
+- After the complete plugin surface is installed, choose `passive` orchestration to enable hooks without overriding Codex's native MultiAgentV2 defaults, or `aggressive` orchestration to activate proactive lean fan-out.
 - Use `link` for a trusted local checkout that should hot-reload source updates. Use `copy` for an isolated snapshot.
 - Prefer a versioned release checkout for stable use. Treat `plugins/skizzles` as generated output and build it before a full-harness install.
 
@@ -56,14 +56,14 @@ Only run this lifecycle after the complete plugin surface—and therefore its pa
 Ask the user to choose an orchestration mode:
 
 - `passive` writes only `features.hooks = true`. It does not write any MultiAgentV2 setting or hint, so Codex retains its model-specific native defaults.
-- `aggressive` also enables MultiAgentV2, sets `max_concurrent_threads_per_session = 14`, adds one concise proactive mode hint, and gives roots and subagents short pointers to `$fourth-wall`. Fourteen is a ceiling for bounded parallel ownership, not a target. Use this only when the user wants autonomous quality-and-speed delegation.
+- `aggressive` also enables MultiAgentV2, sets `max_concurrent_threads_per_session = 14`, and adds concise role, fan-out, ownership, and terminal-Review hints. Fourteen is capacity, not a target.
 
 Also ask whether Codex should keep its native model instructions or use the Skizzles split:
 
 - `native` is the default and does not write instruction or agent-role config.
-- `skizzles` writes the canonical root prompt to `model_instructions_file` and configures the seven fixed native roles advertised by `assets/agents/manifest.json`. Generated role files combine one behavioral duty with one durable model/reasoning pair, share `skizzles_subagent_instructions.md`, and add duty-specific `developer_instructions`. This mode requires an absolute `--source-root` whose assets remain available after installation.
+- `skizzles` writes the tiny canonical orchestration hint to `model_instructions_file` and configures four fixed roles advertised by `assets/agents/manifest.json`: Default/Worker use Luna Max, Explorer uses Terra Medium, and Reviewer uses Sol High. Generated role files combine one behavioral duty with one durable model/reasoning pair. This mode requires an absolute `--source-root` whose assets remain available after installation.
 
-With the Skizzles split, select the generated `agent_type`, omit independent model/reasoning overrides, and use the smallest useful positive integer for `fork_turns`. A positive integer larger than the available history retains all available turns without becoming full-history mode. Do not use `fork_turns="none"` or `fork_turns="all"`: context-free and full-history spawning discard the bounded role handoff or inherit the parent role, respectively, bypassing selected-role application.
+With the Skizzles split, select the generated `agent_type`, omit independent model/reasoning overrides, and use a positive integer for `fork_turns`. Do not use `fork_turns="none"` or `fork_turns="all"`: context-free and full-history spawning discard the handoff or inherit the parent role, respectively, bypassing selected-role application.
 
 Preview against an explicit `CODEX_HOME` and absolute Codex binary:
 
@@ -90,18 +90,6 @@ Repeat restoration without `--dry-run` only after previewing it. The lifecycle l
 Configuration upgrades are an explicit restore-and-reapply lifecycle because `configure` refuses to overwrite an active receipt. Preview `unconfigure` with the absolute Codex binary recorded in the receipt, run it only when the owned values are drift-free, preview the new `configure`, then apply it. Do not delete or rewrite the receipt by hand; that discards the exact restoration boundary Skizzles uses to preserve unrelated config.
 
 Maintainers edit `assets/agent-role-spec.json` for model/reasoning pairs and `assets/agent-role-templates/*.toml` for behavioral duties. Run `bun run agents:build` to regenerate `assets/agents/`, and `bun run agents:check` to detect drift. Never hand-edit generated role TOML or its manifest.
-
-## Optionally configure a learning consumer
-
-Fourth Wall maintains a bounded latest campaign-close snapshot under `/tmp/skizzles-orchestration/<campaign-id>/learning/campaign-close.md` and emits immutable revisioned forwarding artifacts under that campaign's `learning/forwarded/` directory. This is evidence, not an automatic harness change. If the user explicitly wants harness learning forwarded, guide them to:
-
-1. Choose an existing local project whose owner can evaluate orchestration behavior. A versioned checkout of the official OpenAI Codex repository is a useful recommendation when the consumer must inspect harness implementation, but it is never a prerequisite.
-2. Choose a stable consumer naming or epoch convention and record the routing in machine-local instructions (for example, `AGENTS.md`) by an explicit user action.
-3. Forward only the new immutable revisioned artifact or its path after the user confirms the unique consumer and destination. Never forward the mutable latest snapshot. If later evidence reopens the campaign, preserve the prior artifact and forward a new revision that identifies what it supersedes and summarizes the correction.
-
-Private campaign observations never belong in the source checkout or generated plugin. If an owner explicitly wants durable local curation, they may manually create `CODEX_HOME/.skizzles/learning/` with mode `0700` and `learning-log.md` with mode `0600`. That user-owned record is outside installation receipts and transfer targets; do not create, copy, package, or add it to Git on the user's behalf.
-
-The installer must not clone or modify a repository, edit `AGENTS.md`, create or message tasks, or guess when a consumer is absent or ambiguous. Report the packet to the human owner instead. Consumer review may propose changes, but promotion into Skizzles skills, roles, routing, hooks, configuration, or installs always requires separate owner deliberation.
 
 ## Use Container Lab deliberately
 

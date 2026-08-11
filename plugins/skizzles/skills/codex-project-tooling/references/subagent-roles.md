@@ -32,9 +32,9 @@ When `features.multi_agent_v2` is enabled, `agents.max_threads` cannot be set. U
 Declare roles under `[agents.<role>]`:
 
 ```toml
-[agents.triage]
-description = "Use for mapping the current codebase shape to the desired outcome before implementation. Triage agents inspect, summarize, and recommend a small execution plan; they should not make broad edits."
-config_file = ".codex/agents/triage.toml"
+[agents.explorer]
+description = "Use for mapping the current codebase shape to the desired outcome before implementation. Explorers inspect, summarize, and recommend an execution path without modifying product source."
+config_file = ".codex/agents/explorer.toml"
 nickname_candidates = ["Scout", "Mapper", "Surveyor"]
 ```
 
@@ -49,7 +49,7 @@ Fields:
 Codex also discovers role files under `.codex/agents/**/*.toml`. This is usually the cleanest project-local form:
 
 ```toml
-name = "reviewer"
+name = "review"
 description = "Use for adversarial review of completed changes. Reviewers inspect diffs, validation proof, missed requirements, security risks, dead code, and tombstones; they report findings to the orchestrator instead of editing by default."
 nickname_candidates = ["Auditor", "Verifier", "Crosscheck"]
 
@@ -96,11 +96,11 @@ Prefer small, correct, maintainable changes with targeted validation.
 """
 ```
 
-Triage:
+Explorer:
 
 ```toml
-name = "triage"
-description = "Use for exploration before implementation. Triage maps current codebase shape to desired outcome, identifies constraints, and proposes the smallest useful implementation slice."
+name = "explorer"
+description = "Use for read-only exploration before implementation. Explorer maps current codebase shape to desired outcome, identifies constraints, and proposes an execution path."
 
 developer_instructions = """
 Explore first and summarize what exists, what must change, risks, and recommended next steps.
@@ -108,34 +108,10 @@ Prefer code references and concrete findings. Do not make implementation edits u
 """
 ```
 
-Designer:
-
-```toml
-name = "designer"
-description = "Use for frontend or product UI implementation. Designers produce polished interfaces, shared components, responsive layouts, and screenshot-backed visual proof."
-
-developer_instructions = """
-Implement frontend work with strong visual quality and maintainable component structure.
-Use existing design conventions where present. Validate with screenshots or simulator/browser proof when possible.
-"""
-```
-
-QA:
-
-```toml
-name = "qa"
-description = "Use for product validation in a browser, simulator, or local app. QA agents find blockers, reproduce issues, and provide visual or command evidence."
-
-developer_instructions = """
-Pilot the application like a user. Focus on product blockers, regressions, broken flows, layout issues, and missing validation proof.
-Report clear reproduction steps and evidence. Avoid broad code edits unless asked.
-"""
-```
-
 Reviewer:
 
 ```toml
-name = "reviewer"
+name = "review"
 description = "Use for adversarial review of proposed or completed changes. Reviewers check compile/test proof, missed requirements, security risks, regressions, dead code, and refactor tombstones."
 
 developer_instructions = """
@@ -144,22 +120,10 @@ Check whether relevant project skills or requirements were followed. Treat missi
 """
 ```
 
-Deployment:
-
-```toml
-name = "deployment"
-description = "Use for careful release, deploy, and production operations. Deployment agents use high discretion, preserve auditability, and stop when credentials or irreversible actions need user confirmation."
-
-developer_instructions = """
-Handle deployment work conservatively. Prefer dry runs and status checks before irreversible actions.
-Never expose secrets. Do not push, publish, migrate production, or destroy resources unless explicitly instructed and validated.
-"""
-```
-
 ## Authoring Guidance
 
 - Put operational rules in `developer_instructions`, not only in the description.
 - Keep descriptions short enough to scan in spawn tool guidance.
-- Use `max_depth = 1` when subagents should not spawn more subagents.
+- Keep write ownership disjoint when nested fan-out is enabled.
 - Give the parent guidance in role descriptions and the child guidance in role config.
 - Prefer role-specific permissions only when the role truly needs different safety boundaries.

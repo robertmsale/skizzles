@@ -7106,48 +7106,6 @@ function collect(state, chunk, cap) {
   state.bytes += chunk.byteLength;
 }
 
-// packages/codex-container-lab/cli/src/public-output.ts
-function redactPublicTextWithMetadata(value, maxBytes = 2000, maxLines = 8, options = {}) {
-  let contentRedacted = false;
-  const controlsRedacted = value.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
-  contentRedacted ||= controlsRedacted !== value;
-  const quotedAndTagsRedacted = controlsRedacted.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
-  contentRedacted ||= quotedAndTagsRedacted !== controlsRedacted;
-  const unquotedPathStart = quotedAndTagsRedacted.search(/(?:\b[A-Za-z]:[\\/]|\\\\|\/)/);
-  const pathsRedacted = unquotedPathStart < 0 ? quotedAndTagsRedacted : `${quotedAndTagsRedacted.slice(0, unquotedPathStart)}[path]`;
-  contentRedacted ||= pathsRedacted !== quotedAndTagsRedacted;
-  const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]");
-  contentRedacted ||= redacted !== pathsRedacted;
-  const bounded = redacted.split(`
-`).slice(-maxLines).join(`
-`);
-  return {
-    text: truncateUtf8(bounded, maxBytes, options.byteCapture ?? "head"),
-    contentRedacted
-  };
-}
-function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
-  return redactPublicTextWithMetadata(value, maxBytes, maxLines, options).text;
-}
-function truncateUtf8(value, maxBytes, policy) {
-  if (policy === "tail") {
-    const bytes2 = Buffer.from(value);
-    if (bytes2.byteLength <= maxBytes)
-      return value;
-    return bytes2.subarray(bytes2.byteLength - maxBytes).toString("utf8").replace(/^\uFFFD/, "");
-  }
-  let bytes = 0;
-  let output = "";
-  for (const character of value) {
-    const size = Buffer.byteLength(character);
-    if (bytes + size > maxBytes)
-      return `${output}\u2026`;
-    output += character;
-    bytes += size;
-  }
-  return output;
-}
-
 // packages/codex-container-lab/cli/src/docker.ts
 var defaultDockerRunner = {
   run: async (args, options = {}) => await runCommand("docker", args, options),
@@ -7606,6 +7564,48 @@ async function writeJsonAtomic(file, value) {
   await writeFile2(temporary, `${JSON.stringify(value)}
 `, { mode: 384 });
   await rename(temporary, file);
+}
+
+// packages/codex-container-lab/cli/src/public-output.ts
+function redactPublicTextWithMetadata(value, maxBytes = 2000, maxLines = 8, options = {}) {
+  let contentRedacted = false;
+  const controlsRedacted = value.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
+  contentRedacted ||= controlsRedacted !== value;
+  const quotedAndTagsRedacted = controlsRedacted.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
+  contentRedacted ||= quotedAndTagsRedacted !== controlsRedacted;
+  const unquotedPathStart = quotedAndTagsRedacted.search(/(?:\b[A-Za-z]:[\\/]|\\\\|\/)/);
+  const pathsRedacted = unquotedPathStart < 0 ? quotedAndTagsRedacted : `${quotedAndTagsRedacted.slice(0, unquotedPathStart)}[path]`;
+  contentRedacted ||= pathsRedacted !== quotedAndTagsRedacted;
+  const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]");
+  contentRedacted ||= redacted !== pathsRedacted;
+  const bounded = redacted.split(`
+`).slice(-maxLines).join(`
+`);
+  return {
+    text: truncateUtf8(bounded, maxBytes, options.byteCapture ?? "head"),
+    contentRedacted
+  };
+}
+function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
+  return redactPublicTextWithMetadata(value, maxBytes, maxLines, options).text;
+}
+function truncateUtf8(value, maxBytes, policy) {
+  if (policy === "tail") {
+    const bytes2 = Buffer.from(value);
+    if (bytes2.byteLength <= maxBytes)
+      return value;
+    return bytes2.subarray(bytes2.byteLength - maxBytes).toString("utf8").replace(/^\uFFFD/, "");
+  }
+  let bytes = 0;
+  let output = "";
+  for (const character of value) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > maxBytes)
+      return `${output}\u2026`;
+    output += character;
+    bytes += size;
+  }
+  return output;
 }
 
 // packages/codex-container-lab/cli/src/state.ts

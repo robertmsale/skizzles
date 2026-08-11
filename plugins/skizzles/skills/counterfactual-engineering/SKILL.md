@@ -32,7 +32,7 @@ Verify that isolation includes mutable dependencies, not only source files. Shar
 
 ## Bug investigations
 
-Make triage produce a compact hypothesis set instead of only the most plausible explanation. Each serious hypothesis should include:
+Have an Explorer produce a compact hypothesis set instead of only the most plausible explanation. Each serious hypothesis should include:
 
 - the proposed causal mechanism;
 - evidence it explains;
@@ -40,7 +40,7 @@ Make triage produce a compact hypothesis set instead of only the most plausible 
 - the smallest experiment that distinguishes it;
 - the regression oracle a durable fix must satisfy.
 
-Use independent workers when parallelism materially helps; otherwise one worker may explore multiple isolated workspaces. Give each worker complete ownership of its hypothesis loop. Let the root own selection and integration, then use QA and adversarial review on the integrated result instead of relying on repeated worker-review repair loops to discover alternate causes.
+Use independent Workers when parallelism materially helps; otherwise one Worker may explore multiple isolated workspaces. Give each Worker complete ownership of its hypothesis loop. Let the root own selection and integration, then use runtime proof and one adversarial Review on the integrated result instead of relying on repeated Worker-Review repair loops to discover alternate causes.
 
 If review exposes a materially different causal model, reopen hypothesis exploration rather than repeatedly patching the same approach.
 

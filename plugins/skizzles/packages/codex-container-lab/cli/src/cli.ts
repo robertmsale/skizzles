@@ -7659,57 +7659,14 @@ function collect(state, chunk, cap) {
   state.bytes += chunk.byteLength;
 }
 
-// packages/codex-container-lab/cli/src/public-output.ts
-function redactPublicTextWithMetadata(value, maxBytes = 2000, maxLines = 8, options = {}) {
-  let contentRedacted = false;
-  const controlsRedacted = value.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
-  contentRedacted ||= controlsRedacted !== value;
-  const quotedAndTagsRedacted = controlsRedacted.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
-  contentRedacted ||= quotedAndTagsRedacted !== controlsRedacted;
-  const unquotedPathStart = quotedAndTagsRedacted.search(/(?:\b[A-Za-z]:[\\/]|\\\\|\/)/);
-  const pathsRedacted = unquotedPathStart < 0 ? quotedAndTagsRedacted : `${quotedAndTagsRedacted.slice(0, unquotedPathStart)}[path]`;
-  contentRedacted ||= pathsRedacted !== quotedAndTagsRedacted;
-  const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]");
-  contentRedacted ||= redacted !== pathsRedacted;
-  const bounded = redacted.split(`
-`).slice(-maxLines).join(`
-`);
-  return {
-    text: truncateUtf8(bounded, maxBytes, options.byteCapture ?? "head"),
-    contentRedacted
-  };
-}
-function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
-  return redactPublicTextWithMetadata(value, maxBytes, maxLines, options).text;
-}
-function truncateUtf8(value, maxBytes, policy) {
-  if (policy === "tail") {
-    const bytes2 = Buffer.from(value);
-    if (bytes2.byteLength <= maxBytes)
-      return value;
-    return bytes2.subarray(bytes2.byteLength - maxBytes).toString("utf8").replace(/^\uFFFD/, "");
-  }
-  let bytes = 0;
-  let output = "";
-  for (const character of value) {
-    const size = Buffer.byteLength(character);
-    if (bytes + size > maxBytes)
-      return `${output}\u2026`;
-    output += character;
-    bytes += size;
-  }
-  return output;
-}
-
 // packages/codex-container-lab/cli/src/log-framing.ts
 function redactComposeFailureWithMetadata(value, runtime, secretValues, fragments = [value]) {
   const rawIncomplete = secretValues.some((secret) => /[\r\n]/.test(secret)) || secretCrossesFragmentBoundary(fragments, secretValues);
   const redacted = redactComposeTextWithMetadata(value, runtime, secretValues);
-  const publicText = redactPublicTextWithMetadata(redacted.text, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, { byteCapture: "tail" });
-  const incomplete = rawIncomplete || secretCrossesFragmentBoundary([publicText.text], secretValues);
+  const incomplete = rawIncomplete || redacted.incomplete === true || secretCrossesFragmentBoundary([redacted.text], secretValues);
   const result = {
-    text: incomplete ? "" : publicText.text,
-    contentRedacted: incomplete || redacted.contentRedacted || publicText.contentRedacted
+    text: incomplete ? "" : redacted.text,
+    contentRedacted: incomplete || redacted.contentRedacted
   };
   if (incomplete)
     result.incomplete = true;
@@ -7743,9 +7700,14 @@ function redactComposeTextWithMetadata(value, runtime, secretValues) {
     contentRedacted ||= replacement !== diagnostic;
     diagnostic = replacement;
   }
-  const idsRedacted = diagnostic.replace(/\b[0-9a-f]{12,64}\b/gi, "[redacted]");
-  contentRedacted ||= idsRedacted !== diagnostic;
-  return { text: idsRedacted, contentRedacted };
+  const normalized = diagnostic.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
+  contentRedacted ||= normalized !== diagnostic;
+  const incomplete = secretValues.some((secret) => secret.length > 0 && normalized.includes(secret));
+  return {
+    text: normalized,
+    contentRedacted,
+    ...incomplete ? { incomplete: true } : {}
+  };
 }
 function redactComposeLogCapture(value, runtime, secretValues) {
   if (secretValues.some((secret) => /[\r\n]/.test(secret))) {
@@ -7759,9 +7721,8 @@ function redactComposeLogCapture(value, runtime, secretValues) {
   let contentRedacted = false;
   for (const record of parsed.records) {
     const composeRedacted = redactComposeTextWithMetadata(record.text, runtime, secretValues);
-    const publicText = redactPublicTextWithMetadata(composeRedacted.text, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
-    records.push({ timestamp: record.timestamp, text: publicText.text, sequence: record.sequence });
-    contentRedacted ||= composeRedacted.contentRedacted || publicText.contentRedacted;
+    records.push({ timestamp: record.timestamp, text: composeRedacted.text, sequence: record.sequence });
+    contentRedacted ||= composeRedacted.contentRedacted;
   }
   return { records, rawRecords: parsed.records, contentRedacted, valid: true };
 }
@@ -7872,6 +7833,13 @@ function redactComposeLogStreams(streams, resultCode, runtime, secretValues) {
     };
   }
   const merged = mergeComposeLogRecords(captures);
+  const normalizedSecret = secretValues.some((secret) => secret.length > 0 && merged.text.includes(secret));
+  if (normalizedSecret) {
+    return {
+      redacted: { text: "", contentRedacted: true, incomplete: true },
+      truncated: true
+    };
+  }
   const markers = captures.map((capture, index) => {
     if (capture.valid)
       return;
@@ -8061,7 +8029,12 @@ async function listStackServiceSummaries(runtime, runner, environment, all = tru
     return { available: false, services: [], serviceCount: 0, error: "Docker returned an unavailable status response" };
   }
   if (result.code !== 0) {
-    return { available: false, services: [], serviceCount: 0, error: compactError(result.stderr.toString()) };
+    return {
+      available: false,
+      services: [],
+      serviceCount: 0,
+      error: compactError(result.stderr.toString(), runtime, environment)
+    };
   }
   const raw = result.stdout.toString().trim();
   if (!raw)
@@ -8205,7 +8178,7 @@ async function captureFailedServiceLogs(runtime, service, tailLines, segmentByte
 function buildDiagnosticSegment(label, maxLines, maxBytes, upstreamTruncated, redacted, secretValues) {
   const header = `--- ${label} ---`;
   const body = boundedLogTail(redacted.text, Math.max(0, maxLines - 1), Math.max(0, maxBytes - Buffer.byteLength(header) - 1));
-  const privacyFailure = bodyContainsSecret(body.text, header, secretValues);
+  const privacyFailure = redacted.incomplete === true || bodyContainsSecret(body.text, header, secretValues);
   const text = body.text ? `${header}
 ${body.text}` : header;
   return {
@@ -8571,8 +8544,17 @@ function runtimeFromLab(metadata) {
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
-function compactError(value) {
-  return redactPublicText(value.trim(), 2000, 6);
+function compactError(value, runtime, environment) {
+  const redacted = redactComposeFailureWithMetadata(value.trim(), runtime, declaredSecretValues(runtime, environment ?? process.env));
+  if (redacted.incomplete)
+    return "";
+  const bounded = redacted.text.split(`
+`).slice(-6).join(`
+`);
+  const bytes = Buffer.from(bounded);
+  if (bytes.byteLength <= 2000)
+    return bounded;
+  return bytes.subarray(bytes.byteLength - 2000).toString("utf8").replace(/^\uFFFD/, "");
 }
 function secretComposeEnvironment(names, environment) {
   const result = scrubSecretEnvironment(names, environment);
@@ -8893,6 +8875,48 @@ function probeProcess(pid) {
 }
 function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// packages/codex-container-lab/cli/src/public-output.ts
+function redactPublicTextWithMetadata(value, maxBytes = 2000, maxLines = 8, options = {}) {
+  let contentRedacted = false;
+  const controlsRedacted = value.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
+  contentRedacted ||= controlsRedacted !== value;
+  const quotedAndTagsRedacted = controlsRedacted.replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\)(?:\\.|(?!\1)[^\\])*?\1/g, "[path]").replace(/(["'])\/(?:\\.|(?!\1)[^\\\n])*?\1/g, "[path]");
+  contentRedacted ||= quotedAndTagsRedacted !== controlsRedacted;
+  const unquotedPathStart = quotedAndTagsRedacted.search(/(?:\b[A-Za-z]:[\\/]|\\\\|\/)/);
+  const pathsRedacted = unquotedPathStart < 0 ? quotedAndTagsRedacted : `${quotedAndTagsRedacted.slice(0, unquotedPathStart)}[path]`;
+  contentRedacted ||= pathsRedacted !== quotedAndTagsRedacted;
+  const redacted = pathsRedacted.replace(/\b[a-f0-9]{64}\b/gi, "[redacted]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, "[redacted]").replace(/\bcodex-container-lab:[A-Za-z0-9._-]+\b/g, "[redacted]").replace(/\bccl-[a-z0-9][a-z0-9-]*\b/gi, "[redacted]").replace(/io\.openai\.codex-container-lab\.owner=\S+/gi, "io.openai.codex-container-lab.owner=[redacted]").replace(/(?:ownerKey|runtimeRoot|stateRoot|composeArgs|managedImage)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "[redacted]");
+  contentRedacted ||= redacted !== pathsRedacted;
+  const bounded = redacted.split(`
+`).slice(-maxLines).join(`
+`);
+  return {
+    text: truncateUtf8(bounded, maxBytes, options.byteCapture ?? "head"),
+    contentRedacted
+  };
+}
+function redactPublicText(value, maxBytes = 2000, maxLines = 8, options = {}) {
+  return redactPublicTextWithMetadata(value, maxBytes, maxLines, options).text;
+}
+function truncateUtf8(value, maxBytes, policy) {
+  if (policy === "tail") {
+    const bytes2 = Buffer.from(value);
+    if (bytes2.byteLength <= maxBytes)
+      return value;
+    return bytes2.subarray(bytes2.byteLength - maxBytes).toString("utf8").replace(/^\uFFFD/, "");
+  }
+  let bytes = 0;
+  let output = "";
+  for (const character of value) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > maxBytes)
+      return `${output}\u2026`;
+    output += character;
+    bytes += size;
+  }
+  return output;
 }
 
 // packages/codex-container-lab/cli/src/state.ts
@@ -9800,7 +9824,7 @@ class ContainerLabService {
   async labStatus(id) {
     await this.reconcileOwner();
     const lab = await readLab(this.roots, this.owner, id);
-    return compactLabStatus(lab, lab.state === "ready" && lab.runtime ? await stackStatus(runtimeFromLab(lab), this.docker) : undefined);
+    return compactLabStatus(lab, lab.state === "ready" && lab.runtime ? await stackStatus(runtimeFromLab(lab), this.docker, { environment: this.environment }) : undefined);
   }
   async diagnostic(id) {
     await this.reconcileOwner();
@@ -9823,9 +9847,9 @@ class ContainerLabService {
       throw new Error("terminal provisioning diagnostic is unavailable");
     }
     const stored = await readFile5(path3, "utf8");
-    if (Buffer.byteLength(stored) > 8 * 1024)
+    const text = stored.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
+    if (Buffer.byteLength(text) > 8 * 1024)
       throw new Error("terminal provisioning diagnostic is unavailable");
-    const text = redactPublicText(stored.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "\uFFFD"), 8 * 1024, 500);
     const lines = text ? text.split(`
 `).length : 0;
     if (lines > 500)

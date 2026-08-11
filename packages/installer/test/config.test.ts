@@ -82,7 +82,7 @@ function factory(rpc: FakeRpc) {
   return async () => rpc;
 }
 
-function writeInstructionFixture(sourceRoot: string, nativeRoleAliases: Record<string, string> = { explorer: "triage" }): void {
+function writeInstructionFixture(sourceRoot: string, nativeRoleAliases: Record<string, string> = {}): void {
   mkdirSync(join(sourceRoot, "assets", "agents"), { recursive: true });
   for (const file of ["skizzles_instructions.md", "skizzles_subagent_instructions.md"]) {
     writeFileSync(join(sourceRoot, "assets", file), file);
@@ -90,7 +90,8 @@ function writeInstructionFixture(sourceRoot: string, nativeRoleAliases: Record<s
   const agents = [
     { agentType: "default", description: "Fixture default", configFile: "default.toml" },
     { agentType: "worker", description: "Fixture worker", configFile: "worker.toml" },
-    { agentType: "triage", description: "Fixture triage", configFile: "triage.toml" },
+    { agentType: "explorer", description: "Fixture explorer", configFile: "explorer.toml" },
+    { agentType: "review", description: "Fixture review", configFile: "review.toml" },
   ];
   for (const agent of agents) writeFileSync(join(sourceRoot, "assets", "agents", agent.configFile), agent.agentType);
   writeFileSync(join(sourceRoot, "assets", "agents", "manifest.json"), JSON.stringify({ version: 1, nativeRoleAliases, agents }));
@@ -108,31 +109,18 @@ describe("Codex configuration lifecycle", () => {
     const subagent = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_subagent_instructions.md"), "utf8");
     const wordCount = (contents: string) => (contents.match(/\S+/g) ?? []).length;
 
-    expect(wordCount(root)).toBeLessThanOrEqual(1200);
-    expect(wordCount(subagent)).toBeLessThanOrEqual(600);
-    expect(root).toContain("Source-changing campaigns require independent Review of a frozen candidate before acceptance.");
-    expect(root).toContain("If context is compacted, continue from the resulting summary");
-    expect(root).toContain("For monitoring or waiting, use the native wait or monitoring primitive");
-    expect(root).toContain("preserve generated artifacts through their canonical source and generator");
-    expect(subagent).toContain("The parent owns the user relationship");
-    expect(subagent).toContain("You are a leaf: do not spawn");
-    expect(subagent).toContain("Own the slice through focused implementation");
-    expect(subagent).toContain("Send the parent a concise message");
+    expect(wordCount(root)).toBeLessThanOrEqual(100);
+    expect(wordCount(subagent)).toBeLessThanOrEqual(100);
+    expect(root).toContain("Luna Max");
+    expect(root).toContain("Terra Medium");
+    expect(root).toContain("Sol High");
+    expect(root).toContain("one adversarial Review of a frozen coherent candidate");
+    expect(subagent).toContain("Fan out only genuinely independent work");
+    expect(subagent).toContain("do not create overlapping writers");
   });
 
   test("canonical execution-safety policy permits only verified user-authorized Git surgery", () => {
     const policy = readFileSync(resolve(import.meta.dir, "../../../assets/auto_review_policy.md"), "utf8");
-    const root = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_instructions.md"), "utf8");
-    const subagent = readFileSync(resolve(import.meta.dir, "../../../assets/skizzles_subagent_instructions.md"), "utf8");
-    const coordination = readFileSync(
-      resolve(import.meta.dir, "../../../skills/fourth-wall/references/coordination-loop.md"),
-      "utf8",
-    );
-    const fourthWall = readFileSync(resolve(import.meta.dir, "../../../skills/fourth-wall/SKILL.md"), "utf8");
-    const delegation = readFileSync(
-      resolve(import.meta.dir, "../../../skills/fourth-wall/references/delegation-contract.md"),
-      "utf8",
-    );
 
     expect(policy).toContain("Explicit current-task user authority");
     for (const operation of ["rebase", "cherry-pick", "reset", "exact-path restore", "branch or ref deletion", "force-push"]) {
@@ -165,36 +153,14 @@ describe("Codex configuration lifecycle", () => {
       expect(policy).toContain(allowedShape);
     }
 
-    expect(root).toContain("do not substitute additive re-expression merely because the authorized operation changes history");
-    expect(subagent).toContain("delegates one scoped Git action to you as the named serialized owner");
-    expect(fourthWall).toContain("never by an automatic merge or rebase");
-    expect(fourthWall).toContain("An exact user-authorized serialized integration may use its approved Git operation");
-    expect(fourthWall).toContain("An exact current-task user authorization may permit one named serialized owner");
-    expect(fourthWall).toContain("Git integration stays with the root by default");
-    expect(fourthWall).toContain("acceptance always remains with the root");
-    expect(coordination).toContain("an exact authorized history operation must not be rejected or replaced with additive patch re-expression");
-    expect(coordination).toContain("never an automatic merge/rebase");
-    expect(coordination).toContain("explicitly user-authorized, serialized integration");
-    expect(coordination).toContain("By default, the root retains Git mutations; the exact-authority exception above");
-    expect(delegation).toContain("Keep final acceptance and, by default, shared Git mutations at the root");
-    expect(delegation).toContain("Exact current-task user authority may delegate one scoped Git operation");
-
-    for (const contradictoryRule of [
-      "The root retains Git mutations,",
-      "The root retains Git mutations;",
-      "The root retains Git mutations and acceptance.",
-      "The root owns Git integration, task-graph shape",
-      "Keep shared Git mutations and final acceptance at the root.",
-    ]) {
-      expect(`${fourthWall}\n${coordination}\n${delegation}`).not.toContain(contradictoryRule);
-    }
+    expect(policy).toContain("Ensure the exact command remains within ordinary tool approval");
   });
 
   test("Skizzles instructions configure fixed capability-bearing generated roles", () => {
     const agents = {
       default: { description: "Default Luna", configFile: "/skizzles/assets/agents/default.toml" },
       worker: { description: "Worker Luna xhigh", configFile: "/skizzles/assets/agents/worker.toml" },
-      triage: { description: "Triage Terra", configFile: "/skizzles/assets/agents/triage.toml" },
+      explorer: { description: "Explorer Terra", configFile: "/skizzles/assets/agents/explorer.toml" },
     };
     const edits = desiredConfigEdits("passive", {
       sourceRoot: "/skizzles",
@@ -224,7 +190,7 @@ describe("Codex configuration lifecycle", () => {
       agents: Array<{ agentType: string; behavior: string; model: string; reasoningEffort: string; configFile: string }>;
     };
     expect(manifest.agents.map(({ agentType }) => agentType).sort()).toEqual([
-      "default", "deployment", "designer", "qa", "review", "triage", "worker",
+      "default", "explorer", "review", "worker",
     ]);
     for (const agent of manifest.agents) {
       const contents = readFileSync(join(roleRoot, agent.configFile), "utf8");
@@ -234,13 +200,13 @@ describe("Codex configuration lifecycle", () => {
       expect(parsed.model_reasoning_effort).toBe(agent.reasoningEffort);
       expect(parsed.developer_instructions?.trim().length).toBeGreaterThan(0);
     }
-    for (const behavior of ["default", "triage", "worker", "designer", "qa", "review", "deployment"]) {
+    for (const behavior of ["default", "worker", "explorer", "review"]) {
       const template = readFileSync(join(templateRoot, `${behavior}.toml`), "utf8");
       expect(template).not.toMatch(/^model(?:_reasoning_effort)?\s*=/m);
     }
   });
 
-  test("aggressive orchestration uses concise Fourth Wall hints", () => {
+  test("aggressive orchestration uses concise native role hints", () => {
     const edits = desiredConfigEdits("aggressive");
     expect(edits.map(({ keyPath }) => keyPath)).toEqual([
       "features.hooks",
@@ -251,17 +217,18 @@ describe("Codex configuration lifecycle", () => {
       "features.multi_agent_v2.subagent_usage_hint_text",
     ]);
     const hints = edits.slice(3).map(({ value }) => value as string);
-    expect(hints.every((hint) => hint.includes("$fourth-wall"))).toBe(true);
+    expect(hints.some((hint) => hint.includes("$fourth-wall"))).toBe(false);
     const rootHintKey = "features.multi_agent_v2.root_agent_usage_hint_text";
     const rootHint = edits.find(({ keyPath }) => keyPath === rootHintKey)?.value as string;
-    expect(rootHint.length).toBeLessThan(300);
-    expect(rootHint).toMatch(/source-changing work.*use \$fourth-wall/);
-    expect(rootHint).toMatch(/full goal active through in-scope failures/);
-    expect(rootHint).toMatch(/independent Review of a frozen candidate before acceptance/);
+    expect(rootHint.length).toBeLessThan(400);
+    expect(rootHint).toContain("Luna Max");
+    expect(rootHint).toContain("Terra Medium");
+    expect(rootHint).toContain("Sol High");
+    expect(rootHint).toContain("one adversarial Review of a frozen coherent candidate");
     const nonRootHints = edits
       .filter(({ keyPath }) => keyPath !== rootHintKey && keyPath.endsWith("_hint_text"))
       .map(({ value }) => value as string);
-    expect(nonRootHints.every((hint) => hint.length < 120)).toBe(true);
+    expect(nonRootHints.every((hint) => hint.length < 160)).toBe(true);
     expect(edits[2]?.value).toBe(14);
   });
 
@@ -329,12 +296,12 @@ describe("Codex configuration lifecycle", () => {
           config_file: join(canonicalSourceRoot, "assets", "agents", "default.toml"),
           nickname_candidates: ["Ada"],
         },
-        triage: { description: "Fixture triage", config_file: join(canonicalSourceRoot, "assets", "agents", "triage.toml") },
         explorer: {
-          description: "Fixture triage",
-          config_file: join(canonicalSourceRoot, "assets", "agents", "triage.toml"),
+          description: "Fixture explorer",
+          config_file: join(canonicalSourceRoot, "assets", "agents", "explorer.toml"),
           nickname_candidates: ["Grace"],
         },
+        review: { description: "Fixture review", config_file: join(canonicalSourceRoot, "assets", "agents", "review.toml") },
       },
     });
 
@@ -385,7 +352,7 @@ describe("Codex configuration lifecycle", () => {
   test("fails closed when a native role alias targets a missing generated role", async () => {
     const f = fixture({});
     const sourceRoot = join(f.codexHome, "skizzles");
-    writeInstructionFixture(sourceRoot, { explorer: "missing" });
+    writeInstructionFixture(sourceRoot, { investigator: "missing" });
 
     await expect(configureCodex({
       ...f,
@@ -401,7 +368,7 @@ describe("Codex configuration lifecycle", () => {
   test("fails closed when a native role alias collides with a generated role", async () => {
     const f = fixture({});
     const sourceRoot = join(f.codexHome, "skizzles");
-    writeInstructionFixture(sourceRoot, { triage: "triage" });
+    writeInstructionFixture(sourceRoot, { explorer: "worker" });
 
     await expect(configureCodex({
       ...f,

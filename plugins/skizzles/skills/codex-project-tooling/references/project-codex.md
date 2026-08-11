@@ -11,8 +11,8 @@ Repo-local Codex configuration lets a project carry its own agent roles, hooks, 
   hooks/
     check-shell.py
   agents/
-    triage.toml
-    reviewer.toml
+    explorer.toml
+    review.toml
   skills/
     project-skill/
       SKILL.md
@@ -34,9 +34,9 @@ goals = true
 max_threads = 6
 max_depth = 1
 
-[agents.reviewer]
+[agents.review]
 description = "Use for adversarial review of completed changes."
-config_file = ".codex/agents/reviewer.toml"
+config_file = ".codex/agents/review.toml"
 ```
 
 Keep repo config focused on shared project behavior. Put personal preferences in

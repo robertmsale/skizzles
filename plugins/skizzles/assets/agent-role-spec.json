@@ -3,11 +3,10 @@
   "capabilities": {
     "luna_max": { "model": "gpt-5.6-luna", "reasoningEffort": "max" },
     "terra_medium": { "model": "gpt-5.6-terra", "reasoningEffort": "medium" },
-    "sol_high": { "model": "gpt-5.6-sol", "reasoningEffort": "high" },
-    "sol_xhigh": { "model": "gpt-5.6-sol", "reasoningEffort": "xhigh" }
+    "sol_high": { "model": "gpt-5.6-sol", "reasoningEffort": "high" }
   },
   "routes": {},
-  "nativeRoleAliases": { "explorer": "triage" },
+  "nativeRoleAliases": {},
   "roles": [
     {
       "behavior": "default",
@@ -16,40 +15,22 @@
       "capabilities": ["luna_max"]
     },
     {
-      "behavior": "triage",
-      "description": "Evidence-first diagnosis, runtime reproduction, and implementation-path mapping.",
+      "behavior": "worker",
+      "description": "Implementation ownership through focused validation and evidence.",
+      "defaultCapability": "luna_max",
+      "capabilities": ["luna_max"]
+    },
+    {
+      "behavior": "explorer",
+      "description": "Read-only investigation, runtime reproduction, and implementation-path mapping.",
       "defaultCapability": "terra_medium",
       "capabilities": ["terra_medium"]
-    },
-    {
-      "behavior": "worker",
-      "description": "Bounded implementation ownership through focused validation and evidence.",
-      "defaultCapability": "luna_max",
-      "capabilities": ["luna_max"]
-    },
-    {
-      "behavior": "designer",
-      "description": "Frontend and product UI implementation with visual and accessibility proof.",
-      "defaultCapability": "luna_max",
-      "capabilities": ["luna_max"]
-    },
-    {
-      "behavior": "qa",
-      "description": "Runtime piloting and evidence-rich product verification without silent fixes.",
-      "defaultCapability": "luna_max",
-      "capabilities": ["luna_max"]
     },
     {
       "behavior": "review",
       "description": "Independent adversarial review, verification, and acceptance assessment.",
       "defaultCapability": "sol_high",
       "capabilities": ["sol_high"]
-    },
-    {
-      "behavior": "deployment",
-      "description": "Authorized deployment and production-adjacent procedures with rollback discipline.",
-      "defaultCapability": "sol_xhigh",
-      "capabilities": ["sol_xhigh"]
     }
   ]
 }

@@ -6,15 +6,15 @@ Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks
 
 ## What’s inside
 
-- **Command-output management** — classifies useful build/test commands, keeps output bounded, and leaves a useful artifact when a command gets noisy.
-- **Fourth Wall orchestration** — Triage proves the terrain and records a shared execution map, parallel Workers implement and validate disjoint slices, and specialist roles supply design, QA, review, and deployment judgment. Persistent teammates clarify and repair without rediscovering the campaign from scratch. 🗺️🎨🤌
+- **Hot-reloadable local-development permissions** — approves a conservative set of build, test, and repo-contained patch operations before Guardian while leaving Git surgery, publication, and consequential work on the normal approval path.
+- **Lean native orchestration** — Luna Max implements, Terra Medium explores, and Sol High supplies one adversarial terminal Review. Native Ultra-style fan-out stays available without a procedural obstacle course. 🗺️🤌
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
-- **Durable role brains** — an opt-in developer-focused root prompt keeps the conversation delightful, while generated Triage/Worker/Designer/QA/Review/Deployment roles bind each duty to a configured capability that survives eviction and rework. Behavioral guidance stays stable while the canonical role catalog evolves. 🧠✨
-- **A practical skill shelf** — auth semantics, Cargo optimization, completion contracts, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
+- **Durable role brains** — tiny generated Default/Worker/Explorer/Reviewer overlays bind each duty to a configured model and reasoning effort that survives eviction and rework. 🧠✨
+- **A practical skill shelf** — auth semantics, Cargo optimization, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
-- **A polite config handshake** — enable the hooks, then choose passive native orchestration or the full proactive Fourth Wall experience without trampling the rest of `config.toml`. 🤝
+- **A polite config handshake** — enable the hooks, then choose passive native orchestration or proactive lean fan-out without trampling the rest of `config.toml`. 🤝
 
 Everything is maintained once in the canonical roots and workspace packages, then staged into a versioned plugin. 🎯
 
@@ -49,9 +49,9 @@ Container Lab is fully included in this repository—not merely documented here.
 After installing the complete plugin surface, Skizzles can safely finish the Codex-side handshake:
 
 - **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
-- **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for bounded parallel teams, and adds tiny root/subagent pointers to `$fourth-wall` plus the proactive quality-and-speed trigger. 🚀
+- **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for parallel work, and adds tiny role and ownership hints. 🚀
 - **Native instructions** (the default) leave Codex's model instructions untouched.
-- **Skizzles instructions** install a developer-facing root prompt plus seven fixed capability-bearing roles from the generated role catalog and canonical role spec. There are no implementation escalation variants: roles provide stable behavioral duties and durable generated bindings, while the root coordinates evidence and acceptance. Select the generated `agent_type` without separate model overrides, and use the smallest useful positive numbered fork so Codex applies it—a large number safely means “up to this many turns,” not full-history mode.
+- **Skizzles instructions** install a tiny orchestration hint plus four fixed capability-bearing roles from the generated role catalog: Default/Worker use Luna Max, Explorer uses Terra Medium, and Reviewer uses Sol High. Select the generated `agent_type` without separate model overrides, and use a positive numbered fork so Codex applies the selected role instead of inheriting full parent context.
 
 Preview the full developer setup from the checkout:
 

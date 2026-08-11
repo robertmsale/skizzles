@@ -29,7 +29,11 @@ type SessionSummary = {
 };
 type Options = { from: number; to: number; bucket: "hour" | "day"; cachedWeight: number; top: number; json: boolean };
 
-const subagentRoles = new Set(["triage", "worker", "designer", "qa", "review", "deployment"]);
+const subagentRoles = new Set([
+  "default", "worker", "explorer", "review",
+  // Historical Skizzles roles remain classifiable after retiring them from active routing.
+  "triage", "designer", "qa", "deployment",
+]);
 const CREDIT_RATES = {
   "gpt-5.6-sol": { uncachedInput: 125, cachedInput: 12.5, cacheWriteInput: 156.25, output: 750 },
   "gpt-5.6-terra": { uncachedInput: 62.5, cachedInput: 6.25, cacheWriteInput: 78.125, output: 375 },

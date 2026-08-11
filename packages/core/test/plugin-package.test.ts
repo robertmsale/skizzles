@@ -33,18 +33,20 @@ describe("deterministic plugin packaging", () => {
 
     expect(hooks).toEqual({
       hooks: {
-        PreToolUse: [
+        PermissionRequest: [
           {
-            matcher: "Bash",
+            matcher: "^(Bash|apply_patch)$",
             hooks: [
               {
                 type: "command",
-                command: 'bun "${PLUGIN_ROOT}/hooks/manage-command-output.ts"',
+                command: 'bun "${PLUGIN_ROOT}/hooks/approve-safe-operations.ts"',
                 timeout: 3,
-                statusMessage: "checking command output management",
+                statusMessage: "checking local development permission policy",
               },
             ],
           },
+        ],
+        PreToolUse: [
           {
             matcher: "^(spawn_agent|collaborationspawn_agent)$",
             hooks: [
@@ -61,65 +63,18 @@ describe("deterministic plugin packaging", () => {
     });
   });
 
-  test("stages mandatory closeout, KPI, and consumer safety contracts", async () => {
+  test("omits retired orchestration ceremony from the staged plugin", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const root = await mkdtemp(join(tmpdir(), "skizzles-learning-contract-"));
     temporaryRoots.push(root);
     const staged = join(root, "staged");
     await stagePlugin(repoRoot, staged);
 
-    const canonicalLearning = await readFile(
-      join(repoRoot, "skills/fourth-wall/references/learning-loop.md"),
-      "utf8",
-    );
-    const stagedLearning = await readFile(
-      join(staged, "skills/fourth-wall/references/learning-loop.md"),
-      "utf8",
-    );
-    expect(stagedLearning).toBe(canonicalLearning);
-    expect(stagedLearning).toContain("any terminal disposition");
-    expect(stagedLearning).toContain("accepted`, `rejected`, `blocked`, or `abandoned");
-    for (const field of [
-      "worker_shots",
-      "worker_to_triage_consultations",
-      "attributable_reviewer_product_blockers",
-      "triage_to_review_adjudications",
-    ]) {
-      expect(stagedLearning).toContain(`\`${field}\``);
-    }
-    expect(stagedLearning).toContain("never auto-promote or auto-mutate harness policy");
-    expect(stagedLearning).toContain("private host-local record");
-    expect(stagedLearning).toContain("incorrect_terminal_block");
-    expect(stagedLearning).toContain("in_scope_runtime_failure_continued");
-    const stagedFourthWall = await readFile(join(staged, "skills/fourth-wall/SKILL.md"), "utf8");
-    expect(stagedFourthWall).toContain("A failed local build, test, Container Lab run, or QA proof is evidence to preserve and classify");
-    expect(stagedFourthWall).toContain("Reserve `blocked` for an unavailable external dependency, service, or permission");
-    expect(stagedFourthWall).toContain("Every source-changing Fourth Wall campaign requires one mandatory terminal aggregate Review");
-    expect(stagedFourthWall).toContain("`UNREVIEWED CANDIDATE`");
-    const stagedDelegation = await readFile(
-      join(staged, "skills/fourth-wall/references/delegation-contract.md"),
-      "utf8",
-    );
-    expect(stagedDelegation).toContain("must not by itself mark a substantial goal or campaign `blocked`");
-    expect(stagedDelegation).toContain("Route the evidence to the owning Worker or persistent Triage owner");
-    expect(stagedDelegation).toContain("never infer an external blocker from a failed local proof alone");
-    expect(stagedDelegation).toContain("Every source-changing Fourth Wall campaign is Review-required regardless of diff size");
-    expect(stagedDelegation).toContain("Tests, builds, QA, screenshots, and root inspection do not replace");
-    for (const field of [
-      "review_required_checkpoints",
-      "review_receipts",
-      "review_deferred_handoffs",
-      "review_omissions",
-    ]) {
-      expect(stagedLearning).toContain(`\`${field}\``);
-    }
-    expect(await Bun.file(join(staged, "skills/fourth-wall/resources/learning-log.md")).exists()).toBe(false);
-
-    const stagedInstaller = await readFile(join(staged, "skills/install-skizzles/SKILL.md"), "utf8");
-    expect(stagedInstaller).toContain("must not clone or modify a repository");
-    expect(stagedInstaller).toContain("edit `AGENTS.md`");
-    expect(stagedInstaller).toContain("create or message tasks");
-    expect(stagedInstaller).toContain("absent or ambiguous");
+    expect(await Bun.file(join(staged, "skills/fourth-wall/SKILL.md")).exists()).toBe(false);
+    expect(await Bun.file(join(staged, "skills/completion-contract/SKILL.md")).exists()).toBe(false);
+    expect(await Bun.file(join(staged, "hooks/manage-command-output.ts")).exists()).toBe(false);
+    expect(await Bun.file(join(staged, "runtime/codex-command.ts")).exists()).toBe(false);
+    expect(await Bun.file(join(staged, "hooks/approve-safe-operations.ts")).exists()).toBe(true);
   });
 
   test("stages only allowlisted canonical inputs deterministically", async () => {
@@ -358,10 +313,10 @@ describe("deterministic plugin packaging", () => {
 
   test("rejects private learning records", async () => {
     const root = await fixture();
-    await write(root, "skills/fourth-wall/resources/learning-log.md", "private campaign observation\n");
+    await write(root, "skills/example/resources/learning-log.md", "private campaign observation\n");
 
     expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
-      "skills/fourth-wall/resources/learning-log.md looks like local or live state",
+      "skills/example/resources/learning-log.md looks like local or live state",
     );
   });
 });

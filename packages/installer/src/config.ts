@@ -68,11 +68,11 @@ export interface ConfigureOptions {
 }
 
 const aggressiveModeHint =
-  "For substantial multi-owner work, use $fourth-wall.";
+  "Use subagents when independent work can materially improve speed or quality; keep concurrent write ownership clear.";
 const rootHint =
-  "For substantial source-changing work, use $fourth-wall; keep the full goal active through in-scope failures and obtain independent Review of a frozen candidate before acceptance.";
+  "Use Default/Worker (Luna Max) for implementation, Explorer (Terra Medium) for read-only investigation, and Reviewer (Sol High) for independent review. Fan out independent work aggressively, batch failures and findings, and obtain one adversarial Review of a frozen coherent candidate before accepting substantial source changes.";
 const subagentHint =
-  "Follow the assigned role and $fourth-wall when the parent activates it.";
+  "Own the assigned coherent slice through proportionate validation; fan out only genuinely independent work and avoid overlapping writers.";
 
 interface AgentManifest {
   version: 1;
