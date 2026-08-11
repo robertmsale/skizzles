@@ -18,7 +18,7 @@ export type ReapedOwnerManifest = {
 const LAB_STATES = new Set(["provisioning", "ready", "failed", "destroying"]);
 const FINDING_SURFACES = new Set([
   "host-bind", "socket-bind", "privileged", "host-namespace", "device", "capability",
-  "secret", "config", "fixed-port", "non-loopback-port",
+  "secret", "config", "fixed-port", "non-loopback-port", "shared-cache",
 ]);
 
 export function defaultStateRoot(): string {
@@ -330,7 +330,8 @@ function validatePersistedRuntime(lab: Record<string, unknown>, runtime: unknown
       posix.normalize(config.runtime.workspace) !== config.runtime.workspace || config.runtime.workspace === "/" ||
       !Array.isArray(config.runtime.shell) || config.runtime.shell.length === 0 || config.runtime.shell.length > 64 ||
       !config.runtime.shell.every((part) => isBoundedString(part, 4_096) && !part.includes("\0")) ||
-      !posix.isAbsolute(config.runtime.shell[0]) || posix.normalize(config.runtime.shell[0]) !== config.runtime.shell[0]) throw new Error("invalid container runtime");
+      !posix.isAbsolute(config.runtime.shell[0]) || posix.normalize(config.runtime.shell[0]) !== config.runtime.shell[0] ||
+      (config.runtime.compilerCache !== undefined && config.runtime.compilerCache !== "sccache-redis")) throw new Error("invalid container runtime");
   if (!Array.isArray(config.ports) || !config.ports.every(isDeclaredPort)) throw new Error("invalid declared ports");
   if (!Array.isArray(config.forwardEnvironment) || config.forwardEnvironment.length > 64 ||
       !config.forwardEnvironment.every((key) => typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) ||

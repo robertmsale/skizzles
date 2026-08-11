@@ -61,6 +61,18 @@ runtime:
     expect(image.mode).toEqual({ kind: "image", image: "node:24", commandService: "dev" });
   });
 
+  test("accepts the explicit shared compiler cache opt-in", () => {
+    const config = parseLabConfig(`
+image: { name: node:24, service: dev }
+runtime: { compiler_cache: sccache-redis }
+`, root);
+    expect(config.runtime).toEqual({
+      workspace: "/workspace",
+      shell: ["/bin/sh", "-lc"],
+      compilerCache: "sccache-redis",
+    });
+  });
+
   test("trims service names in record keys like other service fields", () => {
     const config = parseLabConfig(`
 image: { name: node:24, service: dev }
@@ -129,6 +141,10 @@ image: { name: node:24, service: dev }
 environment: [TOKEN]
 secret_environment: [TOKEN]
 `, root)).toThrow("must not overlap environment: TOKEN");
+    expect(() => parseLabConfig(`
+image: { name: node:24, service: dev }
+runtime: { compiler_cache: local }
+`, root)).toThrow("runtime.compiler_cache: must be sccache-redis");
     expect(() => parseLabConfig(`
 image: { name: node:24, service: dev }
 ports:

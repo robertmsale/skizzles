@@ -7003,6 +7003,8 @@ var $visit = visit.visit;
 var $visitAsync = visit.visitAsync;
 
 // packages/codex-container-lab/cli/src/compose.ts
+var SHARED_COMPILER_CACHE_CONTAINER = "skizzles-sccache-redis";
+var SHARED_COMPILER_CACHE_ENDPOINT = `redis://${SHARED_COMPILER_CACHE_CONTAINER}:6379`;
 function composeCommandArgs(config, options) {
   const sourceFiles = config.mode.kind === "compose" ? config.mode.files : options.baseFile ? [options.baseFile] : [];
   if (sourceFiles.length === 0) {
@@ -7624,7 +7626,8 @@ var FINDING_SURFACES = new Set([
   "secret",
   "config",
   "fixed-port",
-  "non-loopback-port"
+  "non-loopback-port",
+  "shared-cache"
 ]);
 function defaultStateRoot() {
   return join(homedir(), "Library", "Application Support", "OpenAI", "codex-container-lab");
@@ -7844,7 +7847,7 @@ function validatePersistedRuntime(lab, runtime) {
   } else {
     throw new Error("invalid runtime mode");
   }
-  if (!isBoundedString(config.runtime.workspace, 1024) || !posix.isAbsolute(config.runtime.workspace) || posix.normalize(config.runtime.workspace) !== config.runtime.workspace || config.runtime.workspace === "/" || !Array.isArray(config.runtime.shell) || config.runtime.shell.length === 0 || config.runtime.shell.length > 64 || !config.runtime.shell.every((part) => isBoundedString(part, 4096) && !part.includes("\x00")) || !posix.isAbsolute(config.runtime.shell[0]) || posix.normalize(config.runtime.shell[0]) !== config.runtime.shell[0])
+  if (!isBoundedString(config.runtime.workspace, 1024) || !posix.isAbsolute(config.runtime.workspace) || posix.normalize(config.runtime.workspace) !== config.runtime.workspace || config.runtime.workspace === "/" || !Array.isArray(config.runtime.shell) || config.runtime.shell.length === 0 || config.runtime.shell.length > 64 || !config.runtime.shell.every((part) => isBoundedString(part, 4096) && !part.includes("\x00")) || !posix.isAbsolute(config.runtime.shell[0]) || posix.normalize(config.runtime.shell[0]) !== config.runtime.shell[0] || config.runtime.compilerCache !== undefined && config.runtime.compilerCache !== "sccache-redis")
     throw new Error("invalid container runtime");
   if (!Array.isArray(config.ports) || !config.ports.every(isDeclaredPort))
     throw new Error("invalid declared ports");

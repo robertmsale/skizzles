@@ -10,6 +10,10 @@ import {
   generateOverrideCompose,
   internalImageTag,
   inspectComposeModel,
+  SHARED_COMPILER_CACHE_CONTAINER,
+  SHARED_COMPILER_CACHE_IMAGE,
+  SHARED_COMPILER_CACHE_LABELS,
+  SHARED_COMPILER_CACHE_NETWORK,
   validateSecretEnvironmentModel,
   type ComposeInspectionFinding,
   type ComposeModel,
@@ -57,6 +61,169 @@ export const defaultDockerRunner: DockerRunner = {
   }),
 };
 
+const SHARED_COMPILER_CACHE_COMMAND = [
+  "redis-server",
+  "--maxmemory", "16gb",
+  "--maxmemory-policy", "allkeys-lru",
+  "--save", "",
+  "--appendonly", "no",
+];
+
+/**
+ * Ensure the one Skizzles-owned Redis cache exists and is healthy.
+ *
+ * This resource is deliberately outside every lab's ownership labels and
+ * lifecycle.  It is created only by the explicit compiler-cache opt-in and
+ * is never discovered by per-lab cleanup.
+ */
+export async function ensureSharedCompilerCache(runner: DockerRunner = defaultDockerRunner): Promise<void> {
+  await ensureSharedCompilerCacheNetwork(runner);
+  let existing = await inspectSharedCompilerCacheContainer(runner);
+  if (existing === "missing") {
+    const created = await runner.run([
+      "run", "--detach",
+      "--name", SHARED_COMPILER_CACHE_CONTAINER,
+      "--network", SHARED_COMPILER_CACHE_NETWORK,
+      "--network-alias", SHARED_COMPILER_CACHE_CONTAINER,
+      "--restart", "unless-stopped",
+      ...Object.entries(SHARED_COMPILER_CACHE_LABELS).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
+      SHARED_COMPILER_CACHE_IMAGE,
+      ...SHARED_COMPILER_CACHE_COMMAND,
+    ], { allowFailure: true, timeoutMs: 30_000, maxOutputBytes: 64 * 1024 });
+    if (created.code !== 0) {
+      // Another process may have won the create race. Re-inspect and adopt
+      // only if the resulting container proves the complete identity.
+      const raced = await inspectSharedCompilerCacheContainer(runner);
+      if (raced === "missing") throw new Error("failed to create shared compiler cache container");
+      existing = raced;
+    } else {
+      existing = await inspectSharedCompilerCacheContainer(runner);
+      if (existing === "missing") throw new Error("shared compiler cache container disappeared after creation");
+    }
+  }
+  if (existing !== "running") {
+    const started = await runner.run(["start", SHARED_COMPILER_CACHE_CONTAINER], {
+      allowFailure: true, timeoutMs: 30_000, maxOutputBytes: 64 * 1024,
+    });
+    if (started.code !== 0) throw new Error("failed to start shared compiler cache container");
+  }
+
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const ping = await runner.run(["exec", SHARED_COMPILER_CACHE_CONTAINER, "redis-cli", "ping"], {
+      allowFailure: true, timeoutMs: 500, maxOutputBytes: 64 * 1024,
+    });
+    if (ping.code === 0 && ping.stdout.toString().trim() === "PONG") return;
+    if (attempt < 29) await delay(100);
+  }
+  throw new Error("shared compiler cache did not respond to redis-cli ping");
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function ensureSharedCompilerCacheNetwork(runner: DockerRunner): Promise<void> {
+  const existing = await inspectSharedCompilerCacheNetwork(runner);
+  if (existing !== "missing") return;
+  const created = await runner.run([
+    "network", "create", "--driver", "bridge",
+    ...Object.entries(SHARED_COMPILER_CACHE_LABELS).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
+    SHARED_COMPILER_CACHE_NETWORK,
+  ], { allowFailure: true, timeoutMs: 30_000, maxOutputBytes: 64 * 1024 });
+  if (created.code !== 0) {
+    const raced = await inspectSharedCompilerCacheNetwork(runner);
+    if (raced === "missing") throw new Error("failed to create shared compiler cache network");
+  } else {
+    const verified = await inspectSharedCompilerCacheNetwork(runner);
+    if (verified === "missing") throw new Error("shared compiler cache network disappeared after creation");
+  }
+}
+
+type SharedResourceInspection = "missing" | "running" | "stopped";
+
+async function inspectSharedCompilerCacheNetwork(runner: DockerRunner): Promise<"missing" | "matching"> {
+  const inspected = await runner.run([
+    "network", "inspect", SHARED_COMPILER_CACHE_NETWORK, "--format", "{{json .}}",
+  ], { allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 256 * 1024 });
+  if (inspected.code !== 0) {
+    if (isExactMissingResource(inspected, "network", SHARED_COMPILER_CACHE_NETWORK)) return "missing";
+    throw new Error("unable to inspect shared compiler cache network");
+  }
+  const network = parseInspection(inspected.stdout.toString());
+  if (!isRecord(network) || network.Name !== SHARED_COMPILER_CACHE_NETWORK || network.Driver !== "bridge" ||
+      network.Scope !== "local" || network.Internal !== false || !hasExactSharedLabels(network.Labels)) {
+    throw new Error("refusing shared compiler cache network with mismatched identity");
+  }
+  return "matching";
+}
+
+async function inspectSharedCompilerCacheContainer(runner: DockerRunner): Promise<SharedResourceInspection> {
+  const inspected = await runner.run([
+    "container", "inspect", SHARED_COMPILER_CACHE_CONTAINER, "--format", "{{json .}}",
+  ], { allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 256 * 1024 });
+  if (inspected.code !== 0) {
+    if (isExactMissingResource(inspected, "container", SHARED_COMPILER_CACHE_CONTAINER)) return "missing";
+    throw new Error("unable to inspect shared compiler cache container");
+  }
+  const container = parseInspection(inspected.stdout.toString());
+  if (!isRecord(container) || container.Name !== `/${SHARED_COMPILER_CACHE_CONTAINER}` ||
+      !isRecord(container.Config) || container.Config.Image !== SHARED_COMPILER_CACHE_IMAGE ||
+      !hasExactSharedLabels(container.Config.Labels) ||
+      !isRecord(container.HostConfig) || !isRecord(container.HostConfig.RestartPolicy) ||
+      container.HostConfig.RestartPolicy.Name !== "unless-stopped" ||
+      !isEmptyPortBindings(container.HostConfig.PortBindings) ||
+      !isExpectedCommand(container.Config.Cmd) ||
+      !isRecord(container.NetworkSettings) || !isExclusiveSharedNetwork(container.NetworkSettings.Networks) ||
+      !isRecord(container.State) || typeof container.State.Status !== "string") {
+    throw new Error("refusing shared compiler cache container with mismatched identity");
+  }
+  if (container.State.Status === "running") return "running";
+  if (["created", "restarting", "exited", "dead", "paused"].includes(container.State.Status)) return "stopped";
+  throw new Error("refusing shared compiler cache container with unknown state");
+}
+
+function parseInspection(value: string): unknown {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed[0] : parsed;
+  } catch {
+    throw new Error("invalid shared compiler cache Docker inspection");
+  }
+}
+
+function isExactMissingResource(result: CommandResult, kind: "network" | "container", name: string): boolean {
+  if (result.stdout.toString().trim() !== "") return false;
+  const diagnostic = result.stderr.toString().trim();
+  const expected = kind === "container"
+    ? [`Error: No such container: ${name}`, `Error response from daemon: No such container: ${name}`]
+    : [`Error: network ${name} not found`, `Error response from daemon: network ${name} not found`];
+  return expected.includes(diagnostic);
+}
+
+function hasExactSharedLabels(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  if (Object.keys(value).length !== Object.keys(SHARED_COMPILER_CACHE_LABELS).length) return false;
+  for (const [key, expected] of Object.entries(SHARED_COMPILER_CACHE_LABELS)) {
+    if (value[key] !== expected) return false;
+  }
+  return true;
+}
+
+function isEmptyPortBindings(value: unknown): boolean {
+  return value === null || (isRecord(value) && Object.keys(value).length === 0);
+}
+
+function isExpectedCommand(value: unknown): boolean {
+  return Array.isArray(value) && value.length === SHARED_COMPILER_CACHE_COMMAND.length &&
+    value.every((item, index) => item === SHARED_COMPILER_CACHE_COMMAND[index]);
+}
+
+function isExclusiveSharedNetwork(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const names = Object.keys(value);
+  return names.length === 1 && names[0] === SHARED_COMPILER_CACHE_NETWORK && isRecord(value[names[0]!]);
+}
+
 export async function dockerAvailable(
   runner: DockerRunner = defaultDockerRunner,
   secretEnvironment: readonly string[] = [],
@@ -92,6 +259,10 @@ export async function prepareLabRuntime(
     ownerKey: metadata.ownerKey,
     labId: metadata.id,
   });
+  if (config.runtime.compilerCache === "sccache-redis") {
+    await ensureSharedCompilerCache(scrubDockerRunnerEnvironment(runner, config.secretEnvironment, environment));
+    findings.push({ surface: "shared-cache", detail: "shared compiler cache enabled" });
+  }
   await writeFile(overrideFile, override, { mode: 0o600 });
   const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
   validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);

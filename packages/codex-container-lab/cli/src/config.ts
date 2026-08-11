@@ -42,6 +42,8 @@ interface ParsedManifest {
   secret_environment: string[];
 }
 
+export type CompilerCache = "sccache-redis";
+
 function isValidContainerPath(value: string, allowRoot: boolean): boolean {
   if (!value.startsWith("/") || value.includes("\0") || (!allowRoot && value === "/")) return false;
   return posix.normalize(value) === value && value.split("/").every((part) => part !== "." && part !== "..");
@@ -193,12 +195,20 @@ function parseRuntime(value: unknown, path: IssuePath, issues: ValidationIssue[]
   if (value === undefined) return { workspace: "/workspace", shell: ["/bin/sh", "-lc"] };
   const record = asObject(value, path, issues);
   if (!record) return { workspace: "/workspace", shell: ["/bin/sh", "-lc"] };
-  rejectUnknownKeys(record, ["workspace", "shell"], path, issues);
+  rejectUnknownKeys(record, ["workspace", "shell", "compiler_cache"], path, issues);
   const workspace = optionalString(record, "workspace", path, issues, (candidate) => typeof candidate === "string" ? candidate : undefined, "must be a string", "/workspace");
   const shell = hasOwn(record, "shell")
     ? parseStringArray(record.shell, [...path, "shell"], issues, parseShellArgument, "must be a non-empty shell argument without NUL", 1)
     : ["/bin/sh", "-lc"];
-  return { workspace, shell };
+  let compilerCache: CompilerCache | undefined;
+  if (hasOwn(record, "compiler_cache")) {
+    if (record.compiler_cache !== "sccache-redis") {
+      addIssue(issues, [...path, "compiler_cache"], "must be sccache-redis");
+    } else {
+      compilerCache = "sccache-redis";
+    }
+  }
+  return compilerCache === undefined ? { workspace, shell } : { workspace, shell, compilerCache };
 }
 
 function parsePort(value: unknown, path: IssuePath, issues: ValidationIssue[]): PortManifest | undefined {
@@ -304,6 +314,7 @@ export function resolveRepoPath(repoRoot: string, candidate: string): string {
 export interface RuntimeConfig {
   workspace: string;
   shell: string[];
+  compilerCache?: CompilerCache;
 }
 
 export interface DeclaredPort {

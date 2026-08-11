@@ -1,6 +1,16 @@
 import { stringify as stringifyYaml } from "yaml";
 import type { LabConfig } from "./config";
 
+/** Stable names for the opt-in, Skizzles-owned compiler cache resources. */
+export const SHARED_COMPILER_CACHE_CONTAINER = "skizzles-sccache-redis";
+export const SHARED_COMPILER_CACHE_NETWORK = "skizzles-sccache";
+export const SHARED_COMPILER_CACHE_ENDPOINT = `redis://${SHARED_COMPILER_CACHE_CONTAINER}:6379`;
+export const SHARED_COMPILER_CACHE_IMAGE = "redis@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065";
+export const SHARED_COMPILER_CACHE_LABELS: Record<string, string> = {
+  "io.openai.skizzles.shared-cache": "sccache-redis-v1",
+  "io.openai.skizzles.shared-cache.role": "compiler-cache",
+};
+
 export interface ComposeModel {
   services?: Record<string, Record<string, unknown>>;
   volumes?: Record<string, Record<string, unknown> | null>;
@@ -57,9 +67,24 @@ export function generateOverrideCompose(config: LabConfig, model: ComposeModel, 
       override.volumes = [
         { type: "bind", source: context.workspaceHostPath, target: config.runtime.workspace },
       ];
-      if (config.forwardEnvironment.length > 0) {
+      const commandEnvironment = [...config.forwardEnvironment];
+      if (config.runtime.compilerCache === "sccache-redis") {
+        // Keep the cache endpoint explicit and deterministic. In particular,
+        // do not rely on the deprecated SCCACHE_REDIS variable or inject a
+        // wrapper into a project-owned image.
+        commandEnvironment.splice(
+          0,
+          commandEnvironment.length,
+          ...commandEnvironment.filter((name) => name !== "SCCACHE_REDIS_ENDPOINT"),
+          `SCCACHE_REDIS_ENDPOINT=${SHARED_COMPILER_CACHE_ENDPOINT}`,
+        );
+      }
+      if (commandEnvironment.length > 0) {
         // List form asks Compose to forward only these explicitly declared host names.
-        override.environment = config.forwardEnvironment;
+        override.environment = commandEnvironment;
+      }
+      if (config.runtime.compilerCache === "sccache-redis") {
+        override.networks = serviceNetworksWithSharedCompilerCache(model.services?.[name]?.networks);
       }
       if (config.mode.kind === "dockerfile") {
         override.image = internalImageTag(context.ownerKey, context.labId);
@@ -77,6 +102,15 @@ export function generateOverrideCompose(config: LabConfig, model: ComposeModel, 
 
   const volumes = labelTopLevelResources(model.volumes, labels);
   const networks = labelTopLevelResources(model.networks, labels);
+  if (config.runtime.compilerCache === "sccache-redis") {
+    if (Object.hasOwn(model.networks ?? {}, SHARED_COMPILER_CACHE_NETWORK)) {
+      throw new Error(`project Compose network is reserved for the shared compiler cache: ${SHARED_COMPILER_CACHE_NETWORK}`);
+    }
+    networks[SHARED_COMPILER_CACHE_NETWORK] = {
+      external: true,
+      name: SHARED_COMPILER_CACHE_NETWORK,
+    };
+  }
   return stringifyYaml({
     services,
     ...(Object.keys(volumes).length > 0 ? { volumes } : {}),
@@ -95,7 +129,7 @@ function managementLabels(context: LabComposeContext): Record<string, string> {
 function labelTopLevelResources(
   resources: Record<string, Record<string, unknown> | null> | undefined,
   labels: Record<string, string>,
-): Record<string, { labels: Record<string, string> }> {
+): Record<string, Record<string, unknown>> {
   return Object.fromEntries(Object.entries(resources ?? {})
     .filter(([, definition]) => !definition?.external)
     .map(([name]) => [name, { labels }]));
@@ -134,7 +168,8 @@ export type PrivilegeSurface =
   | "secret"
   | "config"
   | "fixed-port"
-  | "non-loopback-port";
+  | "non-loopback-port"
+  | "shared-cache";
 
 export interface ComposeInspectionFinding {
   service?: string;
@@ -314,6 +349,18 @@ function add(findings: ComposeInspectionFinding[], service: string, surface: Pri
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function serviceNetworksWithSharedCompilerCache(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.includes(SHARED_COMPILER_CACHE_NETWORK)
+      ? value
+      : [...value, SHARED_COMPILER_CACHE_NETWORK];
+  }
+  if (isRecord(value)) {
+    return { ...value, [SHARED_COMPILER_CACHE_NETWORK]: {} };
+  }
+  return [SHARED_COMPILER_CACHE_NETWORK];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

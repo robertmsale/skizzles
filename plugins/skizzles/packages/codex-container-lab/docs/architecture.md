@@ -19,6 +19,15 @@ Arbitrary commands have exactly one lifecycle. `codex-container-lab run` starts 
 
 The lifecycle retains one Compose path. Project Compose files remain in the consuming checkout and are passed to Docker in manifest order. Image and Dockerfile modes generate an internal base Compose file. Every mode receives a generated override containing exact labels, the isolated workspace bind, `init`, declared random loopback publications, and non-sensitive lab metadata. Dockerfile mode also applies the exact labels at build time; cleanup verifies them on the tagged image and removes only its validated immutable image id.
 
+An explicit `runtime.compiler_cache: sccache-redis` opt-in adds one shared
+Skizzles-owned Redis container on one external bridge network before Compose
+up. The command service keeps its downstream-owned image and command; the
+override preserves its project network memberships, adds the external cache
+network, and injects only `SCCACHE_REDIS_ENDPOINT`. The cache uses a pinned
+Redis digest, bounded eviction settings, no host port, and non-lab labels. A
+bounded `shared-cache` finding records the opt-in. Per-lab destroy and archive
+cleanup discover only exact lab labels, so they never remove the shared cache.
+
 Manifest `environment` and `secret_environment` are separate allowlists. The former remains list-form forwarding for the command service. The latter authorizes project-owned top-level Compose secret sources shaped as `{ environment: VAR }`; every allowlisted name must be present in the invoking CLI environment, and every environment-backed source in the normalized model must be allowlisted. Only names are retained in normalized configuration and durable manifests. Secret values are supplied ephemerally to Compose config/up, never to generated YAML, argv, state, metadata, findings, errors, or public output. Names shared by the two fields are rejected. A no-interpolation normalized model is checked for declared source-name references in plaintext service environments without value comparison, and Compose diagnostics are replaced with fixed redacted errors.
 
 Docker runs only on the host. Generated configuration never adds a Docker socket or ambient credentials implicitly; `secret_environment` is the explicit ephemeral path for declared Compose secret sources. The normalized Compose model is inspected for host binds, socket binds, privileged mode, host namespaces, devices, capabilities, secrets, configs, and non-loopback or fixed publications. Findings describe trusted-project configuration; they are not a hostile-project sandbox policy.

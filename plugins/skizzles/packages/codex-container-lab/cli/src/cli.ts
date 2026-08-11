@@ -7130,10 +7130,18 @@ function parseRuntime(value, path, issues) {
   const record = asObject(value, path, issues);
   if (!record)
     return { workspace: "/workspace", shell: ["/bin/sh", "-lc"] };
-  rejectUnknownKeys(record, ["workspace", "shell"], path, issues);
+  rejectUnknownKeys(record, ["workspace", "shell", "compiler_cache"], path, issues);
   const workspace = optionalString(record, "workspace", path, issues, (candidate) => typeof candidate === "string" ? candidate : undefined, "must be a string", "/workspace");
   const shell = hasOwn(record, "shell") ? parseStringArray(record.shell, [...path, "shell"], issues, parseShellArgument, "must be a non-empty shell argument without NUL", 1) : ["/bin/sh", "-lc"];
-  return { workspace, shell };
+  let compilerCache;
+  if (hasOwn(record, "compiler_cache")) {
+    if (record.compiler_cache !== "sccache-redis") {
+      addIssue(issues, [...path, "compiler_cache"], "must be sccache-redis");
+    } else {
+      compilerCache = "sccache-redis";
+    }
+  }
+  return compilerCache === undefined ? { workspace, shell } : { workspace, shell, compilerCache };
 }
 function parsePort(value, path, issues) {
   const record = asObject(value, path, issues);
@@ -7303,6 +7311,14 @@ function formatIssue(issue) {
 }
 
 // packages/codex-container-lab/cli/src/compose.ts
+var SHARED_COMPILER_CACHE_CONTAINER = "skizzles-sccache-redis";
+var SHARED_COMPILER_CACHE_NETWORK = "skizzles-sccache";
+var SHARED_COMPILER_CACHE_ENDPOINT = `redis://${SHARED_COMPILER_CACHE_CONTAINER}:6379`;
+var SHARED_COMPILER_CACHE_IMAGE = "redis@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065";
+var SHARED_COMPILER_CACHE_LABELS = {
+  "io.openai.skizzles.shared-cache": "sccache-redis-v1",
+  "io.openai.skizzles.shared-cache.role": "compiler-cache"
+};
 var labelPrefix = "io.openai.codex-container-lab";
 function generateBaseCompose(config) {
   if (config.mode.kind === "compose")
@@ -7343,8 +7359,15 @@ function generateOverrideCompose(config, model, context) {
       override.volumes = [
         { type: "bind", source: context.workspaceHostPath, target: config.runtime.workspace }
       ];
-      if (config.forwardEnvironment.length > 0) {
-        override.environment = config.forwardEnvironment;
+      const commandEnvironment = [...config.forwardEnvironment];
+      if (config.runtime.compilerCache === "sccache-redis") {
+        commandEnvironment.splice(0, commandEnvironment.length, ...commandEnvironment.filter((name2) => name2 !== "SCCACHE_REDIS_ENDPOINT"), `SCCACHE_REDIS_ENDPOINT=${SHARED_COMPILER_CACHE_ENDPOINT}`);
+      }
+      if (commandEnvironment.length > 0) {
+        override.environment = commandEnvironment;
+      }
+      if (config.runtime.compilerCache === "sccache-redis") {
+        override.networks = serviceNetworksWithSharedCompilerCache(model.services?.[name]?.networks);
       }
       if (config.mode.kind === "dockerfile") {
         override.image = internalImageTag(context.ownerKey, context.labId);
@@ -7359,6 +7382,15 @@ function generateOverrideCompose(config, model, context) {
   }));
   const volumes = labelTopLevelResources(model.volumes, labels);
   const networks = labelTopLevelResources(model.networks, labels);
+  if (config.runtime.compilerCache === "sccache-redis") {
+    if (Object.hasOwn(model.networks ?? {}, SHARED_COMPILER_CACHE_NETWORK)) {
+      throw new Error(`project Compose network is reserved for the shared compiler cache: ${SHARED_COMPILER_CACHE_NETWORK}`);
+    }
+    networks[SHARED_COMPILER_CACHE_NETWORK] = {
+      external: true,
+      name: SHARED_COMPILER_CACHE_NETWORK
+    };
+  }
   return $stringify({
     services,
     ...Object.keys(volumes).length > 0 ? { volumes } : {},
@@ -7565,6 +7597,15 @@ function add(findings, service, surface, detail) {
 }
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+function serviceNetworksWithSharedCompilerCache(value) {
+  if (Array.isArray(value)) {
+    return value.includes(SHARED_COMPILER_CACHE_NETWORK) ? value : [...value, SHARED_COMPILER_CACHE_NETWORK];
+  }
+  if (isRecord2(value)) {
+    return { ...value, [SHARED_COMPILER_CACHE_NETWORK]: {} };
+  }
+  return [SHARED_COMPILER_CACHE_NETWORK];
 }
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -7884,6 +7925,174 @@ var defaultDockerRunner = {
     stdio: ["pipe", "pipe", "pipe"]
   })
 };
+var SHARED_COMPILER_CACHE_COMMAND = [
+  "redis-server",
+  "--maxmemory",
+  "16gb",
+  "--maxmemory-policy",
+  "allkeys-lru",
+  "--save",
+  "",
+  "--appendonly",
+  "no"
+];
+async function ensureSharedCompilerCache(runner = defaultDockerRunner) {
+  await ensureSharedCompilerCacheNetwork(runner);
+  let existing = await inspectSharedCompilerCacheContainer(runner);
+  if (existing === "missing") {
+    const created = await runner.run([
+      "run",
+      "--detach",
+      "--name",
+      SHARED_COMPILER_CACHE_CONTAINER,
+      "--network",
+      SHARED_COMPILER_CACHE_NETWORK,
+      "--network-alias",
+      SHARED_COMPILER_CACHE_CONTAINER,
+      "--restart",
+      "unless-stopped",
+      ...Object.entries(SHARED_COMPILER_CACHE_LABELS).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
+      SHARED_COMPILER_CACHE_IMAGE,
+      ...SHARED_COMPILER_CACHE_COMMAND
+    ], { allowFailure: true, timeoutMs: 30000, maxOutputBytes: 64 * 1024 });
+    if (created.code !== 0) {
+      const raced = await inspectSharedCompilerCacheContainer(runner);
+      if (raced === "missing")
+        throw new Error("failed to create shared compiler cache container");
+      existing = raced;
+    } else {
+      existing = await inspectSharedCompilerCacheContainer(runner);
+      if (existing === "missing")
+        throw new Error("shared compiler cache container disappeared after creation");
+    }
+  }
+  if (existing !== "running") {
+    const started = await runner.run(["start", SHARED_COMPILER_CACHE_CONTAINER], {
+      allowFailure: true,
+      timeoutMs: 30000,
+      maxOutputBytes: 64 * 1024
+    });
+    if (started.code !== 0)
+      throw new Error("failed to start shared compiler cache container");
+  }
+  for (let attempt = 0;attempt < 30; attempt++) {
+    const ping = await runner.run(["exec", SHARED_COMPILER_CACHE_CONTAINER, "redis-cli", "ping"], {
+      allowFailure: true,
+      timeoutMs: 500,
+      maxOutputBytes: 64 * 1024
+    });
+    if (ping.code === 0 && ping.stdout.toString().trim() === "PONG")
+      return;
+    if (attempt < 29)
+      await delay(100);
+  }
+  throw new Error("shared compiler cache did not respond to redis-cli ping");
+}
+async function delay(milliseconds) {
+  await new Promise((resolve2) => setTimeout(resolve2, milliseconds));
+}
+async function ensureSharedCompilerCacheNetwork(runner) {
+  const existing = await inspectSharedCompilerCacheNetwork(runner);
+  if (existing !== "missing")
+    return;
+  const created = await runner.run([
+    "network",
+    "create",
+    "--driver",
+    "bridge",
+    ...Object.entries(SHARED_COMPILER_CACHE_LABELS).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
+    SHARED_COMPILER_CACHE_NETWORK
+  ], { allowFailure: true, timeoutMs: 30000, maxOutputBytes: 64 * 1024 });
+  if (created.code !== 0) {
+    const raced = await inspectSharedCompilerCacheNetwork(runner);
+    if (raced === "missing")
+      throw new Error("failed to create shared compiler cache network");
+  } else {
+    const verified = await inspectSharedCompilerCacheNetwork(runner);
+    if (verified === "missing")
+      throw new Error("shared compiler cache network disappeared after creation");
+  }
+}
+async function inspectSharedCompilerCacheNetwork(runner) {
+  const inspected = await runner.run([
+    "network",
+    "inspect",
+    SHARED_COMPILER_CACHE_NETWORK,
+    "--format",
+    "{{json .}}"
+  ], { allowFailure: true, timeoutMs: 1e4, maxOutputBytes: 256 * 1024 });
+  if (inspected.code !== 0) {
+    if (isExactMissingResource(inspected, "network", SHARED_COMPILER_CACHE_NETWORK))
+      return "missing";
+    throw new Error("unable to inspect shared compiler cache network");
+  }
+  const network = parseInspection(inspected.stdout.toString());
+  if (!isRecord3(network) || network.Name !== SHARED_COMPILER_CACHE_NETWORK || network.Driver !== "bridge" || network.Scope !== "local" || network.Internal !== false || !hasExactSharedLabels(network.Labels)) {
+    throw new Error("refusing shared compiler cache network with mismatched identity");
+  }
+  return "matching";
+}
+async function inspectSharedCompilerCacheContainer(runner) {
+  const inspected = await runner.run([
+    "container",
+    "inspect",
+    SHARED_COMPILER_CACHE_CONTAINER,
+    "--format",
+    "{{json .}}"
+  ], { allowFailure: true, timeoutMs: 1e4, maxOutputBytes: 256 * 1024 });
+  if (inspected.code !== 0) {
+    if (isExactMissingResource(inspected, "container", SHARED_COMPILER_CACHE_CONTAINER))
+      return "missing";
+    throw new Error("unable to inspect shared compiler cache container");
+  }
+  const container = parseInspection(inspected.stdout.toString());
+  if (!isRecord3(container) || container.Name !== `/${SHARED_COMPILER_CACHE_CONTAINER}` || !isRecord3(container.Config) || container.Config.Image !== SHARED_COMPILER_CACHE_IMAGE || !hasExactSharedLabels(container.Config.Labels) || !isRecord3(container.HostConfig) || !isRecord3(container.HostConfig.RestartPolicy) || container.HostConfig.RestartPolicy.Name !== "unless-stopped" || !isEmptyPortBindings(container.HostConfig.PortBindings) || !isExpectedCommand(container.Config.Cmd) || !isRecord3(container.NetworkSettings) || !isExclusiveSharedNetwork(container.NetworkSettings.Networks) || !isRecord3(container.State) || typeof container.State.Status !== "string") {
+    throw new Error("refusing shared compiler cache container with mismatched identity");
+  }
+  if (container.State.Status === "running")
+    return "running";
+  if (["created", "restarting", "exited", "dead", "paused"].includes(container.State.Status))
+    return "stopped";
+  throw new Error("refusing shared compiler cache container with unknown state");
+}
+function parseInspection(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed[0] : parsed;
+  } catch {
+    throw new Error("invalid shared compiler cache Docker inspection");
+  }
+}
+function isExactMissingResource(result, kind, name) {
+  if (result.stdout.toString().trim() !== "")
+    return false;
+  const diagnostic = result.stderr.toString().trim();
+  const expected = kind === "container" ? [`Error: No such container: ${name}`, `Error response from daemon: No such container: ${name}`] : [`Error: network ${name} not found`, `Error response from daemon: network ${name} not found`];
+  return expected.includes(diagnostic);
+}
+function hasExactSharedLabels(value) {
+  if (!isRecord3(value))
+    return false;
+  if (Object.keys(value).length !== Object.keys(SHARED_COMPILER_CACHE_LABELS).length)
+    return false;
+  for (const [key, expected] of Object.entries(SHARED_COMPILER_CACHE_LABELS)) {
+    if (value[key] !== expected)
+      return false;
+  }
+  return true;
+}
+function isEmptyPortBindings(value) {
+  return value === null || isRecord3(value) && Object.keys(value).length === 0;
+}
+function isExpectedCommand(value) {
+  return Array.isArray(value) && value.length === SHARED_COMPILER_CACHE_COMMAND.length && value.every((item, index) => item === SHARED_COMPILER_CACHE_COMMAND[index]);
+}
+function isExclusiveSharedNetwork(value) {
+  if (!isRecord3(value))
+    return false;
+  const names = Object.keys(value);
+  return names.length === 1 && names[0] === SHARED_COMPILER_CACHE_NETWORK && isRecord3(value[names[0]]);
+}
 async function dockerAvailable(runner = defaultDockerRunner, secretEnvironment = [], environment = process.env) {
   return (await runner.run(["info", "--format", "{{.ServerVersion}}"], {
     allowFailure: true,
@@ -7911,6 +8120,10 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
     ownerKey: metadata.ownerKey,
     labId: metadata.id
   });
+  if (config.runtime.compilerCache === "sccache-redis") {
+    await ensureSharedCompilerCache(scrubDockerRunnerEnvironment(runner, config.secretEnvironment, environment));
+    findings.push({ surface: "shared-cache", detail: "shared compiler cache enabled" });
+  }
   await writeFile(overrideFile, override, { mode: 384 });
   const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
   validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
@@ -8935,7 +9148,8 @@ var FINDING_SURFACES = new Set([
   "secret",
   "config",
   "fixed-port",
-  "non-loopback-port"
+  "non-loopback-port",
+  "shared-cache"
 ]);
 function defaultStateRoot() {
   return join2(homedir(), "Library", "Application Support", "OpenAI", "codex-container-lab");
@@ -9196,7 +9410,7 @@ function validatePersistedRuntime(lab, runtime) {
   } else {
     throw new Error("invalid runtime mode");
   }
-  if (!isBoundedString(config.runtime.workspace, 1024) || !posix3.isAbsolute(config.runtime.workspace) || posix3.normalize(config.runtime.workspace) !== config.runtime.workspace || config.runtime.workspace === "/" || !Array.isArray(config.runtime.shell) || config.runtime.shell.length === 0 || config.runtime.shell.length > 64 || !config.runtime.shell.every((part) => isBoundedString(part, 4096) && !part.includes("\x00")) || !posix3.isAbsolute(config.runtime.shell[0]) || posix3.normalize(config.runtime.shell[0]) !== config.runtime.shell[0])
+  if (!isBoundedString(config.runtime.workspace, 1024) || !posix3.isAbsolute(config.runtime.workspace) || posix3.normalize(config.runtime.workspace) !== config.runtime.workspace || config.runtime.workspace === "/" || !Array.isArray(config.runtime.shell) || config.runtime.shell.length === 0 || config.runtime.shell.length > 64 || !config.runtime.shell.every((part) => isBoundedString(part, 4096) && !part.includes("\x00")) || !posix3.isAbsolute(config.runtime.shell[0]) || posix3.normalize(config.runtime.shell[0]) !== config.runtime.shell[0] || config.runtime.compilerCache !== undefined && config.runtime.compilerCache !== "sccache-redis")
     throw new Error("invalid container runtime");
   if (!Array.isArray(config.ports) || !config.ports.every(isDeclaredPort))
     throw new Error("invalid declared ports");

@@ -23,6 +23,24 @@ environment:
 secret_environment: []
 ```
 
+### Optional shared compiler cache
+
+Compiler caching is opt-in per lab:
+
+```yaml
+runtime:
+  compiler_cache: sccache-redis
+```
+
+When enabled, Generic Lab idempotently ensures one Skizzles-owned Redis cache
+on an external bridge network and adds `SCCACHE_REDIS_ENDPOINT` to the
+configured command service. The project image, command, and existing project
+network memberships remain downstream-owned; Generic Lab does not set
+`RUSTC_WRAPPER`, publish a host port, or add a cache service to the project.
+The cache is a bounded `shared-cache` finding and is outside per-lab cleanup.
+The only accepted value is `sccache-redis`; omitting `compiler_cache` leaves
+the lab unchanged.
+
 `files` are passed to Compose in order and remain rooted at the consuming repository, so relative build contexts, env files, configs, and bind mounts preserve normal Compose behavior. The command service must already be long-running. The generated override mounts the isolated clone at `runtime.workspace`, sets `init`, adds management labels, and adds random `127.0.0.1` publications for declared ports.
 
 ### Environment forwarding and Compose secret sources

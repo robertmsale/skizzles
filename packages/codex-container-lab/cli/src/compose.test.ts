@@ -6,6 +6,9 @@ import {
   generateBaseCompose,
   generateOverrideCompose,
   inspectComposeModel,
+  SHARED_COMPILER_CACHE_CONTAINER,
+  SHARED_COMPILER_CACHE_ENDPOINT,
+  SHARED_COMPILER_CACHE_NETWORK,
   validateSecretEnvironmentModel,
   type ComposeModel,
 } from "./compose";
@@ -98,6 +101,37 @@ environment: [TERM]
       ownerKey: "a".repeat(64),
       labId: "l",
     })).toThrow("command service is absent");
+  });
+
+  test("adds the external shared compiler cache without replacing project networks or images", () => {
+    const config = parseLabConfig(`
+image: { name: downstream-owned:latest, service: dev }
+runtime: { compiler_cache: sccache-redis }
+`, repoRoot);
+    const override = parseYaml(generateOverrideCompose(config, {
+      services: { dev: { networks: { backend: { aliases: ["dev"] } } } },
+      networks: { backend: {} },
+    }, {
+      workspaceHostPath: "/tmp/workspace",
+      owner: "thread",
+      ownerKey: "a".repeat(64),
+      labId: "lab",
+    }));
+
+    expect(override.services.dev.environment).toEqual([
+      `SCCACHE_REDIS_ENDPOINT=${SHARED_COMPILER_CACHE_ENDPOINT}`,
+    ]);
+    expect(override.services.dev.networks).toEqual({
+      backend: { aliases: ["dev"] },
+      [SHARED_COMPILER_CACHE_NETWORK]: {},
+    });
+    expect(override.networks[SHARED_COMPILER_CACHE_NETWORK]).toEqual({
+      external: true,
+      name: SHARED_COMPILER_CACHE_NETWORK,
+    });
+    expect(override.services.dev.image).toBeUndefined();
+    expect(JSON.stringify(override)).not.toContain("RUSTC_WRAPPER");
+    expect(SHARED_COMPILER_CACHE_CONTAINER).toBe("skizzles-sccache-redis");
   });
 
   test("requires each declared port service in the normalized model", () => {

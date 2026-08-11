@@ -4,7 +4,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupLabLabels, DockerProvisioningFailure, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
+import { cleanupLabLabels, DockerProvisioningFailure, ensureSharedCompilerCache, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
+import { SHARED_COMPILER_CACHE_CONTAINER, SHARED_COMPILER_CACHE_IMAGE, SHARED_COMPILER_CACHE_LABELS, SHARED_COMPILER_CACHE_NETWORK } from "./compose";
 import { parseLabConfig } from "./config";
 import { redactComposeFailureWithMetadata } from "./log-framing";
 import type { RunOptions, CommandResult } from "./process";
@@ -62,6 +63,129 @@ class ComposeFailureDocker implements DockerRunner {
   }
   spawn(): ChildProcessWithoutNullStreams { return new EventEmitter() as ChildProcessWithoutNullStreams; }
 }
+
+class SharedCacheDocker implements DockerRunner {
+  calls: string[][] = [];
+  networkExists = false;
+  containerExists = false;
+  containerStatus: "running" | "exited" = "running";
+  networkCollision = false;
+  containerCollision = false;
+  pingFailures = 0;
+
+  async run(args: string[]): Promise<CommandResult> {
+    this.calls.push(args);
+    if (args[0] === "network" && args[1] === "inspect") {
+      if (!this.networkExists && !this.networkCollision) return resultWithError(`Error: network ${SHARED_COMPILER_CACHE_NETWORK} not found`);
+      return result(JSON.stringify({
+        Name: this.networkCollision ? "unrelated-network" : SHARED_COMPILER_CACHE_NETWORK,
+        Driver: "bridge",
+        Scope: "local",
+        Internal: false,
+        Labels: SHARED_COMPILER_CACHE_LABELS,
+      }));
+    }
+    if (args[0] === "network" && args[1] === "create") {
+      if (this.networkCollision) return resultWithError("network name already in use");
+      this.networkExists = true;
+      return result("network-id");
+    }
+    if (args[0] === "container" && args[1] === "inspect") {
+      if (!this.containerExists && !this.containerCollision) return resultWithError(`Error: No such container: ${SHARED_COMPILER_CACHE_CONTAINER}`);
+      return result(JSON.stringify({
+        Name: this.containerCollision ? "/unrelated-container" : `/${SHARED_COMPILER_CACHE_CONTAINER}`,
+        Config: {
+          Image: SHARED_COMPILER_CACHE_IMAGE,
+          Labels: SHARED_COMPILER_CACHE_LABELS,
+          Cmd: ["redis-server", "--maxmemory", "16gb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"],
+        },
+        HostConfig: { RestartPolicy: { Name: "unless-stopped" }, PortBindings: null },
+        NetworkSettings: { Networks: { [SHARED_COMPILER_CACHE_NETWORK]: {} } },
+        State: { Status: this.containerStatus },
+      }));
+    }
+    if (args[0] === "run") {
+      if (this.containerCollision) return resultWithError("container name already in use");
+      this.containerExists = true;
+      this.containerStatus = "running";
+      return result("container-id");
+    }
+    if (args[0] === "start") {
+      this.containerStatus = "running";
+      return result("container-id");
+    }
+    if (args[0] === "exec") {
+      if (this.pingFailures > 0) {
+        this.pingFailures--;
+        return resultWithError("redis is starting");
+      }
+      return result("PONG\n");
+    }
+    return result("");
+  }
+
+  spawn(): ChildProcessWithoutNullStreams {
+    return new EventEmitter() as ChildProcessWithoutNullStreams;
+  }
+}
+
+describe("shared compiler cache", () => {
+  test("creates matching resources once and is idempotent", async () => {
+    const docker = new SharedCacheDocker();
+    await ensureSharedCompilerCache(docker);
+    await ensureSharedCompilerCache(docker);
+    expect(docker.calls.filter((args) => args[0] === "network" && args[1] === "create")).toHaveLength(1);
+    expect(docker.calls.filter((args) => args[0] === "run")).toHaveLength(1);
+    expect(docker.calls.filter((args) => args[0] === "exec")).toHaveLength(2);
+    const create = docker.calls.find((args) => args[0] === "run")!;
+    expect(create).toContain(SHARED_COMPILER_CACHE_IMAGE);
+    expect(create).toContain("--restart");
+    expect(create).toContain("unless-stopped");
+    expect(create).not.toContain("--publish");
+    expect(create).not.toContain("io.openai.codex-container-lab.managed=true");
+  });
+
+  test("retries a transient Redis readiness failure within the bounded probe window", async () => {
+    const docker = new SharedCacheDocker();
+    docker.pingFailures = 2;
+    await ensureSharedCompilerCache(docker);
+    expect(docker.calls.filter((args) => args[0] === "exec")).toHaveLength(3);
+  });
+
+  test("starts a matching stopped container and rejects unrelated collisions", async () => {
+    const stopped = new SharedCacheDocker();
+    stopped.networkExists = true;
+    stopped.containerExists = true;
+    stopped.containerStatus = "exited";
+    await ensureSharedCompilerCache(stopped);
+    expect(stopped.calls.filter((args) => args[0] === "start")).toHaveLength(1);
+
+    const networkCollision = new SharedCacheDocker();
+    networkCollision.networkCollision = true;
+    await expect(ensureSharedCompilerCache(networkCollision)).rejects.toThrow("mismatched identity");
+
+    const containerCollision = new SharedCacheDocker();
+    containerCollision.networkExists = true;
+    containerCollision.containerCollision = true;
+    await expect(ensureSharedCompilerCache(containerCollision)).rejects.toThrow("mismatched identity");
+  });
+
+  test("does not inspect or create shared resources without compiler-cache opt-in", async () => {
+    const root = await mkdtemp(join(tmpdir(), "container-lab-no-cache-"));
+    try {
+      const docker = new MockDocker();
+      docker.responses.push(
+        result(JSON.stringify({ services: { dev: {} } })),
+        result(JSON.stringify({ services: { dev: {} } })),
+      );
+      const config = parseLabConfig("image: { name: node:24, service: dev }", join(root, "source"));
+      await prepareLabRuntime(labAt(root), config, docker);
+      expect(docker.calls.some((args) => ["network", "container", "run", "start", "exec"].includes(args[0] ?? ""))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("secret environment materialization", () => {
   test("keeps values ephemeral and sends them only to Compose config and up", async () => {
