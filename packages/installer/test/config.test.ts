@@ -121,7 +121,15 @@ describe("Codex configuration lifecycle", () => {
       "If context is compacted",
       "Read applicable `AGENTS.md`",
       "never weaken validation to manufacture a green result",
-      "Never overwrite, reset, clean, discard, rewrite history, push, publish, or alter production without exact authority",
+      "non-force pushes from a verified dedicated non-default task branch",
+      "Treat task-owned clean Git state as a mandatory end-of-turn invariant",
+      "do not ask permission to commit",
+      "create or update its draft pull request",
+      "Never push a default/protected branch under this standing authority",
+      "verify that the checkout is an exclusively owned task worktree",
+      "Preserve and do not stage pre-existing or concurrent foreign changes",
+      "Never bypass, disable, or skip a commit hook without explicit user permission",
+      "a verified externally blocked hook is the only acceptable reason",
       "Assume the workspace may be shared",
       "concise evidence-backed handoff",
     ]) {
@@ -133,6 +141,12 @@ describe("Codex configuration lifecycle", () => {
       "Do not broaden scope or create overlapping ownership",
       "Own the slice through focused implementation",
       "keep validation proportional",
+      "Additive commits are mandatory closeout work",
+      "commit your owned changes yourself before completing the assignment",
+      "A source-changing subagent may not hand off dirty state",
+      "only if the hook remains unusable because of externally broken tooling after reasonable repair attempts",
+      "Never stage foreign changes",
+      "Never bypass a commit hook",
       "Send the parent a concise message when you hit a material blocker",
       "Report changed areas, resulting behavior, validation",
     ]) {
@@ -146,12 +160,18 @@ describe("Codex configuration lifecycle", () => {
       expect(root).not.toContain(roleDetail);
       expect(subagent).not.toContain(roleDetail);
     }
+    expect(root).not.toContain("create commits only at coherent, validated forward-progress boundaries when authorized");
+    expect(subagent).not.toContain("The parent owns the user relationship, overall outcome, cross-slice decisions, integration, history-changing Git operations");
+    expect(subagent).not.toContain("transfer the exact owned paths and diff to the parent");
   });
 
   test("canonical execution-safety policy permits only verified user-authorized Git surgery", () => {
     const policy = readFileSync(resolve(import.meta.dir, "../../../assets/auto_review_policy.md"), "utf8");
 
     expect(policy).toContain("Explicit current-task user authority");
+    expect(policy).toContain("narrow standing task-branch closeout authority");
+    expect(policy).toContain("dedicated non-default task branch");
+    expect(policy).toContain("does not authorize default/protected-branch pushes, force-pushes, broad refspecs, tags, releases, or unrelated publication");
     for (const operation of ["rebase", "cherry-pick", "reset", "exact-path restore", "branch or ref deletion", "force-push"]) {
       expect(policy).toContain(operation);
     }
