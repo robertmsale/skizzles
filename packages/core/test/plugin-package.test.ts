@@ -75,6 +75,7 @@ describe("deterministic plugin packaging", () => {
     expect(await Bun.file(join(staged, "hooks/manage-command-output.ts")).exists()).toBe(false);
     expect(await Bun.file(join(staged, "runtime/codex-command.ts")).exists()).toBe(false);
     expect(await Bun.file(join(staged, "hooks/approve-safe-operations.ts")).exists()).toBe(true);
+    expect(await Bun.file(join(staged, "grok")).exists()).toBe(false);
   });
 
   test("stages only allowlisted canonical inputs deterministically", async () => {
@@ -378,7 +379,7 @@ async function fixture(): Promise<string> {
     "packages/codex-container-lab/cli/src/cli.ts",
     "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture cli' }));\n",
   );
-  for (const path of ["config.ts", "core.ts", "doctor.ts", "harness.ts"]) {
+  for (const path of ["config.ts", "core.ts", "doctor.ts", "grok.ts", "harness.ts"]) {
     await write(root, `packages/installer/src/${path}`, `export const fixture = "${path}";\n`);
   }
   await write(root, "packages/installer/src/cli.ts", "console.log('fixture cli');\n");

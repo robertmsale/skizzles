@@ -7,6 +7,8 @@ description: Choose, install, diagnose, update, or uninstall Skizzles from its c
 
 Keep installation deliberate and reversible. Never mutate a live Codex home, plugin marketplace, `PATH`, Docker, or launchd without the user's explicit approval.
 
+The separate Grok surface installs Skizzles-native full prompts, a Grok 4.6 High launcher, a scoped spawn guard, and portable skills under an explicit `GROK_HOME`. It does not modify Grok `config.toml`, authenticate a provider, or enable T3.
+
 ## Choose the installation
 
 - Use plain-skill mode when the user only wants skills. It manages selected directories below an explicit `CODEX_HOME/skills` and never activates hooks or runtime helpers.
@@ -86,6 +88,21 @@ bun run packages/installer/src/cli.ts unconfigure \
 ```
 
 Repeat restoration without `--dry-run` only after previewing it. The lifecycle launches that Codex binary's app-server against the selected home and uses native `config/read` plus atomic `config/batchWrite` with version-conflict detection. Its receipt lives at `CODEX_HOME/.skizzles/config-receipt.json`; restoration fails closed if an owned value drifted. It never edits `AGENTS.md`, `developer_instructions`, approvals, permissions, goals, model defaults, MCP registrations, or unrelated feature flags. With `--instructions skizzles`, it additionally owns `model_instructions_file` and the generated Skizzles roles listed by the manifest. To restore configuration shape cleanly, the receipt owns the entire `agents` table when it was initially absent, an entire named-role table when that role was initially absent, or only `description` and `config_file` leaves when preserving an existing customized role. Later edits inside a structurally owned table are treated as drift and block restoration. Do not manually delete the receipt to bypass a conflict.
+
+## Install the Grok Build surface
+
+Preview against an explicit `GROK_HOME`:
+
+```sh
+bun run packages/installer/src/cli.ts install \
+  --surface grok --grok-home /absolute/target/.grok \
+  --source-root /absolute/path/to/skizzles \
+  --transfer link --dry-run
+```
+
+Review the four agent profiles, copied launcher and hook files, and curated skill targets, then repeat without `--dry-run`. The installer leaves `config.toml`, authentication, and T3 enablement untouched. Its launcher applies `skizzles-root`, `grok-4.6`, and `high` only when that launcher is used and exports the profile marker consumed by the global guard hook, so ordinary Grok profiles remain unaffected. Uninstall with the same `--surface grok --grok-home ... --dry-run` preview followed by the real command. Do not replace foreign targets or delete the receipt to bypass drift.
+
+For T3, configure the Grok provider instance with the absolute `GROK_HOME/bin/skizzles-grok` launcher path. The child profiles intentionally omit model and effort so Worker, Explorer, and Reviewer inherit the root session's pinned Grok 4.6 High configuration.
 
 Configuration upgrades are an explicit restore-and-reapply lifecycle because `configure` refuses to overwrite an active receipt. Preview `unconfigure` with the absolute Codex binary recorded in the receipt, run it only when the owned values are drift-free, preview the new `configure`, then apply it. Do not delete or rewrite the receipt by hand; that discards the exact restoration boundary Skizzles uses to preserve unrelated config.
 

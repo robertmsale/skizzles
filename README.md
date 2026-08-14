@@ -4,6 +4,8 @@
 
 Skizzles is a friendly, reviewable Codex harness: reusable skills, helpful hooks, tiny runtime tools, and release packaging in one canonical source tree. It turns the fiddly parts of agent work into a tidy little toolkit. 🧰
 
+Skizzles also includes a Grok Build harness with full root/Worker/Explorer/Reviewer prompts, a T3-facing Grok 4.6 High launcher with homogeneous child inheritance, a narrowly scoped subagent override guard, and a curated portable skill set. It is installed independently from the Codex plugin and never rewrites Grok's `config.toml`.
+
 ## What’s inside
 
 - **Hot-reloadable local-development permissions** — approves a conservative set of build, test, and repo-contained patch operations before Guardian while leaving Git surgery, publication, and consequential work on the normal approval path.
@@ -66,6 +68,16 @@ bun run packages/installer/src/cli.ts configure \
 ```
 
 Review the reported keys, then repeat without `--dry-run`. The lifecycle uses Codex’s own atomic config editor, preserves comments and unrelated settings, and records only the keys it owns for drift-safe restoration. It never edits `AGENTS.md`, approvals, permissions, goals, model defaults, or MCP registrations. Prompt replacement happens only with the explicit `--instructions skizzles` option. See [install-skizzles](skills/install-skizzles/SKILL.md) for restoration and the complete contract.
+
+Install the source-linked Grok surface without enabling or authenticating the provider:
+
+```sh
+bun run packages/installer/src/cli.ts install \
+  --surface grok --grok-home "$HOME/.grok" \
+  --source-root "$PWD" --transfer link --dry-run
+```
+
+Review the targets, then repeat without `--dry-run`. Use `--transfer copy` for a durable installation or `link` only from a checkout that will remain at the recorded absolute path. The T3-facing launcher and security-sensitive global hook files are always copied into Grok's real directories. The receipt at `~/.grok/.skizzles/grok-harness-receipt.json` owns only those targets and makes uninstall drift-safe. Point T3's Grok provider at `~/.grok/bin/skizzles-grok`; the launcher selects `skizzles-root`, Grok 4.6, and High reasoning before starting ACP, while every child profile inherits that live configuration.
 
 The optional Luna V2 overlay lives in `runtime/model-catalog.ts`. It regenerates a complete static catalog from the newest valid normal cache or the installed Codex binary, changes only Luna's compatibility marker, and becomes a no-op when upstream enables V2 officially. Its launchd template watches both sources and runs every five minutes; catalog changes take effect after the next app-server restart. See `assets/model-catalog-installation.md` before activating it. 🚀
 

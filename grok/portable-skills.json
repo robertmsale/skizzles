@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "skills": [
+    "auth-semantics",
+    "cargo-build-optimize",
+    "codex-container-lab",
+    "counterfactual-engineering",
+    "design-proof-gate",
+    "designer-runtime",
+    "no-legacy-cleanup",
+    "rinf-boundary"
+  ]
+}

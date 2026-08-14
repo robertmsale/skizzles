@@ -43,6 +43,7 @@ const INSTALLER_INPUTS = [
   "src/config.ts",
   "src/core.ts",
   "src/doctor.ts",
+  "src/grok.ts",
   "src/harness.ts",
 ] as const;
 

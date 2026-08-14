@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -eu
+export GROK_AGENT=skizzles-root
+
+exec "$(dirname "$0")/grok" \
+  --agent skizzles-root \
+  --model grok-4.6 \
+  --effort high \
+  "$@"

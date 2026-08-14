@@ -11,6 +11,8 @@ describe("installer CLI target gates", () => {
     ["uninstall", "--surface", "skills"],
     ["install", "--surface", "harness"],
     ["uninstall", "--surface", "harness"],
+    ["install", "--surface", "grok"],
+    ["uninstall", "--surface", "grok"],
     ["configure"],
     ["unconfigure"],
     ["doctor"],
@@ -62,5 +64,27 @@ describe("installer CLI target gates", () => {
       stderr: "pipe",
     });
     expect(result.exitCode).toBe(2);
+  });
+
+  test("Grok install requires an explicit canonical source root", () => {
+    const root = `${process.env.TMPDIR ?? "/tmp"}/skizzles-cli-grok-${crypto.randomUUID()}`;
+    roots.push(root);
+    const result = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        resolve(import.meta.dir, "../src/cli.ts"),
+        "install",
+        "--surface",
+        "grok",
+        "--grok-home",
+        join(root, "grok"),
+        "--dry-run",
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(existsSync(root)).toBe(false);
   });
 });

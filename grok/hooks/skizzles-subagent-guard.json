@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Task|spawn_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun bin/skizzles-guard-subagent-spawn.ts",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
