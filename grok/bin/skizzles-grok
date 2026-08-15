@@ -7,4 +7,5 @@ exec "$(dirname "$0")/grok" \
   --agent skizzles-root \
   --model grok-4.6 \
   --effort high \
+  --permission-mode auto \
   "$@"

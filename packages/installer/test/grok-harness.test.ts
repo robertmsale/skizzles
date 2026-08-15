@@ -18,7 +18,7 @@ function fixture(): { sourceRoot: string; grokHome: string } {
   mkdirSync(join(sourceRoot, "grok/bin"), { recursive: true });
   writeFileSync(
     join(sourceRoot, "grok/bin/skizzles-grok"),
-    '#!/bin/sh\nexport GROK_AGENT=skizzles-root\nexec "$(dirname "$0")/grok" --agent skizzles-root --model grok-4.6 --effort high "$@"\n',
+    '#!/bin/sh\nexport GROK_AGENT=skizzles-root\nexec "$(dirname "$0")/grok" --agent skizzles-root --model grok-4.6 --effort high --permission-mode auto "$@"\n',
     { mode: 0o755 },
   );
   mkdirSync(join(sourceRoot, "grok/hooks/bin"), { recursive: true });
@@ -69,7 +69,7 @@ describe("Grok harness installer", () => {
     expect(readFileSync(join(f.grokHome, "agents/skizzles-root.md"), "utf8")).toBe("foreign\n");
   });
 
-  test("launcher pins the root profile, Grok 4.6, and high effort", () => {
+  test("launcher pins the root profile and enables native automatic permission review", () => {
     const f = fixture();
     mkdirSync(join(f.grokHome, "bin"), { recursive: true });
     writeFileSync(join(f.grokHome, "bin/grok"), "#!/bin/sh\nprintf 'GROK_AGENT=%s\\n' \"$GROK_AGENT\"\nprintf '%s\\n' \"$@\"\n", { mode: 0o755 });
@@ -86,6 +86,8 @@ describe("Grok harness installer", () => {
       "grok-4.6",
       "--effort",
       "high",
+      "--permission-mode",
+      "auto",
       "agent",
       "stdio",
     ]);

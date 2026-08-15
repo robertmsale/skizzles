@@ -61,12 +61,13 @@ describe("Grok agent profiles", () => {
 });
 
 describe("Grok launcher", () => {
-  test("pins the root while children remain inheritance-only", () => {
+  test("pins the root and enables native automatic permission review", () => {
     const text = readFileSync(launcher, "utf8");
     expect(text).toContain("GROK_AGENT=skizzles-root");
     expect(text).toContain("--agent skizzles-root");
     expect(text).toContain("--model grok-4.6");
     expect(text).toContain("--effort high");
+    expect(text).toContain("--permission-mode auto");
   });
 });
 
