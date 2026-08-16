@@ -1,0 +1,970 @@
+#!/usr/bin/env bun
+// @bun
+
+// packages/t3-orchestration/src/daemon.ts
+import { connect, createServer as createServer2 } from "net";
+import { chmodSync } from "fs";
+import { lstat, mkdir, unlink } from "fs/promises";
+import { dirname } from "path";
+
+// packages/t3-orchestration/src/config.ts
+import { join } from "path";
+var {$ } = globalThis.Bun;
+
+// packages/t3-orchestration/src/protocol.ts
+function requireSelection(value, providerDriver) {
+  if (!value || typeof value !== "object")
+    throw new Error("Model selection is missing");
+  const candidate = value;
+  if (typeof candidate.instanceId !== "string" || typeof candidate.model !== "string") {
+    throw new Error("Model selection is malformed");
+  }
+  if (candidate.instanceId.trim() === "" || candidate.model.trim() === "")
+    throw new Error("Model selection has an empty provider or model");
+  const driver = providerDriver ?? candidate.instanceId;
+  const rawOptions = candidate.options === undefined ? [] : candidate.options;
+  if (!Array.isArray(rawOptions))
+    throw new Error("Model selection is malformed");
+  const options = rawOptions.map((entry) => {
+    if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || entry.id.trim() === "")
+      throw new Error("Model selection contains a malformed option");
+    if (!(typeof entry.value === "string" || typeof entry.value === "boolean" || typeof entry.value === "number"))
+      throw new Error(`Model option '${entry.id}' has an invalid value`);
+    return { id: entry.id, value: entry.value };
+  });
+  if (new Set(options.map((entry) => entry.id)).size !== options.length)
+    throw new Error("Model selection contains duplicate options");
+  if (driver === "codex" && !options.some((entry) => entry.id === "reasoningEffort")) {
+    throw new Error("Codex reasoning effort is missing");
+  }
+  return { instanceId: candidate.instanceId, model: candidate.model, options };
+}
+
+// packages/t3-orchestration/src/config.ts
+var home = process.env.HOME ?? (() => {
+  throw new Error("HOME is required");
+})();
+var CODEX_HOME = process.env.CODEX_HOME ?? join(home, ".codex");
+var T3_HOME = process.env.T3_HOME ?? join(home, ".t3");
+var SOCKET_PATH = process.env.T3_ORCHESTRATION_SOCKET ?? join(T3_HOME, "t3-orchestration.sock");
+var HTTP_SOCKET_PATH = process.env.T3_ORCHESTRATION_HTTP_SOCKET ?? join(T3_HOME, "t3-orchestration-http.sock");
+var TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
+var KEYCHAIN_SERVICE = "t3-orchestration";
+var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
+var GROK_DEFAULT_MODEL = "grok-4.6";
+async function origin() {
+  const path = join(T3_HOME, "userdata/server-runtime.json");
+  const runtime = await Bun.file(path).json();
+  if (typeof runtime.origin !== "string" || !/^https?:\/\//.test(runtime.origin))
+    throw new Error(`Invalid T3 runtime origin in ${path}`);
+  return runtime.origin.replace(/\/$/, "");
+}
+async function token() {
+  const result = await $`security find-generic-password -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`.quiet();
+  const value = result.text().trim();
+  if (!value)
+    throw new Error("No T3 token. Run t3ctl auth configure.");
+  return value;
+}
+async function codexDefaults() {
+  const text = await Bun.file(join(CODEX_HOME, "config.toml")).text();
+  const parsed = Bun.TOML.parse(text);
+  const model = parsed.model;
+  const effort = parsed.model_reasoning_effort;
+  const provider = parsed.model_provider;
+  const serviceTier = parsed.service_tier;
+  if (typeof model !== "string" || typeof effort !== "string" || typeof provider !== "string") {
+    throw new Error("config.toml must define model, model_reasoning_effort, and model_provider");
+  }
+  if (provider.length === 0)
+    throw new Error("config.toml model_provider is empty");
+  const selection = requireSelection({
+    instanceId: "codex",
+    model,
+    options: [
+      { id: "reasoningEffort", value: effort },
+      ...typeof serviceTier === "string" ? [{ id: "serviceTier", value: serviceTier }] : []
+    ]
+  });
+  if (!selection.options.some((entry) => entry.id === "reasoningEffort")) {
+    throw new Error("Codex default reasoning effort is missing");
+  }
+  return selection;
+}
+async function taskProviderDefaults(provider) {
+  switch (provider?.trim().toLowerCase() || "codex") {
+    case "codex":
+    case "openai":
+      return codexDefaults();
+    case "grok":
+      return requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] });
+    default:
+      throw new Error(`Unsupported task provider '${provider}'. Supported providers: codex, grok`);
+  }
+}
+
+// packages/t3-orchestration/src/t3.ts
+import { randomUUID } from "crypto";
+import { realpath } from "fs/promises";
+var {$: $2 } = globalThis.Bun;
+
+// packages/t3-orchestration/src/task-projection.ts
+function taskPhase(thread) {
+  const shell = thread;
+  if (thread.deletedAt)
+    return "deleted";
+  if (thread.archivedAt)
+    return "archived";
+  if (shell.hasPendingApprovals)
+    return "waiting_for_approval";
+  if (shell.hasPendingUserInput)
+    return "waiting_for_input";
+  if (thread.session?.status === "error" || thread.latestTurn?.state === "error")
+    return "failed";
+  if (thread.session?.status === "starting")
+    return "starting";
+  if (thread.session?.status === "running" || thread.latestTurn?.state === "running")
+    return "running";
+  if (thread.interactionMode === "plan" && shell.hasActionableProposedPlan)
+    return "plan_ready";
+  if (shell.backgroundLiveness === "working")
+    return "running";
+  if (shell.backgroundLiveness === "monitoring")
+    return "monitoring";
+  if (thread.latestTurn?.state === "completed")
+    return "completed";
+  if (thread.latestTurn?.state === "interrupted" && thread.latestTurn.completedAt !== null)
+    return "completed";
+  if (thread.session?.status === "ready" || thread.session?.status === "idle")
+    return "completed";
+  if (thread.session?.status === "stopped" || thread.session?.status === "interrupted")
+    return "stopped";
+  return "idle";
+}
+function taskCursor(thread) {
+  const shell = thread;
+  return Buffer.from(JSON.stringify([
+    thread.updatedAt ?? null,
+    thread.latestTurn?.turnId ?? null,
+    thread.latestTurn?.state ?? null,
+    thread.latestTurn?.completedAt ?? null,
+    thread.session?.status ?? null,
+    thread.session?.updatedAt ?? null,
+    shell.hasPendingApprovals ?? false,
+    shell.hasPendingUserInput ?? false,
+    shell.hasActionableProposedPlan ?? false,
+    shell.backgroundLiveness ?? null,
+    thread.interactionMode,
+    thread.archivedAt ?? null,
+    thread.deletedAt ?? null
+  ])).toString("base64url");
+}
+function projectName(projects, thread) {
+  return projects.get(thread.projectId)?.title ?? null;
+}
+function projectTask(thread, projects, pinnedIndex) {
+  const shell = thread;
+  return {
+    id: thread.id,
+    title: thread.title,
+    projectId: thread.projectId,
+    projectTitle: projectName(projects, thread),
+    phase: taskPhase(thread),
+    sessionStatus: thread.session?.status ?? null,
+    latestTurnState: thread.latestTurn?.state ?? null,
+    pendingApproval: shell.hasPendingApprovals ?? false,
+    pendingUserInput: shell.hasPendingUserInput ?? false,
+    actionablePlan: shell.hasActionableProposedPlan ?? false,
+    backgroundLiveness: shell.backgroundLiveness ?? null,
+    pinnedIndex: pinnedIndex ?? null,
+    archived: thread.archivedAt != null,
+    deleted: thread.deletedAt != null,
+    settled: thread.settledOverride === "settled",
+    branch: thread.branch,
+    updatedAt: thread.updatedAt ?? null,
+    cursor: taskCursor(thread)
+  };
+}
+function comparePinned(left, right) {
+  if (left.pinOrderKey && right.pinOrderKey)
+    return left.pinOrderKey.localeCompare(right.pinOrderKey);
+  if (left.pinOrderKey)
+    return -1;
+  if (right.pinOrderKey)
+    return 1;
+  return (left.pinnedAt ?? left.createdAt ?? "").localeCompare(right.pinnedAt ?? right.createdAt ?? "");
+}
+function compareRecent(left, right) {
+  return (right.updatedAt ?? right.createdAt ?? "").localeCompare(left.updatedAt ?? left.createdAt ?? "");
+}
+function projectTaskList(snapshot, options) {
+  if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 200) {
+    throw new Error("Task list limit must be an integer from 1 through 200");
+  }
+  const projects = new Map(snapshot.projects.filter((project) => !project.deletedAt).map((project) => [project.id, project]));
+  const visible = snapshot.threads.filter((thread) => !thread.deletedAt && (!options.projectId || thread.projectId === options.projectId) && (options.includeArchived || !thread.archivedAt) && (options.includeSettled || thread.settledOverride !== "settled"));
+  const pinned = visible.filter((thread) => thread.pinnedAt).sort(comparePinned);
+  const recent = visible.filter((thread) => !thread.pinnedAt).sort(compareRecent).slice(0, options.limit);
+  return {
+    snapshotSequence: snapshot.snapshotSequence,
+    tasks: [
+      ...pinned.map((thread, index) => projectTask(thread, projects, index + 1)),
+      ...recent.map((thread) => projectTask(thread, projects))
+    ],
+    pinnedCount: pinned.length,
+    recentCount: recent.length,
+    moreRecent: Math.max(0, visible.length - pinned.length - recent.length)
+  };
+}
+function projectProjects(snapshot) {
+  const projects = snapshot.projects.filter((project) => !project.deletedAt).sort((left, right) => left.title.localeCompare(right.title)).map(({ id, title, workspaceRoot }) => ({ id, title, workspaceRoot }));
+  return { projects, count: projects.length };
+}
+function mergeArchivedTasks(shell, full) {
+  const activeIds = new Set(shell.threads.map((thread) => thread.id));
+  const archived = full.threads.filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt && thread.archivedAt);
+  return {
+    snapshotSequence: Math.max(shell.snapshotSequence, full.snapshotSequence),
+    projects: full.projects,
+    threads: [...shell.threads, ...archived],
+    updatedAt: shell.updatedAt
+  };
+}
+function isWakePhase(phase) {
+  return phase === "completed" || phase === "failed" || phase === "waiting_for_approval" || phase === "waiting_for_input" || phase === "plan_ready" || phase === "archived" || phase === "deleted";
+}
+async function waitForTasks(input, loadSnapshot, sleep = Bun.sleep, clock = Date.now, loadMissing) {
+  const uniqueIds = new Set(input.threadIds);
+  if (uniqueIds.size !== input.threadIds.length || uniqueIds.size < 1 || uniqueIds.size > 8) {
+    throw new Error("Task wait requires 1 through 8 unique task ids");
+  }
+  if (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 0 || input.timeoutMs > 3600000) {
+    throw new Error("Task wait timeout must be an integer from 0 through 3600000 milliseconds");
+  }
+  const unknownCursors = Object.keys(input.after).filter((threadId) => !uniqueIds.has(threadId));
+  if (unknownCursors.length)
+    throw new Error(`Wait cursor does not match a target task: ${unknownCursors.join(", ")}`);
+  const deadline = clock() + input.timeoutMs;
+  while (true) {
+    const snapshot = await loadSnapshot();
+    const projects = new Map(snapshot.projects.map((project) => [project.id, project]));
+    const byId = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
+    const missing = input.threadIds.filter((threadId) => !byId.has(threadId));
+    if (missing.length && loadMissing) {
+      for (const thread of await loadMissing(missing))
+        byId.set(thread.id, thread);
+    }
+    const unresolved = input.threadIds.filter((threadId) => !byId.has(threadId));
+    if (unresolved.length)
+      throw new Error(`T3 task not found: ${unresolved.join(", ")}`);
+    const tasks = input.threadIds.map((threadId) => projectTask(byId.get(threadId), projects));
+    const ready = tasks.filter((task) => isWakePhase(task.phase) && input.after[task.id] !== task.cursor);
+    if (ready.length)
+      return { timedOut: false, ready: ready.map((task) => task.id), tasks };
+    const remaining = deadline - clock();
+    if (remaining <= 0)
+      return { timedOut: true, ready: [], tasks };
+    await sleep(Math.min(1000, remaining));
+  }
+}
+
+// packages/t3-orchestration/src/t3.ts
+async function request(path, init = {}, maxBodyBytes = 2000000) {
+  const response = await fetch(`${await origin()}${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${await token()}`, "content-type": "application/json", ...init.headers ?? {} }
+  });
+  if (!response.body)
+    throw new Error(`${init.method ?? "GET"} ${path} returned no body`);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done)
+      break;
+    size += next.value.byteLength;
+    if (size > maxBodyBytes) {
+      await reader.cancel();
+      throw new Error(`${init.method ?? "GET"} ${path} response exceeded ${maxBodyBytes} bytes`);
+    }
+    chunks.push(next.value);
+  }
+  const body = new TextDecoder().decode(Buffer.concat(chunks));
+  if (!response.ok)
+    throw new Error(`${init.method ?? "GET"} ${path} -> ${response.status}: ${body}`);
+  return body ? JSON.parse(body) : null;
+}
+var snapshot = () => request("/api/orchestration/snapshot");
+var shellSnapshot = () => request("/api/orchestration/shell", {}, 2000000);
+var threadSnapshot = (id, turnLimit, beforeCursor) => {
+  if (!Number.isInteger(turnLimit) || turnLimit < 1 || turnLimit > 10)
+    throw new Error("History --turns must be an integer from 1 through 10");
+  const query = new URLSearchParams({ turnLimit: String(turnLimit) });
+  if (beforeCursor?.trim())
+    query.set("beforeCursor", beforeCursor.trim());
+  return request(`/api/orchestration/threads/${encodeURIComponent(id)}?${query}`, {}, 512000);
+};
+function projectThread(result) {
+  const source = result.thread;
+  return {
+    id: source.id,
+    projectId: source.projectId,
+    title: source.title,
+    modelSelection: source.modelSelection,
+    runtimeMode: source.runtimeMode,
+    interactionMode: source.interactionMode,
+    worktreePath: source.worktreePath,
+    branch: source.branch,
+    latestTurn: source.latestTurn ?? null,
+    createdAt: source.createdAt,
+    updatedAt: source.updatedAt,
+    archivedAt: source.archivedAt ?? null,
+    settledOverride: source.settledOverride ?? null,
+    settledAt: source.settledAt ?? null,
+    pinnedAt: source.pinnedAt ?? null,
+    pinOrderKey: source.pinOrderKey ?? null,
+    deletedAt: source.deletedAt ?? null,
+    session: source.session ? {
+      status: source.session.status,
+      threadId: source.session.threadId ?? null,
+      activeTurnId: source.session.activeTurnId ?? null,
+      lastError: source.session.lastError ?? null,
+      updatedAt: source.session.updatedAt
+    } : null
+  };
+}
+var thread = async (id) => projectThread(await threadSnapshot(id, 1));
+var projectList = async () => projectProjects(await snapshot());
+var taskList = async (options) => {
+  const shell = await shellSnapshot();
+  const source = options.includeArchived ? mergeArchivedTasks(shell, await snapshot()) : shell;
+  return projectTaskList(source, options);
+};
+var taskWait = async (input) => waitForTasks(input, shellSnapshot, Bun.sleep, Date.now, async (threadIds) => {
+  const full = await snapshot();
+  const ids = new Set(threadIds);
+  return full.threads.filter((entry) => ids.has(entry.id));
+});
+var taskStatus = async (id) => {
+  const shell = await shellSnapshot();
+  const active = shell.threads.find((entry) => entry.id === id);
+  if (active)
+    return projectTask(active, new Map(shell.projects.map((project) => [project.id, project])));
+  const [result, full] = await Promise.all([threadSnapshot(id, 1), snapshot()]);
+  return projectTask(result.thread, new Map(full.projects.map((project) => [project.id, project])));
+};
+var HISTORY_MESSAGE_CHAR_LIMIT = 8000;
+var HISTORY_TOTAL_CHAR_LIMIT = 32000;
+function projectTaskHistory(result) {
+  let remaining = HISTORY_TOTAL_CHAR_LIMIT;
+  let messagesOmitted = 0;
+  const messages = [];
+  for (const message of result.thread.messages.toReversed()) {
+    if (remaining <= 0) {
+      messagesOmitted++;
+      continue;
+    }
+    const source = typeof message.text === "string" ? message.text : "";
+    const available = Math.min(HISTORY_MESSAGE_CHAR_LIMIT, remaining);
+    const text = source.slice(0, available);
+    messages.push({
+      role: message.role,
+      text,
+      textTruncated: text.length < source.length,
+      turnId: message.turnId,
+      createdAt: message.createdAt
+    });
+    remaining -= text.length;
+  }
+  messages.reverse();
+  return {
+    thread: {
+      id: result.thread.id,
+      projectId: result.thread.projectId,
+      title: result.thread.title,
+      sessionStatus: result.thread.session?.status ?? null
+    },
+    page: result.page ?? null,
+    messages,
+    messagesOmitted
+  };
+}
+async function taskHistory(id, turnLimit, beforeCursor) {
+  return projectTaskHistory(await threadSnapshot(id, turnLimit, beforeCursor));
+}
+var BOOTSTRAP_TIMEOUT_MS = 180000;
+function bootstrapRpcRequest(requestId, payload, tag = "orchestration.dispatchCommand") {
+  return {
+    _tag: "Request",
+    id: requestId,
+    tag,
+    payload,
+    headers: []
+  };
+}
+function bootstrapRpcResponse(frame, requestId) {
+  let response;
+  try {
+    response = JSON.parse(frame);
+  } catch {
+    return { type: "failure", message: "T3 WebSocket bootstrap returned malformed JSON" };
+  }
+  const description = `${String(response._tag)} requestId=${String(response.requestId)}`;
+  if (response._tag !== "Exit" || response.requestId !== requestId) {
+    return { type: "ignore", description };
+  }
+  if (response.exit?._tag === "Success")
+    return { type: "success", value: response.exit.value };
+  return { type: "failure", message: `T3 WebSocket dispatch failed: ${JSON.stringify(response.exit?.cause ?? response.exit)}` };
+}
+async function requestRpc(tag, payload) {
+  const base = await origin();
+  const ticketResponse = await fetch(`${base}/api/auth/websocket-ticket`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${await token()}` }
+  });
+  if (!ticketResponse.ok)
+    throw new Error(`T3 WebSocket ticket failed (${ticketResponse.status}): ${await ticketResponse.text()}`);
+  const ticket = await ticketResponse.json();
+  if (typeof ticket.ticket !== "string" || !ticket.ticket)
+    throw new Error("T3 WebSocket ticket response was invalid");
+  const url = new URL(base);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/ws";
+  url.search = new URLSearchParams({ wsTicket: ticket.ticket }).toString();
+  const requestId = id();
+  return await new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    let settled = false;
+    let lastFrame = "none";
+    const finish = (callback) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const timeout = setTimeout(() => {
+      finish(() => {
+        socket.close();
+        reject(new Error("T3 WebSocket bootstrap dispatch timed out after 180 seconds"));
+      });
+    }, BOOTSTRAP_TIMEOUT_MS);
+    socket.addEventListener("open", () => socket.send(JSON.stringify(bootstrapRpcRequest(requestId, payload, tag))));
+    socket.addEventListener("message", (event) => {
+      const response = bootstrapRpcResponse(String(event.data), requestId);
+      if (response.type === "ignore") {
+        lastFrame = response.description;
+        return;
+      }
+      finish(() => {
+        socket.close();
+        if (response.type === "success")
+          resolve(response.value);
+        else
+          reject(new Error(response.message));
+      });
+    });
+    socket.addEventListener("error", () => finish(() => reject(new Error("T3 WebSocket dispatch failed to connect"))));
+    socket.addEventListener("close", (event) => finish(() => reject(new Error(`T3 WebSocket bootstrap closed before acknowledging the command (code ${event.code}${event.reason ? `: ${event.reason}` : ""}; last frame: ${lastFrame})`))));
+  });
+}
+var requiresRpcDispatch = (command) => command.type === "thread.turn.start" && Boolean(command.bootstrap) || command.type === "thread.archive" || command.type === "thread.settle";
+var dispatch = (command) => requiresRpcDispatch(command) ? requestRpc("orchestration.dispatchCommand", command) : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
+function requireAvailableProviderSelection(config, selection) {
+  const providers = config && typeof config === "object" && "providers" in config ? config.providers : undefined;
+  if (!Array.isArray(providers))
+    throw new Error("T3 provider catalog is unavailable");
+  const provider = providers.find((entry) => Boolean(entry && typeof entry === "object" && entry.instanceId === selection.instanceId));
+  if (!provider)
+    throw new Error(`T3 provider '${selection.instanceId}' is not configured`);
+  if (typeof provider.driver !== "string" || provider.driver.trim() === "") {
+    throw new Error(`T3 provider '${selection.instanceId}' has no driver identity`);
+  }
+  if (provider.enabled !== true || provider.installed !== true || provider.status !== "ready" || provider.availability === "unavailable") {
+    throw new Error(`T3 provider '${selection.instanceId}' is not ready`);
+  }
+  const models = Array.isArray(provider.models) ? provider.models : [];
+  const hasModel = models.some((model) => model && typeof model === "object" && model.slug === selection.model);
+  if (!hasModel)
+    throw new Error(`T3 provider '${selection.instanceId}' does not expose model '${selection.model}'`);
+  return provider.driver;
+}
+async function preflightProviderSelection(selection) {
+  const config = await requestRpc("server.getConfig", {});
+  return requireAvailableProviderSelection(config, selection);
+}
+function now() {
+  return new Date().toISOString();
+}
+function id() {
+  return randomUUID();
+}
+async function importProjects() {
+  const state = await Bun.file(`${process.env.CODEX_HOME ?? `${process.env.HOME}/.codex`}/.codex-global-state.json`).json();
+  const roots = new Map;
+  for (const [key, value] of Object.entries(state["local-projects"] ?? {})) {
+    const title = value && typeof value === "object" && "name" in value && typeof value.name === "string" ? value.name : key;
+    const rawRoots = value && typeof value === "object" && "rootPaths" in value && Array.isArray(value.rootPaths) ? value.rootPaths.filter((root) => typeof root === "string") : [];
+    for (const root of rawRoots) {
+      let real;
+      try {
+        real = await realpath(root);
+      } catch {
+        continue;
+      }
+      const git = await $2`git -C ${real} rev-parse --show-toplevel`.nothrow().quiet();
+      if (git.exitCode !== 0)
+        continue;
+      const canonical = git.text().trim();
+      if (!canonical)
+        continue;
+      roots.set(canonical, title === "codex" && rawRoots.length > 1 ? canonical.split("/").at(-1) ?? title : title);
+    }
+  }
+  const current = await snapshot();
+  const active = new Set;
+  for (const project of current.projects.filter((entry) => !entry.deletedAt)) {
+    try {
+      active.add(await realpath(project.workspaceRoot));
+    } catch {}
+  }
+  const imported = [], skipped = [];
+  for (const [workspaceRoot, title] of roots) {
+    if (active.has(workspaceRoot)) {
+      skipped.push(workspaceRoot);
+      continue;
+    }
+    await dispatch({ type: "project.create", commandId: id(), projectId: id(), title, workspaceRoot, createWorkspaceRootIfMissing: false, defaultModelSelection: null, createdAt: now() });
+    imported.push(workspaceRoot);
+  }
+  return { imported, skipped };
+}
+async function gitBaseBranch(workspaceRoot) {
+  const originHead = await $2`git -C ${workspaceRoot} symbolic-ref --quiet --short refs/remotes/origin/HEAD`.nothrow().quiet();
+  if (originHead.exitCode === 0 && originHead.text().trim())
+    return originHead.text().trim().replace(/^origin\//, "");
+  const current = await $2`git -C ${workspaceRoot} branch --show-current`.quiet();
+  const branch = current.text().trim();
+  if (!branch)
+    throw new Error(`Could not determine a Git base branch for ${workspaceRoot}`);
+  return branch;
+}
+async function createTask(input) {
+  const selection = await taskProviderDefaults(input.provider);
+  await preflightProviderSelection(selection);
+  const projects = await snapshot();
+  const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
+  if (!project)
+    throw new Error(`Active T3 project not found: ${input.projectId}`);
+  const threadId = id(), createdAt = now();
+  const baseBranch = input.baseBranch ?? await gitBaseBranch(project.workspaceRoot);
+  const result = await dispatch({
+    type: "thread.turn.start",
+    commandId: id(),
+    threadId,
+    message: { messageId: id(), role: "user", text: input.message, attachments: [] },
+    modelSelection: selection,
+    runtimeMode: "auto",
+    interactionMode: "default",
+    createdAt,
+    bootstrap: {
+      createThread: { projectId: project.id, title: input.title, modelSelection: selection, runtimeMode: "auto", interactionMode: "default", branch: baseBranch, worktreePath: null, createdAt },
+      prepareWorktree: { projectCwd: project.workspaceRoot, baseBranch, branch: `t3code/${id().replaceAll("-", "").slice(0, 8)}`, startFromOrigin: true },
+      runSetupScript: true
+    }
+  });
+  let created;
+  for (let attempt = 0;attempt < 30; attempt++) {
+    await Bun.sleep(1000);
+    created = await thread(threadId);
+    if (created.worktreePath)
+      break;
+  }
+  if (!created?.worktreePath)
+    throw new Error(`T3 accepted task ${threadId} without creating a worktree`);
+  const projectRoot = await realpath(project.workspaceRoot);
+  const worktreeRoot = await realpath(created.worktreePath);
+  if (worktreeRoot === projectRoot)
+    throw new Error(`T3 task ${threadId} resolved to the primary checkout, not a worktree`);
+  const worktrees = (await $2`git -C ${projectRoot} worktree list --porcelain`.quiet()).text();
+  if (!worktrees.split(`
+`).some((line) => line === `worktree ${worktreeRoot}`))
+    throw new Error(`T3 task ${threadId} path is not a registered Git worktree`);
+  return { sequence: result.sequence, threadId, model: selection, worktreeRequired: true };
+}
+function taskTurnCommand(target, message, commandId = id(), messageId = id(), createdAt = now(), providerDriver = target.modelSelection.instanceId) {
+  const selection = requireSelection(target.modelSelection, providerDriver);
+  return { type: "thread.turn.start", commandId, threadId: target.id, message: { messageId, role: "user", text: message, attachments: [] }, modelSelection: selection, runtimeMode: target.runtimeMode, interactionMode: target.interactionMode, createdAt };
+}
+async function sendTask(threadId, message) {
+  const target = await thread(threadId);
+  const selection = requireSelection(target.modelSelection);
+  const providerDriver = await preflightProviderSelection(selection);
+  return dispatch(taskTurnCommand(target, message, id(), id(), now(), providerDriver));
+}
+function taskTitleCommand(threadId, title, commandId = id()) {
+  return { type: "thread.meta.update", commandId, threadId, title };
+}
+function taskLifecycleCommand(action, threadId, commandId = id(), createdAt = now()) {
+  switch (action) {
+    case "archive":
+      return { type: "thread.archive", commandId, threadId };
+    case "unarchive":
+      return { type: "thread.unarchive", commandId, threadId };
+    case "pin":
+      return { type: "thread.pin", commandId, threadId };
+    case "unpin":
+      return { type: "thread.unpin", commandId, threadId };
+    case "settle":
+      return { type: "thread.settle", commandId, threadId };
+    case "unsettle":
+      return { type: "thread.unsettle", commandId, threadId, reason: "user" };
+    case "interrupt":
+      return { type: "thread.turn.interrupt", commandId, threadId, createdAt };
+  }
+}
+async function renameTask(threadId, title) {
+  return dispatch(taskTitleCommand(threadId, title));
+}
+async function archiveTask(threadId, archived) {
+  return dispatch(taskLifecycleCommand(archived ? "archive" : "unarchive", threadId));
+}
+async function pinTask(threadId, pinned) {
+  return dispatch(taskLifecycleCommand(pinned ? "pin" : "unpin", threadId));
+}
+async function settleTask(threadId, settled) {
+  return dispatch(taskLifecycleCommand(settled ? "settle" : "unsettle", threadId));
+}
+async function interruptTask(threadId) {
+  return dispatch(taskLifecycleCommand("interrupt", threadId));
+}
+
+// packages/t3-orchestration/src/identity.ts
+import { Database } from "bun:sqlite";
+import { join as join2 } from "path";
+function rootProviderId(id2, db) {
+  const edges = db.query("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges").all();
+  const parentByChild = new Map(edges.map((edge) => [edge.child_thread_id, edge.parent_thread_id]));
+  const seen = new Set;
+  let current = id2;
+  while (parentByChild.has(current)) {
+    if (!seen.add(current))
+      throw new Error("Codex spawn graph contains a cycle");
+    current = parentByChild.get(current);
+  }
+  return current;
+}
+function resolveCallerThread(correlationId) {
+  const codexThreadId = typeof correlationId === "string" ? correlationId.trim() : "";
+  if (!codexThreadId)
+    throw new Error("CODEX_THREAD_ID is required for task-to-task orchestration");
+  const codexDb = new Database(join2(CODEX_HOME, "state_5.sqlite"), { readonly: true });
+  const root = rootProviderId(codexThreadId, codexDb);
+  codexDb.close();
+  const t3Db = new Database(join2(T3_HOME, "userdata/state.sqlite"), { readonly: true });
+  const rows = t3Db.query("SELECT thread_id, project_id FROM projection_threads WHERE json_extract((SELECT resume_cursor_json FROM provider_session_runtime WHERE thread_id = projection_threads.thread_id), '$.threadId') = ? AND deleted_at IS NULL").all(root);
+  t3Db.close();
+  if (rows.length !== 1)
+    throw new Error(`Could not uniquely map Codex root ${root} to a live T3 task`);
+  const row = rows[0];
+  return { codexThreadId, t3ThreadId: row.thread_id, projectId: row.project_id };
+}
+
+// packages/t3-orchestration/src/commands.ts
+async function executeCommand(command, dependencies) {
+  const caller = command.op === "tasks.create" ? dependencies.resolveCallerThread(command.callerThreadId) : null;
+  const projectId = command.op === "tasks.create" && command.projectId === "current" ? caller?.projectId : command.projectId;
+  if (caller && command.op === "tasks.create" && projectId !== caller.projectId) {
+    throw new Error("A root may create tasks only in its own T3 project");
+  }
+  switch (command.op) {
+    case "projects.import":
+      return dependencies.importProjects();
+    case "projects.list":
+      return dependencies.projectList();
+    case "handoff.create":
+      return dependencies.createTask({
+        projectId: String(command.projectId),
+        title: String(command.title),
+        message: String(command.message),
+        ...command.baseBranch ? { baseBranch: String(command.baseBranch) } : {},
+        ...command.provider ? { provider: String(command.provider) } : {}
+      });
+    case "tasks.create":
+      return dependencies.createTask({
+        projectId: String(projectId),
+        title: String(command.title),
+        message: String(command.message),
+        ...command.baseBranch ? { baseBranch: String(command.baseBranch) } : {},
+        ...command.provider ? { provider: String(command.provider) } : {}
+      });
+    case "tasks.list":
+      return dependencies.taskList({
+        limit: Number(command.limit),
+        ...command.projectId ? { projectId: String(command.projectId) } : {},
+        includeSettled: Boolean(command.includeSettled),
+        includeArchived: Boolean(command.includeArchived)
+      });
+    case "tasks.wait":
+      return dependencies.taskWait({
+        threadIds: command.threadIds,
+        timeoutMs: Number(command.timeoutMs),
+        after: command.after
+      });
+    case "tasks.send":
+      return dependencies.sendTask(String(command.threadId), String(command.message));
+    case "tasks.status":
+      return dependencies.taskStatus(String(command.threadId));
+    case "tasks.history":
+      return dependencies.taskHistory(String(command.threadId), Number(command.turns), command.before ? String(command.before) : undefined);
+    case "tasks.title":
+      return dependencies.renameTask(String(command.threadId), String(command.title));
+    case "tasks.archive":
+      return dependencies.archiveTask(String(command.threadId), true);
+    case "tasks.unarchive":
+      return dependencies.archiveTask(String(command.threadId), false);
+    case "tasks.pin":
+      return dependencies.pinTask(String(command.threadId), true);
+    case "tasks.unpin":
+      return dependencies.pinTask(String(command.threadId), false);
+    case "tasks.settle":
+      return dependencies.settleTask(String(command.threadId), true);
+    case "tasks.unsettle":
+      return dependencies.settleTask(String(command.threadId), false);
+    case "tasks.interrupt":
+      return dependencies.interruptTask(String(command.threadId));
+    default:
+      throw new Error(`Unknown operation: ${String(command.op)}`);
+  }
+}
+
+// packages/t3-orchestration/src/http-gateway.ts
+import { createServer } from "http";
+var MAX_BODY_BYTES = 1048576;
+async function readBoundedBody(request2) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let oversized = false;
+    request2.on("data", (chunk) => {
+      if (oversized)
+        return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > MAX_BODY_BYTES) {
+        oversized = true;
+        chunks.length = 0;
+        return;
+      }
+      chunks.push(buffer);
+    });
+    request2.once("end", () => {
+      if (oversized)
+        reject(new Error("request exceeds 1 MiB"));
+      else
+        resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    request2.once("error", reject);
+  });
+}
+function send(response, status, body) {
+  response.writeHead(status, {
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff"
+  });
+  response.end(`${JSON.stringify(body)}
+`);
+}
+function createTailscaleGateway(allowedLogins, execute) {
+  const allowed = new Set(allowedLogins.map((login) => login.trim().toLowerCase()).filter(Boolean));
+  if (allowed.size === 0)
+    throw new Error("Tailscale gateway requires at least one allowed login");
+  return createServer(async (request2, response) => {
+    if (request2.method !== "POST" || request2.url !== "/v1/request") {
+      send(response, 404, { ok: false, error: "not found" });
+      return;
+    }
+    if (request2.headers.origin) {
+      send(response, 403, { ok: false, error: "browser-origin requests are not allowed" });
+      return;
+    }
+    if (request2.headers["x-forwarded-proto"] !== "https") {
+      send(response, 401, { ok: false, error: "verified Tailscale HTTPS proxy required" });
+      return;
+    }
+    const loginHeader = request2.headers["tailscale-user-login"];
+    const login = typeof loginHeader === "string" ? loginHeader.trim().toLowerCase() : "";
+    if (!login) {
+      send(response, 401, { ok: false, error: "verified Tailscale user identity required" });
+      return;
+    }
+    if (!allowed.has(login)) {
+      send(response, 403, { ok: false, error: "Tailscale user is not authorized" });
+      return;
+    }
+    if (request2.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+      send(response, 415, { ok: false, error: "application/json required" });
+      return;
+    }
+    try {
+      const body = await readBoundedBody(request2);
+      const command = JSON.parse(body);
+      if (!command || typeof command !== "object" || typeof command.op !== "string") {
+        throw new Error("command is malformed");
+      }
+      send(response, 200, { ok: true, result: await execute(command) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      send(response, message === "request exceeds 1 MiB" ? 413 : 200, { ok: false, error: message });
+    }
+  });
+}
+
+// packages/t3-orchestration/src/daemon.ts
+var commandDependencies = {
+  resolveCallerThread,
+  importProjects,
+  projectList,
+  taskList,
+  taskWait,
+  createTask,
+  sendTask,
+  taskStatus,
+  taskHistory,
+  renameTask,
+  archiveTask,
+  pinTask,
+  settleTask,
+  interruptTask
+};
+var dispatch2 = (command) => executeCommand(command, commandDependencies);
+var server = createServer2((socket) => {
+  let buffer = "";
+  let work = Promise.resolve();
+  socket.on("data", (chunk) => {
+    buffer += chunk.toString();
+    if (buffer.length > 1048576) {
+      socket.destroy(new Error("request exceeds 1 MiB"));
+      return;
+    }
+    let newline = buffer.indexOf(`
+`);
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf(`
+`);
+      work = work.then(async () => {
+        try {
+          const command = JSON.parse(line);
+          const result = await dispatch2(command);
+          socket.write(`${JSON.stringify({ ok: true, result })}
+`);
+        } catch (error) {
+          socket.write(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}
+`);
+        }
+      });
+    }
+  });
+  socket.on("error", () => {
+    return;
+  });
+  socket.on("close", () => {
+    buffer = "";
+  });
+});
+process.umask(63);
+await mkdir(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
+var prepareSocket = async (path, isLive) => {
+  try {
+    const existing = await lstat(path);
+    if (!existing.isSocket())
+      throw new Error(`Refusing to replace non-socket path ${path}`);
+    if (await isLive())
+      throw new Error(`Daemon already running on ${path}`);
+    await unlink(path);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("ENOENT"))
+      throw error;
+  }
+};
+await prepareSocket(SOCKET_PATH, () => new Promise((resolve) => {
+  const socket = connect(SOCKET_PATH);
+  socket.once("connect", () => {
+    socket.destroy();
+    resolve(true);
+  });
+  socket.once("error", () => {
+    socket.destroy();
+    resolve(false);
+  });
+}));
+await new Promise((resolve, reject) => {
+  server.once("error", reject);
+  server.listen(SOCKET_PATH, () => {
+    server.off("error", reject);
+    chmodSync(SOCKET_PATH, 384);
+    console.log(`t3-orchestrationd listening on ${SOCKET_PATH}`);
+    resolve();
+  });
+});
+server.on("error", (error) => {
+  console.error(`t3-orchestrationd local socket failed: ${error.message}`);
+  process.exit(1);
+});
+var gateway = TAILSCALE_ALLOWED_USERS.length > 0 ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, dispatch2) : undefined;
+if (gateway) {
+  try {
+    await mkdir(dirname(HTTP_SOCKET_PATH), { recursive: true, mode: 448 });
+    await prepareSocket(HTTP_SOCKET_PATH, () => new Promise((resolve) => {
+      const probe = connect(HTTP_SOCKET_PATH);
+      probe.once("connect", () => {
+        probe.destroy();
+        resolve(true);
+      });
+      probe.once("error", () => {
+        probe.destroy();
+        resolve(false);
+      });
+    }));
+    await new Promise((resolve, reject) => {
+      gateway.once("error", reject);
+      gateway.listen(HTTP_SOCKET_PATH, () => {
+        gateway.off("error", reject);
+        chmodSync(HTTP_SOCKET_PATH, 384);
+        console.log(`t3-orchestrationd Tailscale gateway listening on ${HTTP_SOCKET_PATH}`);
+        resolve();
+      });
+    });
+    gateway.on("error", (error) => {
+      console.error(`t3-orchestrationd Tailscale gateway failed: ${error.message}`);
+      process.exit(1);
+    });
+  } catch (error) {
+    await new Promise((resolve) => server.close(() => resolve()));
+    await unlink(SOCKET_PATH).catch(() => {
+      return;
+    });
+    throw error;
+  }
+}
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    const cleanup = () => Promise.all([
+      unlink(SOCKET_PATH).catch(() => {
+        return;
+      }),
+      ...gateway ? [unlink(HTTP_SOCKET_PATH).catch(() => {
+        return;
+      })] : []
+    ]).finally(() => process.exit(0));
+    if (gateway)
+      gateway.close(() => server.close(cleanup));
+    else
+      server.close(cleanup);
+  });
+}

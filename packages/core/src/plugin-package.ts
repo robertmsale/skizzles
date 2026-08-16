@@ -37,6 +37,11 @@ const CONTAINER_LAB_STATIC_INPUTS = [
 ] as const;
 
 const CONTAINER_LAB_LAUNCHER = "skills/codex-container-lab/scripts/codex-container-lab";
+const T3_ORCHESTRATION_SOURCE_PATH = "packages/t3-orchestration";
+const T3_ORCHESTRATION_PROVENANCE = "11fd830798e512466ceb1a6ca1187b0f3f41acbd";
+const T3_ORCHESTRATION_ENTRYPOINTS = ["src/cli.ts", "src/daemon.ts"] as const;
+const T3_ORCHESTRATION_STATIC_INPUTS = ["package.json", "README.md", "scripts/install.ts"] as const;
+const T3_ORCHESTRATION_LAUNCHER = "skills/t3-orchestration/scripts/t3ctl";
 const INSTALLER_INPUTS = [
   "package.json",
   "src/cli.ts",
@@ -125,6 +130,7 @@ export async function stagePlugin(repoRoot: string, destination: string): Promis
   }
 
   await stageContainerLabRuntime(paths.repoRoot, destination);
+  await stageT3OrchestrationRuntime(paths.repoRoot, destination);
 
   await validateGeneratedPlugin(paths.repoRoot, destination, paths.marketplacePath);
 }
@@ -226,6 +232,8 @@ async function validateGeneratedPlugin(
 
   await validateContainerLabRuntime(pluginRoot);
   await validateContainerLabDescriptor(repoRoot, pluginRoot);
+  await validateT3OrchestrationRuntime(pluginRoot);
+  await validateT3OrchestrationDescriptor(repoRoot, pluginRoot);
   await rejectForbiddenDistributableContent(pluginRoot);
 }
 
@@ -291,6 +299,122 @@ async function validateContainerLabRuntime(pluginRoot: string): Promise<void> {
   }
 }
 
+async function stageT3OrchestrationRuntime(repoRoot: string, pluginRoot: string): Promise<void> {
+  const sourceRoot = join(repoRoot, T3_ORCHESTRATION_SOURCE_PATH);
+  const destinationRoot = join(pluginRoot, T3_ORCHESTRATION_SOURCE_PATH);
+  await mkdir(join(destinationRoot, "src"), { recursive: true });
+
+  for (const path of T3_ORCHESTRATION_ENTRYPOINTS) {
+    const destination = join(destinationRoot, path);
+    const build = Bun.spawnSync([
+      process.execPath,
+      "build",
+      join(T3_ORCHESTRATION_SOURCE_PATH, path),
+      "--target=bun",
+      "--format=esm",
+      `--outfile=${destination}`,
+    ], {
+      cwd: repoRoot,
+      env: { PATH: process.env.PATH ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (build.exitCode !== 0) {
+      const details = Buffer.concat([Buffer.from(build.stdout), Buffer.from(build.stderr)]).toString("utf8").trim();
+      throw new PackagingError(`Unable to bundle T3 orchestration runtime ${path}:\n${details}`);
+    }
+    await chmod(destination, 0o755);
+  }
+
+  for (const path of T3_ORCHESTRATION_STATIC_INPUTS) {
+    await copyCanonicalFile(
+      join(sourceRoot, path),
+      join(destinationRoot, path),
+      `${T3_ORCHESTRATION_SOURCE_PATH}/${path}`,
+    );
+  }
+}
+
+async function validateT3OrchestrationRuntime(pluginRoot: string): Promise<void> {
+  const runtimeRoot = join(pluginRoot, T3_ORCHESTRATION_SOURCE_PATH);
+  for (const path of T3_ORCHESTRATION_ENTRYPOINTS) {
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(join(runtimeRoot, path));
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        throw new PackagingError(`T3 orchestration runtime is missing ${path}.`);
+      }
+      throw error;
+    }
+    if (!metadata.isFile() || (metadata.mode & 0o111) === 0) {
+      throw new PackagingError(`T3 orchestration runtime ${path} must be an executable regular file.`);
+    }
+  }
+  for (const path of T3_ORCHESTRATION_STATIC_INPUTS) {
+    if (!(await exists(join(runtimeRoot, path)))) {
+      throw new PackagingError(`T3 orchestration runtime is missing ${path}.`);
+    }
+  }
+}
+
+async function validateT3OrchestrationDescriptor(repoRoot: string, pluginRoot: string): Promise<void> {
+  const descriptor = await readJsonObject(
+    join(repoRoot, "integrations/t3-orchestration.json"),
+    "T3 orchestration descriptor",
+  );
+  const packageMetadata = await readJsonObject(
+    join(repoRoot, T3_ORCHESTRATION_SOURCE_PATH, "package.json"),
+    "T3 orchestration package metadata",
+  );
+  const bundled = descriptor.bundled;
+  const binaries = descriptor.binaries;
+  const host = descriptor.host;
+  const ownership = descriptor.ownership;
+  const expectedDocumentation = [`${T3_ORCHESTRATION_SOURCE_PATH}/README.md`];
+  const expected = {
+    operationalEntrypoint: `${T3_ORCHESTRATION_SOURCE_PATH}/src/cli.ts`,
+    daemonEntrypoint: `${T3_ORCHESTRATION_SOURCE_PATH}/src/daemon.ts`,
+    launcher: T3_ORCHESTRATION_LAUNCHER,
+    hostWiring: `${T3_ORCHESTRATION_SOURCE_PATH}/scripts/install.ts`,
+  };
+  const expectedBinaries = { operational: "t3ctl", daemon: "t3-orchestrationd" };
+  const expectedHost = {
+    platform: "macOS",
+    launchAgentLabel: "io.github.t3-orchestration.daemon",
+    localTransport: "mode-0600-unix-socket",
+    credentialStore: "macOS-keychain",
+    remoteTransport: "tailscale-serve-https",
+    publicFunnelAllowed: false,
+  };
+  if (
+    descriptor.integrationContract !== 1 ||
+    descriptor.configuredRuntime !== packageMetadata.version ||
+    descriptor.supportedRuntime !== ">=0.1.0 <0.2.0" ||
+    descriptor.versionVerification !== "contract-fingerprint-only" ||
+    !isObject(ownership) || ownership.runtimeOwner !== "skizzles" ||
+    ownership.canonicalSource !== T3_ORCHESTRATION_SOURCE_PATH ||
+    ownership.provenanceCommit !== T3_ORCHESTRATION_PROVENANCE ||
+    !isObject(bundled) || Object.entries(expected).some(([key, value]) => bundled[key] !== value) ||
+    !Array.isArray(bundled.documentation) || !sameStrings(bundled.documentation, expectedDocumentation) ||
+    !isObject(binaries) || !sameRecord(binaries, expectedBinaries) ||
+    !isObject(host) || !sameRecord(host, expectedHost)
+  ) {
+    throw new PackagingError("T3 orchestration descriptor must match the canonical package metadata and staged plugin inputs.");
+  }
+  for (const path of [
+    expected.operationalEntrypoint,
+    expected.daemonEntrypoint,
+    expected.launcher,
+    expected.hostWiring,
+    ...expectedDocumentation,
+  ]) {
+    if (!(await exists(join(repoRoot, path))) || !(await exists(join(pluginRoot, path)))) {
+      throw new PackagingError(`T3 orchestration descriptor path is not a canonical and staged input: ${path}.`);
+    }
+  }
+}
+
 async function validateContainerLabDescriptor(repoRoot: string, pluginRoot: string): Promise<void> {
   const descriptor = await readJsonObject(join(repoRoot, "integrations/container-lab.json"), "Container Lab descriptor");
   const packageMetadata = await readJsonObject(
@@ -334,6 +458,11 @@ async function validateContainerLabDescriptor(repoRoot: string, pluginRoot: stri
 
 function sameStrings(actual: unknown[], expected: readonly string[]): boolean {
   return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+}
+
+function sameRecord(actual: Record<string, unknown>, expected: Record<string, unknown>): boolean {
+  const entries = Object.entries(expected);
+  return Object.keys(actual).length === entries.length && entries.every(([key, value]) => actual[key] === value);
 }
 
 async function validateManifest(manifest: Record<string, unknown>, pluginRoot: string): Promise<void> {

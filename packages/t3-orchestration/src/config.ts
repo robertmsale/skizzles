@@ -1,0 +1,75 @@
+import { join } from "node:path";
+import { $ } from "bun";
+import { requireSelection, type ModelSelection } from "./protocol.ts";
+
+const home = process.env.HOME ?? (() => { throw new Error("HOME is required"); })();
+export const CODEX_HOME = process.env.CODEX_HOME ?? join(home, ".codex");
+export const T3_HOME = process.env.T3_HOME ?? join(home, ".t3");
+export const SOCKET_PATH = process.env.T3_ORCHESTRATION_SOCKET ?? join(T3_HOME, "t3-orchestration.sock");
+export const HTTP_SOCKET_PATH = process.env.T3_ORCHESTRATION_HTTP_SOCKET ?? join(T3_HOME, "t3-orchestration-http.sock");
+export const TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "")
+  .split(",")
+  .map((login) => login.trim().toLowerCase())
+  .filter(Boolean);
+export const KEYCHAIN_SERVICE = "t3-orchestration";
+export const KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
+
+export type TaskProvider = "codex" | "grok";
+
+const GROK_DEFAULT_MODEL = "grok-4.6";
+
+export async function origin(): Promise<string> {
+  const path = join(T3_HOME, "userdata/server-runtime.json");
+  const runtime = await Bun.file(path).json() as { origin?: unknown };
+  if (typeof runtime.origin !== "string" || !/^https?:\/\//.test(runtime.origin)) throw new Error(`Invalid T3 runtime origin in ${path}`);
+  return runtime.origin.replace(/\/$/, "");
+}
+
+export async function token(): Promise<string> {
+  const result = await $`security find-generic-password -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`.quiet();
+  const value = result.text().trim();
+  if (!value) throw new Error("No T3 token. Run t3ctl auth configure.");
+  return value;
+}
+
+export async function codexDefaults(): Promise<ModelSelection> {
+  const text = await Bun.file(join(CODEX_HOME, "config.toml")).text();
+  const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
+  const model = parsed.model;
+  const effort = parsed.model_reasoning_effort;
+  const provider = parsed.model_provider;
+  const serviceTier = parsed.service_tier;
+  if (typeof model !== "string" || typeof effort !== "string" || typeof provider !== "string") {
+    throw new Error("config.toml must define model, model_reasoning_effort, and model_provider");
+  }
+  // T3's installed Codex adapter is addressed as `codex`; the upstream
+  // model_provider (for example codex-lb) is resolved by Codex itself from
+  // CODEX_HOME/config.toml. Never put that upstream id in T3's instanceId.
+  if (provider.length === 0) throw new Error("config.toml model_provider is empty");
+  const selection = requireSelection({
+    instanceId: "codex",
+    model,
+    options: [
+      { id: "reasoningEffort", value: effort },
+      ...(typeof serviceTier === "string" ? [{ id: "serviceTier", value: serviceTier }] : []),
+    ],
+  });
+  if (!selection.options.some((entry) => entry.id === "reasoningEffort")) {
+    throw new Error("Codex default reasoning effort is missing");
+  }
+  return selection;
+}
+
+export async function taskProviderDefaults(provider: string | undefined): Promise<ModelSelection> {
+  switch (provider?.trim().toLowerCase() || "codex") {
+    case "codex":
+    case "openai":
+      return codexDefaults();
+    case "grok":
+      // T3's Grok ACP provider currently exposes no model option descriptors.
+      // Reasoning is owned by the installed Grok harness, not by task creators.
+      return requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] });
+    default:
+      throw new Error(`Unsupported task provider '${provider}'. Supported providers: codex, grok`);
+  }
+}

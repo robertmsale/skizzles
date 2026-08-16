@@ -14,7 +14,7 @@
     "agents:check": "bun run packages/core/src/agent-role-package.ts check",
     "plugin:build": "bun run agents:build && bun run packages/core/src/plugin-package.ts build",
     "plugin:check": "bun run agents:check && bun run packages/core/src/plugin-package.ts check",
-    "typecheck": "bunx tsc --noEmit && bun run --cwd packages/codex-container-lab/cli typecheck",
+    "typecheck": "bunx tsc --noEmit && bun run --cwd packages/codex-container-lab/cli typecheck && bun run --cwd packages/t3-orchestration typecheck",
     "test": "bun test",
     "test:packaging": "bun test packages/core/test/plugin-package.test.ts",
     "verify": "bun run typecheck && bun run plugin:check && bun test"

@@ -17,13 +17,17 @@ afterEach(async () => {
 });
 
 describe("deterministic plugin packaging", () => {
-  test("uses the root lockfile for the Container Lab workspace", async () => {
+  test("uses the root lockfile for bundled runtime workspaces", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const rootPackage = await Bun.file(join(repoRoot, "package.json")).json() as { workspaces?: unknown };
     expect(rootPackage.workspaces).toContain("packages/codex-container-lab/cli");
+    expect(rootPackage.workspaces).toContain("packages/*");
     expect(await Bun.file(join(repoRoot, "packages/codex-container-lab/cli/bun.lock")).exists()).toBe(false);
     expect(await readFile(join(repoRoot, "bun.lock"), "utf8")).toContain(
       '"codex-container-lab@workspace:packages/codex-container-lab/cli"',
+    );
+    expect(await readFile(join(repoRoot, "bun.lock"), "utf8")).toContain(
+      '"@skizzles/t3-orchestration@workspace:packages/t3-orchestration"',
     );
   });
 
@@ -171,6 +175,38 @@ describe("deterministic plugin packaging", () => {
     }
   });
 
+  test("ships runnable dependency-self-contained T3 orchestration bundles", async () => {
+    const repoRoot = resolve(import.meta.dir, "../../..");
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "skizzles-t3-orchestration-plugin-"));
+    temporaryRoots.push(temporaryRoot);
+    const stagedPlugin = join(temporaryRoot, "staged");
+    const isolatedPlugin = join(temporaryRoot, "isolated");
+    await stagePlugin(repoRoot, stagedPlugin);
+    await cp(stagedPlugin, isolatedPlugin, { recursive: true });
+
+    const runtimeRoot = join(isolatedPlugin, "packages/t3-orchestration");
+    expect(await filesUnder(runtimeRoot)).toEqual([
+      "README.md",
+      "package.json",
+      "scripts/install.ts",
+      "src/cli.ts",
+      "src/daemon.ts",
+    ]);
+    expect(await Bun.file(join(isolatedPlugin, "node_modules")).exists()).toBe(false);
+    for (const entrypoint of ["src/cli.ts", "src/daemon.ts"]) {
+      expect((await stat(join(runtimeRoot, entrypoint))).mode & 0o111).not.toBe(0);
+    }
+    const result = Bun.spawnSync(["bun", join(runtimeRoot, "src/cli.ts"), "--help"], {
+      cwd: isolatedPlugin,
+      env: { HOME: temporaryRoot, PATH: process.env.PATH ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+    expect(typeof (JSON.parse(result.stdout.toString()) as { help?: unknown }).help).toBe("string");
+    expect(result.stderr.toString()).toBe("");
+  });
+
   test("exercises bundled YAML manifest configuration with a fake Docker binary", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
     const root = await mkdtemp(join(tmpdir(), "skizzles-container-lab-bundle-config-"));
@@ -228,6 +264,32 @@ describe("deterministic plugin packaging", () => {
 
     expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
       "Container Lab descriptor must match the canonical package metadata and staged plugin inputs",
+    );
+  });
+
+  test("rejects stale T3 orchestration descriptor metadata before staging", async () => {
+    const root = await fixture();
+    const descriptorPath = join(root, "integrations/t3-orchestration.json");
+    const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
+    descriptor.configuredRuntime = "9.9.9";
+    await writeFile(descriptorPath, JSON.stringify(descriptor));
+
+    expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
+      "T3 orchestration descriptor must match the canonical package metadata and staged plugin inputs",
+    );
+  });
+
+  test("rejects drift in the complete T3 orchestration host contract", async () => {
+    const root = await fixture();
+    const descriptorPath = join(root, "integrations/t3-orchestration.json");
+    const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
+    descriptor.host.publicFunnelAllowed = true;
+    descriptor.binaries.daemon = "other-daemon";
+    descriptor.integrationContract = 2;
+    await writeFile(descriptorPath, JSON.stringify(descriptor));
+
+    expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
+      "T3 orchestration descriptor must match the canonical package metadata and staged plugin inputs",
     );
   });
 
@@ -420,6 +482,44 @@ async function fixture(): Promise<string> {
         "packages/codex-container-lab/docs/manifest.md",
         "packages/codex-container-lab/docs/safety.md",
       ],
+    },
+  }));
+  await write(
+    root,
+    "packages/t3-orchestration/src/cli.ts",
+    "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture t3ctl' }));\n",
+  );
+  await write(root, "packages/t3-orchestration/src/daemon.ts", "#!/usr/bin/env bun\nsetInterval(() => {}, 1000);\n");
+  await write(root, "packages/t3-orchestration/scripts/install.ts", "console.log('fixture installer');\n");
+  await write(root, "packages/t3-orchestration/README.md", "# Fixture T3 orchestration\n");
+  await write(root, "packages/t3-orchestration/package.json", JSON.stringify({ name: "@skizzles/t3-orchestration", version: "0.1.0" }));
+  await write(root, "skills/t3-orchestration/scripts/t3ctl", "#!/usr/bin/env bun\nconsole.log('fixture');\n");
+  await chmod(join(root, "skills/t3-orchestration/scripts/t3ctl"), 0o755);
+  await write(root, "integrations/t3-orchestration.json", JSON.stringify({
+    integrationContract: 1,
+    configuredRuntime: "0.1.0",
+    supportedRuntime: ">=0.1.0 <0.2.0",
+    versionVerification: "contract-fingerprint-only",
+    ownership: {
+      runtimeOwner: "skizzles",
+      canonicalSource: "packages/t3-orchestration",
+      provenanceCommit: "11fd830798e512466ceb1a6ca1187b0f3f41acbd",
+    },
+    bundled: {
+      operationalEntrypoint: "packages/t3-orchestration/src/cli.ts",
+      daemonEntrypoint: "packages/t3-orchestration/src/daemon.ts",
+      launcher: "skills/t3-orchestration/scripts/t3ctl",
+      hostWiring: "packages/t3-orchestration/scripts/install.ts",
+      documentation: ["packages/t3-orchestration/README.md"],
+    },
+    binaries: { operational: "t3ctl", daemon: "t3-orchestrationd" },
+    host: {
+      platform: "macOS",
+      launchAgentLabel: "io.github.t3-orchestration.daemon",
+      localTransport: "mode-0600-unix-socket",
+      credentialStore: "macOS-keychain",
+      remoteTransport: "tailscale-serve-https",
+      publicFunnelAllowed: false,
     },
   }));
   await write(root, ".gitignore", ".DS_Store\n");
