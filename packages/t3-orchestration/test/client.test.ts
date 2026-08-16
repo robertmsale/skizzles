@@ -36,7 +36,9 @@ describe("daemon client", () => {
   test("explains how to recover when the service is unavailable", async () => {
     root = await mkdtemp("/tmp/t3-client-");
     const { daemonRequest } = await import("../src/client.ts");
-    await expect(daemonRequest({ op: "projects.list" }, join(root, "missing.sock"))).rejects.toThrow("install and start its LaunchAgent");
+    await expect(daemonRequest({ op: "projects.list" }, join(root, "missing.sock"))).rejects.toThrow(
+      "bun run packages/t3-orchestration/scripts/install.ts",
+    );
   });
 
   test("rejects a daemon that closes before a newline-delimited response", async () => {

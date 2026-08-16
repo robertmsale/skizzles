@@ -278,6 +278,20 @@ describe("deterministic plugin packaging", () => {
     );
   });
 
+  test("rejects drift in the complete T3 orchestration host contract", async () => {
+    const root = await fixture();
+    const descriptorPath = join(root, "integrations/t3-orchestration.json");
+    const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
+    descriptor.host.publicFunnelAllowed = true;
+    descriptor.binaries.daemon = "other-daemon";
+    descriptor.integrationContract = 2;
+    await writeFile(descriptorPath, JSON.stringify(descriptor));
+
+    expect(stagePlugin(root, join(root, "stage"))).rejects.toThrow(
+      "T3 orchestration descriptor must match the canonical package metadata and staged plugin inputs",
+    );
+  });
+
   test("honors Git ignore rules in canonical package inputs", async () => {
     const root = await fixture();
     await write(root, "skills/.DS_Store", "local metadata");
@@ -481,7 +495,10 @@ async function fixture(): Promise<string> {
   await write(root, "skills/t3-orchestration/scripts/t3ctl", "#!/usr/bin/env bun\nconsole.log('fixture');\n");
   await chmod(join(root, "skills/t3-orchestration/scripts/t3ctl"), 0o755);
   await write(root, "integrations/t3-orchestration.json", JSON.stringify({
+    integrationContract: 1,
     configuredRuntime: "0.1.0",
+    supportedRuntime: ">=0.1.0 <0.2.0",
+    versionVerification: "contract-fingerprint-only",
     ownership: {
       runtimeOwner: "skizzles",
       canonicalSource: "packages/t3-orchestration",
@@ -493,6 +510,15 @@ async function fixture(): Promise<string> {
       launcher: "skills/t3-orchestration/scripts/t3ctl",
       hostWiring: "packages/t3-orchestration/scripts/install.ts",
       documentation: ["packages/t3-orchestration/README.md"],
+    },
+    binaries: { operational: "t3ctl", daemon: "t3-orchestrationd" },
+    host: {
+      platform: "macOS",
+      launchAgentLabel: "io.github.t3-orchestration.daemon",
+      localTransport: "mode-0600-unix-socket",
+      credentialStore: "macOS-keychain",
+      remoteTransport: "tailscale-serve-https",
+      publicFunnelAllowed: false,
     },
   }));
   await write(root, ".gitignore", ".DS_Store\n");

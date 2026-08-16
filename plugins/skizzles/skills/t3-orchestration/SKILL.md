@@ -45,7 +45,7 @@ t3ctl tasks unsettle <id>
 t3ctl tasks interrupt <id>
 ```
 
-The optional per-user LaunchAgent keeps `t3-orchestrationd` available. The daemon owns the T3 credential; the CLI communicates over a same-user Unix socket. Host activation is explicit and machine-local—it is never performed merely by installing the Skizzles plugin or skill. With direct operator approval, run `bun run packages/t3-orchestration/scripts/install.ts` from a Skizzles checkout or plugin snapshot. Use `--client-only` on a tailnet client that must not host the credential-owning daemon.
+The optional per-user LaunchAgent keeps `t3-orchestrationd` available. The daemon owns the T3 credential; the CLI communicates over a same-user Unix socket. Host activation is explicit and machine-local—it is never performed merely by installing the Skizzles plugin or skill. With direct operator approval, run `bun run packages/t3-orchestration/scripts/install.ts` from a Skizzles checkout or plugin snapshot. The installer copies the runtime into a stable receipt-owned location, refuses foreign targets, and supports verified `--uninstall`; use `--client-only` for both install and uninstall on a tailnet client that must not host the credential-owning daemon.
 
 Remote clients may use an explicitly configured tailnet-only HTTPS endpoint created with Tailscale Serve. Never use Funnel. The host still owns the T3 credential; remote clients authenticate through Tailscale identity and an exact host allowlist. Configure a remote client with `t3ctl remote configure --url https://HOSTNAME.TAILNET.ts.net`. Remote mode never falls back silently to the local socket.
 

@@ -236,7 +236,7 @@ function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = da
       finish(() => {
         const code = "code" in error ? String(error.code) : "";
         if (code === "ENOENT" || code === "ECONNREFUSED")
-          reject(new Error("t3-orchestrationd is unavailable. Run `bun run install-global` in the t3-orchestration project to install and start its LaunchAgent."));
+          reject(new Error("t3-orchestrationd is unavailable. From a full Skizzles checkout or plugin snapshot, run `bun run packages/t3-orchestration/scripts/install.ts` to install and start its LaunchAgent."));
         else
           reject(error);
       });

@@ -29,9 +29,20 @@ t3ctl auth configure < pairing-token.txt
 
 The pairing token is short-lived. Keep it outside the checkout and delete it after the exchange.
 
-The host-wiring command installs and starts a per-user LaunchAgent. It keeps the
-credential-owning daemon available across terminal and T3 restarts and replaces
-stale sockets left by an abnormal process exit.
+The host-wiring command copies the runtime and skill into the stable,
+receipt-owned `~/.local/share/skizzles/t3-orchestration` installation, then
+installs and starts a per-user LaunchAgent. It keeps the credential-owning
+daemon available across terminal and T3 restarts without depending on the
+checkout or plugin-cache path that supplied the installer.
+
+The installer refuses unowned PATH links, skills, LaunchAgents, and install
+roots. Re-running it performs a staged upgrade with rollback; uninstall first
+verifies every receipt-owned link, file, and runtime artifact before removing
+anything:
+
+```sh
+bun run packages/t3-orchestration/scripts/install.ts --uninstall
+```
 
 The project importer is idempotent by canonical workspace root:
 
@@ -103,6 +114,11 @@ t3ctl projects list
 ```
 
 `install-client` is intentionally for a clean client device. It refuses to run when a daemon symlink or host LaunchAgent already exists; it never silently converts or disables a credential-owning host installation.
+Remove a receipt-owned client installation with:
+
+```sh
+bun run packages/t3-orchestration/scripts/install.ts --client-only --uninstall
+```
 
 `t3ctl remote clear` restores local Unix-socket mode. Remote mode is explicit and never silently falls back to local transport. Since a lost network response can leave a mutation's outcome unknown, the client does not automatically retry commands.
 

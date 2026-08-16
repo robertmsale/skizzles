@@ -367,6 +367,8 @@ async function validateT3OrchestrationDescriptor(repoRoot: string, pluginRoot: s
     "T3 orchestration package metadata",
   );
   const bundled = descriptor.bundled;
+  const binaries = descriptor.binaries;
+  const host = descriptor.host;
   const ownership = descriptor.ownership;
   const expectedDocumentation = [`${T3_ORCHESTRATION_SOURCE_PATH}/README.md`];
   const expected = {
@@ -375,13 +377,27 @@ async function validateT3OrchestrationDescriptor(repoRoot: string, pluginRoot: s
     launcher: T3_ORCHESTRATION_LAUNCHER,
     hostWiring: `${T3_ORCHESTRATION_SOURCE_PATH}/scripts/install.ts`,
   };
+  const expectedBinaries = { operational: "t3ctl", daemon: "t3-orchestrationd" };
+  const expectedHost = {
+    platform: "macOS",
+    launchAgentLabel: "io.github.t3-orchestration.daemon",
+    localTransport: "mode-0600-unix-socket",
+    credentialStore: "macOS-keychain",
+    remoteTransport: "tailscale-serve-https",
+    publicFunnelAllowed: false,
+  };
   if (
+    descriptor.integrationContract !== 1 ||
     descriptor.configuredRuntime !== packageMetadata.version ||
+    descriptor.supportedRuntime !== ">=0.1.0 <0.2.0" ||
+    descriptor.versionVerification !== "contract-fingerprint-only" ||
     !isObject(ownership) || ownership.runtimeOwner !== "skizzles" ||
     ownership.canonicalSource !== T3_ORCHESTRATION_SOURCE_PATH ||
     ownership.provenanceCommit !== T3_ORCHESTRATION_PROVENANCE ||
     !isObject(bundled) || Object.entries(expected).some(([key, value]) => bundled[key] !== value) ||
-    !Array.isArray(bundled.documentation) || !sameStrings(bundled.documentation, expectedDocumentation)
+    !Array.isArray(bundled.documentation) || !sameStrings(bundled.documentation, expectedDocumentation) ||
+    !isObject(binaries) || !sameRecord(binaries, expectedBinaries) ||
+    !isObject(host) || !sameRecord(host, expectedHost)
   ) {
     throw new PackagingError("T3 orchestration descriptor must match the canonical package metadata and staged plugin inputs.");
   }
@@ -441,6 +457,11 @@ async function validateContainerLabDescriptor(repoRoot: string, pluginRoot: stri
 
 function sameStrings(actual: unknown[], expected: readonly string[]): boolean {
   return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+}
+
+function sameRecord(actual: Record<string, unknown>, expected: Record<string, unknown>): boolean {
+  const entries = Object.entries(expected);
+  return Object.keys(actual).length === entries.length && entries.every(([key, value]) => actual[key] === value);
 }
 
 async function validateManifest(manifest: Record<string, unknown>, pluginRoot: string): Promise<void> {
