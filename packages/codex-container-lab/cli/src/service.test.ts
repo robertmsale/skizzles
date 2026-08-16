@@ -38,6 +38,18 @@ class RecordingDocker implements DockerRunner {
   }
 }
 
+class HealthFailureDocker extends RecordingDocker {
+  constructor(private readonly stderr: string) { super(); }
+  override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
+    if (args[0] === "info") {
+      this.calls.push(args);
+      this.runCalls.push({ args, options });
+      return resultWithError(this.stderr);
+    }
+    return await super.run(args, options);
+  }
+}
+
 class SecretDiagnosticDocker extends RecordingDocker {
   constructor(private readonly sentinel: string) { super(); }
   override async run(args: string[], options?: RunOptions): Promise<CommandResult> {
@@ -1070,6 +1082,23 @@ ports:
     const info = docker.runCalls.find((call) => call.args[0] === "info");
     expect(info).toBeDefined();
     expect(Object.hasOwn(info!.options?.env ?? {}, "REGISTRY_TOKEN")).toBe(false);
+  });
+
+  test("health reports a bounded Docker diagnostic only when unavailable", async () => {
+    const fixture = await durableFixture("thread-health-diagnostic", "ready", true);
+    const docker = new HealthFailureDocker('docker: context "/tmp/private-token" does not exist');
+    const service = new ContainerLabService(fixture.owner, fixture.roots, docker, { DOCKER_CONTEXT: "/tmp/private-token" });
+
+    const health = await service.health();
+    expect(health).toMatchObject({
+      ok: true,
+      dockerAvailable: false,
+      labs: 1,
+      dockerDiagnostic: { reason: "context", nextAction: expect.any(String) },
+    });
+    expect(JSON.stringify(health)).not.toContain("/tmp/private-token");
+    const success = await new ContainerLabService(fixture.owner, fixture.roots, new RecordingDocker()).health();
+    expect(success).not.toHaveProperty("dockerDiagnostic");
   });
 
   test("loads legacy version-1 ready state without secret metadata for status and destroy", async () => {

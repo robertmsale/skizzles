@@ -224,16 +224,110 @@ function isExclusiveSharedNetwork(value: unknown): boolean {
   return names.length === 1 && names[0] === SHARED_COMPILER_CACHE_NETWORK && isRecord(value[names[0]!]);
 }
 
+export type DockerUnavailableReason =
+  | "timeout"
+  | "spawn"
+  | "not-found"
+  | "context"
+  | "permission"
+  | "daemon"
+  | "unreachable"
+  | "other";
+
+export type DockerAvailabilityDiagnostic = {
+  reason: DockerUnavailableReason;
+  context?: string;
+  nextAction: string;
+};
+
+export type DockerProbeResult =
+  | { available: true }
+  | { available: false; diagnostic: DockerAvailabilityDiagnostic };
+
+const SAFE_DOCKER_CONTEXT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+const DOCKER_NEXT_ACTION: Record<DockerUnavailableReason, string> = {
+  timeout: "Retry the Docker health check; if it persists, restart Docker.",
+  spawn: "Check that the Docker CLI can start, then retry.",
+  "not-found": "Install Docker and ensure the Docker CLI is available on PATH.",
+  context: "Remove the unavailable Docker context or select an available one, then retry.",
+  permission: "Grant access to the Docker daemon, then retry.",
+  daemon: "Start Docker Desktop or the Docker daemon, then retry.",
+  unreachable: "Check that the Docker daemon endpoint is reachable, then retry.",
+  other: "Check Docker configuration and daemon logs, then retry.",
+};
+
+/** Probe Docker while retaining only a bounded, actionable failure category. */
 export async function dockerAvailable(
   runner: DockerRunner = defaultDockerRunner,
   secretEnvironment: readonly string[] = [],
   environment: NodeJS.ProcessEnv = process.env,
-): Promise<boolean> {
-  return (await runner.run(["info", "--format", "{{.ServerVersion}}"], {
-    allowFailure: true,
-    timeoutMs: 10_000,
-    env: scrubSecretEnvironment(secretEnvironment, environment),
-  })).code === 0;
+): Promise<DockerProbeResult> {
+  const probeEnvironment = scrubSecretEnvironment(secretEnvironment, environment);
+  const context = safeDockerContext(probeEnvironment.DOCKER_CONTEXT);
+  try {
+    const result = await runner.run(["info", "--format", "{{.ServerVersion}}"], {
+      allowFailure: true,
+      timeoutMs: 10_000,
+      env: probeEnvironment,
+    });
+    if (result.code === 0) return { available: true };
+    return { available: false, diagnostic: dockerFailureDiagnostic(result.stderr.toString(), result.code, context) };
+  } catch (error) {
+    return { available: false, diagnostic: dockerFailureDiagnostic(error, undefined, context) };
+  }
+}
+
+/** Descriptive alias for callers that prefer the probe terminology. */
+export const dockerProbe = dockerAvailable;
+
+function safeDockerContext(value: string | undefined): string | undefined {
+  return value !== undefined && SAFE_DOCKER_CONTEXT.test(value) ? value : undefined;
+}
+
+function dockerFailureDiagnostic(value: unknown, code: number | undefined, context: string | undefined): DockerAvailabilityDiagnostic {
+  const text = typeof value === "string" ? value : value instanceof Error ? value.message : "";
+  const normalized = text.toLowerCase();
+  const failureContext = context ?? contextFromFailure(text);
+  const timedOut = value instanceof Error && (value.name === "TimeoutError" || (isNodeError(value) && value.code === "ETIMEDOUT"));
+  const reason: DockerUnavailableReason = code === 124 || timedOut || /(?:timed? ?out|timeout|deadline exceeded)/.test(normalized)
+    ? "timeout"
+    : /(?:context .* does not exist|context .* not found|unknown context)/.test(normalized)
+      ? "context"
+      : isSpawnNotFound(value, normalized)
+        ? "not-found"
+        : isSpawnFailure(value, normalized)
+          ? "spawn"
+          : /(?:permission denied|operation not permitted|eacces)/.test(normalized)
+            ? "permission"
+            : /(?:cannot connect to the docker daemon|docker daemon.*(?:not running|unavailable)|is the docker daemon running|error response from daemon)/.test(normalized)
+              ? "daemon"
+              : /(?:connection refused|network is unreachable|no route to host|host is down|unreachable|econnrefused|dial tcp)/.test(normalized)
+                ? "unreachable"
+                : "other";
+  return {
+    reason,
+    ...(failureContext ? { context: failureContext } : {}),
+    nextAction: DOCKER_NEXT_ACTION[reason],
+  };
+}
+
+function contextFromFailure(value: string): string | undefined {
+  const match = value.match(/\bcontext\s+["']?([A-Za-z0-9][A-Za-z0-9_.-]{0,63})["']?\s+(?:does not exist|not found)\b/i);
+  return safeDockerContext(match?.[1]);
+}
+
+function isSpawnNotFound(value: unknown, normalized: string): boolean {
+  return (isNodeError(value) && value.code === "ENOENT") || /(?:command not found|no such file or directory|\benoent\b)/.test(normalized);
+}
+
+function isSpawnFailure(value: unknown, normalized: string): boolean {
+  return (isNodeError(value) && typeof value.code === "string" && ["E2BIG", "EAGAIN", "EMFILE", "ENOMEM"].includes(value.code)) ||
+    /(?:spawn .* failed|failed to spawn)/.test(normalized);
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value && typeof value.code === "string";
 }
 
 export async function prepareLabRuntime(

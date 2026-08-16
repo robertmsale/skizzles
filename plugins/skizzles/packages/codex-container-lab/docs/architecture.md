@@ -38,7 +38,13 @@ The public JSON boundary uses compact purpose-built response objects. It never s
 
 The stable administrative response shapes are:
 
-- `health`: `{ok,dockerAvailable,labs}`
+- `health`: `{ok,dockerAvailable,labs}`. When Docker is unavailable, the
+  response additionally includes `dockerDiagnostic: {reason,context?,nextAction}`.
+  `reason` is one of `timeout`, `spawn`, `not-found`, `context`, `permission`,
+  `daemon`, `unreachable`, or `other`; `context` is included only when the
+  active context value is a safe identifier (`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`),
+  and `nextAction` is a fixed actionable hint. Docker stderr, paths, endpoints,
+  and environment values are never returned.
 - `lab create`: `{labId,state}`
 - `lab list`: `{labs:[{labId,name,state,updatedAt}]}`
 - `lab status`: `{labId,name,state,updatedAt,endpoints?,endpointCount?,findings?,findingCount?,error?,provisioningFailure?,stack?}`; failed Compose-up records contain only `{phase,capturedAt,services,serviceCount,evidence?}`, where `evidence` is `{kind,available,bytes,lines,truncated}` and never a filesystem path. Bounded arrays expose actionable entries while counts disclose omitted entries, and `stack.services` contains only `{service,state,health?,exitCode?}` summaries

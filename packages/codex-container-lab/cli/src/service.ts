@@ -6,6 +6,7 @@ import { internalImageTag } from "./compose";
 import {
   cleanupLabLabels,
   defaultDockerRunner,
+  type DockerAvailabilityDiagnostic,
   DockerProvisioningFailure,
   destroyLabStack,
   dockerAvailable,
@@ -61,14 +62,21 @@ export class ContainerLabService {
     this.roots = roots;
   }
 
-  async health(): Promise<{ ok: true; dockerAvailable: boolean; labs: number }> {
+  async health(): Promise<{
+    ok: true;
+    dockerAvailable: boolean;
+    labs: number;
+    dockerDiagnostic?: DockerAvailabilityDiagnostic;
+  }> {
     await this.reconcileOwner();
     const labs = await listLabs(this.roots, this.owner);
     const secretEnvironment = [...new Set(labs.flatMap((lab) => lab.secretEnvironment))];
+    const docker = await dockerAvailable(this.docker, secretEnvironment, this.environment);
     return {
       ok: true,
-      dockerAvailable: await dockerAvailable(this.docker, secretEnvironment, this.environment).catch(() => false),
+      dockerAvailable: docker.available,
       labs: labs.length,
+      ...(!docker.available ? { dockerDiagnostic: docker.diagnostic } : {}),
     };
   }
 

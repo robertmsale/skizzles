@@ -4,7 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupLabLabels, DockerProvisioningFailure, ensureSharedCompilerCache, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
+import { cleanupLabLabels, dockerAvailable, DockerProvisioningFailure, ensureSharedCompilerCache, launchDockerRun, prepareLabRuntime, PROVISIONING_FAILURE_DIAGNOSTIC_FILE, provisionLabStack, stackLogs, stackStatus, terminateDockerRun, type DockerRunner, type DockerSpawnOptions, type LabRuntime } from "./docker";
 import { SHARED_COMPILER_CACHE_CONTAINER, SHARED_COMPILER_CACHE_IMAGE, SHARED_COMPILER_CACHE_LABELS, SHARED_COMPILER_CACHE_NETWORK } from "./compose";
 import { parseLabConfig } from "./config";
 import { redactComposeFailureWithMetadata } from "./log-framing";
@@ -26,6 +26,66 @@ class MockDocker implements DockerRunner {
     return new EventEmitter() as ChildProcessWithoutNullStreams;
   }
 }
+
+describe("Docker health probe", () => {
+  test("returns availability without adding a diagnostic on success", async () => {
+    const docker = new MockDocker();
+    docker.responses.push(result("27.1.0\n"));
+    const probe = await dockerAvailable(docker, ["TOKEN"], {
+      PATH: "/usr/bin",
+      TOKEN: "secret-health-value",
+      DOCKER_CONTEXT: "orbstack",
+    });
+    expect(probe).toEqual({ available: true });
+    expect(docker.calls[0]).toEqual(["info", "--format", "{{.ServerVersion}}"]);
+    expect(docker.spawnOptions).toHaveLength(0);
+  });
+
+  test("classifies bounded Docker failures without exposing stderr", async () => {
+    const cases = [
+      ["permission", "permission denied while trying to connect to the Docker daemon", "permission"],
+      ["context", 'Failed to initialize: context "linux": context not found: open /private/docker/meta.json: no such file or directory', "context"],
+      ["daemon", "Cannot connect to the Docker daemon. Is the docker daemon running?", "daemon"],
+      ["unreachable", "ssh: connect to host 192.0.2.10 port 22: Connection refused", "unreachable"],
+    ] as const;
+    for (const [, stderr, reason] of cases) {
+      const docker = new MockDocker();
+      docker.responses.push(resultWithError(stderr));
+      const probe = await dockerAvailable(docker, [], { DOCKER_CONTEXT: "linux" });
+      expect(probe).toMatchObject({ available: false, diagnostic: { reason, context: "linux" } });
+      expect(JSON.stringify(probe)).not.toContain(stderr);
+      expect((probe as { available: false; diagnostic: { nextAction: string } }).diagnostic.nextAction).not.toBe("");
+    }
+  });
+
+  test("classifies thrown spawn and timeout failures", async () => {
+    const spawnFailure: DockerRunner = {
+      run: async () => { throw new Error("spawn docker failed"); },
+      spawn: () => new EventEmitter() as ChildProcessWithoutNullStreams,
+    };
+    await expect(dockerAvailable(spawnFailure)).resolves.toMatchObject({
+      available: false,
+      diagnostic: { reason: "spawn" },
+    });
+
+    const timeoutFailure: DockerRunner = {
+      run: async () => { throw new Error("Docker health check timed out"); },
+      spawn: () => new EventEmitter() as ChildProcessWithoutNullStreams,
+    };
+    await expect(dockerAvailable(timeoutFailure)).resolves.toMatchObject({
+      available: false,
+      diagnostic: { reason: "timeout" },
+    });
+  });
+
+  test("only returns a context that matches the strict identifier allowlist", async () => {
+    const docker = new MockDocker();
+    docker.responses.push(resultWithError('docker: context "/tmp/private-token" does not exist'));
+    const probe = await dockerAvailable(docker, [], { DOCKER_CONTEXT: "/tmp/private-token" });
+    expect(probe).toMatchObject({ available: false, diagnostic: { reason: "context" } });
+    expect(JSON.stringify(probe)).not.toContain("/tmp/private-token");
+  });
+});
 
 class SecretRecordingDocker implements DockerRunner {
   calls: Array<{ args: string[]; options?: RunOptions }> = [];

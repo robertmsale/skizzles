@@ -8093,12 +8093,60 @@ function isExclusiveSharedNetwork(value) {
   const names = Object.keys(value);
   return names.length === 1 && names[0] === SHARED_COMPILER_CACHE_NETWORK && isRecord3(value[names[0]]);
 }
+var SAFE_DOCKER_CONTEXT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+var DOCKER_NEXT_ACTION = {
+  timeout: "Retry the Docker health check; if it persists, restart Docker.",
+  spawn: "Check that the Docker CLI can start, then retry.",
+  "not-found": "Install Docker and ensure the Docker CLI is available on PATH.",
+  context: "Remove the unavailable Docker context or select an available one, then retry.",
+  permission: "Grant access to the Docker daemon, then retry.",
+  daemon: "Start Docker Desktop or the Docker daemon, then retry.",
+  unreachable: "Check that the Docker daemon endpoint is reachable, then retry.",
+  other: "Check Docker configuration and daemon logs, then retry."
+};
 async function dockerAvailable(runner = defaultDockerRunner, secretEnvironment = [], environment = process.env) {
-  return (await runner.run(["info", "--format", "{{.ServerVersion}}"], {
-    allowFailure: true,
-    timeoutMs: 1e4,
-    env: scrubSecretEnvironment(secretEnvironment, environment)
-  })).code === 0;
+  const probeEnvironment = scrubSecretEnvironment(secretEnvironment, environment);
+  const context = safeDockerContext(probeEnvironment.DOCKER_CONTEXT);
+  try {
+    const result = await runner.run(["info", "--format", "{{.ServerVersion}}"], {
+      allowFailure: true,
+      timeoutMs: 1e4,
+      env: probeEnvironment
+    });
+    if (result.code === 0)
+      return { available: true };
+    return { available: false, diagnostic: dockerFailureDiagnostic(result.stderr.toString(), result.code, context) };
+  } catch (error) {
+    return { available: false, diagnostic: dockerFailureDiagnostic(error, undefined, context) };
+  }
+}
+function safeDockerContext(value) {
+  return value !== undefined && SAFE_DOCKER_CONTEXT.test(value) ? value : undefined;
+}
+function dockerFailureDiagnostic(value, code, context) {
+  const text = typeof value === "string" ? value : value instanceof Error ? value.message : "";
+  const normalized = text.toLowerCase();
+  const failureContext = context ?? contextFromFailure(text);
+  const timedOut = value instanceof Error && (value.name === "TimeoutError" || isNodeError(value) && value.code === "ETIMEDOUT");
+  const reason = code === 124 || timedOut || /(?:timed? ?out|timeout|deadline exceeded)/.test(normalized) ? "timeout" : /(?:context .* does not exist|context .* not found|unknown context)/.test(normalized) ? "context" : isSpawnNotFound(value, normalized) ? "not-found" : isSpawnFailure(value, normalized) ? "spawn" : /(?:permission denied|operation not permitted|eacces)/.test(normalized) ? "permission" : /(?:cannot connect to the docker daemon|docker daemon.*(?:not running|unavailable)|is the docker daemon running|error response from daemon)/.test(normalized) ? "daemon" : /(?:connection refused|network is unreachable|no route to host|host is down|unreachable|econnrefused|dial tcp)/.test(normalized) ? "unreachable" : "other";
+  return {
+    reason,
+    ...failureContext ? { context: failureContext } : {},
+    nextAction: DOCKER_NEXT_ACTION[reason]
+  };
+}
+function contextFromFailure(value) {
+  const match = value.match(/\bcontext\s+["']?([A-Za-z0-9][A-Za-z0-9_.-]{0,63})["']?\s+(?:does not exist|not found)\b/i);
+  return safeDockerContext(match?.[1]);
+}
+function isSpawnNotFound(value, normalized) {
+  return isNodeError(value) && value.code === "ENOENT" || /(?:command not found|no such file or directory|\benoent\b)/.test(normalized);
+}
+function isSpawnFailure(value, normalized) {
+  return isNodeError(value) && typeof value.code === "string" && ["E2BIG", "EAGAIN", "EMFILE", "ENOMEM"].includes(value.code) || /(?:spawn .* failed|failed to spawn)/.test(normalized);
+}
+function isNodeError(value) {
+  return value instanceof Error && "code" in value && typeof value.code === "string";
 }
 async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner, environment = process.env) {
   await mkdir(metadata.runtimeRoot, { recursive: true, mode: 448 });
@@ -9978,10 +10026,12 @@ class ContainerLabService {
     await this.reconcileOwner();
     const labs = await listLabs(this.roots, this.owner);
     const secretEnvironment = [...new Set(labs.flatMap((lab) => lab.secretEnvironment))];
+    const docker = await dockerAvailable(this.docker, secretEnvironment, this.environment);
     return {
       ok: true,
-      dockerAvailable: await dockerAvailable(this.docker, secretEnvironment, this.environment).catch(() => false),
-      labs: labs.length
+      dockerAvailable: docker.available,
+      labs: labs.length,
+      ...!docker.available ? { dockerDiagnostic: docker.diagnostic } : {}
     };
   }
   async createLab(name = "lab", source = process.cwd(), signal) {
