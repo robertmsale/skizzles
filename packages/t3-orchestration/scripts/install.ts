@@ -393,8 +393,12 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
   await ensureDirectory(dirname(join(bin, "t3ctl")), 0o755);
   await ensureDirectory(dirname(join(skills, "t3-orchestration")), 0o755);
   if (!clientOnly) await ensureDirectory(launchAgents, 0o755);
-  const previousHostDomain = previous?.mode === "host" ? await launchctlDomain() : undefined;
-  const previousHostLoaded = previousHostDomain ? await launchctlLoaded(previousHostDomain) : false;
+  const hostDomain = !clientOnly ? await launchctlDomain() : undefined;
+  const hostLoaded = hostDomain ? await launchctlLoaded(hostDomain) : false;
+  if (hostLoaded && previous?.mode !== "host") {
+    throw new Error(`Refusing to replace loaded ${launchAgentLabel} without a host install receipt`);
+  }
+  const previousHostLoaded = previous?.mode === "host" && hostLoaded;
 
   const transactionRoot = await mkdtemp(join(dirname(installRoot), ".t3-orchestration-transaction-"));
   const stagedRoot = join(transactionRoot, "new-install");

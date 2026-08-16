@@ -40,4 +40,6 @@ bun run plugin:check
 
 The root integration owner creates Git checkpoints only after a coherent ownership slice has passed focused validation. Do not include unrelated collaborator changes, generated drift, or the root `.DS_Store`. Checkpoint before risky causal changes, a substantial handoff, or independent review; validate the aggregate branch before closeout.
 
+Skizzles pull requests are reserved for outside contributors. Maintainer-owned work stays isolated on a task branch for validation and independent review, then integrates directly into `master` and removes its obsolete maintainer branch; never create or update a maintainer PR for this repository. This repository-local closeout rule overrides the global draft-PR default without weakening the clean-worktree, review, or non-force-push requirements.
+
 Read [README.md](README.md) for installation choices and [profiles/AGENTS.md](profiles/AGENTS.md) for the optional portable policy.

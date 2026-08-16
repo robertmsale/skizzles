@@ -25,37 +25,51 @@ async function installWithEnvironment(
   return { exitCode: await process.exited, stderr: await new Response(process.stderr).text() };
 }
 
-describe("host installer", () => {
-  test("unloads a newly bootstrapped service when activation fails", async () => {
-    const root = `/tmp/t3-host-install-${crypto.randomUUID()}`;
-    roots.push(root);
-    const bin = join(root, "fake-bin");
-    const state = join(root, "launchctl-state");
-    const log = join(root, "launchctl.log");
-    const launchctl = join(bin, "launchctl");
-    await mkdir(bin, { recursive: true });
-    await writeFile(launchctl, `#!/bin/sh
+async function launchctlFixture(
+  root: string,
+  options: { loaded?: boolean; kickstartExit?: number } = {},
+): Promise<{ environment: Record<string, string>; log: string; state: string }> {
+  const bin = join(root, "fake-bin");
+  const state = join(root, "launchctl-state");
+  const log = join(root, "launchctl.log");
+  const launchctl = join(bin, "launchctl");
+  await mkdir(bin, { recursive: true });
+  if (options.loaded) await writeFile(state, "loaded");
+  await writeFile(launchctl, `#!/bin/sh
 echo "$1" >> "$MOCK_LAUNCHCTL_LOG"
 case "$1" in
   print) test -f "$MOCK_LAUNCHCTL_STATE" ;;
   bootstrap) printf loaded > "$MOCK_LAUNCHCTL_STATE" ;;
-  kickstart) exit 42 ;;
+  kickstart) exit "$MOCK_KICKSTART_EXIT" ;;
   bootout) rm -f "$MOCK_LAUNCHCTL_STATE" ;;
   *) exit 43 ;;
 esac
 `);
-    await chmod(launchctl, 0o755);
-
-    const result = await installWithEnvironment(root, {
+  await chmod(launchctl, 0o755);
+  return {
+    state,
+    log,
+    environment: {
       PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
       UID: String(process.getuid?.() ?? 501),
+      MOCK_KICKSTART_EXIT: String(options.kickstartExit ?? 0),
       MOCK_LAUNCHCTL_STATE: state,
       MOCK_LAUNCHCTL_LOG: log,
-    });
+    },
+  };
+}
+
+describe("host installer", () => {
+  test("unloads a newly bootstrapped service when activation fails", async () => {
+    const root = `/tmp/t3-host-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root, { kickstartExit: 42 });
+    const result = await installWithEnvironment(root, fixture.environment);
 
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("Could not start io.github.t3-orchestration.daemon");
-    expect((await readFile(log, "utf8")).trim().split("\n")).toEqual([
+    expect((await readFile(fixture.log, "utf8")).trim().split("\n")).toEqual([
+      "print",
       "print",
       "bootstrap",
       "kickstart",
@@ -64,9 +78,23 @@ esac
       "print",
       "print",
     ]);
-    await expect(lstat(state)).rejects.toThrow();
+    await expect(lstat(fixture.state)).rejects.toThrow();
     await expect(lstat(join(root, ".local/share/skizzles/t3-orchestration"))).rejects.toThrow();
     await expect(lstat(join(root, "Library/LaunchAgents/io.github.t3-orchestration.daemon.plist"))).rejects.toThrow();
+  });
+
+  test("refuses to unload a loaded service without receipt ownership", async () => {
+    const root = `/tmp/t3-host-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root, { loaded: true });
+
+    const result = await installWithEnvironment(root, fixture.environment);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Refusing to replace loaded io.github.t3-orchestration.daemon without a host install receipt");
+    expect((await readFile(fixture.log, "utf8")).trim().split("\n")).toEqual(["print"]);
+    expect(await readFile(fixture.state, "utf8")).toBe("loaded");
+    await expect(lstat(join(root, ".local/share/skizzles/t3-orchestration"))).rejects.toThrow();
   });
 });
 
