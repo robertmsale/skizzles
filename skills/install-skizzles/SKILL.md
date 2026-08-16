@@ -119,7 +119,7 @@ bun run packages/installer/src/cli.ts install \
 
 Review the portable skill targets under `CURSOR_HOME/skills` and the local plugin at `CURSOR_HOME/plugins/local/skizzles`, then repeat without `--dry-run`. Never write into `CURSOR_HOME/skills-cursor`; that directory is Cursor's reserved built-in skill tree. The installer leaves `cli-config.json`, authentication, MCP approvals, and T3 enablement untouched. Cursor's plugin marketplace is not the Codex marketplace—if a Cursor plugin cannot be installed at the documented local plugin path, the command fails closed instead of faking Codex plugin install. Uninstall with the same `--surface cursor --cursor-home ... --dry-run` preview followed by the real command.
 
-T3 `--provider cursor` maps to the live catalog instance `cursor`, model `grok-4.6`, and option `reasoning=high`. New Cursor work requires a new task.
+T3 `--provider cursor` maps to the live catalog instance `cursor`, model `grok-4.6`, option `reasoning=high`, and `fastMode=false`. New Cursor work requires a new task.
 
 Configuration upgrades are an explicit restore-and-reapply lifecycle because `configure` refuses to overwrite an active receipt. Preview `unconfigure` with the absolute Codex binary recorded in the receipt, run it only when the owned values are drift-free, preview the new `configure`, then apply it. Do not delete or rewrite the receipt by hand; that discards the exact restoration boundary Skizzles uses to preserve unrelated config.
 

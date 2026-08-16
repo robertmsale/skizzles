@@ -103,8 +103,8 @@ function plannedEntries(options: CursorHarnessOptions): InstalledEntry[] {
       fingerprint: "",
     },
     {
-      source: join(pluginRoot, "rules/skizzles-cursor.md"),
-      target: join(cursorHome, pluginRelativeRoot, "rules/skizzles-cursor.md"),
+      source: join(pluginRoot, "rules/skizzles-cursor.mdc"),
+      target: join(cursorHome, pluginRelativeRoot, "rules/skizzles-cursor.mdc"),
       kind: "file",
       transfer: "copy-only",
       fingerprint: "",
@@ -168,10 +168,10 @@ function validateReceiptEntries(receipt: CursorHarnessReceipt, cursorHome: strin
       },
     ],
     [
-      join(pluginTarget, "rules/skizzles-cursor.md"),
+      join(pluginTarget, "rules/skizzles-cursor.mdc"),
       {
-        source: join(sourceRoot, "cursor/plugin/rules/skizzles-cursor.md"),
-        target: join(pluginTarget, "rules/skizzles-cursor.md"),
+        source: join(sourceRoot, "cursor/plugin/rules/skizzles-cursor.mdc"),
+        target: join(pluginTarget, "rules/skizzles-cursor.mdc"),
         kind: "file",
         transfer: "copy-only",
       },

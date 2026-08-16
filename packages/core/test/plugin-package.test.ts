@@ -80,6 +80,7 @@ describe("deterministic plugin packaging", () => {
     expect(await Bun.file(join(staged, "runtime/codex-command.ts")).exists()).toBe(false);
     expect(await Bun.file(join(staged, "hooks/approve-safe-operations.ts")).exists()).toBe(true);
     expect(await Bun.file(join(staged, "grok")).exists()).toBe(false);
+    expect(await Bun.file(join(staged, "cursor")).exists()).toBe(false);
   });
 
   test("stages only allowlisted canonical inputs deterministically", async () => {

@@ -13,7 +13,7 @@ function fixture(): { sourceRoot: string; cursorHome: string } {
   mkdirSync(join(sourceRoot, "cursor/plugin/.cursor-plugin"), { recursive: true });
   mkdirSync(join(sourceRoot, "cursor/plugin/rules"), { recursive: true });
   writeFileSync(join(sourceRoot, "cursor/plugin/.cursor-plugin/plugin.json"), '{"name":"skizzles"}\n');
-  writeFileSync(join(sourceRoot, "cursor/plugin/rules/skizzles-cursor.md"), "# rule\n");
+  writeFileSync(join(sourceRoot, "cursor/plugin/rules/skizzles-cursor.mdc"), "---\nalwaysApply: true\n---\n# rule\n");
   mkdirSync(join(sourceRoot, "skills/portable"), { recursive: true });
   writeFileSync(join(sourceRoot, "skills/portable/SKILL.md"), "---\nname: portable\n---\n");
   writeFileSync(join(sourceRoot, "cursor/portable-skills.json"), '{"version":1,"skills":["portable"]}\n');

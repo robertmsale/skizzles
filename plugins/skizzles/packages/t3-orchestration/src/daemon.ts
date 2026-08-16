@@ -67,6 +67,7 @@ var CURSOR_INSTANCE_ID = "cursor";
 var CURSOR_DEFAULT_MODEL = "grok-4.6";
 var CURSOR_REASONING_OPTION_ID = "reasoning";
 var CURSOR_REASONING_HIGH = "high";
+var CURSOR_FAST_MODE_OPTION_ID = "fastMode";
 var SUPPORTED_PROVIDERS = "codex, grok, cursor";
 async function origin() {
   const path = join(T3_HOME, "userdata/server-runtime.json");
@@ -118,7 +119,10 @@ async function taskProviderDefaults(provider) {
       return requireSelection({
         instanceId: CURSOR_INSTANCE_ID,
         model: CURSOR_DEFAULT_MODEL,
-        options: [{ id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH }]
+        options: [
+          { id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH },
+          { id: CURSOR_FAST_MODE_OPTION_ID, value: false }
+        ]
       });
     default:
       throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);

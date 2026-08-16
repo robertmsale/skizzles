@@ -29,7 +29,7 @@ describe("task provider preflight", () => {
         availability: "available",
         models: [{ slug: "grok-4.6" }],
       }],
-    }, { instanceId: "cursor", model: "grok-4.6", options: [{ id: "reasoning", value: "high" }] })).toBe("cursor");
+    }, { instanceId: "cursor", model: "grok-4.6", options: [{ id: "reasoning", value: "high" }, { id: "fastMode", value: false }] })).toBe("cursor");
   });
 
   test("fails before task creation when provider or model is unusable", () => {

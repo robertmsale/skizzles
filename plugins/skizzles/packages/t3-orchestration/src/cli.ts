@@ -124,13 +124,16 @@ async function taskProviderDefaults(provider) {
       return requireSelection({
         instanceId: CURSOR_INSTANCE_ID,
         model: CURSOR_DEFAULT_MODEL,
-        options: [{ id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH }]
+        options: [
+          { id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH },
+          { id: CURSOR_FAST_MODE_OPTION_ID, value: false }
+        ]
       });
     default:
       throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
   }
 }
-var home, CODEX_HOME, T3_HOME, SOCKET_PATH, DEFAULT_TAILSCALE_GATEWAY_PORT = 43773, TAILSCALE_GATEWAY_PORT, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, GROK_DEFAULT_MODEL = "grok-4.6", CURSOR_INSTANCE_ID = "cursor", CURSOR_DEFAULT_MODEL = "grok-4.6", CURSOR_REASONING_OPTION_ID = "reasoning", CURSOR_REASONING_HIGH = "high", SUPPORTED_PROVIDERS = "codex, grok, cursor";
+var home, CODEX_HOME, T3_HOME, SOCKET_PATH, DEFAULT_TAILSCALE_GATEWAY_PORT = 43773, TAILSCALE_GATEWAY_PORT, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, GROK_DEFAULT_MODEL = "grok-4.6", CURSOR_INSTANCE_ID = "cursor", CURSOR_DEFAULT_MODEL = "grok-4.6", CURSOR_REASONING_OPTION_ID = "reasoning", CURSOR_REASONING_HIGH = "high", CURSOR_FAST_MODE_OPTION_ID = "fastMode", SUPPORTED_PROVIDERS = "codex, grok, cursor";
 var init_config = __esm(() => {
   home = process.env.HOME ?? (() => {
     throw new Error("HOME is required");

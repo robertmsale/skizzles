@@ -27,7 +27,10 @@ describe("task provider defaults", () => {
     expect(await taskProviderDefaults("cursor")).toEqual({
       instanceId: "cursor",
       model: "grok-4.6",
-      options: [{ id: "reasoning", value: "high" }],
+      options: [
+        { id: "reasoning", value: "high" },
+        { id: "fastMode", value: false },
+      ],
     });
   });
 
