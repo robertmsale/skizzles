@@ -1,0 +1,63 @@
+#!/usr/bin/env bun
+
+import { accessSync, constants, lstatSync, realpathSync } from "node:fs";
+import { delimiter, resolve } from "node:path";
+
+const entrypoint = resolve(import.meta.dir, "../../../packages/t3-orchestration/src/cli.ts");
+const launcherPath = realpathSync(import.meta.path);
+
+function bundledRuntime(): string | undefined {
+  try {
+    return lstatSync(entrypoint).isFile() ? entrypoint : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function pathBinary(): string | undefined {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = resolve(directory, "t3ctl");
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (realpathSync(candidate) !== launcherPath) return candidate;
+    } catch {}
+  }
+}
+
+function command(): string[] | undefined {
+  const runtime = bundledRuntime();
+  if (runtime) return [process.execPath, runtime];
+  const binary = pathBinary();
+  return binary ? [binary] : undefined;
+}
+
+export async function runT3ctl(args = process.argv.slice(2)): Promise<number> {
+  const resolvedCommand = command();
+  if (!resolvedCommand) {
+    console.error("Skizzles T3 orchestration runtime is unavailable: a skill-only install contains guidance. Install the full Skizzles plugin or use a Skizzles checkout, or install a distinct t3ctl PATH binary.");
+    return 1;
+  }
+  let child: Bun.Subprocess<"inherit", "inherit", "inherit"> | undefined;
+  let pendingSignal: "SIGINT" | "SIGTERM" | undefined;
+  const forward = (signal: "SIGINT" | "SIGTERM") => {
+    pendingSignal = signal;
+    if (child?.exitCode === null) child.kill(signal);
+  };
+  process.on("SIGINT", forward);
+  process.on("SIGTERM", forward);
+  try {
+    child = Bun.spawn([...resolvedCommand, ...args], {
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    if (pendingSignal && child.exitCode === null) child.kill(pendingSignal);
+    return await child.exited;
+  } finally {
+    process.removeListener("SIGINT", forward);
+    process.removeListener("SIGTERM", forward);
+  }
+}
+
+if (import.meta.main) process.exit(await runT3ctl());

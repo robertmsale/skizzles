@@ -1,7 +1,7 @@
 {
   "name": "skizzles",
   "version": "0.1.0",
-  "description": "Portable Codex harness skills, hooks, maintenance tooling, and bundled Container Lab runtime.",
+  "description": "Portable Codex harness skills, hooks, maintenance tooling, and bundled Container Lab and T3 orchestration runtimes.",
   "author": {
     "name": "Robert Sale"
   },
@@ -10,20 +10,23 @@
   "keywords": [
     "codex",
     "developer-tools",
-    "skills"
+    "skills",
+    "t3-code",
+    "orchestration"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Skizzles",
-    "shortDescription": "A portable Codex harness with bundled Container Lab tooling.",
-    "longDescription": "Skizzles packages reusable skills, hooks, maintenance tooling, and runnable Container Lab CLI/reaper bundles for a consistent Codex development environment.",
+    "shortDescription": "A portable Codex harness with bundled development and orchestration tooling.",
+    "longDescription": "Skizzles packages reusable skills, hooks, maintenance tooling, and runnable Container Lab and T3 orchestration bundles for a consistent Codex development environment.",
     "developerName": "Robert Sale",
     "category": "Developer Tools",
     "capabilities": [
       "Skills",
       "Hooks",
       "Developer tooling",
-      "Container Lab CLI and reaper"
+      "Container Lab CLI and reaper",
+      "T3 Code orchestration CLI and daemon"
     ],
     "defaultPrompt": [
       "Check this workspace with the Skizzles harness.",

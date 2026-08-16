@@ -1,0 +1,33 @@
+{
+  "id": "t3-orchestration",
+  "integrationContract": 1,
+  "configuredRuntime": "0.1.0",
+  "supportedRuntime": ">=0.1.0 <0.2.0",
+  "versionVerification": "contract-fingerprint-only",
+  "ownership": {
+    "runtimeOwner": "skizzles",
+    "canonicalSource": "packages/t3-orchestration",
+    "provenanceCommit": "11fd830798e512466ceb1a6ca1187b0f3f41acbd"
+  },
+  "bundled": {
+    "operationalEntrypoint": "packages/t3-orchestration/src/cli.ts",
+    "daemonEntrypoint": "packages/t3-orchestration/src/daemon.ts",
+    "launcher": "skills/t3-orchestration/scripts/t3ctl",
+    "hostWiring": "packages/t3-orchestration/scripts/install.ts",
+    "documentation": [
+      "packages/t3-orchestration/README.md"
+    ]
+  },
+  "binaries": {
+    "operational": "t3ctl",
+    "daemon": "t3-orchestrationd"
+  },
+  "host": {
+    "platform": "macOS",
+    "launchAgentLabel": "io.github.t3-orchestration.daemon",
+    "localTransport": "mode-0600-unix-socket",
+    "credentialStore": "macOS-keychain",
+    "remoteTransport": "tailscale-serve-https",
+    "publicFunnelAllowed": false
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "T3 Orchestration"
+  short_description: "Coordinate T3 Code tasks across projects"
+  default_prompt: "Use $t3-orchestration to create, inspect, message, and coordinate T3 Code tasks."

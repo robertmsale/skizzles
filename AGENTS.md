@@ -4,12 +4,12 @@ Skizzles is a packaging project, not a live installation. Keep its canonical sou
 
 ## Ownership and architecture
 
-- Treat `skills/`, `hooks/`, `runtime/`, `scripts/`, `assets/`, and `packages/codex-container-lab/` as canonical distributable inputs; `packages/core/plugin-template/` and `.agents/plugins/marketplace.json` define the plugin contract.
+- Treat `skills/`, `hooks/`, `runtime/`, `scripts/`, `assets/`, `packages/codex-container-lab/`, and `packages/t3-orchestration/` as canonical distributable inputs; `packages/core/plugin-template/` and `.agents/plugins/marketplace.json` define the plugin contract.
 - Treat `assets/agent-role-spec.json` and `assets/agent-role-templates/` as the canonical agent-role inputs. `assets/agents/` is generated output; rebuild it with `bun run agents:build` and never repair generated role files in place.
 - Treat `plugins/skizzles/` as generated output. Change the canonical source, rebuild, and check drift; never repair generated files in place.
 - Keep repo-local `.codex/skills/` as maintainer guidance, separate from the public skill collection unless packaging intentionally includes it.
 - Treat `packages/codex-container-lab/cli` as the canonical Bun workspace package. Keep `bun.lock` at the Skizzles root as its sole lockfile; do not restore a nested lock.
-- The stable plugin carries bundled Container Lab CLI/reaper entrypoints plus the public skill launcher. Do not hand-edit those generated bundles. PATH and LaunchAgent activation remain separate, explicit host wiring.
+- The stable plugin carries bundled Container Lab CLI/reaper and T3 orchestration CLI/daemon entrypoints plus their public skill launchers. Do not hand-edit those generated bundles. PATH, LaunchAgent, Keychain, and Tailscale activation remain separate, explicit host wiring.
 - The former standalone Container Lab checkout is rollback history only, not live authority; never mutate it from Skizzles work.
 
 ## Safe working rules
