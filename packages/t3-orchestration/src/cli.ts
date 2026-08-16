@@ -4,8 +4,8 @@ import { clearRemoteUrl, configuredRemoteUrl, configureRemoteUrl, REMOTE_CONFIG_
 
 const USAGE = `t3ctl remote {configure --url HTTPS_URL|status|clear}
 t3ctl projects {list|import}
-t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok]
-t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok]
+t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor]
+t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor]
 t3ctl tasks list [--project ID] [--limit 1..200] [--include-settled] [--include-archived]
 t3ctl tasks {read|history|status} ID
 t3ctl tasks wait ID [ID ...] [--timeout-ms 0..3600000] [--after ID=CURSOR]

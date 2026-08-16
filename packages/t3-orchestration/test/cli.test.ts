@@ -105,5 +105,13 @@ describe("cross-project collaboration CLI", () => {
       message: "work",
       provider: "grok",
     });
+    expect(await captureCli(["tasks", "create", "--title", "Cursor task", "--message", "work", "--provider", "cursor"])).toEqual({
+      op: "tasks.create",
+      callerThreadId: "desktop-root",
+      projectId: "current",
+      title: "Cursor task",
+      message: "work",
+      provider: "cursor",
+    });
   });
 });

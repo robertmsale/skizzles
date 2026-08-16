@@ -16,7 +16,7 @@ Optional Skizzles sidecar tooling for orchestrating T3 Code tasks through its su
 - `t3ctl` talks to the daemon over a same-user Unix socket.
 - T3 SQLite and Codex SQLite are read-only identity/configuration sources; mutations use T3 dispatch.
 - New root tasks always use T3's worktree bootstrap. The CLI exposes a bounded provider selector, never model or reasoning flags.
-- Codex remains the default provider and uses the explicit top-level defaults in `~/.codex/config.toml`. `--provider grok` selects the installed Grok harness with Grok 4.6; messages replay the recipient's exact saved selection. Profile/CLI model overrides are intentionally not inherited.
+- Codex remains the default provider and uses the explicit top-level defaults in `~/.codex/config.toml`. `--provider grok` selects the installed Grok harness with Grok 4.6. `--provider cursor` selects this machine's T3 Cursor instance with catalog model `grok-4.6` and option `reasoning=high` (Cursor Grok 4.6 High). Messages replay the recipient's exact saved selection. Profile/CLI model overrides are intentionally not inherited. New Cursor work requires a new task; an existing thread's provider cannot be flipped by messaging it.
 
 ## First-time setup
 
@@ -63,7 +63,7 @@ Pinned tasks are always included first and do not consume the recent-task limit.
 For an explicitly authorized one-time ingress from an external Codex client:
 
 ```sh
-t3ctl handoff create --project <id> --title <title> --message <handoff> [--provider grok]
+t3ctl handoff create --project <id> --title <title> --message <handoff> [--provider grok|cursor]
 ```
 
 Tasks can read a bounded window of another task's conversation in the same T3 installation, including across projects. The default is three user-anchored turns and the hard maximum is ten:

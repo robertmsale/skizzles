@@ -63,6 +63,11 @@ var TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "
 var KEYCHAIN_SERVICE = "t3-orchestration";
 var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
 var GROK_DEFAULT_MODEL = "grok-4.6";
+var CURSOR_INSTANCE_ID = "cursor";
+var CURSOR_DEFAULT_MODEL = "grok-4.6";
+var CURSOR_REASONING_OPTION_ID = "reasoning";
+var CURSOR_REASONING_HIGH = "high";
+var SUPPORTED_PROVIDERS = "codex, grok, cursor";
 async function origin() {
   const path = join(T3_HOME, "userdata/server-runtime.json");
   const runtime = await Bun.file(path).json();
@@ -109,8 +114,14 @@ async function taskProviderDefaults(provider) {
       return codexDefaults();
     case "grok":
       return requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] });
+    case "cursor":
+      return requireSelection({
+        instanceId: CURSOR_INSTANCE_ID,
+        model: CURSOR_DEFAULT_MODEL,
+        options: [{ id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH }]
+      });
     default:
-      throw new Error(`Unsupported task provider '${provider}'. Supported providers: codex, grok`);
+      throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
   }
 }
 

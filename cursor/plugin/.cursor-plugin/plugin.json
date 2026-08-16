@@ -1,0 +1,7 @@
+{
+  "name": "skizzles",
+  "displayName": "Skizzles",
+  "description": "Skizzles portable agent skills and T3 orchestration for Cursor Agent. Personal skills are installed beside this plugin under the Cursor-scanned skills directory; this plugin does not copy Grok Build internals or Codex hooks.",
+  "version": "0.1.0",
+  "rules": "./rules"
+}

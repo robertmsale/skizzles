@@ -6,6 +6,7 @@ Skizzles is a packaging project, not a live installation. Keep its canonical sou
 
 - Treat `skills/`, `hooks/`, `runtime/`, `scripts/`, `assets/`, `packages/codex-container-lab/`, and `packages/t3-orchestration/` as canonical Codex-plugin inputs; `packages/core/plugin-template/` and `.agents/plugins/marketplace.json` define that plugin contract.
 - Treat `grok/` as the canonical Grok Build harness source. It is installed independently and must not be staged into the Codex plugin.
+- Treat `cursor/` as the canonical Cursor Agent surface. It is installed independently into a Cursor home and must not be staged into the Codex plugin or copy Grok Build internals.
 - Treat `assets/agent-role-spec.json` and `assets/agent-role-templates/` as the canonical agent-role inputs. `assets/agents/` is generated output; rebuild it with `bun run agents:build` and never repair generated role files in place.
 - Treat `plugins/skizzles/` as generated output. Change the canonical source, rebuild, and check drift; never repair generated files in place.
 - Keep repo-local `.codex/skills/` as maintainer guidance, separate from the public skill collection unless packaging intentionally includes it.

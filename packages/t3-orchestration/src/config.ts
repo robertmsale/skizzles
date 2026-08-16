@@ -26,9 +26,14 @@ export const TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_U
 export const KEYCHAIN_SERVICE = "t3-orchestration";
 export const KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
 
-export type TaskProvider = "codex" | "grok";
+export type TaskProvider = "codex" | "grok" | "cursor";
 
 const GROK_DEFAULT_MODEL = "grok-4.6";
+const CURSOR_INSTANCE_ID = "cursor";
+const CURSOR_DEFAULT_MODEL = "grok-4.6";
+const CURSOR_REASONING_OPTION_ID = "reasoning";
+const CURSOR_REASONING_HIGH = "high";
+const SUPPORTED_PROVIDERS = "codex, grok, cursor";
 
 export async function origin(): Promise<string> {
   const path = join(T3_HOME, "userdata/server-runtime.json");
@@ -81,7 +86,17 @@ export async function taskProviderDefaults(provider: string | undefined): Promis
       // T3's Grok ACP provider currently exposes no model option descriptors.
       // Reasoning is owned by the installed Grok harness, not by task creators.
       return requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] });
+    case "cursor":
+      // Discovered from this machine's live T3 catalog: instanceId `cursor`,
+      // model slug `grok-4.6` ("Cursor Grok 4.6"), option id `reasoning` value
+      // `high`. The catalog also exposes `fastMode`; this bounded selector
+      // does not pin it.
+      return requireSelection({
+        instanceId: CURSOR_INSTANCE_ID,
+        model: CURSOR_DEFAULT_MODEL,
+        options: [{ id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH }],
+      });
     default:
-      throw new Error(`Unsupported task provider '${provider}'. Supported providers: codex, grok`);
+      throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
   }
 }

@@ -456,7 +456,7 @@ async function fixture(): Promise<string> {
     "packages/codex-container-lab/cli/src/cli.ts",
     "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture cli' }));\n",
   );
-  for (const path of ["config.ts", "core.ts", "doctor.ts", "grok.ts", "harness.ts"]) {
+  for (const path of ["config.ts", "core.ts", "doctor.ts", "grok.ts", "cursor.ts", "harness.ts"]) {
     await write(root, `packages/installer/src/${path}`, `export const fixture = "${path}";\n`);
   }
   await write(root, "packages/installer/src/cli.ts", "console.log('fixture cli');\n");
