@@ -15,7 +15,6 @@ import {
 } from "node:fs/promises";
 import { connect } from "node:net";
 import { dirname, join, resolve } from "node:path";
-import { TAILSCALE_GATEWAY_PORT } from "../src/config.ts";
 
 type InstallMode = "client" | "host";
 type TreeEntry = { path: string; sha256: string; mode: number };
@@ -60,6 +59,19 @@ const installRoot = resolve(process.env.T3_ORCHESTRATION_INSTALL_ROOT?.trim() ||
 const runtimeRoot = join(installRoot, "runtime");
 const skillRoot = join(installRoot, "skill");
 const receiptPath = join(installRoot, "install-receipt.json");
+const defaultTailscaleGatewayPort = 43_773;
+
+function tailscaleGatewayPort(value: string | undefined): number {
+  const normalized = value?.trim();
+  if (!normalized) return defaultTailscaleGatewayPort;
+  const port = Number(normalized);
+  if (!Number.isInteger(port) || port < 1_024 || port > 65_535) {
+    throw new Error("T3_ORCHESTRATION_HTTP_PORT must be an integer from 1024 through 65535");
+  }
+  return port;
+}
+
+const tailscaleGatewayPortNumber = tailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
 
 function isMissing(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
@@ -297,18 +309,20 @@ async function waitForSocket(path: string): Promise<boolean> {
   return ready;
 }
 
-async function waitForTcp(port: number): Promise<boolean> {
-  const probe = () => new Promise<boolean>((resolveProbe) => {
-    const socket = connect({ host: "127.0.0.1", port });
-    socket.once("connect", () => { socket.destroy(); resolveProbe(true); });
-    socket.once("error", () => { socket.destroy(); resolveProbe(false); });
-  });
-  let ready = await probe();
-  for (let attempt = 0; attempt < 100 && !ready; attempt++) {
-    await Bun.sleep(100);
-    ready = await probe();
+async function waitForGateway(port: number): Promise<boolean> {
+  for (let attempt = 0; attempt <= 100; attempt++) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/health`, {
+        redirect: "error",
+        signal: AbortSignal.timeout(100),
+      });
+      await response.body?.cancel();
+      return response.status === 200 && response.headers.get("x-t3-orchestration-gateway") === "1";
+    } catch {
+      if (attempt < 100) await Bun.sleep(100);
+    }
   }
-  return ready;
+  return false;
 }
 
 async function deactivateHostIfLoaded(): Promise<void> {
@@ -337,8 +351,8 @@ async function activateHost(): Promise<void> {
   if (kickstart.exitCode !== 0) throw new Error(`Could not start ${launchAgentLabel}: ${kickstart.stderr.toString().trim()}`);
   if (!await waitForSocket(socketPath)) throw new Error(`${launchAgentLabel} started but its Unix socket did not become ready`);
   if (process.env.T3_ORCHESTRATION_TAILSCALE_USERS?.trim()) {
-    if (!await waitForTcp(TAILSCALE_GATEWAY_PORT)) {
-      throw new Error(`${launchAgentLabel} started but its Tailscale gateway did not become ready on loopback port ${TAILSCALE_GATEWAY_PORT}`);
+    if (!await waitForGateway(tailscaleGatewayPortNumber)) {
+      throw new Error(`${launchAgentLabel} started but its Tailscale gateway did not become ready on loopback port ${tailscaleGatewayPortNumber}`);
     }
   }
 }

@@ -34,7 +34,27 @@ async function invoke(
   });
 }
 
+async function health(): Promise<{ status: number; headers: Headers; body: Record<string, unknown> }> {
+  const server = createTailscaleGateway(["owner@example.com"], async () => undefined);
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const response = await fetch(`http://127.0.0.1:${port}/v1/health`);
+  return {
+    status: response.status,
+    headers: response.headers,
+    body: await response.json() as Record<string, unknown>,
+  };
+}
+
 describe("Tailscale HTTP gateway", () => {
+  test("exposes a non-dispatching readiness fingerprint for the host installer", async () => {
+    const response = await health();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-t3-orchestration-gateway")).toBe("1");
+    expect(response.body).toEqual({ ok: true, result: { service: "t3-orchestrationd", schema: 1 } });
+  });
+
   test("executes commands only for an explicitly allowed verified identity", async () => {
     expect(await invoke({
       "tailscale-user-login": "Owner@Example.com",

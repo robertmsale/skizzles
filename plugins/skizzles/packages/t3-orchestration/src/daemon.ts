@@ -784,6 +784,7 @@ function send(response, status, body) {
   response.writeHead(status, {
     "cache-control": "no-store",
     "content-type": "application/json; charset=utf-8",
+    "x-t3-orchestration-gateway": "1",
     "x-content-type-options": "nosniff"
   });
   response.end(`${JSON.stringify(body)}
@@ -794,6 +795,10 @@ function createTailscaleGateway(allowedLogins, execute) {
   if (allowed.size === 0)
     throw new Error("Tailscale gateway requires at least one allowed login");
   return createServer(async (request2, response) => {
+    if (request2.method === "GET" && request2.url === "/v1/health") {
+      send(response, 200, { ok: true, result: { service: "t3-orchestrationd", schema: 1 } });
+      return;
+    }
     if (request2.method !== "POST" || request2.url !== "/v1/request") {
       send(response, 404, { ok: false, error: "not found" });
       return;

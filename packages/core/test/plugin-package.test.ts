@@ -205,6 +205,21 @@ describe("deterministic plugin packaging", () => {
     expect(result.exitCode).toBe(0);
     expect(typeof (JSON.parse(result.stdout.toString()) as { help?: unknown }).help).toBe("string");
     expect(result.stderr.toString()).toBe("");
+
+    const installHome = join(temporaryRoot, "home");
+    const installResult = Bun.spawnSync([
+      "bun",
+      join(runtimeRoot, "scripts/install.ts"),
+      "--client-only",
+    ], {
+      cwd: isolatedPlugin,
+      env: { HOME: installHome, PATH: process.env.PATH ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(installResult.exitCode).toBe(0);
+    expect(JSON.parse(installResult.stdout.toString())).toMatchObject({ mode: "client" });
+    expect(installResult.stderr.toString()).toBe("");
   });
 
   test("exercises bundled YAML manifest configuration with a fake Docker binary", async () => {
