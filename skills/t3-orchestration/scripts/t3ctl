@@ -3,15 +3,19 @@
 import { accessSync, constants, lstatSync, realpathSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
 
-const entrypoint = resolve(import.meta.dir, "../../../packages/t3-orchestration/src/cli.ts");
 const launcherPath = realpathSync(import.meta.path);
+const runtimeCandidates = [
+  resolve(import.meta.dir, "../../../packages/t3-orchestration/src/cli.ts"),
+  resolve(import.meta.dir, "../../runtime/cli.ts"),
+];
 
 function bundledRuntime(): string | undefined {
-  try {
-    return lstatSync(entrypoint).isFile() ? entrypoint : undefined;
-  } catch {
-    return undefined;
+  for (const entrypoint of runtimeCandidates) {
+    try {
+      if (lstatSync(entrypoint).isFile()) return entrypoint;
+    } catch {}
   }
+  return undefined;
 }
 
 function pathBinary(): string | undefined {

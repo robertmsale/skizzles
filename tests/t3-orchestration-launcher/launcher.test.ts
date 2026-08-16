@@ -35,6 +35,22 @@ describe("T3 orchestration bundled launcher", () => {
     expect(typeof (JSON.parse(staged.stdout) as { help?: unknown }).help).toBe("string");
   });
 
+  test("resolves the receipt-owned installed runtime without PATH", async () => {
+    const root = temporaryRoot();
+    const launcher = join(root, "skill/scripts/t3ctl");
+    const runtime = join(root, "runtime/cli.ts");
+    mkdirSync(dirname(launcher), { recursive: true });
+    mkdirSync(dirname(runtime), { recursive: true });
+    writeFileSync(launcher, readFileSync(canonicalLauncher));
+    chmodSync(launcher, 0o755);
+    writeFileSync(runtime, "console.log(JSON.stringify({ installed: true, args: process.argv.slice(2) }));\n");
+
+    const result = await invoke(launcher, ["projects", "list"], undefined, { PATH: "" });
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual({ installed: true, args: ["projects", "list"] });
+  });
+
   test("uses a distinct PATH binary from a skill-only install without recursing", async () => {
     const root = temporaryRoot();
     const launcher = skillOnlyLauncher(root);

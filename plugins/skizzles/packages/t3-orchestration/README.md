@@ -113,7 +113,7 @@ t3ctl remote status
 t3ctl projects list
 ```
 
-`install-client` is intentionally for a clean client device. It refuses to run when a daemon symlink or host LaunchAgent already exists; it never silently converts or disables a credential-owning host installation.
+The `--client-only` installer mode is intentionally for a clean client device. It refuses to run when a daemon symlink or host LaunchAgent already exists; it never silently converts or disables a credential-owning host installation.
 Remove a receipt-owned client installation with:
 
 ```sh

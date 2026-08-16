@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { chmod, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 
 const roots: string[] = [];
 
@@ -9,13 +9,66 @@ afterEach(async () => {
 });
 
 async function install(root: string, ...args: string[]): Promise<{ exitCode: number; stderr: string }> {
+  return installWithEnvironment(root, {}, ...args);
+}
+
+async function installWithEnvironment(
+  root: string,
+  environment: Record<string, string>,
+  ...args: string[]
+): Promise<{ exitCode: number; stderr: string }> {
   const process = Bun.spawn(["bun", resolve(import.meta.dir, "../scripts/install.ts"), ...args], {
-    env: { ...Bun.env, HOME: root },
+    env: { ...Bun.env, HOME: root, ...environment },
     stdout: "pipe",
     stderr: "pipe",
   });
   return { exitCode: await process.exited, stderr: await new Response(process.stderr).text() };
 }
+
+describe("host installer", () => {
+  test("unloads a newly bootstrapped service when activation fails", async () => {
+    const root = `/tmp/t3-host-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const bin = join(root, "fake-bin");
+    const state = join(root, "launchctl-state");
+    const log = join(root, "launchctl.log");
+    const launchctl = join(bin, "launchctl");
+    await mkdir(bin, { recursive: true });
+    await writeFile(launchctl, `#!/bin/sh
+echo "$1" >> "$MOCK_LAUNCHCTL_LOG"
+case "$1" in
+  print) test -f "$MOCK_LAUNCHCTL_STATE" ;;
+  bootstrap) printf loaded > "$MOCK_LAUNCHCTL_STATE" ;;
+  kickstart) exit 42 ;;
+  bootout) rm -f "$MOCK_LAUNCHCTL_STATE" ;;
+  *) exit 43 ;;
+esac
+`);
+    await chmod(launchctl, 0o755);
+
+    const result = await installWithEnvironment(root, {
+      PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+      UID: String(process.getuid?.() ?? 501),
+      MOCK_LAUNCHCTL_STATE: state,
+      MOCK_LAUNCHCTL_LOG: log,
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Could not start io.github.t3-orchestration.daemon");
+    expect((await readFile(log, "utf8")).trim().split("\n")).toEqual([
+      "print",
+      "bootstrap",
+      "kickstart",
+      "print",
+      "bootout",
+      "print",
+      "print",
+    ]);
+    await expect(lstat(state)).rejects.toThrow();
+    await expect(lstat(join(root, ".local/share/skizzles/t3-orchestration"))).rejects.toThrow();
+    await expect(lstat(join(root, "Library/LaunchAgents/io.github.t3-orchestration.daemon.plist"))).rejects.toThrow();
+  });
+});
 
 describe("client-only installer", () => {
   test("installs only the CLI and skill on a clean client", async () => {

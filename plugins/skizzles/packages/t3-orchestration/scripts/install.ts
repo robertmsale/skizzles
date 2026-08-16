@@ -296,15 +296,20 @@ async function waitForSocket(path: string): Promise<boolean> {
   return ready;
 }
 
+async function deactivateHostIfLoaded(): Promise<void> {
+  const domain = await launchctlDomain();
+  const service = `${domain}/${launchAgentLabel}`;
+  if (!await launchctlLoaded(domain)) return;
+  const bootout = await Bun.$`launchctl bootout ${service}`.nothrow().quiet();
+  if (bootout.exitCode !== 0) throw new Error(`Could not unload ${launchAgentLabel}: ${bootout.stderr.toString().trim()}`);
+  for (let attempt = 0; attempt < 50 && await launchctlLoaded(domain); attempt++) await Bun.sleep(100);
+  if (await launchctlLoaded(domain)) throw new Error(`Timed out waiting for ${launchAgentLabel} to unload`);
+}
+
 async function activateHost(): Promise<void> {
   const domain = await launchctlDomain();
   const service = `${domain}/${launchAgentLabel}`;
-  if (await launchctlLoaded(domain)) {
-    const bootout = await Bun.$`launchctl bootout ${service}`.nothrow().quiet();
-    if (bootout.exitCode !== 0) throw new Error(`Could not unload ${launchAgentLabel}: ${bootout.stderr.toString().trim()}`);
-    for (let attempt = 0; attempt < 50 && await launchctlLoaded(domain); attempt++) await Bun.sleep(100);
-    if (await launchctlLoaded(domain)) throw new Error(`Timed out waiting for ${launchAgentLabel} to unload`);
-  }
+  await deactivateHostIfLoaded();
   let bootstrapError = "";
   for (let attempt = 0; attempt < 10; attempt++) {
     const bootstrap = await Bun.$`launchctl bootstrap ${domain} ${launchAgent}`.nothrow().quiet();
@@ -433,12 +438,23 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await rm(join(installRoot, "staged-links"), { recursive: true, force: true });
     if (receipt.files.length > 0) await activateHost();
   } catch (error) {
+    let serviceRollbackError: unknown;
+    if (receipt.files.length > 0 && !previousHostLoaded) {
+      try { await deactivateHostIfLoaded(); }
+      catch (cleanupError) { serviceRollbackError = cleanupError; }
+    }
     try { await rollbackTransaction(transactionRoot, previousInstall, movedDestinations, installedRoot); }
-    catch (rollbackError) { throw new AggregateError([error, rollbackError], "T3 orchestration install and filesystem rollback both failed"); }
+    catch (rollbackError) {
+      throw new AggregateError(
+        serviceRollbackError ? [error, serviceRollbackError, rollbackError] : [error, rollbackError],
+        "T3 orchestration install and filesystem rollback both failed",
+      );
+    }
     if (previousHostLoaded) {
       try { await activateHost(); }
       catch (recoveryError) { throw new AggregateError([error, recoveryError], "T3 orchestration install and service rollback both failed"); }
     }
+    if (serviceRollbackError) throw new AggregateError([error, serviceRollbackError], "T3 orchestration install and service rollback both failed");
     throw error;
   }
   await rm(transactionRoot, { recursive: true, force: true }).catch(() => undefined);
