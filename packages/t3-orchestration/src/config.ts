@@ -6,7 +6,19 @@ const home = process.env.HOME ?? (() => { throw new Error("HOME is required"); }
 export const CODEX_HOME = process.env.CODEX_HOME ?? join(home, ".codex");
 export const T3_HOME = process.env.T3_HOME ?? join(home, ".t3");
 export const SOCKET_PATH = process.env.T3_ORCHESTRATION_SOCKET ?? join(T3_HOME, "t3-orchestration.sock");
-export const HTTP_SOCKET_PATH = process.env.T3_ORCHESTRATION_HTTP_SOCKET ?? join(T3_HOME, "t3-orchestration-http.sock");
+export const DEFAULT_TAILSCALE_GATEWAY_PORT = 43_773;
+
+export function parseTailscaleGatewayPort(value: string | undefined): number {
+  const normalized = value?.trim();
+  if (!normalized) return DEFAULT_TAILSCALE_GATEWAY_PORT;
+  const port = Number(normalized);
+  if (!Number.isInteger(port) || port < 1_024 || port > 65_535) {
+    throw new Error("T3_ORCHESTRATION_HTTP_PORT must be an integer from 1024 through 65535");
+  }
+  return port;
+}
+
+export const TAILSCALE_GATEWAY_PORT = parseTailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
 export const TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "")
   .split(",")
   .map((login) => login.trim().toLowerCase())

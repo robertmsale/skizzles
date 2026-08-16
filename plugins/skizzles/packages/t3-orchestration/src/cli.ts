@@ -50,18 +50,30 @@ var exports_config = {};
 __export(exports_config, {
   token: () => token,
   taskProviderDefaults: () => taskProviderDefaults,
+  parseTailscaleGatewayPort: () => parseTailscaleGatewayPort,
   origin: () => origin,
   codexDefaults: () => codexDefaults,
+  TAILSCALE_GATEWAY_PORT: () => TAILSCALE_GATEWAY_PORT,
   TAILSCALE_ALLOWED_USERS: () => TAILSCALE_ALLOWED_USERS,
   T3_HOME: () => T3_HOME,
   SOCKET_PATH: () => SOCKET_PATH,
   KEYCHAIN_SERVICE: () => KEYCHAIN_SERVICE,
   KEYCHAIN_ACCOUNT: () => KEYCHAIN_ACCOUNT,
-  HTTP_SOCKET_PATH: () => HTTP_SOCKET_PATH,
+  DEFAULT_TAILSCALE_GATEWAY_PORT: () => DEFAULT_TAILSCALE_GATEWAY_PORT,
   CODEX_HOME: () => CODEX_HOME
 });
 import { join } from "path";
 var {$ } = globalThis.Bun;
+function parseTailscaleGatewayPort(value) {
+  const normalized = value?.trim();
+  if (!normalized)
+    return DEFAULT_TAILSCALE_GATEWAY_PORT;
+  const port = Number(normalized);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error("T3_ORCHESTRATION_HTTP_PORT must be an integer from 1024 through 65535");
+  }
+  return port;
+}
 async function origin() {
   const path = join(T3_HOME, "userdata/server-runtime.json");
   const runtime = await Bun.file(path).json();
@@ -112,7 +124,7 @@ async function taskProviderDefaults(provider) {
       throw new Error(`Unsupported task provider '${provider}'. Supported providers: codex, grok`);
   }
 }
-var home, CODEX_HOME, T3_HOME, SOCKET_PATH, HTTP_SOCKET_PATH, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, GROK_DEFAULT_MODEL = "grok-4.6";
+var home, CODEX_HOME, T3_HOME, SOCKET_PATH, DEFAULT_TAILSCALE_GATEWAY_PORT = 43773, TAILSCALE_GATEWAY_PORT, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, GROK_DEFAULT_MODEL = "grok-4.6";
 var init_config = __esm(() => {
   home = process.env.HOME ?? (() => {
     throw new Error("HOME is required");
@@ -120,7 +132,7 @@ var init_config = __esm(() => {
   CODEX_HOME = process.env.CODEX_HOME ?? join(home, ".codex");
   T3_HOME = process.env.T3_HOME ?? join(home, ".t3");
   SOCKET_PATH = process.env.T3_ORCHESTRATION_SOCKET ?? join(T3_HOME, "t3-orchestration.sock");
-  HTTP_SOCKET_PATH = process.env.T3_ORCHESTRATION_HTTP_SOCKET ?? join(T3_HOME, "t3-orchestration-http.sock");
+  TAILSCALE_GATEWAY_PORT = parseTailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
   TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
   KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
 });

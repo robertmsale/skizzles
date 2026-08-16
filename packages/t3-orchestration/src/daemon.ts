@@ -3,7 +3,7 @@ import { connect, createServer } from "node:net";
 import { chmodSync } from "node:fs";
 import { lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { HTTP_SOCKET_PATH, SOCKET_PATH, TAILSCALE_ALLOWED_USERS } from "./config.ts";
+import { SOCKET_PATH, TAILSCALE_ALLOWED_USERS, TAILSCALE_GATEWAY_PORT } from "./config.ts";
 import * as t3 from "./t3.ts";
 import { resolveCallerThread } from "./identity.ts";
 import { executeCommand } from "./commands.ts";
@@ -83,18 +83,11 @@ const gateway = TAILSCALE_ALLOWED_USERS.length > 0
   : undefined;
 if (gateway) {
   try {
-    await mkdir(dirname(HTTP_SOCKET_PATH), { recursive: true, mode: 0o700 });
-    await prepareSocket(HTTP_SOCKET_PATH, () => new Promise<boolean>((resolve) => {
-      const probe = connect(HTTP_SOCKET_PATH);
-      probe.once("connect", () => { probe.destroy(); resolve(true); });
-      probe.once("error", () => { probe.destroy(); resolve(false); });
-    }));
     await new Promise<void>((resolve, reject) => {
       gateway.once("error", reject);
-      gateway.listen(HTTP_SOCKET_PATH, () => {
+      gateway.listen(TAILSCALE_GATEWAY_PORT, "127.0.0.1", () => {
         gateway.off("error", reject);
-        chmodSync(HTTP_SOCKET_PATH, 0o600);
-        console.log(`t3-orchestrationd Tailscale gateway listening on ${HTTP_SOCKET_PATH}`);
+        console.log(`t3-orchestrationd Tailscale gateway listening on 127.0.0.1:${TAILSCALE_GATEWAY_PORT}`);
         resolve();
       });
     });
@@ -111,10 +104,7 @@ if (gateway) {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    const cleanup = () => Promise.all([
-      unlink(SOCKET_PATH).catch(() => undefined),
-      ...(gateway ? [unlink(HTTP_SOCKET_PATH).catch(() => undefined)] : []),
-    ]).finally(() => process.exit(0));
+    const cleanup = () => unlink(SOCKET_PATH).catch(() => undefined).finally(() => process.exit(0));
     if (gateway) gateway.close(() => server.close(cleanup));
     else server.close(cleanup);
   });

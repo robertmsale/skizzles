@@ -15,6 +15,7 @@ import {
 } from "node:fs/promises";
 import { connect } from "node:net";
 import { dirname, join, resolve } from "node:path";
+import { TAILSCALE_GATEWAY_PORT } from "../src/config.ts";
 
 type InstallMode = "client" | "host";
 type TreeEntry = { path: string; sha256: string; mode: number };
@@ -247,7 +248,7 @@ function plistFor(daemonPath: string, bunPath: string): string {
     "CODEX_HOME",
     "T3_HOME",
     "T3_ORCHESTRATION_SOCKET",
-    "T3_ORCHESTRATION_HTTP_SOCKET",
+    "T3_ORCHESTRATION_HTTP_PORT",
     "T3_ORCHESTRATION_TAILSCALE_USERS",
     "T3_ORCHESTRATION_KEYCHAIN_ACCOUNT",
   ].flatMap((name) => process.env[name] ? [`<string>${name}=${escapeXml(process.env[name]!)}</string>`] : []);
@@ -296,6 +297,20 @@ async function waitForSocket(path: string): Promise<boolean> {
   return ready;
 }
 
+async function waitForTcp(port: number): Promise<boolean> {
+  const probe = () => new Promise<boolean>((resolveProbe) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    socket.once("connect", () => { socket.destroy(); resolveProbe(true); });
+    socket.once("error", () => { socket.destroy(); resolveProbe(false); });
+  });
+  let ready = await probe();
+  for (let attempt = 0; attempt < 100 && !ready; attempt++) {
+    await Bun.sleep(100);
+    ready = await probe();
+  }
+  return ready;
+}
+
 async function deactivateHostIfLoaded(): Promise<void> {
   const domain = await launchctlDomain();
   const service = `${domain}/${launchAgentLabel}`;
@@ -322,8 +337,9 @@ async function activateHost(): Promise<void> {
   if (kickstart.exitCode !== 0) throw new Error(`Could not start ${launchAgentLabel}: ${kickstart.stderr.toString().trim()}`);
   if (!await waitForSocket(socketPath)) throw new Error(`${launchAgentLabel} started but its Unix socket did not become ready`);
   if (process.env.T3_ORCHESTRATION_TAILSCALE_USERS?.trim()) {
-    const httpSocketPath = resolve(process.env.T3_ORCHESTRATION_HTTP_SOCKET?.trim() || join(t3Home, "t3-orchestration-http.sock"));
-    if (!await waitForSocket(httpSocketPath)) throw new Error(`${launchAgentLabel} started but its Tailscale gateway socket did not become ready`);
+    if (!await waitForTcp(TAILSCALE_GATEWAY_PORT)) {
+      throw new Error(`${launchAgentLabel} started but its Tailscale gateway did not become ready on loopback port ${TAILSCALE_GATEWAY_PORT}`);
+    }
   }
 }
 

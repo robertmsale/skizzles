@@ -94,11 +94,11 @@ The supported collaboration surface now maps Desktop list/read/wait/send/create/
 
 Remote access is opt-in. The host keeps the T3 bearer in its own Keychain; remote clients receive no T3 credential. Tailscale Serve terminates HTTPS and injects a verified user identity, which the daemon checks against an exact login allowlist.
 
-On the T3 host, reinstall with the allowed Tailscale login and expose only the dedicated HTTP Unix socket:
+On the T3 host, reinstall with the allowed Tailscale login and expose only the dedicated loopback HTTP listener. Port `43773` is the default; set `T3_ORCHESTRATION_HTTP_PORT` consistently for both commands to use another unprivileged port.
 
 ```sh
-T3_ORCHESTRATION_TAILSCALE_USERS="you@example.com" bun run packages/t3-orchestration/scripts/install.ts
-tailscale serve --bg --https=443 unix:"$HOME/.t3/t3-orchestration-http.sock"
+T3_ORCHESTRATION_TAILSCALE_USERS="you@example.com" T3_ORCHESTRATION_HTTP_PORT=43773 bun run packages/t3-orchestration/scripts/install.ts
+tailscale serve --bg --https=443 http://127.0.0.1:43773
 tailscale serve status
 ```
 
@@ -124,6 +124,6 @@ bun run packages/t3-orchestration/scripts/install.ts --client-only --uninstall
 
 ### Security boundary
 
-This is trusted-operator tooling, not a multi-tenant authorization service. Locally, any process running as the same macOS user can use the mode-`0600` daemon socket. Remotely, any tailnet user who both passes tailnet network policy and appears in `T3_ORCHESTRATION_TAILSCALE_USERS` can read, message, create, and manage T3 tasks across projects. The HTTP gateway rejects missing identities, tagged-device traffic without a user identity, non-HTTPS proxy traffic, browser-origin requests, and requests larger than 1 MiB.
+This is trusted-operator tooling, not a multi-tenant authorization service. Locally, any process running as the same macOS user can use the mode-`0600` daemon socket. The optional Serve-facing listener binds only to `127.0.0.1`, but local processes can forge proxy headers; do not enable it on a shared or mutually untrusted multi-user host. Remotely, any tailnet user who both passes tailnet network policy and appears in `T3_ORCHESTRATION_TAILSCALE_USERS` can read, message, create, and manage T3 tasks across projects. The HTTP gateway rejects missing identities, tagged-device traffic without a user identity, non-HTTPS proxy traffic, browser-origin requests, and requests larger than 1 MiB.
 
 See the installed `t3-orchestration` Codex skill for agent-facing invariants and commands.

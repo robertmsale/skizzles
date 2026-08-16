@@ -47,7 +47,18 @@ var home = process.env.HOME ?? (() => {
 var CODEX_HOME = process.env.CODEX_HOME ?? join(home, ".codex");
 var T3_HOME = process.env.T3_HOME ?? join(home, ".t3");
 var SOCKET_PATH = process.env.T3_ORCHESTRATION_SOCKET ?? join(T3_HOME, "t3-orchestration.sock");
-var HTTP_SOCKET_PATH = process.env.T3_ORCHESTRATION_HTTP_SOCKET ?? join(T3_HOME, "t3-orchestration-http.sock");
+var DEFAULT_TAILSCALE_GATEWAY_PORT = 43773;
+function parseTailscaleGatewayPort(value) {
+  const normalized = value?.trim();
+  if (!normalized)
+    return DEFAULT_TAILSCALE_GATEWAY_PORT;
+  const port = Number(normalized);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error("T3_ORCHESTRATION_HTTP_PORT must be an integer from 1024 through 65535");
+  }
+  return port;
+}
+var TAILSCALE_GATEWAY_PORT = parseTailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
 var TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
 var KEYCHAIN_SERVICE = "t3-orchestration";
 var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
@@ -919,24 +930,11 @@ server.on("error", (error) => {
 var gateway = TAILSCALE_ALLOWED_USERS.length > 0 ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, dispatch2) : undefined;
 if (gateway) {
   try {
-    await mkdir(dirname(HTTP_SOCKET_PATH), { recursive: true, mode: 448 });
-    await prepareSocket(HTTP_SOCKET_PATH, () => new Promise((resolve) => {
-      const probe = connect(HTTP_SOCKET_PATH);
-      probe.once("connect", () => {
-        probe.destroy();
-        resolve(true);
-      });
-      probe.once("error", () => {
-        probe.destroy();
-        resolve(false);
-      });
-    }));
     await new Promise((resolve, reject) => {
       gateway.once("error", reject);
-      gateway.listen(HTTP_SOCKET_PATH, () => {
+      gateway.listen(TAILSCALE_GATEWAY_PORT, "127.0.0.1", () => {
         gateway.off("error", reject);
-        chmodSync(HTTP_SOCKET_PATH, 384);
-        console.log(`t3-orchestrationd Tailscale gateway listening on ${HTTP_SOCKET_PATH}`);
+        console.log(`t3-orchestrationd Tailscale gateway listening on 127.0.0.1:${TAILSCALE_GATEWAY_PORT}`);
         resolve();
       });
     });
@@ -954,14 +952,9 @@ if (gateway) {
 }
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
-    const cleanup = () => Promise.all([
-      unlink(SOCKET_PATH).catch(() => {
-        return;
-      }),
-      ...gateway ? [unlink(HTTP_SOCKET_PATH).catch(() => {
-        return;
-      })] : []
-    ]).finally(() => process.exit(0));
+    const cleanup = () => unlink(SOCKET_PATH).catch(() => {
+      return;
+    }).finally(() => process.exit(0));
     if (gateway)
       gateway.close(() => server.close(cleanup));
     else
