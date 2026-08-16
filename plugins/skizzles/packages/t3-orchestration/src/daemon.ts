@@ -893,6 +893,26 @@ var server = createServer2((socket) => {
     buffer = "";
   });
 });
+var gateway = TAILSCALE_ALLOWED_USERS.length > 0 ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, dispatch2) : undefined;
+var shuttingDown = false;
+var closeServer = (listener) => {
+  if (!listener?.listening)
+    return Promise.resolve();
+  return new Promise((resolve) => listener.close(() => resolve()));
+};
+var shutdown = async (exitCode) => {
+  if (shuttingDown)
+    return;
+  shuttingDown = true;
+  await Promise.all([closeServer(gateway), closeServer(server)]);
+  await unlink(SOCKET_PATH).catch(() => {
+    return;
+  });
+  process.exit(exitCode);
+};
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => void shutdown(0));
+}
 process.umask(63);
 await mkdir(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
 var prepareSocket = async (path, isLive) => {
@@ -930,9 +950,8 @@ await new Promise((resolve, reject) => {
 });
 server.on("error", (error) => {
   console.error(`t3-orchestrationd local socket failed: ${error.message}`);
-  process.exit(1);
+  shutdown(1);
 });
-var gateway = TAILSCALE_ALLOWED_USERS.length > 0 ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, dispatch2) : undefined;
 if (gateway) {
   try {
     await new Promise((resolve, reject) => {
@@ -945,24 +964,13 @@ if (gateway) {
     });
     gateway.on("error", (error) => {
       console.error(`t3-orchestrationd Tailscale gateway failed: ${error.message}`);
-      process.exit(1);
+      shutdown(1);
     });
   } catch (error) {
-    await new Promise((resolve) => server.close(() => resolve()));
+    await Promise.all([closeServer(gateway), closeServer(server)]);
     await unlink(SOCKET_PATH).catch(() => {
       return;
     });
     throw error;
   }
-}
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => {
-    const cleanup = () => unlink(SOCKET_PATH).catch(() => {
-      return;
-    }).finally(() => process.exit(0));
-    if (gateway)
-      gateway.close(() => server.close(cleanup));
-    else
-      server.close(cleanup);
-  });
 }

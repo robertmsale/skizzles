@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { connect, createServer } from "node:net";
+import { connect, createServer, type Server } from "node:net";
 import { chmodSync } from "node:fs";
 import { lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -47,6 +47,28 @@ const server = createServer((socket) => {
   socket.on("error", () => undefined);
   socket.on("close", () => { buffer = ""; });
 });
+const gateway = TAILSCALE_ALLOWED_USERS.length > 0
+  ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, dispatch)
+  : undefined;
+let shuttingDown = false;
+
+const closeServer = (listener: Server | undefined): Promise<void> => {
+  if (!listener?.listening) return Promise.resolve();
+  return new Promise((resolve) => listener.close(() => resolve()));
+};
+
+const shutdown = async (exitCode: number): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await Promise.all([closeServer(gateway), closeServer(server)]);
+  await unlink(SOCKET_PATH).catch(() => undefined);
+  process.exit(exitCode);
+};
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => void shutdown(0));
+}
+
 process.umask(0o077);
 await mkdir(dirname(SOCKET_PATH), { recursive: true, mode: 0o700 });
 const prepareSocket = async (path: string, isLive: () => Promise<boolean>) => {
@@ -75,12 +97,9 @@ await new Promise<void>((resolve, reject) => {
 });
 server.on("error", (error) => {
   console.error(`t3-orchestrationd local socket failed: ${error.message}`);
-  process.exit(1);
+  void shutdown(1);
 });
 
-const gateway = TAILSCALE_ALLOWED_USERS.length > 0
-  ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, dispatch)
-  : undefined;
 if (gateway) {
   try {
     await new Promise<void>((resolve, reject) => {
@@ -93,19 +112,11 @@ if (gateway) {
     });
     gateway.on("error", (error) => {
       console.error(`t3-orchestrationd Tailscale gateway failed: ${error.message}`);
-      process.exit(1);
+      void shutdown(1);
     });
   } catch (error) {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await Promise.all([closeServer(gateway), closeServer(server)]);
     await unlink(SOCKET_PATH).catch(() => undefined);
     throw error;
   }
-}
-
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => {
-    const cleanup = () => unlink(SOCKET_PATH).catch(() => undefined).finally(() => process.exit(0));
-    if (gateway) gateway.close(() => server.close(cleanup));
-    else server.close(cleanup);
-  });
 }
