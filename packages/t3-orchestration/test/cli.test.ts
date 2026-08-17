@@ -168,4 +168,23 @@ describe("cross-project collaboration CLI", () => {
     expect(request).toEqual({ op: "worktrees.listCleanable" });
     expect(JSON.parse(stdout)).toMatchObject({ ok: true, dryRun: true, scanned: 0, cleaned: 0, bytesFreed: 0 });
   });
+
+  test("refuses remote mode so it cannot clean local disks from a host snapshot", async () => {
+    root = await mkdtemp("/tmp/t3-cli-");
+    const configDir = join(root, ".config/t3-orchestration");
+    await Bun.write(join(configDir, "client.json"), `${JSON.stringify({ url: "https://studio.example.ts.net" })}\n`);
+    const process = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "worktrees", "clean-settled", "--dry-run"], {
+      env: { ...Bun.env, HOME: root, T3_HOME: root },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("refuses remote t3ctl mode");
+  });
 });

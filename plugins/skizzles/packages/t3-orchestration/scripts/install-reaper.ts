@@ -14,7 +14,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { ORCHESTRATION_LAUNCH_AGENT_LABEL, REAPER_LAUNCH_AGENT_LABEL } from "../src/worktree-reaper.ts";
+
+const REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper";
+const ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon";
 
 type TreeEntry = { path: string; sha256: string; mode: number };
 type LinkEntry = { path: string; target: string };

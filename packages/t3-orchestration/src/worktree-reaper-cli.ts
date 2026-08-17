@@ -15,8 +15,10 @@ if (unknown.length) {
 }
 
 try {
-  const remoteUrl = await configuredRemoteUrl();
-  const report = await cleanSettledWorktrees(createDefaultReaperDependencies((payload) => daemonRequest(payload, undefined, undefined, remoteUrl)), {
+  if (await configuredRemoteUrl()) {
+    throw new Error("t3-worktree-reaper is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
+  }
+  const report = await cleanSettledWorktrees(createDefaultReaperDependencies((payload) => daemonRequest(payload)), {
     dryRun: args.includes("--dry-run"),
   });
   console.log(JSON.stringify({ ...report, log: formatReaperLogs(report) }, null, 2));

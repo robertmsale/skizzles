@@ -132,9 +132,11 @@ const payload = group === "projects" && action === "import" ? { op: "projects.im
 
 try {
   if (payload.op === "worktrees.clean-settled") {
+    if (await configuredRemoteUrl()) {
+      throw new Error("worktrees clean-settled is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
+    }
     const { cleanSettledWorktrees, createDefaultReaperDependencies, formatReaperLogs } = await import("./worktree-reaper.ts");
-    const remoteUrl = await configuredRemoteUrl();
-    const report = await cleanSettledWorktrees(createDefaultReaperDependencies((command) => daemonRequest(command, undefined, undefined, remoteUrl)), {
+    const report = await cleanSettledWorktrees(createDefaultReaperDependencies((command) => daemonRequest(command)), {
       dryRun: payload.dryRun === true,
     });
     console.log(JSON.stringify({ ...report, log: formatReaperLogs(report) }, null, 2));

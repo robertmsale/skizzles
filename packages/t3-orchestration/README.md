@@ -84,7 +84,7 @@ The reaper prefers those paths, then falls back to `git worktree list --porcelai
 matched by branch. A successful clean records the thread id and leftover artifact
 size in `~/.t3/worktree-reaper-state.json` so reruns stay cheap.
 
-This sidecar is host-only. `--client-only` is refused.
+This sidecar is host-only. `--client-only` is refused. `t3ctl worktrees clean-settled` also refuses remote/client mode so it only talks to the local Unix socket.
 
 The project importer is idempotent by canonical workspace root:
 

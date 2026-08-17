@@ -207,7 +207,7 @@ function normalizeBranch(branch) {
   return branch.startsWith("refs/heads/") ? branch.slice("refs/heads/".length) : branch;
 }
 function isRunningTask(task) {
-  return task.sessionStatus === "running" || task.latestTurnState === "running" || task.phase === "running";
+  return task.sessionStatus === "running" || task.sessionStatus === "starting" || task.latestTurnState === "running" || task.phase === "running" || task.phase === "starting";
 }
 function isCleanableLifecycle(task) {
   return !task.deleted && (task.settled === true || task.archived === true);
@@ -518,10 +518,10 @@ async function directorySize(path) {
   }
   return total;
 }
-async function runCleanCommand(command, directory) {
-  const result = await Bun.$`${command} clean`.cwd(directory).nothrow().quiet();
+async function runCleanCommand(command, args, directory) {
+  const result = await Bun.$`${command} ${args}`.cwd(directory).nothrow().quiet();
   if (result.exitCode !== 0) {
-    throw new Error(`${command} clean failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
+    throw new Error(`${command} ${args.join(" ")} failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
   }
 }
 function defaultStatePath(home3 = process.env.HOME || homedir()) {
@@ -633,8 +633,15 @@ function createDefaultReaperDependencies(request) {
     },
     readText: (path) => readFile2(path, "utf8"),
     measureBytes: directorySize,
-    cargoClean: (directory) => runCleanCommand("cargo", directory),
-    flutterClean: (directory) => runCleanCommand("flutter", directory),
+    cargoClean: async (directory) => {
+      const env = { ...Bun.env };
+      delete env.CARGO_TARGET_DIR;
+      const result = await Bun.$`cargo clean --target-dir target`.cwd(directory).env(env).nothrow().quiet();
+      if (result.exitCode !== 0) {
+        throw new Error(`cargo clean --target-dir target failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
+      }
+    },
+    flutterClean: (directory) => runCleanCommand("flutter", ["clean"], directory),
     readState: readReaperState,
     writeState: writeReaperState,
     now: () => new Date().toISOString()
@@ -974,9 +981,11 @@ var payload = group === "projects" && action === "import" ? { op: "projects.impo
 })();
 try {
   if (payload.op === "worktrees.clean-settled") {
+    if (await configuredRemoteUrl()) {
+      throw new Error("worktrees clean-settled is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
+    }
     const { cleanSettledWorktrees: cleanSettledWorktrees2, createDefaultReaperDependencies: createDefaultReaperDependencies2, formatReaperLogs: formatReaperLogs2 } = await Promise.resolve().then(() => (init_worktree_reaper(), exports_worktree_reaper));
-    const remoteUrl = await configuredRemoteUrl();
-    const report = await cleanSettledWorktrees2(createDefaultReaperDependencies2((command) => daemonRequest(command, undefined, undefined, remoteUrl)), {
+    const report = await cleanSettledWorktrees2(createDefaultReaperDependencies2((command) => daemonRequest(command)), {
       dryRun: payload.dryRun === true
     });
     console.log(JSON.stringify({ ...report, log: formatReaperLogs2(report) }, null, 2));

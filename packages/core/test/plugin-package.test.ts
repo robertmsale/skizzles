@@ -224,6 +224,38 @@ describe("deterministic plugin packaging", () => {
     expect(installResult.exitCode).toBe(0);
     expect(JSON.parse(installResult.stdout.toString())).toMatchObject({ mode: "client" });
     expect(installResult.stderr.toString()).toBe("");
+
+    const reaperHome = join(temporaryRoot, "reaper-home");
+    const fakeBin = join(reaperHome, "fake-bin");
+    await mkdir(fakeBin, { recursive: true });
+    await writeFile(join(fakeBin, "launchctl"), `#!/bin/sh
+case "$1" in
+  print) exit 1 ;;
+  bootstrap) exit 0 ;;
+  kickstart) exit 0 ;;
+  bootout) exit 0 ;;
+  *) exit 43 ;;
+esac
+`);
+    await chmod(join(fakeBin, "launchctl"), 0o755);
+    const reaperInstall = Bun.spawnSync([
+      "bun",
+      join(runtimeRoot, "scripts/install-reaper.ts"),
+    ], {
+      cwd: isolatedPlugin,
+      env: {
+        HOME: reaperHome,
+        PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        UID: String(process.getuid?.() ?? 501),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(reaperInstall.stderr.toString()).toBe("");
+    expect(reaperInstall.exitCode).toBe(0);
+    expect(JSON.parse(reaperInstall.stdout.toString())).toMatchObject({
+      launchAgentLabel: "io.github.skizzles.t3-worktree-reaper",
+    });
   });
 
   test("exercises bundled YAML manifest configuration with a fake Docker binary", async () => {

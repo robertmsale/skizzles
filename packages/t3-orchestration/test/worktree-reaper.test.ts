@@ -129,8 +129,10 @@ describe("lifecycle gates", () => {
 
   test("skips session, turn, or phase running", () => {
     expect(isRunningTask(task({ sessionStatus: "running" }))).toBe(true);
+    expect(isRunningTask(task({ sessionStatus: "starting" }))).toBe(true);
     expect(isRunningTask(task({ latestTurnState: "running" }))).toBe(true);
     expect(isRunningTask(task({ phase: "running" }))).toBe(true);
+    expect(isRunningTask(task({ phase: "starting" }))).toBe(true);
     expect(isRunningTask(task({ phase: "completed", sessionStatus: "ready", latestTurnState: "completed" }))).toBe(false);
   });
 });

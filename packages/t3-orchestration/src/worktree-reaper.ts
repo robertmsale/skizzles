@@ -125,7 +125,9 @@ export function normalizeBranch(branch: string | null | undefined): string | nul
 }
 
 export function isRunningTask(task: CleanableTask): boolean {
-  return task.sessionStatus === "running" || task.latestTurnState === "running" || task.phase === "running";
+  return task.sessionStatus === "running" || task.sessionStatus === "starting"
+    || task.latestTurnState === "running"
+    || task.phase === "running" || task.phase === "starting";
 }
 
 export function isCleanableLifecycle(task: CleanableTask): boolean {
@@ -440,10 +442,10 @@ async function directorySize(path: string): Promise<number> {
   return total;
 }
 
-async function runCleanCommand(command: string, directory: string): Promise<void> {
-  const result = await Bun.$`${command} clean`.cwd(directory).nothrow().quiet();
+async function runCleanCommand(command: string, args: string[], directory: string): Promise<void> {
+  const result = await Bun.$`${command} ${args}`.cwd(directory).nothrow().quiet();
   if (result.exitCode !== 0) {
-    throw new Error(`${command} clean failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
+    throw new Error(`${command} ${args.join(" ")} failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
   }
 }
 
@@ -555,8 +557,15 @@ export function createDefaultReaperDependencies(
     },
     readText: (path) => readFile(path, "utf8"),
     measureBytes: directorySize,
-    cargoClean: (directory) => runCleanCommand("cargo", directory),
-    flutterClean: (directory) => runCleanCommand("flutter", directory),
+    cargoClean: async (directory) => {
+      const env = { ...Bun.env };
+      delete env.CARGO_TARGET_DIR;
+      const result = await Bun.$`cargo clean --target-dir target`.cwd(directory).env(env).nothrow().quiet();
+      if (result.exitCode !== 0) {
+        throw new Error(`cargo clean --target-dir target failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
+      }
+    },
+    flutterClean: (directory) => runCleanCommand("flutter", ["clean"], directory),
     readState: readReaperState,
     writeState: writeReaperState,
     now: () => new Date().toISOString(),
