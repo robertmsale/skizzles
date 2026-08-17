@@ -90,6 +90,60 @@ Wait wakes only for completion, failure, archival/deletion, plan approval, appro
 
 Coordinator approval commands wrap T3's existing `thread.approval.respond` command. `t3ctl tasks approvals` lists live `hasPendingApprovals` threads and projects `approval.requested` activity payloads from the thread snapshot. `t3ctl tasks approve ID [REQUEST_ID]` and `t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]` never auto-approve; approve refuses when T3 does not expose the command or path. Codex auto-guardian is unchanged.
 
+### T3 Auto guardian sidecar
+
+T3 `runtimeMode: "auto"` is a thread label. Codex already maps Auto to `approvalsReviewer: "auto_review"`. Cursor, Grok, and other providers fall through to ask. The optional host-only sidecar `t3-auto-guardian` is a T3 client, not a harness hook: it polls the existing `t3-orchestrationd` socket, skips Codex threads, and judges remaining Auto pending approvals with one-shot `codex exec --ephemeral`.
+
+It will not:
+
+- start or install a second orchestration daemon
+- write `io.github.t3-orchestration.daemon` or `io.github.skizzles.t3-worktree-reaper`
+- call `acceptForSession` or yolo
+- approve an unidentifiable command or path
+- respond twice to the same `requestId`
+
+Install it separately from the orchestration daemon:
+
+```sh
+bun run packages/t3-orchestration/scripts/install-guardian.ts
+t3-auto-guardian once --dry-run
+t3-auto-guardian status
+```
+
+Optional host config lives at `~/.config/skizzles/t3-auto-guardian.toml`
+(or `T3_AUTO_GUARDIAN_CONFIG` / `--config`). That file is machine-local and
+must not be committed. Example:
+
+```toml
+# ~/.config/skizzles/t3-auto-guardian.toml
+enabled = true
+dry_run = false
+model = "codex-auto-review"
+poll_interval_ms = 5000
+include_projects = ["acme"]
+exclude_projects = ["acme/app"]
+```
+
+`include_projects` and `exclude_projects` match a T3 project title, project id,
+or workspace root. The default model is official Codex `codex-auto-review`,
+not `luna-low`. Policy text is the extracted official guardian template and
+tenant policy from `openai/codex` `codex-rs/core/src/guardian/`; the judge
+prompt is the last T3 user message plus the identifiable command or path.
+
+The guardian installer copies only the guardian CLI and its imported modules into
+`~/.local/share/skizzles/t3-auto-guardian`. It does not copy `cli.ts` or
+`daemon.ts`, links `~/.local/bin/t3-auto-guardian`,
+and loads KeepAlive LaunchAgent `io.github.skizzles.t3-auto-guardian`.
+It refuses unowned PATH links, plists, and install roots; uninstall verifies
+receipt-owned artifacts first:
+
+```sh
+bun run packages/t3-orchestration/scripts/install-guardian.ts --uninstall
+```
+
+This sidecar is host-only. `--client-only` is refused. It also refuses remote
+`t3ctl` mode so it only talks to the local Unix socket.
+
 The supported collaboration surface now maps Desktop list/read/wait/send/create/title/pin/archive operations. T3 does not expose a native provider-conversation fork or Desktop-style host handoff/navigation API, so the tool does not pretend to clone a conversation; explicit worktree task creation plus a handoff message is the T3-native equivalent.
 
 ## Private tailnet access

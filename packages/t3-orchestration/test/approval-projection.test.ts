@@ -3,6 +3,7 @@ import {
   approvalRespondCommand,
   derivePendingApprovals,
   projectPendingApprovalList,
+  providerDriversFromConfig,
   requireIdentifiableApproval,
   selectPendingApproval,
   threadActivities,
@@ -175,13 +176,19 @@ describe("pending approval projection", () => {
         ])],
         [other.id, snapshot([])],
       ]),
+      new Map([["project", { title: "acme", workspaceRoot: "/repo" }]]),
+      new Map([["cursor", "cursor"], ["grok", "grok"], ["personal", "codex"]]),
     );
     expect(result.count).toBe(1);
     expect(result.approvals).toEqual([{
       threadId: "task",
       title: "Cursor work",
       projectId: "project",
+      projectTitle: "acme",
+      workspaceRoot: "/repo",
       provider: "cursor",
+      providerDriver: "cursor",
+      runtimeMode: "auto",
       requestId: "req-1",
       requestKind: "command",
       toolName: "Shell",
@@ -194,12 +201,26 @@ describe("pending approval projection", () => {
       threadId: "other",
       title: "Grok work",
       projectId: "project",
+      projectTitle: "acme",
+      workspaceRoot: "/repo",
       provider: "grok",
+      providerDriver: "grok",
+      runtimeMode: "auto",
       requestId: null,
       reason: expect.stringContaining("hasPendingApprovals"),
       createdAt: "2026-08-17T00:00:00Z",
       worktreePath: "/worktree",
     }]);
+  });
+
+  test("maps custom instance IDs to their T3 provider driver", () => {
+    expect(providerDriversFromConfig({
+      providers: [
+        { instanceId: "personal", driver: "codex" },
+        { instanceId: "cursor", driver: "cursor" },
+        { instanceId: "ignored" },
+      ],
+    })).toEqual(new Map([["personal", "codex"], ["cursor", "cursor"]]));
   });
 
   test("reads activities from a raw thread snapshot and maps the T3 respond command", () => {

@@ -13,11 +13,20 @@ export type PendingApproval = {
   identifiable: boolean;
 };
 
+export type ApprovalProject = {
+  title?: string | null;
+  workspaceRoot?: string | null;
+};
+
 export type ProjectedApproval = {
   threadId: string;
   title: string;
   projectId: string;
+  projectTitle: string | null;
+  workspaceRoot: string | null;
   provider: string;
+  providerDriver: string | null;
+  runtimeMode: string;
   requestId: string;
   requestKind: ApprovalRequestKind | null;
   toolName: string | null;
@@ -31,16 +40,20 @@ export type UnidentifiableApproval = {
   threadId: string;
   title: string;
   projectId: string;
+  projectTitle: string | null;
+  workspaceRoot: string | null;
   provider: string;
+  providerDriver: string | null;
+  runtimeMode: string;
   requestId: string | null;
   reason: string;
   createdAt: string | null;
   worktreePath: string | null;
 };
 
-const MISSING_COMMAND_GAP =
+export const MISSING_COMMAND_GAP =
   "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
-const MISSING_SNAPSHOT_GAP =
+export const MISSING_SNAPSHOT_GAP =
   "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -205,9 +218,38 @@ function threadProvider(thread: T3Thread): string {
   return thread.modelSelection.instanceId;
 }
 
+export function providerDriversFromConfig(config: unknown): Map<string, string> {
+  const providers = config && typeof config === "object" && "providers" in config
+    ? (config as { providers?: unknown }).providers
+    : undefined;
+  const drivers = new Map<string, string>();
+  if (!Array.isArray(providers)) return drivers;
+  for (const entry of providers) {
+    if (!entry || typeof entry !== "object") continue;
+    const provider = entry as { instanceId?: unknown; driver?: unknown };
+    if (typeof provider.instanceId !== "string" || provider.instanceId.trim() === "") continue;
+    if (typeof provider.driver !== "string" || provider.driver.trim() === "") continue;
+    drivers.set(provider.instanceId, provider.driver.trim());
+  }
+  return drivers;
+}
+
+function projectContext(
+  thread: T3ThreadShell,
+  projects?: ReadonlyMap<string, ApprovalProject>,
+): { projectTitle: string | null; workspaceRoot: string | null } {
+  const project = projects?.get(thread.projectId);
+  return {
+    projectTitle: project?.title?.trim() || null,
+    workspaceRoot: project?.workspaceRoot?.trim() || null,
+  };
+}
+
 export function projectPendingApprovalList(
   threads: readonly T3ThreadShell[],
   snapshots: ReadonlyMap<string, ThreadSnapshot>,
+  projects?: ReadonlyMap<string, ApprovalProject>,
+  drivers?: ReadonlyMap<string, string>,
 ): { approvals: ProjectedApproval[]; unidentifiable: UnidentifiableApproval[]; count: number } {
   const approvals: ProjectedApproval[] = [];
   const unidentifiable: UnidentifiableApproval[] = [];
@@ -215,12 +257,18 @@ export function projectPendingApprovalList(
     if (thread.deletedAt || thread.archivedAt || !thread.hasPendingApprovals) continue;
     const snapshot = snapshots.get(thread.id);
     const pending = snapshot ? derivePendingApprovals(threadActivities(snapshot)) : [];
+    const context = projectContext(thread, projects);
+    const provider = threadProvider(thread);
+    const providerDriver = drivers?.get(provider)?.trim() || null;
     if (pending.length === 0) {
       unidentifiable.push({
         threadId: thread.id,
         title: thread.title,
         projectId: thread.projectId,
-        provider: threadProvider(thread),
+        ...context,
+        provider,
+        providerDriver,
+        runtimeMode: thread.runtimeMode,
         requestId: null,
         reason: MISSING_SNAPSHOT_GAP,
         createdAt: thread.updatedAt ?? null,
@@ -234,7 +282,10 @@ export function projectPendingApprovalList(
           threadId: thread.id,
           title: thread.title,
           projectId: thread.projectId,
-          provider: threadProvider(thread),
+          ...context,
+          provider,
+          providerDriver,
+          runtimeMode: thread.runtimeMode,
           requestId: approval.requestId,
           requestKind: approval.requestKind,
           toolName: approval.toolName,
@@ -249,7 +300,10 @@ export function projectPendingApprovalList(
         threadId: thread.id,
         title: thread.title,
         projectId: thread.projectId,
-        provider: threadProvider(thread),
+        ...context,
+        provider,
+        providerDriver,
+        runtimeMode: thread.runtimeMode,
         requestId: approval.requestId,
         reason: MISSING_COMMAND_GAP,
         createdAt: approval.createdAt,

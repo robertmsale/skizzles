@@ -273,7 +273,31 @@ function requireIdentifiableApproval(approval) {
 function threadProvider(thread) {
   return thread.modelSelection.instanceId;
 }
-function projectPendingApprovalList(threads, snapshots) {
+function providerDriversFromConfig(config) {
+  const providers = config && typeof config === "object" && "providers" in config ? config.providers : undefined;
+  const drivers = new Map;
+  if (!Array.isArray(providers))
+    return drivers;
+  for (const entry of providers) {
+    if (!entry || typeof entry !== "object")
+      continue;
+    const provider = entry;
+    if (typeof provider.instanceId !== "string" || provider.instanceId.trim() === "")
+      continue;
+    if (typeof provider.driver !== "string" || provider.driver.trim() === "")
+      continue;
+    drivers.set(provider.instanceId, provider.driver.trim());
+  }
+  return drivers;
+}
+function projectContext(thread, projects) {
+  const project = projects?.get(thread.projectId);
+  return {
+    projectTitle: project?.title?.trim() || null,
+    workspaceRoot: project?.workspaceRoot?.trim() || null
+  };
+}
+function projectPendingApprovalList(threads, snapshots, projects, drivers) {
   const approvals = [];
   const unidentifiable = [];
   for (const thread of threads) {
@@ -281,12 +305,18 @@ function projectPendingApprovalList(threads, snapshots) {
       continue;
     const snapshot = snapshots.get(thread.id);
     const pending = snapshot ? derivePendingApprovals(threadActivities(snapshot)) : [];
+    const context = projectContext(thread, projects);
+    const provider = threadProvider(thread);
+    const providerDriver = drivers?.get(provider)?.trim() || null;
     if (pending.length === 0) {
       unidentifiable.push({
         threadId: thread.id,
         title: thread.title,
         projectId: thread.projectId,
-        provider: threadProvider(thread),
+        ...context,
+        provider,
+        providerDriver,
+        runtimeMode: thread.runtimeMode,
         requestId: null,
         reason: MISSING_SNAPSHOT_GAP,
         createdAt: thread.updatedAt ?? null,
@@ -300,7 +330,10 @@ function projectPendingApprovalList(threads, snapshots) {
           threadId: thread.id,
           title: thread.title,
           projectId: thread.projectId,
-          provider: threadProvider(thread),
+          ...context,
+          provider,
+          providerDriver,
+          runtimeMode: thread.runtimeMode,
           requestId: approval.requestId,
           requestKind: approval.requestKind,
           toolName: approval.toolName,
@@ -315,7 +348,10 @@ function projectPendingApprovalList(threads, snapshots) {
         threadId: thread.id,
         title: thread.title,
         projectId: thread.projectId,
-        provider: threadProvider(thread),
+        ...context,
+        provider,
+        providerDriver,
+        runtimeMode: thread.runtimeMode,
         requestId: approval.requestId,
         reason: MISSING_COMMAND_GAP,
         createdAt: approval.createdAt,
@@ -876,12 +912,19 @@ async function interruptTask(threadId) {
 var APPROVAL_TURN_WINDOW = 10;
 async function listTaskApprovals(projectId) {
   const shell = await shellSnapshot();
+  const projects = new Map(shell.projects.map((project) => [project.id, project]));
+  let drivers = new Map;
+  try {
+    drivers = providerDriversFromConfig(await requestRpc("server.getConfig", {}));
+  } catch {
+    drivers = new Map;
+  }
   const candidates = shell.threads.filter((thread2) => !thread2.deletedAt && !thread2.archivedAt && thread2.hasPendingApprovals && (!projectId || thread2.projectId === projectId));
   const snapshots = new Map;
   await Promise.all(candidates.map(async (thread2) => {
     snapshots.set(thread2.id, await threadSnapshot(thread2.id, APPROVAL_TURN_WINDOW));
   }));
-  return projectPendingApprovalList(candidates, snapshots);
+  return projectPendingApprovalList(candidates, snapshots, projects, drivers);
 }
 async function resolveTaskApproval(input) {
   const snapshot2 = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);

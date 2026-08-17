@@ -66,6 +66,8 @@ Use `tasks read` to inspect only the bounded conversation window needed to coord
 
 `tasks approvals` lists live threads whose T3 shell flag `hasPendingApprovals` is true, then projects each pending `approval.requested` activity from the thread snapshot. Each identifiable item includes the T3 `requestId`, provider `instanceId`, request kind, command or path from the activity payload (`detail` / nested `command` / path), and worktree/cwd when T3 exposes them. This is the coordinator fallback for harnesses that prompt (Cursor, Grok, others). It does not change Codex auto-guardian. `tasks approve` and `tasks deny` dispatch T3's existing `thread.approval.respond` command with `decision` `accept` or `decline`. If a thread has exactly one pending approval, the request id may be omitted. Approve is fail-closed: it never auto-approves, never uses `acceptForSession`, and refuses when T3 does not expose the command or path. Deny accepts an optional `--reason` for the CLI result only; T3's command has no reason field, so the reason is not sent to T3.
 
+The optional host-only sidecar `t3-auto-guardian` is a separate T3 client for non-Codex `runtimeMode: "auto"` threads. It does not replace these coordinator commands, does not install a second orchestration daemon, and never judges Codex threads.
+
 Use `handoff create` only for explicit operator-authorized ingress from a task outside T3. It requires a concrete imported T3 project id, still creates a mandatory worktree, and exposes no model or reasoning controls.
 
 ## ChatGPT Desktop parity

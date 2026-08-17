@@ -190,12 +190,14 @@ describe("deterministic plugin packaging", () => {
       "README.md",
       "package.json",
       "scripts/host-gateway.ts",
+      "scripts/install-guardian.ts",
       "scripts/install.ts",
+      "src/auto-guardian-cli.ts",
       "src/cli.ts",
       "src/daemon.ts",
     ]);
     expect(await Bun.file(join(isolatedPlugin, "node_modules")).exists()).toBe(false);
-    for (const entrypoint of ["src/cli.ts", "src/daemon.ts"]) {
+    for (const entrypoint of ["src/cli.ts", "src/daemon.ts", "src/auto-guardian-cli.ts"]) {
       expect((await stat(join(runtimeRoot, entrypoint))).mode & 0o111).not.toBe(0);
     }
     const result = Bun.spawnSync(["bun", join(runtimeRoot, "src/cli.ts"), "--help"], {
@@ -507,7 +509,9 @@ async function fixture(): Promise<string> {
     "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture t3ctl' }));\n",
   );
   await write(root, "packages/t3-orchestration/src/daemon.ts", "#!/usr/bin/env bun\nsetInterval(() => {}, 1000);\n");
+  await write(root, "packages/t3-orchestration/src/auto-guardian-cli.ts", "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture guardian' }));\n");
   await write(root, "packages/t3-orchestration/scripts/install.ts", "console.log('fixture installer');\n");
+  await write(root, "packages/t3-orchestration/scripts/install-guardian.ts", "console.log('fixture guardian installer');\n");
   await write(root, "packages/t3-orchestration/scripts/host-gateway.ts", "export const fixture = 'host-gateway';\n");
   await write(root, "packages/t3-orchestration/README.md", "# Fixture T3 orchestration\n");
   await write(root, "packages/t3-orchestration/package.json", JSON.stringify({ name: "@skizzles/t3-orchestration", version: "0.1.0" }));

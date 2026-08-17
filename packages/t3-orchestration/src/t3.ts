@@ -6,6 +6,7 @@ import {
   approvalRespondCommand,
   derivePendingApprovals,
   projectPendingApprovalList,
+  providerDriversFromConfig,
   requireIdentifiableApproval,
   selectPendingApproval,
   threadActivities,
@@ -423,6 +424,13 @@ const APPROVAL_TURN_WINDOW = 10;
 
 export async function listTaskApprovals(projectId?: string) {
   const shell = await shellSnapshot();
+  const projects = new Map(shell.projects.map((project) => [project.id, project]));
+  let drivers = new Map<string, string>();
+  try {
+    drivers = providerDriversFromConfig(await requestRpc("server.getConfig", {}));
+  } catch {
+    drivers = new Map();
+  }
   const candidates = shell.threads.filter((thread) =>
     !thread.deletedAt &&
     !thread.archivedAt &&
@@ -433,7 +441,7 @@ export async function listTaskApprovals(projectId?: string) {
   await Promise.all(candidates.map(async (thread) => {
     snapshots.set(thread.id, await threadSnapshot(thread.id, APPROVAL_TURN_WINDOW));
   }));
-  return projectPendingApprovalList(candidates, snapshots);
+  return projectPendingApprovalList(candidates, snapshots, projects, drivers);
 }
 
 export async function resolveTaskApproval(input: {
