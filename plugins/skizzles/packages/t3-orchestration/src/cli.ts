@@ -209,17 +209,76 @@ async function clearRemoteUrl() {
 }
 
 // packages/t3-orchestration/src/client.ts
-function daemonResponseTimeoutMs(payload) {
-  if (payload.op !== "tasks.wait")
-    return 240000;
-  const waitTimeoutMs = Number(payload.timeoutMs);
-  if (!Number.isInteger(waitTimeoutMs) || waitTimeoutMs < 0 || waitTimeoutMs > 3600000)
-    return 240000;
-  return waitTimeoutMs + 30000;
+var CLIENT_DEADLINE_MS = 60000;
+var WAIT_RESPONSE_BUFFER_MS = 2000;
+var CLIENT_DEADLINE_ENV = "T3_ORCHESTRATION_CLIENT_DEADLINE_MS";
+function formatClientDeadline(deadlineMs) {
+  return deadlineMs % 1000 === 0 ? `${deadlineMs / 1000}s` : `${deadlineMs}ms`;
 }
-function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = daemonResponseTimeoutMs(payload), remoteUrl) {
+function clientTimeoutMessage(op, deadlineMs) {
+  const operation = typeof op === "string" && op.trim() ? op.trim() : "request";
+  return `t3ctl ${operation} timed out after ${formatClientDeadline(deadlineMs)}`;
+}
+function clientTimeoutError(op, deadlineMs) {
+  return new Error(clientTimeoutMessage(op, deadlineMs));
+}
+function parseDeadlineMs(value) {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 1)
+    return;
+  return parsed;
+}
+function resolveClientDeadlineMs(overrideMs) {
+  const override = parseDeadlineMs(overrideMs);
+  if (override !== undefined)
+    return Math.min(override, CLIENT_DEADLINE_MS);
+  const injected = parseDeadlineMs(process.env[CLIENT_DEADLINE_ENV]);
+  if (injected !== undefined)
+    return Math.min(injected, CLIENT_DEADLINE_MS);
+  return CLIENT_DEADLINE_MS;
+}
+function maxWaitTimeoutMs(deadlineMs = CLIENT_DEADLINE_MS) {
+  return Math.max(0, deadlineMs - WAIT_RESPONSE_BUFFER_MS);
+}
+function clampWaitTimeoutMs(requestedMs, deadlineMs = CLIENT_DEADLINE_MS) {
+  if (!Number.isInteger(requestedMs) || requestedMs < 0)
+    return 0;
+  return Math.min(requestedMs, maxWaitTimeoutMs(deadlineMs));
+}
+function createClientDeadline(deadlineMs) {
+  const controller = new AbortController;
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, deadlineMs);
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer);
+    }
+  };
+}
+function isAbortError(error) {
+  return error instanceof Error && error.name === "AbortError";
+}
+function whenAborted(signal, op, deadlineMs) {
+  return new Promise((_, reject) => {
+    const fail = () => reject(clientTimeoutError(op, deadlineMs));
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener("abort", fail, { once: true });
+  });
+}
+function daemonRequest(payload, socketPath = SOCKET_PATH, deadlineMs = resolveClientDeadlineMs(), remoteUrl) {
+  const resolvedDeadlineMs = resolveClientDeadlineMs(deadlineMs);
   if (remoteUrl)
-    return remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs);
+    return remoteDaemonRequest(payload, remoteUrl, resolvedDeadlineMs);
+  return localDaemonRequest(payload, socketPath, resolvedDeadlineMs);
+}
+function localDaemonRequest(payload, socketPath, deadlineMs) {
+  const deadline = createClientDeadline(deadlineMs);
   return new Promise((resolve, reject) => {
     const socket = connect(socketPath);
     let buffer = "";
@@ -228,15 +287,15 @@ function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = da
       if (settled)
         return;
       settled = true;
-      clearTimeout(timeout);
+      deadline.dispose();
       callback();
     };
-    const timeout = setTimeout(() => {
+    const failWithTimeout = () => {
       finish(() => {
         socket.destroy();
-        reject(new Error(`t3-orchestrationd did not respond within ${responseTimeoutMs} milliseconds`));
+        reject(clientTimeoutError(payload.op, deadlineMs));
       });
-    }, responseTimeoutMs);
+    };
     socket.on("data", (chunk) => {
       buffer += chunk.toString();
       const newline = buffer.indexOf(`
@@ -254,31 +313,51 @@ function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = da
       });
     });
     socket.once("error", (error) => {
+      if (deadline.signal.aborted) {
+        failWithTimeout();
+        return;
+      }
       finish(() => {
         const code = "code" in error ? String(error.code) : "";
-        if (code === "ENOENT" || code === "ECONNREFUSED")
+        if (code === "ENOENT" || code === "ECONNREFUSED") {
           reject(new Error("t3-orchestrationd is unavailable. From a full Skizzles checkout or plugin snapshot, run `bun run packages/t3-orchestration/scripts/install.ts` to install and start its LaunchAgent."));
-        else
+        } else
           reject(error);
       });
     });
-    socket.once("end", () => finish(() => reject(new Error("t3-orchestrationd closed without a complete response"))));
+    socket.once("end", () => {
+      if (deadline.signal.aborted) {
+        failWithTimeout();
+        return;
+      }
+      finish(() => reject(new Error("t3-orchestrationd closed without a complete response")));
+    });
+    if (deadline.signal.aborted) {
+      failWithTimeout();
+      return;
+    }
+    deadline.signal.addEventListener("abort", failWithTimeout, { once: true });
     socket.write(`${JSON.stringify(payload)}
 `);
   });
 }
-async function remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs) {
+async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
   const endpoint = normalizeRemoteUrl(remoteUrl);
-  const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), responseTimeoutMs);
+  const deadline = createClientDeadline(deadlineMs);
+  const timedOut = whenAborted(deadline.signal, payload.op, deadlineMs);
+  timedOut.catch(() => {
+    return;
+  });
+  let request;
   try {
-    const response = await fetch(`${endpoint}/v1/request`, {
+    request = fetch(`${endpoint}/v1/request`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
       redirect: "error",
-      signal: controller.signal
+      signal: deadline.signal
     });
+    const response = await Promise.race([request, timedOut]);
     if (response.status >= 300 && response.status < 400) {
       throw new Error("remote t3-orchestrationd redirect rejected");
     }
@@ -290,16 +369,25 @@ async function remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs) {
       throw new Error("remote t3-orchestrationd returned an empty response");
     const chunks = [];
     let size = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      size += value.byteLength;
-      if (size > 1048576) {
-        await reader.cancel();
-        throw new Error("remote daemon response exceeds 1 MiB");
+    try {
+      while (true) {
+        if (deadline.signal.aborted)
+          throw clientTimeoutError(payload.op, deadlineMs);
+        const { done, value } = await Promise.race([reader.read(), timedOut]);
+        if (done)
+          break;
+        size += value.byteLength;
+        if (size > 1048576) {
+          await reader.cancel();
+          throw new Error("remote daemon response exceeds 1 MiB");
+        }
+        chunks.push(value);
       }
-      chunks.push(value);
+    } catch (error) {
+      await reader.cancel().catch(() => {
+        return;
+      });
+      throw error;
     }
     const combined = new Uint8Array(size);
     let offset = 0;
@@ -318,23 +406,29 @@ async function remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs) {
       throw new Error(body.error || `remote t3-orchestrationd failed with HTTP ${response.status}`);
     return body;
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`remote t3-orchestrationd did not respond within ${responseTimeoutMs} milliseconds`);
+    if (request)
+      request.catch(() => {
+        return;
+      });
+    if (deadline.signal.aborted || isAbortError(error)) {
+      throw clientTimeoutError(payload.op, deadlineMs);
     }
     throw error;
   } finally {
-    clearTimeout(timeout);
+    deadline.dispose();
   }
 }
 
 // packages/t3-orchestration/src/cli.ts
+var clientDeadlineMs = resolveClientDeadlineMs();
+var maxWaitMs = maxWaitTimeoutMs(clientDeadlineMs);
 var USAGE = `t3ctl remote {configure --url HTTPS_URL|status|clear}
 t3ctl projects {list|import}
 t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor]
 t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor]
 t3ctl tasks list [--project ID] [--limit 1..200] [--include-settled] [--include-archived]
 t3ctl tasks {read|history|status} ID
-t3ctl tasks wait ID [ID ...] [--timeout-ms 0..3600000] [--after ID=CURSOR]
+t3ctl tasks wait ID [ID ...] [--timeout-ms 0..${maxWaitMs}] [--after ID=CURSOR]
 t3ctl tasks send ID --message TEXT
 t3ctl tasks title ID --title TITLE
 t3ctl tasks {archive|unarchive|pin|unpin|settle|unsettle|interrupt} ID
@@ -372,23 +466,35 @@ if (group === "auth" && action === "configure") {
   if (!pairingToken)
     throw new Error("Pipe a one-time T3 pairing token on stdin");
   const { origin: origin2 } = await Promise.resolve().then(() => (init_config(), exports_config));
-  const response = await fetch(`${await origin2()}/oauth/token`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-      subject_token: pairingToken,
-      subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
-      requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-      scope: "orchestration:read orchestration:operate",
-      client_label: "t3ctl",
-      client_device_type: "bot",
-      client_os: "macOS"
-    })
-  });
-  const body = await response.text();
-  if (!response.ok)
-    throw new Error(`T3 pairing exchange failed (${response.status}): ${body}`);
+  const deadline = createClientDeadline(clientDeadlineMs);
+  let body;
+  try {
+    const response = await fetch(`${await origin2()}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+        subject_token: pairingToken,
+        subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+        requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+        scope: "orchestration:read orchestration:operate",
+        client_label: "t3ctl",
+        client_device_type: "bot",
+        client_os: "macOS"
+      }),
+      signal: deadline.signal
+    });
+    body = await response.text();
+    if (!response.ok)
+      throw new Error(`T3 pairing exchange failed (${response.status}): ${body}`);
+  } catch (error) {
+    if (deadline.signal.aborted || error instanceof Error && error.name === "AbortError") {
+      throw clientTimeoutError("auth.configure", clientDeadlineMs);
+    }
+    throw error;
+  } finally {
+    deadline.dispose();
+  }
   const accessToken = JSON.parse(body).access_token;
   if (typeof accessToken !== "string" || !accessToken)
     throw new Error("T3 pairing response did not contain an access token");
@@ -447,17 +553,18 @@ var waitIds = () => {
   return ids;
 };
 var callerThreadId = process.env.CODEX_THREAD_ID?.trim();
-var payload = group === "projects" && action === "import" ? { op: "projects.import" } : group === "projects" && action === "list" ? { op: "projects.list" } : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" } : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: boundedInteger("timeout-ms", 120000, 0, 3600000), after: waitAfter() } : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") } : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") } : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") } : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() } : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() } : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() } : (() => {
+var payload = group === "projects" && action === "import" ? { op: "projects.import" } : group === "projects" && action === "list" ? { op: "projects.list" } : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" } : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3600000), clientDeadlineMs), after: waitAfter() } : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") } : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") } : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") } : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() } : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() } : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() } : (() => {
   throw new Error(`Usage:
   ${USAGE.replaceAll(`
 `, `
   `)}`);
 })();
 try {
-  const result = await daemonRequest(payload, undefined, undefined, await configuredRemoteUrl());
+  const result = await daemonRequest(payload, undefined, clientDeadlineMs, await configuredRemoteUrl());
   console.log(JSON.stringify(result.ok ? result.result : { error: result.error }, null, 2));
   process.exit(result.ok ? 0 : 1);
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}
+`);
   process.exit(1);
 }

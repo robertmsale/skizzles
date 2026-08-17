@@ -1,14 +1,23 @@
 #!/usr/bin/env bun
-import { daemonRequest } from "./client.ts";
+import {
+  clientTimeoutError,
+  clampWaitTimeoutMs,
+  createClientDeadline,
+  daemonRequest,
+  maxWaitTimeoutMs,
+  resolveClientDeadlineMs,
+} from "./client.ts";
 import { clearRemoteUrl, configuredRemoteUrl, configureRemoteUrl, REMOTE_CONFIG_PATH } from "./remote-config.ts";
 
+const clientDeadlineMs = resolveClientDeadlineMs();
+const maxWaitMs = maxWaitTimeoutMs(clientDeadlineMs);
 const USAGE = `t3ctl remote {configure --url HTTPS_URL|status|clear}
 t3ctl projects {list|import}
 t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor]
 t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor]
 t3ctl tasks list [--project ID] [--limit 1..200] [--include-settled] [--include-archived]
 t3ctl tasks {read|history|status} ID
-t3ctl tasks wait ID [ID ...] [--timeout-ms 0..3600000] [--after ID=CURSOR]
+t3ctl tasks wait ID [ID ...] [--timeout-ms 0..${maxWaitMs}] [--after ID=CURSOR]
 t3ctl tasks send ID --message TEXT
 t3ctl tasks title ID --title TITLE
 t3ctl tasks {archive|unarchive|pin|unpin|settle|unsettle|interrupt} ID
@@ -43,22 +52,34 @@ if (group === "auth" && action === "configure") {
   const pairingToken = (await new Response(Bun.stdin.stream()).text()).trim();
   if (!pairingToken) throw new Error("Pipe a one-time T3 pairing token on stdin");
   const { origin } = await import("./config.ts");
-  const response = await fetch(`${await origin()}/oauth/token`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-      subject_token: pairingToken,
-      subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
-      requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-      scope: "orchestration:read orchestration:operate",
-      client_label: "t3ctl",
-      client_device_type: "bot",
-      client_os: "macOS",
-    }),
-  });
-  const body = await response.text();
-  if (!response.ok) throw new Error(`T3 pairing exchange failed (${response.status}): ${body}`);
+  const deadline = createClientDeadline(clientDeadlineMs);
+  let body: string;
+  try {
+    const response = await fetch(`${await origin()}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+        subject_token: pairingToken,
+        subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+        requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+        scope: "orchestration:read orchestration:operate",
+        client_label: "t3ctl",
+        client_device_type: "bot",
+        client_os: "macOS",
+      }),
+      signal: deadline.signal,
+    });
+    body = await response.text();
+    if (!response.ok) throw new Error(`T3 pairing exchange failed (${response.status}): ${body}`);
+  } catch (error) {
+    if (deadline.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw clientTimeoutError("auth.configure", clientDeadlineMs);
+    }
+    throw error;
+  } finally {
+    deadline.dispose();
+  }
   const accessToken = (JSON.parse(body) as { access_token?: unknown }).access_token;
   if (typeof accessToken !== "string" || !accessToken) throw new Error("T3 pairing response did not contain an access token");
   const { KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE } = await import("./config.ts");
@@ -117,7 +138,7 @@ const payload = group === "projects" && action === "import" ? { op: "projects.im
   : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") }
   : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") }
   : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" }
-  : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: boundedInteger("timeout-ms", 120_000, 0, 3_600_000), after: waitAfter() }
+  : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3_600_000), clientDeadlineMs), after: waitAfter() }
   : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") }
   : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") }
   : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") }
@@ -129,10 +150,10 @@ const payload = group === "projects" && action === "import" ? { op: "projects.im
   : (() => { throw new Error(`Usage:\n  ${USAGE.replaceAll("\n", "\n  ")}`); })();
 
 try {
-  const result = await daemonRequest(payload, undefined, undefined, await configuredRemoteUrl());
+  const result = await daemonRequest(payload, undefined, clientDeadlineMs, await configuredRemoteUrl());
   console.log(JSON.stringify(result.ok ? result.result : { error: result.error }, null, 2));
   process.exit(result.ok ? 0 : 1);
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 }
