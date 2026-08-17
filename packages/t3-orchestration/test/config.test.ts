@@ -23,9 +23,20 @@ describe("task provider defaults", () => {
     });
   });
 
+  test("maps --provider cursor to the live T3 catalog Grok 4.6 High selection", async () => {
+    expect(await taskProviderDefaults("cursor")).toEqual({
+      instanceId: "cursor",
+      model: "grok-4.6",
+      options: [
+        { id: "reasoning", value: "high" },
+        { id: "fastMode", value: false },
+      ],
+    });
+  });
+
   test("rejects providers outside the bounded orchestration contract", async () => {
     await expect(taskProviderDefaults("claude")).rejects.toThrow(
-      "Supported providers: codex, grok",
+      "Supported providers: codex, grok, cursor",
     );
   });
 });

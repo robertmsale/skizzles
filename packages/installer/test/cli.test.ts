@@ -13,6 +13,8 @@ describe("installer CLI target gates", () => {
     ["uninstall", "--surface", "harness"],
     ["install", "--surface", "grok"],
     ["uninstall", "--surface", "grok"],
+    ["install", "--surface", "cursor"],
+    ["uninstall", "--surface", "cursor"],
     ["configure"],
     ["unconfigure"],
     ["doctor"],
@@ -78,6 +80,28 @@ describe("installer CLI target gates", () => {
         "grok",
         "--grok-home",
         join(root, "grok"),
+        "--dry-run",
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(existsSync(root)).toBe(false);
+  });
+
+  test("Cursor install requires an explicit canonical source root", () => {
+    const root = `${process.env.TMPDIR ?? "/tmp"}/skizzles-cli-cursor-${crypto.randomUUID()}`;
+    roots.push(root);
+    const result = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        resolve(import.meta.dir, "../src/cli.ts"),
+        "install",
+        "--surface",
+        "cursor",
+        "--cursor-home",
+        join(root, "cursor"),
         "--dry-run",
       ],
       stdout: "pipe",

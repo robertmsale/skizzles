@@ -116,4 +116,12 @@ describe("task message delivery", () => {
       modelSelection: { instanceId: "codex_personal", model: "gpt-5.6-sol", options: [] },
     }, "continue", "command", "message", "now", "codex")).toThrow("Codex reasoning effort is missing");
   });
+
+  test("replays a Cursor thread's saved Grok 4.6 High selection", () => {
+    const cursorThread = {
+      ...baseThread,
+      modelSelection: { instanceId: "cursor", model: "grok-4.6", options: [{ id: "reasoning", value: "high" }, { id: "fastMode", value: false }] },
+    };
+    expect(taskTurnCommand(cursorThread, "continue").modelSelection).toEqual(cursorThread.modelSelection);
+  });
 });

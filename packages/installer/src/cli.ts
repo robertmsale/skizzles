@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { installSkills, receiptSummary, uninstallSkills, type Transfer } from "./core";
 import { installHarness, uninstallHarness } from "./harness";
 import { grokReceiptSummary, installGrokHarness, uninstallGrokHarness } from "./grok";
+import { cursorReceiptSummary, installCursorHarness, uninstallCursorHarness } from "./cursor";
 import { doctor } from "./doctor";
 import {
   configureCodex,
@@ -13,13 +14,14 @@ import {
 
 type Parsed = {
   command: "install" | "uninstall" | "doctor" | "configure" | "unconfigure";
-  surface: "skills" | "harness" | "grok" | undefined;
+  surface: "skills" | "harness" | "grok" | "cursor" | undefined;
   codexHome: string | undefined;
   codexBinary: string | undefined;
   orchestration: OrchestrationMode | undefined;
   instructions: InstructionMode | undefined;
   home: string | undefined;
   grokHome: string | undefined;
+  cursorHome: string | undefined;
   sourceRoot: string;
   sourceRootProvided: boolean;
   transfer: Transfer;
@@ -27,7 +29,7 @@ type Parsed = {
 };
 
 function usage(): never {
-  console.error("usage: bun packages/installer/src/cli.ts <install|uninstall> --surface <skills|harness|grok> [--codex-home PATH] [--home PATH] [--grok-home PATH] [--source-root PATH] [--transfer link|copy] [--dry-run] | configure --codex-home PATH --codex-binary PATH --orchestration <aggressive|passive> [--instructions <native|skizzles>] [--source-root PATH] [--dry-run] | unconfigure --codex-home PATH --codex-binary PATH [--dry-run] | doctor --home PATH --codex-home PATH");
+  console.error("usage: bun packages/installer/src/cli.ts <install|uninstall> --surface <skills|harness|grok|cursor> [--codex-home PATH] [--home PATH] [--grok-home PATH] [--cursor-home PATH] [--source-root PATH] [--transfer link|copy] [--dry-run] | configure --codex-home PATH --codex-binary PATH --orchestration <aggressive|passive> [--instructions <native|skizzles>] [--source-root PATH] [--dry-run] | unconfigure --codex-home PATH --codex-binary PATH [--dry-run] | doctor --home PATH --codex-home PATH");
   process.exit(2);
 }
 
@@ -40,10 +42,11 @@ function parse(argv: string[]): Parsed {
   let instructions: InstructionMode | undefined;
   let home: string | undefined;
   let grokHome: string | undefined;
+  let cursorHome: string | undefined;
   let sourceRoot = resolve(import.meta.dir, "../../..");
   let sourceRootProvided = false;
   let transfer: Transfer = "link";
-  let surface: "skills" | "harness" | "grok" | undefined;
+  let surface: "skills" | "harness" | "grok" | "cursor" | undefined;
   let dryRun = false;
   while (argv.length > 0) {
     const flag = argv.shift();
@@ -62,6 +65,7 @@ function parse(argv: string[]): Parsed {
     }
     else if (flag === "--home") home = argv.shift();
     else if (flag === "--grok-home") grokHome = argv.shift();
+    else if (flag === "--cursor-home") cursorHome = argv.shift();
     else if (flag === "--source-root") {
       sourceRoot = resolve(argv.shift() ?? usage());
       sourceRootProvided = true;
@@ -72,13 +76,13 @@ function parse(argv: string[]): Parsed {
       transfer = mode;
     } else if (flag === "--surface") {
       const value = argv.shift();
-      if (value !== "skills" && value !== "harness" && value !== "grok") usage();
+      if (value !== "skills" && value !== "harness" && value !== "grok" && value !== "cursor") usage();
       surface = value;
     }
     else usage();
   }
   if (command === "doctor") {
-    if (!home || !codexHome || grokHome || surface || codexBinary || orchestration || instructions) usage();
+    if (!home || !codexHome || grokHome || cursorHome || surface || codexBinary || orchestration || instructions) usage();
   } else if (command === "configure") {
     if (
       !codexHome ||
@@ -87,16 +91,18 @@ function parse(argv: string[]): Parsed {
       surface ||
       home ||
       grokHome ||
+      cursorHome ||
       (instructions === "skizzles" && !sourceRootProvided)
     ) usage();
   } else if (command === "unconfigure") {
-    if (!codexHome || !codexBinary || orchestration || instructions || surface || home || grokHome) usage();
+    if (!codexHome || !codexBinary || orchestration || instructions || surface || home || grokHome || cursorHome) usage();
   } else if (
     instructions ||
     !surface ||
-    (surface === "skills" && (!codexHome || home || grokHome)) ||
-    (surface === "harness" && (!home || codexHome || grokHome)) ||
-    (surface === "grok" && (!grokHome || codexHome || home || (command === "install" && !sourceRootProvided)))
+    (surface === "skills" && (!codexHome || home || grokHome || cursorHome)) ||
+    (surface === "harness" && (!home || codexHome || grokHome || cursorHome)) ||
+    (surface === "grok" && (!grokHome || codexHome || home || cursorHome || (command === "install" && !sourceRootProvided))) ||
+    (surface === "cursor" && (!cursorHome || codexHome || home || grokHome || (command === "install" && !sourceRootProvided)))
   ) usage();
   return {
     command: command as Parsed["command"],
@@ -107,6 +113,7 @@ function parse(argv: string[]): Parsed {
     instructions,
     home: home && resolve(home),
     grokHome: grokHome && resolve(grokHome),
+    cursorHome: cursorHome && resolve(cursorHome),
     sourceRoot,
     sourceRootProvided,
     transfer,
@@ -158,11 +165,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       ? installHarness({ home: parsed.home!, sourceRoot: parsed.sourceRoot, transfer: parsed.transfer, dryRun: parsed.dryRun })
       : uninstallHarness(parsed.home!, parsed.dryRun);
     console.log(JSON.stringify({ ok: true, dryRun: parsed.dryRun, surface: "harness", transfer: receipt.transfer, pluginTarget: receipt.pluginTarget }));
-  } else {
+  } else if (parsed.surface === "grok") {
     const receipt = parsed.command === "install"
       ? installGrokHarness({ grokHome: parsed.grokHome!, sourceRoot: parsed.sourceRoot, transfer: parsed.transfer, dryRun: parsed.dryRun })
       : uninstallGrokHarness(parsed.grokHome!, parsed.dryRun);
     console.log(JSON.stringify({ ok: true, dryRun: parsed.dryRun, ...grokReceiptSummary(receipt) }));
+  } else {
+    const receipt = parsed.command === "install"
+      ? installCursorHarness({ cursorHome: parsed.cursorHome!, sourceRoot: parsed.sourceRoot, transfer: parsed.transfer, dryRun: parsed.dryRun })
+      : uninstallCursorHarness(parsed.cursorHome!, parsed.dryRun);
+    console.log(JSON.stringify({ ok: true, dryRun: parsed.dryRun, ...cursorReceiptSummary(receipt) }));
   }
 }
 

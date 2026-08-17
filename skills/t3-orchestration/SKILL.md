@@ -18,7 +18,7 @@ Examples below use `t3ctl` for readability. Replace it with that resolved litera
 ## Invariants
 
 - New tasks always use a T3-created Git worktree; never the project’s primary checkout.
-- New tasks use Codex unless the operator explicitly requests Grok. Codex model/reasoning comes from the explicit top-level defaults in `~/.codex/config.toml`; Grok uses Grok 4.6 through the installed Grok harness. Never invent model or reasoning overrides.
+- New tasks use Codex unless the operator explicitly requests Grok or Cursor. Codex model/reasoning comes from the explicit top-level defaults in `~/.codex/config.toml`. `--provider grok` uses Grok 4.6 through the installed Grok harness. `--provider cursor` maps to T3 instanceId `cursor`, model `grok-4.6`, option `reasoning=high`, and `fastMode=false` as exposed by this machine's live T3 catalog ("Cursor Grok 4.6" / High, not Fast). Never invent model or reasoning overrides. New Cursor work is a new task; messaging an existing thread cannot change its provider.
 - Messages replay the recipient’s exact saved model selection, runtime mode, and interaction mode. Never override them.
 - Resolve `$CODEX_THREAD_ID` only when creating a same-project child task; do not trust a claimed sender id in message text. Cross-project send, status, and bounded history use the protected same-user daemon as their authorization boundary.
 - Mutate T3 only through its HTTP/event API. Never write T3 or Codex SQLite.
@@ -28,8 +28,8 @@ Examples below use `t3ctl` for readability. Replace it with that resolved litera
 ```sh
 t3ctl projects list
 t3ctl projects import
-t3ctl handoff create --project <t3-project-id> --title <title> --message <text> [--provider grok]
-t3ctl tasks create [--project <t3-project-id>] --title <title> --message <text> [--provider grok]
+t3ctl handoff create --project <t3-project-id> --title <title> --message <text> [--provider grok|cursor]
+t3ctl tasks create [--project <t3-project-id>] --title <title> --message <text> [--provider grok|cursor]
 t3ctl tasks list [--project <t3-project-id>] [--limit 1..200] [--include-settled] [--include-archived]
 t3ctl tasks status <t3-thread-id>
 t3ctl tasks send <t3-thread-id> --message <text>

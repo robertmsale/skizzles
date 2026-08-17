@@ -16,7 +16,7 @@ Optional Skizzles sidecar tooling for orchestrating T3 Code tasks through its su
 - `t3ctl` talks to the daemon over a same-user Unix socket.
 - T3 SQLite and Codex SQLite are read-only identity/configuration sources; mutations use T3 dispatch.
 - New root tasks always use T3's worktree bootstrap. The CLI exposes a bounded provider selector, never model or reasoning flags.
-- Codex remains the default provider and uses the explicit top-level defaults in `~/.codex/config.toml`. `--provider grok` selects the installed Grok harness with Grok 4.6; messages replay the recipient's exact saved selection. Profile/CLI model overrides are intentionally not inherited.
+- Codex remains the default provider and uses the explicit top-level defaults in `~/.codex/config.toml`. `--provider grok` selects the installed Grok harness with Grok 4.6. `--provider cursor` selects this machine's T3 Cursor instance with catalog model `grok-4.6`, option `reasoning=high`, and `fastMode=false` (Cursor Grok 4.6 High, not Fast). Messages replay the recipient's exact saved selection. Profile/CLI model overrides are intentionally not inherited. New Cursor work requires a new task; an existing thread's provider cannot be flipped by messaging it.
 
 ## First-time setup
 
@@ -63,7 +63,7 @@ Pinned tasks are always included first and do not consume the recent-task limit.
 For an explicitly authorized one-time ingress from an external Codex client:
 
 ```sh
-t3ctl handoff create --project <id> --title <title> --message <handoff> [--provider grok]
+t3ctl handoff create --project <id> --title <title> --message <handoff> [--provider grok|cursor]
 ```
 
 Tasks can read a bounded window of another task's conversation in the same T3 installation, including across projects. The default is three user-anchored turns and the hard maximum is ten:
@@ -94,7 +94,7 @@ The supported collaboration surface now maps Desktop list/read/wait/send/create/
 
 Remote access is opt-in. The host keeps the T3 bearer in its own Keychain; remote clients receive no T3 credential. Tailscale Serve terminates HTTPS and injects a verified user identity, which the daemon checks against an exact login allowlist.
 
-On the T3 host, reinstall with the allowed Tailscale login and expose only the dedicated loopback HTTP listener. Port `43773` is the default; set `T3_ORCHESTRATION_HTTP_PORT` consistently for both commands to use another unprivileged port.
+On the T3 host, reinstall with the allowed Tailscale login and expose only the dedicated loopback HTTP listener. Port `43773` is the default; set `T3_ORCHESTRATION_HTTP_PORT` consistently for both commands to use another unprivileged port. A later host reinstall without those environment variables keeps the existing LaunchAgent allowlist and HTTP port; it refuses to write a gateway-less host plist over a LaunchAgent that already had the gateway enabled.
 
 ```sh
 T3_ORCHESTRATION_TAILSCALE_USERS="you@example.com" T3_ORCHESTRATION_HTTP_PORT=43773 bun run packages/t3-orchestration/scripts/install.ts

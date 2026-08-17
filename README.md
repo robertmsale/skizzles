@@ -80,6 +80,16 @@ bun run packages/installer/src/cli.ts install \
 
 Review the targets, then repeat without `--dry-run`. Use `--transfer copy` for a durable installation or `link` only from a checkout that will remain at the recorded absolute path. The T3-facing launcher and security-sensitive global hook files are always copied into Grok's real directories. The receipt at `~/.grok/.skizzles/grok-harness-receipt.json` owns only those targets and makes uninstall drift-safe. Point T3's Grok provider at `~/.grok/bin/skizzles-grok`; the launcher selects `skizzles-root`, Grok 4.6, and High reasoning before starting ACP, while every child profile inherits that live configuration.
 
+Install the Cursor Agent surface the same way. Cursor is a different harness: no Grok launcher, no Codex hooks, and no invented marketplace plugin.
+
+```sh
+bun run packages/installer/src/cli.ts install \
+  --surface cursor --cursor-home "$HOME/.cursor" \
+  --source-root "$PWD" --transfer link --dry-run
+```
+
+That writes portable skills to `~/.cursor/skills` and a local Cursor plugin to `~/.cursor/plugins/local/skizzles`. It never touches `~/.cursor/skills-cursor`. T3 `--provider cursor` selects catalog instance `cursor`, model `grok-4.6`, option `reasoning=high`, and `fastMode=false`.
+
 The optional Luna V2 overlay lives in `runtime/model-catalog.ts`. It regenerates a complete static catalog from the newest valid normal cache or the installed Codex binary, changes only Luna's compatibility marker, and becomes a no-op when upstream enables V2 officially. Its launchd template watches both sources and runs every five minutes; catalog changes take effect after the next app-server restart. See `assets/model-catalog-installation.md` before activating it. 🚀
 
 ## Keep the loop delightful
