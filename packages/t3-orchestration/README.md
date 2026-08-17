@@ -44,6 +44,48 @@ anything:
 bun run packages/t3-orchestration/scripts/install.ts --uninstall
 ```
 
+### Settled-worktree artifact reaper
+
+T3 settle/archive does not delete worktrees or their `target/` and `build/`
+directories. The optional host-only sidecar `t3-worktree-reaper` talks to the
+existing `t3-orchestrationd` Unix socket, then runs `cargo clean` and
+`flutter clean` inside registered Git worktrees for tasks that are
+`settled=true` or `archived=true`.
+
+It will not:
+
+- start or install a second orchestration daemon
+- write `io.github.t3-orchestration.daemon`
+- `git worktree remove` or delete a worktree directory, source, or `.git`
+- clean the project's primary checkout
+- clean a task whose session, latest turn, or phase is running
+- guess when two worktrees match the same branch
+
+Install it separately from the orchestration daemon:
+
+```sh
+bun run packages/t3-orchestration/scripts/install-reaper.ts
+t3ctl worktrees clean-settled --dry-run
+t3-worktree-reaper --dry-run
+```
+
+The reaper installer copies the runtime into
+`~/.local/share/skizzles/t3-worktree-reaper`, links `~/.local/bin/t3-worktree-reaper`,
+and loads LaunchAgent `io.github.skizzles.t3-worktree-reaper` every 1800 seconds.
+It refuses unowned PATH links, plists, and install roots; uninstall verifies
+receipt-owned artifacts first:
+
+```sh
+bun run packages/t3-orchestration/scripts/install-reaper.ts --uninstall
+```
+
+`t3ctl tasks list` / `status` now include `worktreePath` and `workspaceRoot`.
+The reaper prefers those paths, then falls back to `git worktree list --porcelain`
+matched by branch. A successful clean records the thread id and leftover artifact
+size in `~/.t3/worktree-reaper-state.json` so reruns stay cheap.
+
+This sidecar is host-only. `--client-only` is refused.
+
 The project importer is idempotent by canonical workspace root:
 
 ```sh

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mergeArchivedTasks, projectProjects, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
+import { mergeArchivedTasks, projectCleanableWorktrees, projectProjects, projectTask, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
 import type { ShellSnapshot, Snapshot, T3ThreadShell } from "../src/protocol.ts";
 
 const project = { id: "project", title: "Project", workspaceRoot: "/repo", deletedAt: null };
@@ -93,6 +93,32 @@ describe("task list projection", () => {
 
   test("rejects unbounded list requests from raw daemon clients", () => {
     expect(() => projectTaskList({ snapshotSequence: 1, projects: [project], threads: [] }, { limit: 201, includeArchived: false, includeSettled: false })).toThrow("1 through 200");
+  });
+
+  test("exposes worktreePath and workspaceRoot on list and status projections", () => {
+    expect(projectTask(thread(), new Map([["project", project]]))).toMatchObject({
+      id: "task",
+      worktreePath: "/worktree",
+      workspaceRoot: "/repo",
+      branch: "t3code/task",
+    });
+  });
+
+  test("lists every settled or archived task for the worktree reaper", () => {
+    const snapshot: Snapshot = {
+      snapshotSequence: 10,
+      projects: [project],
+      threads: [
+        thread({ id: "active" }),
+        thread({ id: "settled", settledOverride: "settled", session: { status: "ready" } }),
+        thread({ id: "archived", archivedAt: "now", session: { status: "stopped" } }),
+        thread({ id: "deleted", deletedAt: "now", settledOverride: "settled" }),
+      ],
+    };
+    expect(projectCleanableWorktrees(snapshot).tasks.map(({ id, worktreePath, workspaceRoot }) => ({ id, worktreePath, workspaceRoot }))).toEqual([
+      { id: "settled", worktreePath: "/worktree", workspaceRoot: "/repo" },
+      { id: "archived", worktreePath: "/worktree", workspaceRoot: "/repo" },
+    ]);
   });
 });
 

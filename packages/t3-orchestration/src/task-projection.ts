@@ -88,8 +88,26 @@ export function projectTask(thread: T3Thread | T3ThreadShell, projects: Map<stri
     deleted: thread.deletedAt != null,
     settled: thread.settledOverride === "settled",
     branch: thread.branch,
+    worktreePath: thread.worktreePath,
+    workspaceRoot: projects.get(thread.projectId)?.workspaceRoot ?? null,
     updatedAt: thread.updatedAt ?? null,
     cursor: taskCursor(thread),
+  };
+}
+
+const CLEANABLE_TASK_CAP = 5_000;
+
+export function projectCleanableWorktrees(snapshot: Snapshot) {
+  const projects = new Map(snapshot.projects.filter((project) => !project.deletedAt).map((project) => [project.id, project]));
+  const visible = snapshot.threads.filter((thread) =>
+    !thread.deletedAt && (thread.archivedAt != null || thread.settledOverride === "settled")
+  ).sort(compareRecent);
+  const truncated = visible.length > CLEANABLE_TASK_CAP;
+  return {
+    snapshotSequence: snapshot.snapshotSequence,
+    tasks: visible.slice(0, CLEANABLE_TASK_CAP).map((thread) => projectTask(thread, projects)),
+    count: Math.min(visible.length, CLEANABLE_TASK_CAP),
+    truncated,
   };
 }
 

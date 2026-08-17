@@ -411,8 +411,22 @@ function projectTask(thread, projects, pinnedIndex) {
     deleted: thread.deletedAt != null,
     settled: thread.settledOverride === "settled",
     branch: thread.branch,
+    worktreePath: thread.worktreePath,
+    workspaceRoot: projects.get(thread.projectId)?.workspaceRoot ?? null,
     updatedAt: thread.updatedAt ?? null,
     cursor: taskCursor(thread)
+  };
+}
+var CLEANABLE_TASK_CAP = 5000;
+function projectCleanableWorktrees(snapshot) {
+  const projects = new Map(snapshot.projects.filter((project) => !project.deletedAt).map((project) => [project.id, project]));
+  const visible = snapshot.threads.filter((thread) => !thread.deletedAt && (thread.archivedAt != null || thread.settledOverride === "settled")).sort(compareRecent);
+  const truncated = visible.length > CLEANABLE_TASK_CAP;
+  return {
+    snapshotSequence: snapshot.snapshotSequence,
+    tasks: visible.slice(0, CLEANABLE_TASK_CAP).map((thread) => projectTask(thread, projects)),
+    count: Math.min(visible.length, CLEANABLE_TASK_CAP),
+    truncated
   };
 }
 function comparePinned(left, right) {
@@ -583,6 +597,10 @@ var taskStatus = async (id) => {
     return projectTask(active, new Map(shell.projects.map((project) => [project.id, project])));
   const [result, full] = await Promise.all([threadSnapshot(id, 1), snapshot()]);
   return projectTask(result.thread, new Map(full.projects.map((project) => [project.id, project])));
+};
+var listCleanableWorktrees = async () => {
+  const [shell, full] = await Promise.all([shellSnapshot(), snapshot()]);
+  return projectCleanableWorktrees(mergeArchivedTasks(shell, full));
 };
 var HISTORY_MESSAGE_CHAR_LIMIT = 8000;
 var HISTORY_TOTAL_CHAR_LIMIT = 32000;
@@ -1009,6 +1027,8 @@ async function executeCommand(command, dependencies) {
         decision: "decline",
         ...command.reason ? { reason: String(command.reason) } : {}
       });
+    case "worktrees.listCleanable":
+      return dependencies.listCleanableWorktrees();
     default:
       throw new Error(`Unknown operation: ${String(command.op)}`);
   }
@@ -1119,7 +1139,8 @@ var commandDependencies = {
   settleTask,
   interruptTask,
   listTaskApprovals,
-  resolveTaskApproval
+  resolveTaskApproval,
+  listCleanableWorktrees
 };
 var dispatch2 = (command) => executeCommand(command, commandDependencies);
 var server = createServer2((socket) => {

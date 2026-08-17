@@ -19,6 +19,7 @@ export type CommandDependencies = {
   interruptTask(threadId: string): Promise<unknown>;
   listTaskApprovals(projectId?: string): Promise<unknown>;
   resolveTaskApproval(input: { threadId: string; requestId?: string; decision: "accept" | "decline"; reason?: string }): Promise<unknown>;
+  listCleanableWorktrees(): Promise<unknown>;
 };
 
 export async function executeCommand(command: Record<string, unknown>, dependencies: CommandDependencies): Promise<unknown> {
@@ -83,6 +84,7 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
       decision: "decline",
       ...(command.reason ? { reason: String(command.reason) } : {}),
     });
+    case "worktrees.listCleanable": return dependencies.listCleanableWorktrees();
     default: throw new Error(`Unknown operation: ${String(command.op)}`);
   }
 }

@@ -46,9 +46,12 @@ t3ctl tasks interrupt <id>
 t3ctl tasks approvals [--project <t3-project-id>]
 t3ctl tasks approve <id> [<request-id>]
 t3ctl tasks deny <id> [<request-id>] [--reason <text>]
+t3ctl worktrees clean-settled [--dry-run]
 ```
 
 The optional per-user LaunchAgent keeps `t3-orchestrationd` available. The daemon owns the T3 credential; the CLI communicates over a same-user Unix socket. Host activation is explicit and machine-local—it is never performed merely by installing the Skizzles plugin or skill. With direct operator approval, run `bun run packages/t3-orchestration/scripts/install.ts` from a Skizzles checkout or plugin snapshot. The installer copies the runtime into a stable receipt-owned location, refuses foreign targets, and supports verified `--uninstall`; use `--client-only` for both install and uninstall on a tailnet client that must not host the credential-owning daemon.
+
+`t3ctl worktrees clean-settled` is a host-only sidecar that asks the existing daemon for settled and archived tasks, then runs `cargo clean` / `flutter clean` inside those tasks' registered Git worktrees. It never removes a worktree, never touches the project primary checkout, and skips any task whose session, latest turn, or phase is running. Install it with `bun run packages/t3-orchestration/scripts/install-reaper.ts`. That command writes LaunchAgent `io.github.skizzles.t3-worktree-reaper` only; it must not be used to mutate `io.github.t3-orchestration.daemon`. `--dry-run` prints thread id, path, and bytes that would be freed. The sidecar is not available in `--client-only` mode.
 
 Remote clients may use an explicitly configured tailnet-only HTTPS endpoint created with Tailscale Serve. Never use Funnel. The host still owns the T3 credential; remote clients authenticate through Tailscale identity and an exact host allowlist. The Serve-facing gateway listens only on `127.0.0.1:43773` by default because macOS Tailscale cannot proxy the prior mode-`0600` Unix socket; `T3_ORCHESTRATION_HTTP_PORT` selects another unprivileged loopback port. Configure a remote client with `t3ctl remote configure --url https://HOSTNAME.TAILNET.ts.net`. Remote mode never falls back silently to the local socket.
 

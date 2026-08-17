@@ -32,6 +32,7 @@ function dependencies(overrides: Partial<CommandDependencies> = {}): CommandDepe
     interruptTask: async (threadId) => ({ threadId }),
     listTaskApprovals: async (projectId) => ({ projectId }),
     resolveTaskApproval: async (input) => input,
+    listCleanableWorktrees: async () => ({ tasks: [], count: 0, truncated: false }),
     ...overrides,
   };
 }
@@ -90,5 +91,6 @@ describe("daemon command routing", () => {
     expect(await executeCommand({ op: "tasks.deny", threadId: "one", reason: "too broad" }, deps)).toEqual({
       threadId: "one", decision: "decline", reason: "too broad",
     });
+    expect(await executeCommand({ op: "worktrees.listCleanable" }, deps)).toEqual({ tasks: [], count: 0, truncated: false });
   });
 });

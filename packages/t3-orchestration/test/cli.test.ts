@@ -49,6 +49,7 @@ describe("cross-project collaboration CLI", () => {
     expect(help.help).toContain("t3ctl tasks approvals");
     expect(help.help).toContain("t3ctl tasks approve ID [REQUEST_ID]");
     expect(help.help).toContain("t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]");
+    expect(help.help).toContain("t3ctl worktrees clean-settled [--dry-run]");
     expect(stderr).toBe("");
   });
 
@@ -139,5 +140,32 @@ describe("cross-project collaboration CLI", () => {
       message: "work",
       provider: "cursor",
     });
+  });
+
+  test("clean-settled asks the existing daemon for cleanable tasks instead of a second daemon", async () => {
+    root = await mkdtemp("/tmp/t3-cli-");
+    const socketPath = join(root, "daemon.sock");
+    let resolvePayload!: (payload: Record<string, unknown>) => void;
+    const payload = new Promise<Record<string, unknown>>((resolveValue) => { resolvePayload = resolveValue; });
+    server = createServer((socket) => socket.once("data", (chunk) => {
+      resolvePayload(JSON.parse(chunk.toString()) as Record<string, unknown>);
+      socket.end('{"ok":true,"result":{"tasks":[],"count":0,"truncated":false}}\n');
+    }));
+    await new Promise<void>((resolveListen) => server!.listen(socketPath, resolveListen));
+    const process = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "worktrees", "clean-settled", "--dry-run"], {
+      env: { ...Bun.env, T3_ORCHESTRATION_SOCKET: socketPath, HOME: root, T3_HOME: root },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr, request] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+      payload,
+    ]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(request).toEqual({ op: "worktrees.listCleanable" });
+    expect(JSON.parse(stdout)).toMatchObject({ ok: true, dryRun: true, scanned: 0, cleaned: 0, bytesFreed: 0 });
   });
 });
