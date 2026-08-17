@@ -94,7 +94,7 @@ The supported collaboration surface now maps Desktop list/read/wait/send/create/
 
 Remote access is opt-in. The host keeps the T3 bearer in its own Keychain; remote clients receive no T3 credential. Tailscale Serve terminates HTTPS and injects a verified user identity, which the daemon checks against an exact login allowlist.
 
-On the T3 host, reinstall with the allowed Tailscale login and expose only the dedicated loopback HTTP listener. Port `43773` is the default; set `T3_ORCHESTRATION_HTTP_PORT` consistently for both commands to use another unprivileged port.
+On the T3 host, reinstall with the allowed Tailscale login and expose only the dedicated loopback HTTP listener. Port `43773` is the default; set `T3_ORCHESTRATION_HTTP_PORT` consistently for both commands to use another unprivileged port. A later host reinstall without those environment variables keeps the existing LaunchAgent allowlist and HTTP port; it refuses to write a gateway-less host plist over a LaunchAgent that already had the gateway enabled.
 
 ```sh
 T3_ORCHESTRATION_TAILSCALE_USERS="you@example.com" T3_ORCHESTRATION_HTTP_PORT=43773 bun run packages/t3-orchestration/scripts/install.ts

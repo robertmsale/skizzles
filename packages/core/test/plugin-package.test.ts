@@ -189,6 +189,7 @@ describe("deterministic plugin packaging", () => {
     expect(await filesUnder(runtimeRoot)).toEqual([
       "README.md",
       "package.json",
+      "scripts/host-gateway.ts",
       "scripts/install.ts",
       "src/cli.ts",
       "src/daemon.ts",
@@ -507,6 +508,7 @@ async function fixture(): Promise<string> {
   );
   await write(root, "packages/t3-orchestration/src/daemon.ts", "#!/usr/bin/env bun\nsetInterval(() => {}, 1000);\n");
   await write(root, "packages/t3-orchestration/scripts/install.ts", "console.log('fixture installer');\n");
+  await write(root, "packages/t3-orchestration/scripts/host-gateway.ts", "export const fixture = 'host-gateway';\n");
   await write(root, "packages/t3-orchestration/README.md", "# Fixture T3 orchestration\n");
   await write(root, "packages/t3-orchestration/package.json", JSON.stringify({ name: "@skizzles/t3-orchestration", version: "0.1.0" }));
   await write(root, "skills/t3-orchestration/scripts/t3ctl", "#!/usr/bin/env bun\nconsole.log('fixture');\n");

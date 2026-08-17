@@ -40,7 +40,7 @@ const CONTAINER_LAB_LAUNCHER = "skills/codex-container-lab/scripts/codex-contain
 const T3_ORCHESTRATION_SOURCE_PATH = "packages/t3-orchestration";
 const T3_ORCHESTRATION_PROVENANCE = "11fd830798e512466ceb1a6ca1187b0f3f41acbd";
 const T3_ORCHESTRATION_ENTRYPOINTS = ["src/cli.ts", "src/daemon.ts"] as const;
-const T3_ORCHESTRATION_STATIC_INPUTS = ["package.json", "README.md", "scripts/install.ts"] as const;
+const T3_ORCHESTRATION_STATIC_INPUTS = ["package.json", "README.md", "scripts/install.ts", "scripts/host-gateway.ts"] as const;
 const T3_ORCHESTRATION_LAUNCHER = "skills/t3-orchestration/scripts/t3ctl";
 const INSTALLER_INPUTS = [
   "package.json",

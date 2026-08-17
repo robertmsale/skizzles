@@ -15,6 +15,7 @@ import {
 } from "node:fs/promises";
 import { connect } from "node:net";
 import { dirname, join, resolve } from "node:path";
+import { assertHostGatewayNotDropped, parseLaunchAgentGateway, resolveHostGateway, type HostGatewayConfig } from "./host-gateway.ts";
 
 type InstallMode = "client" | "host";
 type TreeEntry = { path: string; sha256: string; mode: number };
@@ -70,8 +71,6 @@ function tailscaleGatewayPort(value: string | undefined): number {
   }
   return port;
 }
-
-const tailscaleGatewayPortNumber = tailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
 
 function isMissing(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
@@ -255,15 +254,15 @@ async function bunExecutable(): Promise<string> {
   return path;
 }
 
-function plistFor(daemonPath: string, bunPath: string): string {
+function plistFor(daemonPath: string, bunPath: string, gateway: HostGatewayConfig): string {
   const inheritedConfig = [
     "CODEX_HOME",
     "T3_HOME",
     "T3_ORCHESTRATION_SOCKET",
-    "T3_ORCHESTRATION_HTTP_PORT",
-    "T3_ORCHESTRATION_TAILSCALE_USERS",
     "T3_ORCHESTRATION_KEYCHAIN_ACCOUNT",
   ].flatMap((name) => process.env[name] ? [`<string>${name}=${escapeXml(process.env[name]!)}</string>`] : []);
+  if (gateway.users) inheritedConfig.push(`<string>T3_ORCHESTRATION_TAILSCALE_USERS=${escapeXml(gateway.users)}</string>`);
+  if (gateway.port) inheritedConfig.push(`<string>T3_ORCHESTRATION_HTTP_PORT=${escapeXml(gateway.port)}</string>`);
   const launchPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -350,14 +349,25 @@ async function activateHost(): Promise<void> {
   const kickstart = await Bun.$`launchctl kickstart -k ${service}`.nothrow().quiet();
   if (kickstart.exitCode !== 0) throw new Error(`Could not start ${launchAgentLabel}: ${kickstart.stderr.toString().trim()}`);
   if (!await waitForSocket(socketPath)) throw new Error(`${launchAgentLabel} started but its Unix socket did not become ready`);
-  if (process.env.T3_ORCHESTRATION_TAILSCALE_USERS?.trim()) {
-    if (!await waitForGateway(tailscaleGatewayPortNumber)) {
-      throw new Error(`${launchAgentLabel} started but its Tailscale gateway did not become ready on loopback port ${tailscaleGatewayPortNumber}`);
+  const gateway = parseLaunchAgentGateway(await readFile(launchAgent, "utf8"));
+  if (gateway.users) {
+    const port = tailscaleGatewayPort(gateway.port);
+    if (!await waitForGateway(port)) {
+      throw new Error(`${launchAgentLabel} started but its Tailscale gateway did not become ready on loopback port ${port}`);
     }
   }
 }
 
-async function stageInstall(runtimeVersion: string, currentMode: InstallMode, temporaryRoot: string): Promise<Receipt> {
+async function existingHostGateway(): Promise<HostGatewayConfig | undefined> {
+  try {
+    return parseLaunchAgentGateway(await readFile(launchAgent, "utf8"));
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
+}
+
+async function stageInstall(runtimeVersion: string, currentMode: InstallMode, temporaryRoot: string, gateway: HostGatewayConfig): Promise<Receipt> {
   await lstat(runtimeSource);
   await lstat(skillSource);
   const stageRuntime = join(temporaryRoot, "runtime");
@@ -375,7 +385,7 @@ async function stageInstall(runtimeVersion: string, currentMode: InstallMode, te
     await chmod(t3Home, 0o700);
     const launchPath = await bunExecutable();
     const stagedLaunchAgent = join(temporaryRoot, "launchAgent.plist");
-    await writeFile(stagedLaunchAgent, plistFor(join(runtimeRoot, "daemon.ts"), launchPath), { mode: 0o644 });
+    await writeFile(stagedLaunchAgent, plistFor(join(runtimeRoot, "daemon.ts"), launchPath, gateway), { mode: 0o644 });
     files.push({ path: launchAgent, sha256: await sha256(stagedLaunchAgent), mode: 0o644 });
   }
   const receipt: Receipt = {
@@ -438,7 +448,16 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
   await mkdir(backupsRoot, { recursive: true, mode: 0o700 });
   let receipt: Receipt;
   try {
-    receipt = await stageInstall(runtimeVersion, mode, stagedRoot);
+    const existingGateway = await existingHostGateway();
+    const gateway = resolveHostGateway(
+      {
+        users: process.env.T3_ORCHESTRATION_TAILSCALE_USERS,
+        port: process.env.T3_ORCHESTRATION_HTTP_PORT,
+      },
+      existingGateway,
+    );
+    assertHostGatewayNotDropped(existingGateway, gateway);
+    receipt = await stageInstall(runtimeVersion, mode, stagedRoot, gateway);
   } catch (error) {
     await rm(transactionRoot, { recursive: true, force: true });
     throw error;

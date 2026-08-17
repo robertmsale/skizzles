@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createUnixServer } from "node:net";
 import { chmod, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
@@ -14,11 +16,18 @@ async function install(root: string, ...args: string[]): Promise<{ exitCode: num
 
 async function installWithEnvironment(
   root: string,
-  environment: Record<string, string>,
+  environment: Record<string, string | undefined>,
   ...args: string[]
 ): Promise<{ exitCode: number; stderr: string }> {
+  const env: Record<string, string> = { ...Bun.env, HOME: root };
+  delete env.T3_ORCHESTRATION_TAILSCALE_USERS;
+  delete env.T3_ORCHESTRATION_HTTP_PORT;
+  for (const [name, value] of Object.entries(environment)) {
+    if (value === undefined) delete env[name];
+    else env[name] = value;
+  }
   const process = Bun.spawn(["bun", resolve(import.meta.dir, "../scripts/install.ts"), ...args], {
-    env: { ...Bun.env, HOME: root, ...environment },
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -81,6 +90,54 @@ describe("host installer", () => {
     await expect(lstat(fixture.state)).rejects.toThrow();
     await expect(lstat(join(root, ".local/share/skizzles/t3-orchestration"))).rejects.toThrow();
     await expect(lstat(join(root, "Library/LaunchAgents/io.github.t3-orchestration.daemon.plist"))).rejects.toThrow();
+  });
+
+  test("preserves an existing Tailscale allowlist and HTTP port on host reinstall", async () => {
+    const root = `/tmp/t3-host-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const socketPath = join(root, ".t3/t3-orchestration.sock");
+    await mkdir(dirname(socketPath), { recursive: true });
+    const unix = createUnixServer();
+    await new Promise<void>((resolveListen, reject) => {
+      unix.once("error", reject);
+      unix.listen(socketPath, () => {
+        unix.off("error", reject);
+        resolveListen();
+      });
+    });
+    const http = createHttpServer((_request, response) => {
+      response.writeHead(200, { "x-t3-orchestration-gateway": "1" });
+      response.end("ok");
+    });
+    const port = await new Promise<number>((resolveListen, reject) => {
+      http.once("error", reject);
+      http.listen(0, "127.0.0.1", () => {
+        http.off("error", reject);
+        const address = http.address();
+        if (!address || typeof address === "string") reject(new Error("HTTP fixture has no port"));
+        else resolveListen(address.port);
+      });
+    });
+    try {
+      const first = await installWithEnvironment(root, {
+        ...fixture.environment,
+        T3_ORCHESTRATION_TAILSCALE_USERS: "owner@example.com",
+        T3_ORCHESTRATION_HTTP_PORT: String(port),
+      });
+      expect(first.exitCode).toBe(0);
+      const plist = join(root, "Library/LaunchAgents/io.github.t3-orchestration.daemon.plist");
+      expect(await readFile(plist, "utf8")).toContain("T3_ORCHESTRATION_TAILSCALE_USERS=owner@example.com");
+      expect(await readFile(plist, "utf8")).toContain(`T3_ORCHESTRATION_HTTP_PORT=${port}`);
+
+      const second = await installWithEnvironment(root, fixture.environment);
+      expect(second.exitCode).toBe(0);
+      expect(await readFile(plist, "utf8")).toContain("T3_ORCHESTRATION_TAILSCALE_USERS=owner@example.com");
+      expect(await readFile(plist, "utf8")).toContain(`T3_ORCHESTRATION_HTTP_PORT=${port}`);
+    } finally {
+      await new Promise<void>((resolveClose) => http.close(() => resolveClose()));
+      await new Promise<void>((resolveClose) => unix.close(() => resolveClose()));
+    }
   });
 
   test("refuses to unload a loaded service without receipt ownership", async () => {
