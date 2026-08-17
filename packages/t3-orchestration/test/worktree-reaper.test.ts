@@ -135,6 +135,8 @@ describe("lifecycle gates", () => {
     expect(isRunningTask(task({ latestTurnState: "running" }))).toBe(true);
     expect(isRunningTask(task({ phase: "running" }))).toBe(true);
     expect(isRunningTask(task({ phase: "starting" }))).toBe(true);
+    expect(isRunningTask(task({ phase: "archived", backgroundLiveness: "working" }))).toBe(true);
+    expect(isRunningTask(task({ phase: "archived", backgroundLiveness: "monitoring" }))).toBe(true);
     expect(isRunningTask(task({ phase: "completed", sessionStatus: "ready", latestTurnState: "completed" }))).toBe(false);
   });
 });
@@ -203,8 +205,9 @@ describe("cleanSettledWorktrees", () => {
         return [];
       },
       readText: async (path) => path.endsWith("pubspec.yaml") ? "name: app\nflutter:\n" : "[package]\n",
-      measureBytes: async (path) => path.endsWith("target") || path.endsWith("build") ? 1_000 : 0,
+      measureBytes: async (path) => path.endsWith("target") || path.endsWith("build") || path.endsWith(".dart_tool") ? 1_000 : 0,
       runClean: async (command, directory) => { runs.push({ command, directory }); },
+      readTask: async (threadId) => (overrides.tasks ?? [task()]).find((entry) => entry.id === threadId) ?? task({ id: threadId }),
       readState: async () => state,
       writeState: async (next) => { state = next; states.push(next); },
       now: () => "2026-08-17T00:00:00.000Z",
@@ -333,13 +336,25 @@ deny_paths = ["/repo/.t3/worktrees/repo/t3code-task"]
     ]);
   });
 
-  test("runs extra host commands inside the worktree", async () => {
-    const harness = deps();
+  test("runs extra host commands only against a named artifact directory", async () => {
+    const harness = deps({
+      isDirectory: async (path) => {
+        const name = path.split("/").pop() ?? "";
+        return name === "target" || name === "build" || name === ".dart_tool" || name === "apps" || name === "mobile" || path.endsWith("t3code-task");
+      },
+      readDirectoryNames: async (path) => {
+        if (path === "/repo/.t3/worktrees/repo/t3code-task") return ["Cargo.toml", "target", "apps"];
+        if (path === "/repo/.t3/worktrees/repo/t3code-task/apps") return ["mobile"];
+        if (path === "/repo/.t3/worktrees/repo/t3code-task/apps/mobile") return ["pubspec.yaml", "build", ".dart_tool"];
+        return [];
+      },
+    });
     const report = await cleanSettledWorktrees(harness, {
       dryRun: false,
       config: parseReaperConfig(`
 [[extra_commands]]
 match = "apps/mobile"
+artifact_dir = ".dart_tool"
 command = ["rm", "-rf", ".dart_tool"]
 `),
     });
@@ -348,6 +363,24 @@ command = ["rm", "-rf", ".dart_tool"]
       command: ["rm", "-rf", ".dart_tool"],
       directory: "/repo/.t3/worktrees/repo/t3code-task/apps/mobile",
     });
+  });
+
+  test("skips archived tasks with live background work", async () => {
+    const harness = deps({
+      tasks: [task({ archived: true, settled: true, phase: "archived", backgroundLiveness: "working" })],
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "task is running" });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("revalidates lifecycle immediately before cleaning", async () => {
+    const harness = deps({
+      readTask: async () => task({ sessionStatus: "running", latestTurnState: "running", phase: "running" }),
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "task is running" });
+    expect(harness.runs).toEqual([]);
   });
 
   test("falls back to tasks.list when the running daemon lacks worktrees.listCleanable", async () => {

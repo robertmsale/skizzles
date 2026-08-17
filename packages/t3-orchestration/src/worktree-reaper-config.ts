@@ -14,7 +14,9 @@ export type CleanStrategy = {
 
 export type ExtraCommand = {
   match: string;
+  artifactDir: string;
   command: string[];
+  markers: string[];
 };
 
 export type ProjectOverride = {
@@ -93,6 +95,50 @@ function asCommand(value: unknown, label: string): string[] {
   return command;
 }
 
+const FORBIDDEN_EXEC = new Set([
+  "sh", "bash", "zsh", "dash", "fish", "csh", "ksh",
+  "env", "sudo", "git", "python", "python3", "node", "perl", "ruby",
+  "osascript", "chmod", "chown", "mv", "cp", "dd", "find", "xargs",
+  "npm", "pnpm", "yarn", "bun", "deno", "make", "cmake",
+]);
+const FORBIDDEN_ARTIFACTS = new Set([".git", "src", ".", ".."]);
+
+export function assertAllowedArtifact(artifactDir: string, label: string): void {
+  if (FORBIDDEN_ARTIFACTS.has(artifactDir)) throw new Error(`${label} cannot target ${artifactDir}`);
+}
+
+export function assertAllowedCleanCommand(command: string[], artifactDir: string): void {
+  assertAllowedArtifact(artifactDir, "artifact_dir");
+  const executable = command[0];
+  if (!executable || executable.includes("/") || executable.includes("\\") || FORBIDDEN_EXEC.has(executable)) {
+    throw new Error(`cleaner executable is not allowed: ${executable ?? "(missing)"}`);
+  }
+  for (const argument of command) {
+    if (argument === "-c" || argument === "-C" || argument.startsWith("-C") || argument.startsWith("--git-") || argument.startsWith("--work-tree")) {
+      throw new Error(`cleaner flag is not allowed: ${argument}`);
+    }
+  }
+  if (executable === "cargo") {
+    if (command.length !== 4 || command[1] !== "clean" || command[2] !== "--target-dir" || command[3] !== artifactDir) {
+      throw new Error("cargo cleaner must be: cargo clean --target-dir <artifact_dir>");
+    }
+    return;
+  }
+  if (executable === "flutter") {
+    if (command.length !== 2 || command[1] !== "clean") throw new Error("flutter cleaner must be: flutter clean");
+    return;
+  }
+  if (executable === "rm") {
+    const flags = command.slice(1, -1);
+    const operand = command.at(-1);
+    if (command.length < 3 || operand !== artifactDir || !flags.every((flag) => /^-[rf]+$/.test(flag))) {
+      throw new Error("rm cleaner must be: rm -rf <artifact_dir>");
+    }
+    return;
+  }
+  throw new Error(`unsupported cleaner: ${executable}`);
+}
+
 function parseStrategy(value: unknown, index: number): CleanStrategy {
   if (!value || typeof value !== "object") throw new Error(`strategies[${index}] must be a table`);
   const raw = value as Record<string, unknown>;
@@ -113,12 +159,13 @@ function parseStrategy(value: unknown, index: number): CleanStrategy {
     if (text.file.includes("..") || isAbsolute(text.file)) throw new Error(`strategies[${index}].require_text.file must be a relative file name`);
     requireText = { file: text.file.trim(), pattern: text.pattern };
   }
-  return {
+  const strategy: CleanStrategy = {
     name: raw.name.trim(),
     enabled: raw.enabled === undefined ? true : raw.enabled === true,
     markers: (() => {
       const markers = asStringArray(raw.markers, `strategies[${index}].markers`);
-      if (markers.length === 0) throw new Error(`strategies[${index}].markers must not be empty`);
+      const match = asStringArray(raw.match, `strategies[${index}].match`);
+      if (markers.length === 0 && match.length === 0) throw new Error(`strategies[${index}] needs markers or match`);
       return markers;
     })(),
     artifactDir: raw.artifact_dir.trim(),
@@ -126,13 +173,37 @@ function parseStrategy(value: unknown, index: number): CleanStrategy {
     match: asStringArray(raw.match, `strategies[${index}].match`),
     ...(requireText ? { requireText } : {}),
   };
+  assertAllowedCleanCommand(strategy.command, strategy.artifactDir);
+  return strategy;
+}
+
+export function extraCommandToStrategy(extra: ExtraCommand, index: number): CleanStrategy {
+  return {
+    name: `extra:${index}:${extra.match}`,
+    enabled: true,
+    markers: extra.markers,
+    artifactDir: extra.artifactDir,
+    command: extra.command,
+    match: [extra.match],
+  };
 }
 
 function parseExtraCommand(value: unknown, label: string): ExtraCommand {
   if (!value || typeof value !== "object") throw new Error(`${label} must be a table`);
   const raw = value as Record<string, unknown>;
   if (typeof raw.match !== "string" || raw.match.trim() === "") throw new Error(`${label}.match is required`);
-  return { match: raw.match.trim().replaceAll("\\", "/"), command: asCommand(raw.command, `${label}.command`) };
+  if (typeof raw.artifact_dir !== "string" || raw.artifact_dir.trim() === "") throw new Error(`${label}.artifact_dir is required`);
+  if (raw.artifact_dir.includes("..") || raw.artifact_dir.includes("/") || raw.artifact_dir.includes("\\")) {
+    throw new Error(`${label}.artifact_dir must be a single relative directory name`);
+  }
+  const extra: ExtraCommand = {
+    match: raw.match.trim().replaceAll("\\", "/"),
+    artifactDir: raw.artifact_dir.trim(),
+    command: asCommand(raw.command, `${label}.command`),
+    markers: asStringArray(raw.markers, `${label}.markers`),
+  };
+  assertAllowedCleanCommand(extra.command, extra.artifactDir);
+  return extra;
 }
 
 function parseProject(value: unknown, index: number): ProjectOverride {
@@ -274,10 +345,11 @@ export function resolveProjectPolicy(
     }
     strategies = named.map((name) => config.strategies.find((strategy) => strategy.name === name)!).filter((strategy) => strategy.enabled);
   }
+  const extras = [...config.extraCommands, ...(override?.extraCommands ?? [])].map((extra, index) => extraCommandToStrategy(extra, index));
   return {
     enabled: true,
-    strategies,
-    extraCommands: [...config.extraCommands, ...(override?.extraCommands ?? [])],
+    strategies: [...strategies, ...extras],
+    extraCommands: [],
     denyPaths: [...config.denyPaths, ...(override?.denyPaths ?? [])],
   };
 }
@@ -317,20 +389,4 @@ export async function resolveDenyPaths(
   return resolved;
 }
 
-function pathLikeArguments(argument: string): string[] {
-  const values = [argument];
-  const separator = argument.indexOf("=");
-  if (separator >= 0) values.push(argument.slice(separator + 1));
-  return values.filter((value) => value.startsWith("/") || value.startsWith("~") || value.includes(".."));
-}
 
-export function assertCommandStaysInside(command: string[], cwd: string, worktree: string): void {
-  for (const argument of command) {
-    for (const value of pathLikeArguments(argument)) {
-      const candidate = resolve(cwd, expandUserPath(value));
-      if (relativeInside(worktree, candidate) === undefined) {
-        throw new Error(`command argument escapes the worktree: ${argument}`);
-      }
-    }
-  }
-}

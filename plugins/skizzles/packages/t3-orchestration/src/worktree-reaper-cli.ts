@@ -28,10 +28,12 @@ __export(exports_worktree_reaper_config, {
   matchRelativeGlob: () => matchRelativeGlob,
   loadReaperConfig: () => loadReaperConfig,
   isDeniedPath: () => isDeniedPath,
+  extraCommandToStrategy: () => extraCommandToStrategy,
   expandUserPath: () => expandUserPath,
   defaultReaperConfigPath: () => defaultReaperConfigPath,
   defaultReaperConfig: () => defaultReaperConfig,
-  assertCommandStaysInside: () => assertCommandStaysInside
+  assertAllowedCleanCommand: () => assertAllowedCleanCommand,
+  assertAllowedArtifact: () => assertAllowedArtifact
 });
 import { readFile as readFile2, realpath } from "fs/promises";
 import { homedir } from "os";
@@ -82,6 +84,42 @@ function asCommand(value, label) {
     throw new Error(`${label} must include an executable`);
   return command;
 }
+function assertAllowedArtifact(artifactDir, label) {
+  if (FORBIDDEN_ARTIFACTS.has(artifactDir))
+    throw new Error(`${label} cannot target ${artifactDir}`);
+}
+function assertAllowedCleanCommand(command, artifactDir) {
+  assertAllowedArtifact(artifactDir, "artifact_dir");
+  const executable = command[0];
+  if (!executable || executable.includes("/") || executable.includes("\\") || FORBIDDEN_EXEC.has(executable)) {
+    throw new Error(`cleaner executable is not allowed: ${executable ?? "(missing)"}`);
+  }
+  for (const argument of command) {
+    if (argument === "-c" || argument === "-C" || argument.startsWith("-C") || argument.startsWith("--git-") || argument.startsWith("--work-tree")) {
+      throw new Error(`cleaner flag is not allowed: ${argument}`);
+    }
+  }
+  if (executable === "cargo") {
+    if (command.length !== 4 || command[1] !== "clean" || command[2] !== "--target-dir" || command[3] !== artifactDir) {
+      throw new Error("cargo cleaner must be: cargo clean --target-dir <artifact_dir>");
+    }
+    return;
+  }
+  if (executable === "flutter") {
+    if (command.length !== 2 || command[1] !== "clean")
+      throw new Error("flutter cleaner must be: flutter clean");
+    return;
+  }
+  if (executable === "rm") {
+    const flags = command.slice(1, -1);
+    const operand = command.at(-1);
+    if (command.length < 3 || operand !== artifactDir || !flags.every((flag) => /^-[rf]+$/.test(flag))) {
+      throw new Error("rm cleaner must be: rm -rf <artifact_dir>");
+    }
+    return;
+  }
+  throw new Error(`unsupported cleaner: ${executable}`);
+}
 function parseStrategy(value, index) {
   if (!value || typeof value !== "object")
     throw new Error(`strategies[${index}] must be a table`);
@@ -106,19 +144,32 @@ function parseStrategy(value, index) {
       throw new Error(`strategies[${index}].require_text.file must be a relative file name`);
     requireText = { file: text.file.trim(), pattern: text.pattern };
   }
-  return {
+  const strategy = {
     name: raw.name.trim(),
     enabled: raw.enabled === undefined ? true : raw.enabled === true,
     markers: (() => {
       const markers = asStringArray(raw.markers, `strategies[${index}].markers`);
-      if (markers.length === 0)
-        throw new Error(`strategies[${index}].markers must not be empty`);
+      const match = asStringArray(raw.match, `strategies[${index}].match`);
+      if (markers.length === 0 && match.length === 0)
+        throw new Error(`strategies[${index}] needs markers or match`);
       return markers;
     })(),
     artifactDir: raw.artifact_dir.trim(),
     command: asCommand(raw.command, `strategies[${index}].command`),
     match: asStringArray(raw.match, `strategies[${index}].match`),
     ...requireText ? { requireText } : {}
+  };
+  assertAllowedCleanCommand(strategy.command, strategy.artifactDir);
+  return strategy;
+}
+function extraCommandToStrategy(extra, index) {
+  return {
+    name: `extra:${index}:${extra.match}`,
+    enabled: true,
+    markers: extra.markers,
+    artifactDir: extra.artifactDir,
+    command: extra.command,
+    match: [extra.match]
   };
 }
 function parseExtraCommand(value, label) {
@@ -127,7 +178,19 @@ function parseExtraCommand(value, label) {
   const raw = value;
   if (typeof raw.match !== "string" || raw.match.trim() === "")
     throw new Error(`${label}.match is required`);
-  return { match: raw.match.trim().replaceAll("\\", "/"), command: asCommand(raw.command, `${label}.command`) };
+  if (typeof raw.artifact_dir !== "string" || raw.artifact_dir.trim() === "")
+    throw new Error(`${label}.artifact_dir is required`);
+  if (raw.artifact_dir.includes("..") || raw.artifact_dir.includes("/") || raw.artifact_dir.includes("\\")) {
+    throw new Error(`${label}.artifact_dir must be a single relative directory name`);
+  }
+  const extra = {
+    match: raw.match.trim().replaceAll("\\", "/"),
+    artifactDir: raw.artifact_dir.trim(),
+    command: asCommand(raw.command, `${label}.command`),
+    markers: asStringArray(raw.markers, `${label}.markers`)
+  };
+  assertAllowedCleanCommand(extra.command, extra.artifactDir);
+  return extra;
 }
 function parseProject(value, index) {
   if (!value || typeof value !== "object")
@@ -266,10 +329,11 @@ function resolveProjectPolicy(task, config) {
     }
     strategies = named.map((name) => config.strategies.find((strategy) => strategy.name === name)).filter((strategy) => strategy.enabled);
   }
+  const extras = [...config.extraCommands, ...override?.extraCommands ?? []].map((extra, index) => extraCommandToStrategy(extra, index));
   return {
     enabled: true,
-    strategies,
-    extraCommands: [...config.extraCommands, ...override?.extraCommands ?? []],
+    strategies: [...strategies, ...extras],
+    extraCommands: [],
     denyPaths: [...config.denyPaths, ...override?.denyPaths ?? []]
   };
 }
@@ -304,26 +368,42 @@ async function resolveDenyPaths(paths, worktree, realpathFn = realpath) {
   }
   return resolved;
 }
-function pathLikeArguments(argument) {
-  const values = [argument];
-  const separator = argument.indexOf("=");
-  if (separator >= 0)
-    values.push(argument.slice(separator + 1));
-  return values.filter((value) => value.startsWith("/") || value.startsWith("~") || value.includes(".."));
-}
-function assertCommandStaysInside(command, cwd, worktree) {
-  for (const argument of command) {
-    for (const value of pathLikeArguments(argument)) {
-      const candidate = resolve(cwd, expandUserPath(value));
-      if (relativeInside(worktree, candidate) === undefined) {
-        throw new Error(`command argument escapes the worktree: ${argument}`);
-      }
-    }
-  }
-}
-var DEFAULT_FLUTTER_PATTERN;
+var DEFAULT_FLUTTER_PATTERN, FORBIDDEN_EXEC, FORBIDDEN_ARTIFACTS;
 var init_worktree_reaper_config = __esm(() => {
   DEFAULT_FLUTTER_PATTERN = String.raw`(?:^|\n)flutter:\s*(?:$|\n)|sdk:\s*flutter`;
+  FORBIDDEN_EXEC = new Set([
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "csh",
+    "ksh",
+    "env",
+    "sudo",
+    "git",
+    "python",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+    "osascript",
+    "chmod",
+    "chown",
+    "mv",
+    "cp",
+    "dd",
+    "find",
+    "xargs",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+    "deno",
+    "make",
+    "cmake"
+  ]);
+  FORBIDDEN_ARTIFACTS = new Set([".git", "src", ".", ".."]);
 });
 
 // packages/t3-orchestration/src/client.ts
@@ -567,7 +647,7 @@ function normalizeBranch(branch) {
   return branch.startsWith("refs/heads/") ? branch.slice("refs/heads/".length) : branch;
 }
 function isRunningTask(task) {
-  return task.sessionStatus === "running" || task.sessionStatus === "starting" || task.latestTurnState === "running" || task.phase === "running" || task.phase === "starting";
+  return task.sessionStatus === "running" || task.sessionStatus === "starting" || task.latestTurnState === "running" || task.phase === "running" || task.phase === "starting" || task.backgroundLiveness === "working" || task.backgroundLiveness === "monitoring";
 }
 function isCleanableLifecycle(task) {
   return !task.deleted && (task.settled === true || task.archived === true);
@@ -675,31 +755,12 @@ async function discoverCleanTargets(worktree, strategies, deps) {
         strategy: strategy.name,
         directory,
         artifactDir: join4(directory, strategy.artifactDir),
+        artifactName: strategy.artifactDir,
         command: strategy.command
       });
     }
   }
   return targets;
-}
-async function discoverExtraCommandTargets(worktree, extras, deps) {
-  if (extras.length === 0)
-    return [];
-  const directories = await walkDirectories(worktree, deps);
-  const targets = [];
-  for (const extra of extras) {
-    for (const directory of directories) {
-      const relative2 = relativeInside(worktree, directory);
-      if (relative2 === undefined)
-        continue;
-      if (!matchRelativeOrExact(relative2, extra.match))
-        continue;
-      targets.push({ match: extra.match, directory, command: extra.command });
-    }
-  }
-  return targets;
-}
-function matchRelativeOrExact(relativePath, pattern) {
-  return matchesAnyGlob(relativePath, [pattern]);
 }
 async function cleanSettledWorktrees(deps, options) {
   const config = options.config ?? defaultReaperConfig();
@@ -809,13 +870,9 @@ async function cleanSettledWorktrees(deps, options) {
       continue;
     }
     const targets = (await discoverCleanTargets(resolved.path, policy.strategies, deps)).filter((target) => !isDeniedPath(target.directory, denyPaths) && !isDeniedPath(target.artifactDir, denyPaths));
-    let extras = [];
     try {
-      extras = (await discoverExtraCommandTargets(resolved.path, policy.extraCommands, deps)).filter((target) => !isDeniedPath(target.directory, denyPaths));
       for (const target of targets)
-        assertCommandStaysInside(target.command, target.directory, resolved.path);
-      for (const extra of extras)
-        assertCommandStaysInside(extra.command, extra.directory, resolved.path);
+        assertAllowedCleanCommand(target.command, target.artifactName);
     } catch (error) {
       record({
         threadId: task.id,
@@ -829,7 +886,7 @@ async function cleanSettledWorktrees(deps, options) {
     let bytesBefore = 0;
     for (const directory of artifactDirs)
       bytesBefore += await deps.measureBytes(directory);
-    if (targets.length === 0 && extras.length === 0 || artifactDirs.length === 0 && extras.length === 0 || bytesBefore === 0 && extras.length === 0) {
+    if (targets.length === 0 || bytesBefore === 0) {
       if (!options.dryRun) {
         state.threads[task.id] = { path: resolved.path, bytesAfter: 0, cleanedAt: deps.now() };
       }
@@ -844,7 +901,7 @@ async function cleanSettledWorktrees(deps, options) {
       });
       continue;
     }
-    if (extras.length === 0 && shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
+    if (shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
       record({
         threadId: task.id,
         action: "unchanged",
@@ -854,6 +911,26 @@ async function cleanSettledWorktrees(deps, options) {
         bytesFreed: 0,
         reason: "already cleaned at recorded size"
       });
+      continue;
+    }
+    let current = task;
+    try {
+      current = await deps.readTask(task.id);
+    } catch (error) {
+      record({
+        threadId: task.id,
+        action: "failed",
+        path: resolved.path,
+        reason: `could not revalidate task: ${error instanceof Error ? error.message : String(error)}`
+      });
+      continue;
+    }
+    if (isRunningTask(current)) {
+      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "task is running" });
+      continue;
+    }
+    if (!isCleanableLifecycle(current)) {
+      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "not settled or archived" });
       continue;
     }
     if (options.dryRun) {
@@ -870,8 +947,6 @@ async function cleanSettledWorktrees(deps, options) {
     try {
       for (const target of targets)
         await deps.runClean(target.command, target.directory);
-      for (const extra of extras)
-        await deps.runClean(extra.command, extra.directory);
     } catch (error) {
       record({
         threadId: task.id,
@@ -1015,6 +1090,12 @@ function createDefaultReaperDependencies(request) {
         throw new Error(dedicated.error ?? "worktrees.listCleanable failed");
       }
       return listFromTasks();
+    },
+    async readTask(threadId) {
+      const response = await request({ op: "tasks.status", threadId });
+      if (!response.ok)
+        throw new Error(response.error ?? `tasks.status failed for ${threadId}`);
+      return response.result;
     },
     async listGitWorktrees(workspaceRoot) {
       const result = await Bun.$`git -C ${workspaceRoot} worktree list --porcelain`.nothrow().quiet();

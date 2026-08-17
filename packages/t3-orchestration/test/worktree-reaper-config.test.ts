@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  assertCommandStaysInside,
+  assertAllowedCleanCommand,
   defaultReaperConfig,
   loadReaperConfig,
   matchRelativeGlob,
@@ -75,9 +75,18 @@ enabled = false
     expect(matchRelativeGlob("apps/mobile/src", "apps/*")).toBe(false);
   });
 
-  test("refuses extra-command arguments that escape the worktree", () => {
-    expect(() => assertCommandStaysInside(["rm", "-rf", "/etc"], "/repo/apps/mobile", "/repo")).toThrow("escapes the worktree");
-    expect(() => assertCommandStaysInside(["cargo", "clean", "--target-dir=/tmp/out"], "/repo/apps/mobile", "/repo")).toThrow("escapes the worktree");
-    expect(() => assertCommandStaysInside(["rm", "-rf", "scratch"], "/repo/apps/mobile", "/repo")).not.toThrow();
+  test("allows only artifact-only cleaners", () => {
+    expect(() => assertAllowedCleanCommand(["cargo", "clean", "--target-dir", "target"], "target")).not.toThrow();
+    expect(() => assertAllowedCleanCommand(["flutter", "clean"], "build")).not.toThrow();
+    expect(() => assertAllowedCleanCommand(["rm", "-rf", ".dart_tool"], ".dart_tool")).not.toThrow();
+    expect(() => assertAllowedCleanCommand(["sh", "-c", "printf escaped > /tmp/reaper-proof"], "target")).toThrow("not allowed");
+    expect(() => assertAllowedCleanCommand(["git", "-C/tmp", "clean", "-fd"], "target")).toThrow();
+    expect(() => assertAllowedCleanCommand(["rm", "-rf", "src"], "src")).toThrow();
+    expect(() => assertAllowedCleanCommand(["rm", "-rf", ".git"], ".git")).toThrow();
+    expect(() => parseReaperConfig(`
+[[extra_commands]]
+match = "apps/mobile"
+command = ["sh", "-c", "rm -rf /"]
+`)).toThrow("artifact_dir");
   });
 });

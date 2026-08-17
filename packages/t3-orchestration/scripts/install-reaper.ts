@@ -234,7 +234,16 @@ async function bunExecutable(): Promise<string> {
 }
 
 function plistFor(cliPath: string, bunPath: string): string {
-  const inheritedConfig = ["CODEX_HOME", "T3_HOME", "T3_ORCHESTRATION_SOCKET"].flatMap((name) =>
+  const inheritedConfig = [
+    "CODEX_HOME",
+    "T3_HOME",
+    "T3_ORCHESTRATION_SOCKET",
+    "T3_WORKTREE_REAPER_CONFIG",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "T3_ORCHESTRATION_REMOTE_URL",
+    "T3_ORCHESTRATION_REMOTE_CONFIG",
+  ].flatMap((name) =>
     process.env[name] ? [`<string>${name}=${escapeXml(process.env[name]!)}</string>`] : []
   );
   const launchPath = `${home}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;

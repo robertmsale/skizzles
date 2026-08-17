@@ -2,7 +2,7 @@ import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/pr
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
-  assertCommandStaysInside,
+  assertAllowedCleanCommand,
   defaultReaperConfig,
   isDeniedPath,
   matchesAnyGlob,
@@ -10,7 +10,6 @@ import {
   resolveDenyPaths,
   resolveProjectPolicy,
   type CleanStrategy,
-  type ExtraCommand,
   type ReaperConfig,
 } from "./worktree-reaper-config.ts";
 
@@ -36,6 +35,7 @@ export type CleanableTask = {
   phase: string;
   sessionStatus: string | null;
   latestTurnState: string | null;
+  backgroundLiveness?: "working" | "monitoring" | null;
   archived: boolean;
   deleted: boolean;
   settled: boolean;
@@ -90,6 +90,7 @@ export type ReaperReport = {
 
 export type ReaperDependencies = {
   listCleanableTasks(): Promise<CleanableTask[]>;
+  readTask(threadId: string): Promise<CleanableTask>;
   listGitWorktrees(workspaceRoot: string): Promise<GitWorktree[]>;
   realpath(path: string): Promise<string>;
   pathExists(path: string): Promise<boolean>;
@@ -140,7 +141,8 @@ export function normalizeBranch(branch: string | null | undefined): string | nul
 export function isRunningTask(task: CleanableTask): boolean {
   return task.sessionStatus === "running" || task.sessionStatus === "starting"
     || task.latestTurnState === "running"
-    || task.phase === "running" || task.phase === "starting";
+    || task.phase === "running" || task.phase === "starting"
+    || task.backgroundLiveness === "working" || task.backgroundLiveness === "monitoring";
 }
 
 export function isCleanableLifecycle(task: CleanableTask): boolean {
@@ -213,6 +215,7 @@ export type CleanTarget = {
   strategy: string;
   directory: string;
   artifactDir: string;
+  artifactName: string;
   command: string[];
 };
 
@@ -271,34 +274,12 @@ export async function discoverCleanTargets(
         strategy: strategy.name,
         directory,
         artifactDir: join(directory, strategy.artifactDir),
+        artifactName: strategy.artifactDir,
         command: strategy.command,
       });
     }
   }
   return targets;
-}
-
-export async function discoverExtraCommandTargets(
-  worktree: string,
-  extras: ExtraCommand[],
-  deps: Pick<ReaperDependencies, "isDirectory" | "readDirectoryNames">,
-): Promise<Array<{ match: string; directory: string; command: string[] }>> {
-  if (extras.length === 0) return [];
-  const directories = await walkDirectories(worktree, deps);
-  const targets: Array<{ match: string; directory: string; command: string[] }> = [];
-  for (const extra of extras) {
-    for (const directory of directories) {
-      const relative = relativeInside(worktree, directory);
-      if (relative === undefined) continue;
-      if (!matchRelativeOrExact(relative, extra.match)) continue;
-      targets.push({ match: extra.match, directory, command: extra.command });
-    }
-  }
-  return targets;
-}
-
-function matchRelativeOrExact(relativePath: string, pattern: string): boolean {
-  return matchesAnyGlob(relativePath, [pattern]);
 }
 
 export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
@@ -418,12 +399,8 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     }
     const targets = (await discoverCleanTargets(resolved.path, policy.strategies, deps))
       .filter((target) => !isDeniedPath(target.directory, denyPaths) && !isDeniedPath(target.artifactDir, denyPaths));
-    let extras: Array<{ match: string; directory: string; command: string[] }> = [];
     try {
-      extras = (await discoverExtraCommandTargets(resolved.path, policy.extraCommands, deps))
-        .filter((target) => !isDeniedPath(target.directory, denyPaths));
-      for (const target of targets) assertCommandStaysInside(target.command, target.directory, resolved.path);
-      for (const extra of extras) assertCommandStaysInside(extra.command, extra.directory, resolved.path);
+      for (const target of targets) assertAllowedCleanCommand(target.command, target.artifactName);
     } catch (error) {
       record({
         threadId: task.id,
@@ -436,7 +413,7 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     const artifactDirs = targets.map((target) => target.artifactDir);
     let bytesBefore = 0;
     for (const directory of artifactDirs) bytesBefore += await deps.measureBytes(directory);
-    if ((targets.length === 0 && extras.length === 0) || (artifactDirs.length === 0 && extras.length === 0) || (bytesBefore === 0 && extras.length === 0)) {
+    if (targets.length === 0 || bytesBefore === 0) {
       if (!options.dryRun) {
         state.threads[task.id] = { path: resolved.path, bytesAfter: 0, cleanedAt: deps.now() };
       }
@@ -451,7 +428,7 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
       });
       continue;
     }
-    if (extras.length === 0 && shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
+    if (shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
       record({
         threadId: task.id,
         action: "unchanged",
@@ -461,6 +438,26 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
         bytesFreed: 0,
         reason: "already cleaned at recorded size",
       });
+      continue;
+    }
+    let current = task;
+    try {
+      current = await deps.readTask(task.id);
+    } catch (error) {
+      record({
+        threadId: task.id,
+        action: "failed",
+        path: resolved.path,
+        reason: `could not revalidate task: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      continue;
+    }
+    if (isRunningTask(current)) {
+      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "task is running" });
+      continue;
+    }
+    if (!isCleanableLifecycle(current)) {
+      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "not settled or archived" });
       continue;
     }
     if (options.dryRun) {
@@ -476,7 +473,6 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     }
     try {
       for (const target of targets) await deps.runClean(target.command, target.directory);
-      for (const extra of extras) await deps.runClean(extra.command, extra.directory);
     } catch (error) {
       record({
         threadId: task.id,
@@ -617,6 +613,11 @@ export function createDefaultReaperDependencies(
         throw new Error(dedicated.error ?? "worktrees.listCleanable failed");
       }
       return listFromTasks();
+    },
+    async readTask(threadId) {
+      const response = await request({ op: "tasks.status", threadId });
+      if (!response.ok) throw new Error(response.error ?? `tasks.status failed for ${threadId}`);
+      return response.result as CleanableTask;
     },
     async listGitWorktrees(workspaceRoot) {
       const result = await Bun.$`git -C ${workspaceRoot} worktree list --porcelain`.nothrow().quiet();
