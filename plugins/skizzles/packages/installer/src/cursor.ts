@@ -154,30 +154,19 @@ function readReceipt(cursorHome: string): CursorHarnessReceipt {
   return value as CursorHarnessReceipt;
 }
 
+function isOwnedCursorRuleTarget(cursorHome: string, target: string): boolean {
+  const ruleRoot = resolve(join(cursorHome, pluginRelativeRoot, "rules"));
+  const relativeRule = relative(ruleRoot, target);
+  return relativeRule !== "" && !relativeRule.startsWith("..") && !relativeRule.includes("/") && /\.(mdc|md)$/.test(relativeRule);
+}
+
 function validateReceiptEntries(receipt: CursorHarnessReceipt, cursorHome: string): void {
   const sourceRoot = resolve(receipt.sourceRoot);
-  const pluginTarget = join(cursorHome, pluginRelativeRoot);
-  const fixedEntries = new Map<string, Omit<InstalledEntry, "fingerprint">>([
-    [
-      join(pluginTarget, ".cursor-plugin/plugin.json"),
-      {
-        source: join(sourceRoot, "cursor/plugin/.cursor-plugin/plugin.json"),
-        target: join(pluginTarget, ".cursor-plugin/plugin.json"),
-        kind: "file",
-        transfer: "copy-only",
-      },
-    ],
-    [
-      join(pluginTarget, "rules/skizzles-cursor.mdc"),
-      {
-        source: join(sourceRoot, "cursor/plugin/rules/skizzles-cursor.mdc"),
-        target: join(pluginTarget, "rules/skizzles-cursor.mdc"),
-        kind: "file",
-        transfer: "copy-only",
-      },
-    ],
-  ]);
+  const pluginJsonTarget = join(cursorHome, pluginRelativeRoot, ".cursor-plugin/plugin.json");
+  const pluginJsonSource = join(sourceRoot, "cursor/plugin/.cursor-plugin/plugin.json");
   const seen = new Set<string>();
+  let sawPluginJson = false;
+  let sawRule = false;
   for (const entry of receipt.entries) {
     if (
       !entry ||
@@ -193,15 +182,22 @@ function validateReceiptEntries(receipt: CursorHarnessReceipt, cursorHome: strin
     const target = resolve(entry.target);
     if (seen.has(target)) throw new Error(`Cursor harness receipt contains a duplicate target: ${target}`);
     seen.add(target);
-    const fixed = fixedEntries.get(target);
-    if (fixed) {
+    if (target === pluginJsonTarget) {
       if (
-        resolve(entry.source) !== fixed.source ||
-        entry.kind !== fixed.kind ||
-        entry.transfer !== fixed.transfer
+        resolve(entry.source) !== pluginJsonSource ||
+        entry.kind !== "file" ||
+        entry.transfer !== "copy-only"
       ) {
         throw new Error(`Cursor harness receipt entry does not match its owned target: ${target}`);
       }
+      sawPluginJson = true;
+      continue;
+    }
+    if (isOwnedCursorRuleTarget(cursorHome, target)) {
+      if (entry.kind !== "file" || entry.transfer !== "copy-only") {
+        throw new Error(`Cursor harness receipt entry does not match its owned target: ${target}`);
+      }
+      sawRule = true;
       continue;
     }
     const skillRoot = join(cursorHome, "skills");
@@ -216,9 +212,8 @@ function validateReceiptEntries(receipt: CursorHarnessReceipt, cursorHome: strin
       throw new Error(`Cursor harness receipt contains an unexpected target: ${target}`);
     }
   }
-  for (const target of fixedEntries.keys()) {
-    if (!seen.has(target)) throw new Error(`Cursor harness receipt is missing an owned target: ${target}`);
-  }
+  if (!sawPluginJson) throw new Error(`Cursor harness receipt is missing an owned target: ${pluginJsonTarget}`);
+  if (!sawRule) throw new Error(`Cursor harness receipt is missing an owned Cursor plugin rule under ${join(cursorHome, pluginRelativeRoot, "rules")}`);
 }
 
 export function installCursorHarness(options: CursorHarnessOptions): CursorHarnessReceipt {

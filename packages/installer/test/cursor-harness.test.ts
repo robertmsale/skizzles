@@ -82,6 +82,29 @@ describe("Cursor harness installer", () => {
     expect(existsSync(cursorHarnessReceiptPath(f.cursorHome))).toBe(false);
   });
 
+  test("uninstall accepts a prior copy-only plugin rule filename", () => {
+    const f = fixture();
+    installCursorHarness({ ...f, transfer: "copy" });
+    const receiptPath = cursorHarnessReceiptPath(f.cursorHome);
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as {
+      entries: Array<{ source: string; target: string; kind: string; transfer: string; fingerprint: string }>;
+    };
+    const current = join(f.cursorHome, "plugins/local/skizzles/rules/skizzles-cursor.mdc");
+    const legacy = join(f.cursorHome, "plugins/local/skizzles/rules/skizzles-cursor.md");
+    const entry = receipt.entries.find((item) => item.target === current);
+    expect(entry).toBeDefined();
+    writeFileSync(legacy, readFileSync(current));
+    rmSync(current);
+    entry!.source = join(f.sourceRoot, "cursor/plugin/rules/skizzles-cursor.md");
+    entry!.target = legacy;
+    writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+
+    uninstallCursorHarness(f.cursorHome);
+
+    expect(existsSync(legacy)).toBe(false);
+    expect(existsSync(cursorHarnessReceiptPath(f.cursorHome))).toBe(false);
+  });
+
   test("refuses a reserved skills-cursor portable skill name", () => {
     const f = fixture();
     writeFileSync(join(f.sourceRoot, "cursor/portable-skills.json"), '{"version":1,"skills":["skills-cursor"]}\n');
