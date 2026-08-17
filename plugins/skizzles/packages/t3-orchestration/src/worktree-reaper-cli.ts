@@ -255,11 +255,13 @@ function resolveRegisteredWorktree(task, worktrees, resolvedPaths) {
   const primaryPath = resolvedPaths.get(primary.path);
   if (!primaryPath)
     return { ok: false, reason: "could not resolve primary checkout", failClosed: true };
+  const workspaceRoot = task.workspaceRoot?.trim();
+  const workspacePath = workspaceRoot ? resolvedPaths.get(workspaceRoot) : undefined;
   const registered = new Map;
   for (const worktree of worktrees) {
     const resolved = resolvedPaths.get(worktree.path);
     if (!resolved)
-      return { ok: false, reason: `could not resolve worktree ${worktree.path}`, failClosed: true };
+      continue;
     if (registered.has(resolved) && registered.get(resolved) !== worktree) {
       return { ok: false, reason: `ambiguous registered worktree path ${resolved}`, failClosed: true };
     }
@@ -273,7 +275,7 @@ function resolveRegisteredWorktree(task, worktrees, resolvedPaths) {
     const match = registered.get(resolvedClaim);
     if (!match)
       return { ok: false, reason: `claimed worktreePath is not a registered git worktree: ${resolvedClaim}`, failClosed: true };
-    if (resolvedClaim === primaryPath) {
+    if (resolvedClaim === primaryPath || resolvedClaim === workspacePath) {
       return { ok: false, reason: `refusing to clean project primary checkout ${resolvedClaim}`, failClosed: true };
     }
     return { ok: true, path: resolvedClaim };
@@ -282,7 +284,7 @@ function resolveRegisteredWorktree(task, worktrees, resolvedPaths) {
   if (!branch)
     return { ok: false, reason: "task has no worktreePath or branch", failClosed: true };
   const matches = worktrees.map((worktree) => ({ worktree, path: resolvedPaths.get(worktree.path) })).filter((entry) => {
-    return Boolean(entry.path && normalizeBranch(entry.worktree.branch) === branch && entry.path !== primaryPath);
+    return Boolean(entry.path && normalizeBranch(entry.worktree.branch) === branch && entry.path !== primaryPath && entry.path !== workspacePath);
   });
   if (matches.length === 0)
     return { ok: false, reason: `no registered worktree matches branch ${branch}`, failClosed: false };
@@ -390,17 +392,30 @@ async function cleanSettledWorktrees(deps, options) {
     const resolvedPaths = new Map;
     try {
       resolvedPaths.set(workspaceRoot, await deps.realpath(workspaceRoot));
-      if (task.worktreePath?.trim())
-        resolvedPaths.set(task.worktreePath, await deps.realpath(task.worktreePath));
-      for (const worktree of worktrees)
-        resolvedPaths.set(worktree.path, await deps.realpath(worktree.path));
     } catch (error) {
       record({
         threadId: task.id,
-        action: "failed",
-        reason: `could not resolve worktree paths: ${error instanceof Error ? error.message : String(error)}`
+        action: "skipped",
+        reason: `workspaceRoot is not resolvable: ${error instanceof Error ? error.message : String(error)}`
       });
       continue;
+    }
+    if (task.worktreePath?.trim()) {
+      try {
+        resolvedPaths.set(task.worktreePath, await deps.realpath(task.worktreePath));
+      } catch (error) {
+        record({
+          threadId: task.id,
+          action: "skipped",
+          reason: `claimed worktreePath is not resolvable: ${error instanceof Error ? error.message : String(error)}`
+        });
+        continue;
+      }
+    }
+    for (const worktree of worktrees) {
+      try {
+        resolvedPaths.set(worktree.path, await deps.realpath(worktree.path));
+      } catch {}
     }
     const resolved = resolveRegisteredWorktree(task, worktrees, resolvedPaths);
     if (!resolved.ok) {

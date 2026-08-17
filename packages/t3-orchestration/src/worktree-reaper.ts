@@ -148,7 +148,7 @@ export function resolveRegisteredWorktree(
   const registered = new Map<string, GitWorktree>();
   for (const worktree of worktrees) {
     const resolved = resolvedPaths.get(worktree.path);
-    if (!resolved) return { ok: false, reason: `could not resolve worktree ${worktree.path}`, failClosed: true };
+    if (!resolved) continue;
     if (registered.has(resolved) && registered.get(resolved) !== worktree) {
       return { ok: false, reason: `ambiguous registered worktree path ${resolved}`, failClosed: true };
     }
@@ -286,15 +286,32 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     const resolvedPaths = new Map<string, string>();
     try {
       resolvedPaths.set(workspaceRoot, await deps.realpath(workspaceRoot));
-      if (task.worktreePath?.trim()) resolvedPaths.set(task.worktreePath, await deps.realpath(task.worktreePath));
-      for (const worktree of worktrees) resolvedPaths.set(worktree.path, await deps.realpath(worktree.path));
     } catch (error) {
       record({
         threadId: task.id,
-        action: "failed",
-        reason: `could not resolve worktree paths: ${error instanceof Error ? error.message : String(error)}`,
+        action: "skipped",
+        reason: `workspaceRoot is not resolvable: ${error instanceof Error ? error.message : String(error)}`,
       });
       continue;
+    }
+    if (task.worktreePath?.trim()) {
+      try {
+        resolvedPaths.set(task.worktreePath, await deps.realpath(task.worktreePath));
+      } catch (error) {
+        record({
+          threadId: task.id,
+          action: "skipped",
+          reason: `claimed worktreePath is not resolvable: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        continue;
+      }
+    }
+    for (const worktree of worktrees) {
+      try {
+        resolvedPaths.set(worktree.path, await deps.realpath(worktree.path));
+      } catch {
+        // Stale git worktree entries must not fail a settled task that still has a live path.
+      }
     }
     const resolved = resolveRegisteredWorktree(task, worktrees, resolvedPaths);
     if (!resolved.ok) {

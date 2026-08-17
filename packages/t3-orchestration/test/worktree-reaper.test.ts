@@ -225,6 +225,25 @@ describe("cleanSettledWorktrees", () => {
     expect(harness.flutter).toEqual([]);
   });
 
+  test("ignores stale missing sibling worktrees when the claimed path is live", async () => {
+    const harness = deps({
+      listGitWorktrees: async () => [
+        ...worktrees(),
+        { path: "/private/tmp/ezra-atomic-tenant-enqueue", branch: "codex/stale", bare: false },
+      ],
+      realpath: async (path) => {
+        if (path === "/private/tmp/ezra-atomic-tenant-enqueue") throw new Error(`path does not exist: ${path}`);
+        return path;
+      },
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: true });
+    expect(report.ok).toBe(true);
+    expect(report.tasks[0]).toMatchObject({
+      action: "would-clean",
+      path: "/repo/.t3/worktrees/repo/t3code-task",
+    });
+  });
+
   test("refuses the primary checkout and does not clean", async () => {
     const harness = deps({ tasks: [task({ worktreePath: "/repo" })] });
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
