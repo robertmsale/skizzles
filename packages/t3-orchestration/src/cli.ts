@@ -15,7 +15,7 @@ t3ctl tasks {archive|unarchive|pin|unpin|settle|unsettle|interrupt} ID
 t3ctl tasks approvals [--project ID]
 t3ctl tasks approve ID [REQUEST_ID]
 t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]
-t3ctl worktrees clean-settled [--dry-run]`;
+t3ctl worktrees clean-settled [--dry-run] [--config PATH]`;
 const [group, action, ...args] = process.argv.slice(2);
 if (group === "--help" || group === "-h") {
   console.log(JSON.stringify({ help: USAGE }));
@@ -136,8 +136,12 @@ try {
       throw new Error("worktrees clean-settled is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
     }
     const { cleanSettledWorktrees, createDefaultReaperDependencies, formatReaperLogs } = await import("./worktree-reaper.ts");
+    const { loadReaperConfig } = await import("./worktree-reaper-config.ts");
+    const loaded = await loadReaperConfig(option("config"));
     const report = await cleanSettledWorktrees(createDefaultReaperDependencies((command) => daemonRequest(command)), {
       dryRun: payload.dryRun === true,
+      config: loaded.config,
+      configPath: loaded.path,
     });
     console.log(JSON.stringify({ ...report, log: formatReaperLogs(report) }, null, 2));
     process.exit(report.ok ? 0 : 1);

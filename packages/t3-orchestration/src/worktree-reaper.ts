@@ -1,6 +1,18 @@
 import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import {
+  assertCommandStaysInside,
+  defaultReaperConfig,
+  isDeniedPath,
+  matchesAnyGlob,
+  relativeInside,
+  resolveDenyPaths,
+  resolveProjectPolicy,
+  type CleanStrategy,
+  type ExtraCommand,
+  type ReaperConfig,
+} from "./worktree-reaper-config.ts";
 
 export const REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper";
 export const ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon";
@@ -20,6 +32,7 @@ const SKIP_DIRECTORY_NAMES = new Set([
 export type CleanableTask = {
   id: string;
   projectId: string;
+  projectTitle?: string | null;
   phase: string;
   sessionStatus: string | null;
   latestTurnState: string | null;
@@ -66,6 +79,7 @@ export type ReaperState = {
 export type ReaperReport = {
   ok: boolean;
   dryRun: boolean;
+  configPath: string | null;
   scanned: number;
   cleaned: number;
   skipped: number;
@@ -83,8 +97,7 @@ export type ReaperDependencies = {
   readDirectoryNames(path: string): Promise<string[]>;
   readText(path: string): Promise<string>;
   measureBytes(path: string): Promise<number>;
-  cargoClean(directory: string): Promise<void>;
-  flutterClean(directory: string): Promise<void>;
+  runClean(command: string[], directory: string): Promise<void>;
   readState(): Promise<ReaperState>;
   writeState(state: ReaperState): Promise<void>;
   now(): string;
@@ -196,42 +209,108 @@ export function isFlutterPubspec(text: string): boolean {
   return /(?:^|\n)flutter:\s*(?:$|\n)/.test(text) || /sdk:\s*flutter/.test(text);
 }
 
-export async function discoverArtifactRoots(
+export type CleanTarget = {
+  strategy: string;
+  directory: string;
+  artifactDir: string;
+  command: string[];
+};
+
+async function walkDirectories(
   worktree: string,
-  deps: Pick<ReaperDependencies, "pathExists" | "isDirectory" | "readDirectoryNames" | "readText">,
-): Promise<{ cargo: string[]; flutter: string[] }> {
-  const cargo: string[] = [];
-  const flutter: string[] = [];
+  deps: Pick<ReaperDependencies, "isDirectory" | "readDirectoryNames">,
+): Promise<string[]> {
+  const directories = [worktree];
   const queue = [worktree];
-  const seen = new Set<string>();
+  const seen = new Set<string>([worktree]);
   while (queue.length) {
     const directory = queue.shift()!;
-    if (seen.has(directory)) continue;
-    seen.add(directory);
-    const names = await deps.readDirectoryNames(directory);
-    if (names.includes("Cargo.toml") && await deps.isDirectory(join(directory, "target"))) {
-      cargo.push(directory);
-    }
-    if (names.includes("pubspec.yaml") && await deps.isDirectory(join(directory, "build"))) {
-      try {
-        if (isFlutterPubspec(await deps.readText(join(directory, "pubspec.yaml")))) flutter.push(directory);
-      } catch {
-        // Unreadable pubspec is not a Flutter app we should clean.
-      }
-    }
-    for (const name of names) {
+    for (const name of await deps.readDirectoryNames(directory)) {
       if (SKIP_DIRECTORY_NAMES.has(name)) continue;
       const child = join(directory, name);
-      if (await deps.isDirectory(child)) queue.push(child);
+      if (seen.has(child) || !await deps.isDirectory(child)) continue;
+      seen.add(child);
+      directories.push(child);
+      queue.push(child);
     }
   }
-  return { cargo, flutter };
+  return directories;
 }
 
-export async function cleanSettledWorktrees(deps: ReaperDependencies, options: { dryRun: boolean }): Promise<ReaperReport> {
+async function strategyMatchesDirectory(
+  strategy: CleanStrategy,
+  worktree: string,
+  directory: string,
+  names: string[],
+  deps: Pick<ReaperDependencies, "isDirectory" | "readText">,
+): Promise<boolean> {
+  const relative = relativeInside(worktree, directory);
+  if (relative === undefined) return false;
+  if (!matchesAnyGlob(relative, strategy.match)) return false;
+  if (!strategy.markers.every((marker) => names.includes(marker))) return false;
+  if (!await deps.isDirectory(join(directory, strategy.artifactDir))) return false;
+  if (!strategy.requireText) return true;
+  try {
+    return new RegExp(strategy.requireText.pattern).test(await deps.readText(join(directory, strategy.requireText.file)));
+  } catch {
+    return false;
+  }
+}
+
+export async function discoverCleanTargets(
+  worktree: string,
+  strategies: CleanStrategy[],
+  deps: Pick<ReaperDependencies, "isDirectory" | "readDirectoryNames" | "readText">,
+): Promise<CleanTarget[]> {
+  const targets: CleanTarget[] = [];
+  for (const directory of await walkDirectories(worktree, deps)) {
+    const names = await deps.readDirectoryNames(directory);
+    for (const strategy of strategies) {
+      if (!await strategyMatchesDirectory(strategy, worktree, directory, names, deps)) continue;
+      targets.push({
+        strategy: strategy.name,
+        directory,
+        artifactDir: join(directory, strategy.artifactDir),
+        command: strategy.command,
+      });
+    }
+  }
+  return targets;
+}
+
+export async function discoverExtraCommandTargets(
+  worktree: string,
+  extras: ExtraCommand[],
+  deps: Pick<ReaperDependencies, "isDirectory" | "readDirectoryNames">,
+): Promise<Array<{ match: string; directory: string; command: string[] }>> {
+  if (extras.length === 0) return [];
+  const directories = await walkDirectories(worktree, deps);
+  const targets: Array<{ match: string; directory: string; command: string[] }> = [];
+  for (const extra of extras) {
+    for (const directory of directories) {
+      const relative = relativeInside(worktree, directory);
+      if (relative === undefined) continue;
+      if (!matchRelativeOrExact(relative, extra.match)) continue;
+      targets.push({ match: extra.match, directory, command: extra.command });
+    }
+  }
+  return targets;
+}
+
+function matchRelativeOrExact(relativePath: string, pattern: string): boolean {
+  return matchesAnyGlob(relativePath, [pattern]);
+}
+
+export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
+  dryRun: boolean;
+  config?: ReaperConfig;
+  configPath?: string | null;
+}): Promise<ReaperReport> {
+  const config = options.config ?? defaultReaperConfig();
   const report: ReaperReport = {
     ok: true,
     dryRun: options.dryRun,
+    configPath: options.configPath ?? null,
     scanned: 0,
     cleaned: 0,
     skipped: 0,
@@ -239,6 +318,9 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     bytesFreed: 0,
     tasks: [],
   };
+  if (!config.enabled) {
+    return report;
+  }
   const state = await deps.readState();
   const tasks = await deps.listCleanableTasks();
   report.scanned = tasks.length;
@@ -264,6 +346,11 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     }
     if (isRunningTask(task)) {
       record({ threadId: task.id, action: "skipped", reason: "task is running" });
+      continue;
+    }
+    const policy = resolveProjectPolicy(task, config);
+    if (!policy.enabled) {
+      record({ threadId: task.id, action: "skipped", reason: policy.reason ?? "project disabled by host config" });
       continue;
     }
     const workspaceRoot = task.workspaceRoot?.trim();
@@ -324,14 +411,31 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
       });
       continue;
     }
-    const artifactRoots = await discoverArtifactRoots(resolved.path, deps);
-    const artifactDirs = [
-      ...artifactRoots.cargo.map((directory) => join(directory, "target")),
-      ...artifactRoots.flutter.map((directory) => join(directory, "build")),
-    ];
+    const denyPaths = await resolveDenyPaths(policy.denyPaths, deps.realpath);
+    if (isDeniedPath(resolved.path, denyPaths)) {
+      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "worktree is denied by host config" });
+      continue;
+    }
+    const targets = (await discoverCleanTargets(resolved.path, policy.strategies, deps))
+      .filter((target) => !isDeniedPath(target.directory, denyPaths) && !isDeniedPath(target.artifactDir, denyPaths));
+    let extras: Array<{ match: string; directory: string; command: string[] }> = [];
+    try {
+      extras = (await discoverExtraCommandTargets(resolved.path, policy.extraCommands, deps))
+        .filter((target) => !isDeniedPath(target.directory, denyPaths));
+      for (const extra of extras) assertCommandStaysInside(extra.command, extra.directory, resolved.path);
+    } catch (error) {
+      record({
+        threadId: task.id,
+        action: "failed",
+        path: resolved.path,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    const artifactDirs = targets.map((target) => target.artifactDir);
     let bytesBefore = 0;
     for (const directory of artifactDirs) bytesBefore += await deps.measureBytes(directory);
-    if (artifactDirs.length === 0 || bytesBefore === 0) {
+    if ((targets.length === 0 && extras.length === 0) || (artifactDirs.length === 0 && extras.length === 0) || (bytesBefore === 0 && extras.length === 0)) {
       if (!options.dryRun) {
         state.threads[task.id] = { path: resolved.path, bytesAfter: 0, cleanedAt: deps.now() };
       }
@@ -342,11 +446,11 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
         bytesBefore: 0,
         bytesAfter: 0,
         bytesFreed: 0,
-        reason: "no cargo/flutter artifacts",
+        reason: "no matching artifacts",
       });
       continue;
     }
-    if (shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
+    if (extras.length === 0 && shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
       record({
         threadId: task.id,
         action: "unchanged",
@@ -370,8 +474,8 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
       continue;
     }
     try {
-      for (const directory of artifactRoots.cargo) await deps.cargoClean(directory);
-      for (const directory of artifactRoots.flutter) await deps.flutterClean(directory);
+      for (const target of targets) await deps.runClean(target.command, target.directory);
+      for (const extra of extras) await deps.runClean(extra.command, extra.directory);
     } catch (error) {
       record({
         threadId: task.id,
@@ -440,13 +544,6 @@ async function directorySize(path: string): Promise<number> {
     }
   }
   return total;
-}
-
-async function runCleanCommand(command: string, args: string[], directory: string): Promise<void> {
-  const result = await Bun.$`${command} ${args}`.cwd(directory).nothrow().quiet();
-  if (result.exitCode !== 0) {
-    throw new Error(`${command} ${args.join(" ")} failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
-  }
 }
 
 export function defaultStatePath(home = process.env.HOME || homedir()): string {
@@ -557,15 +654,14 @@ export function createDefaultReaperDependencies(
     },
     readText: (path) => readFile(path, "utf8"),
     measureBytes: directorySize,
-    cargoClean: async (directory) => {
+    async runClean(command, directory) {
       const env = { ...Bun.env };
-      delete env.CARGO_TARGET_DIR;
-      const result = await Bun.$`cargo clean --target-dir target`.cwd(directory).env(env).nothrow().quiet();
+      if (command[0] === "cargo") delete env.CARGO_TARGET_DIR;
+      const result = await Bun.$`${command}`.cwd(directory).env(env).nothrow().quiet();
       if (result.exitCode !== 0) {
-        throw new Error(`cargo clean --target-dir target failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
+        throw new Error(`${command.join(" ")} failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
       }
     },
-    flutterClean: (directory) => runCleanCommand("flutter", ["clean"], directory),
     readState: readReaperState,
     writeState: writeReaperState,
     now: () => new Date().toISOString(),

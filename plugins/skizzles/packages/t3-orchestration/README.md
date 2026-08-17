@@ -46,11 +46,15 @@ bun run packages/t3-orchestration/scripts/install.ts --uninstall
 
 ### Settled-worktree artifact reaper
 
-T3 settle/archive does not delete worktrees or their `target/` and `build/`
-directories. The optional host-only sidecar `t3-worktree-reaper` talks to the
-existing `t3-orchestrationd` Unix socket, then runs `cargo clean` and
-`flutter clean` inside registered Git worktrees for tasks that are
-`settled=true` or `archived=true`.
+T3 settle/archive does not delete worktrees or their build artifacts. The
+optional host-only sidecar `t3-worktree-reaper` talks to the existing
+`t3-orchestrationd` Unix socket, then runs configured cleaners inside
+registered Git worktrees for tasks that are `settled=true` or `archived=true`.
+
+With no host config, detection is generic: `cargo clean --target-dir target`
+in any directory that has `Cargo.toml` plus `target/`, and `flutter clean` in
+any directory that has a Flutter `pubspec.yaml` plus `build/`. Nothing in the
+public defaults names a particular application or repository.
 
 It will not:
 
@@ -58,7 +62,7 @@ It will not:
 - write `io.github.t3-orchestration.daemon`
 - `git worktree remove` or delete a worktree directory, source, or `.git`
 - clean the project's primary checkout
-- clean a task whose session, latest turn, or phase is running
+- clean a task whose session, latest turn, or phase is running or starting
 - guess when two worktrees match the same branch
 
 Install it separately from the orchestration daemon:
@@ -68,6 +72,46 @@ bun run packages/t3-orchestration/scripts/install-reaper.ts
 t3ctl worktrees clean-settled --dry-run
 t3-worktree-reaper --dry-run
 ```
+
+Optional host config lives at `~/.config/skizzles/t3-worktree-reaper.toml`
+(or `T3_WORKTREE_REAPER_CONFIG` / `--config`). That file is machine-local and
+must not be committed. Example:
+
+```toml
+# ~/.config/skizzles/t3-worktree-reaper.toml
+enabled = true
+include_projects = ["acme"]
+deny_paths = ["~/Code/acme"]
+
+[[strategies]]
+name = "cargo"
+markers = ["Cargo.toml"]
+artifact_dir = "target"
+command = ["cargo", "clean", "--target-dir", "target"]
+
+[[strategies]]
+name = "flutter"
+markers = ["pubspec.yaml"]
+artifact_dir = "build"
+require_text = { file = "pubspec.yaml", pattern = "(?m)^flutter:\\s*$|sdk:\\s*flutter" }
+command = ["flutter", "clean"]
+match = ["apps/**"]
+
+[[projects]]
+id = "acme"
+enabled = true
+strategies = ["cargo", "flutter"]
+deny_paths = ["vendor"]
+
+[[projects.extra_commands]]
+match = "acme/app"
+command = ["dart", "pub", "cache", "clean"]
+```
+
+`include_projects` matches a T3 project title, project id, or workspace root.
+Set `enabled = false` on a `[[projects]]` entry to skip that project. Extra
+commands run only in matched directories inside the resolved worktree; arguments
+that escape the worktree are refused.
 
 The reaper installer copies the runtime into
 `~/.local/share/skizzles/t3-worktree-reaper`, links `~/.local/bin/t3-worktree-reaper`,

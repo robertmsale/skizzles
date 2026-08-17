@@ -146,6 +146,303 @@ var init_config = __esm(() => {
   KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
 });
 
+// packages/t3-orchestration/src/worktree-reaper-config.ts
+var exports_worktree_reaper_config = {};
+__export(exports_worktree_reaper_config, {
+  resolveProjectPolicy: () => resolveProjectPolicy,
+  resolveDenyPaths: () => resolveDenyPaths,
+  relativeInside: () => relativeInside,
+  parseReaperConfig: () => parseReaperConfig,
+  normalizeRelative: () => normalizeRelative,
+  matchesAnyGlob: () => matchesAnyGlob,
+  matchRelativeGlob: () => matchRelativeGlob,
+  loadReaperConfig: () => loadReaperConfig,
+  isDeniedPath: () => isDeniedPath,
+  expandUserPath: () => expandUserPath,
+  defaultReaperConfigPath: () => defaultReaperConfigPath,
+  defaultReaperConfig: () => defaultReaperConfig,
+  assertCommandStaysInside: () => assertCommandStaysInside
+});
+import { readFile as readFile2, realpath } from "fs/promises";
+import { homedir } from "os";
+import { isAbsolute, join as join3, relative, resolve, sep } from "path";
+function defaultReaperConfig() {
+  return {
+    enabled: true,
+    includeProjects: [],
+    denyPaths: [],
+    extraCommands: [],
+    projects: [],
+    strategies: [
+      {
+        name: "cargo",
+        enabled: true,
+        markers: ["Cargo.toml"],
+        artifactDir: "target",
+        command: ["cargo", "clean", "--target-dir", "target"],
+        match: []
+      },
+      {
+        name: "flutter",
+        enabled: true,
+        markers: ["pubspec.yaml"],
+        artifactDir: "build",
+        command: ["flutter", "clean"],
+        match: [],
+        requireText: { file: "pubspec.yaml", pattern: DEFAULT_FLUTTER_PATTERN }
+      }
+    ]
+  };
+}
+function defaultReaperConfigPath(home3 = process.env.HOME || homedir()) {
+  const configRoot = resolve(process.env.XDG_CONFIG_HOME?.trim() || join3(home3, ".config"));
+  return join3(configRoot, "skizzles/t3-worktree-reaper.toml");
+}
+function asStringArray(value, label) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
+    throw new Error(`${label} must be an array of non-empty strings`);
+  }
+  return value.map((entry) => entry.trim());
+}
+function asCommand(value, label) {
+  const command = asStringArray(value, label);
+  if (command.length === 0)
+    throw new Error(`${label} must include an executable`);
+  return command;
+}
+function parseStrategy(value, index) {
+  if (!value || typeof value !== "object")
+    throw new Error(`strategies[${index}] must be a table`);
+  const raw = value;
+  if (typeof raw.name !== "string" || raw.name.trim() === "")
+    throw new Error(`strategies[${index}].name is required`);
+  if (typeof raw.artifact_dir !== "string" || raw.artifact_dir.trim() === "") {
+    throw new Error(`strategies[${index}].artifact_dir is required`);
+  }
+  if (raw.artifact_dir.includes("..") || raw.artifact_dir.includes("/") || raw.artifact_dir.includes("\\")) {
+    throw new Error(`strategies[${index}].artifact_dir must be a single relative directory name`);
+  }
+  let requireText;
+  if (raw.require_text !== undefined) {
+    if (!raw.require_text || typeof raw.require_text !== "object")
+      throw new Error(`strategies[${index}].require_text must be a table`);
+    const text = raw.require_text;
+    if (typeof text.file !== "string" || text.file.trim() === "" || typeof text.pattern !== "string" || text.pattern.trim() === "") {
+      throw new Error(`strategies[${index}].require_text needs file and pattern`);
+    }
+    if (text.file.includes("..") || isAbsolute(text.file))
+      throw new Error(`strategies[${index}].require_text.file must be a relative file name`);
+    requireText = { file: text.file.trim(), pattern: text.pattern };
+  }
+  return {
+    name: raw.name.trim(),
+    enabled: raw.enabled === undefined ? true : raw.enabled === true,
+    markers: asStringArray(raw.markers, `strategies[${index}].markers`),
+    artifactDir: raw.artifact_dir.trim(),
+    command: asCommand(raw.command, `strategies[${index}].command`),
+    match: asStringArray(raw.match, `strategies[${index}].match`),
+    ...requireText ? { requireText } : {}
+  };
+}
+function parseExtraCommand(value, label) {
+  if (!value || typeof value !== "object")
+    throw new Error(`${label} must be a table`);
+  const raw = value;
+  if (typeof raw.match !== "string" || raw.match.trim() === "")
+    throw new Error(`${label}.match is required`);
+  return { match: raw.match.trim().replaceAll("\\", "/"), command: asCommand(raw.command, `${label}.command`) };
+}
+function parseProject(value, index) {
+  if (!value || typeof value !== "object")
+    throw new Error(`projects[${index}] must be a table`);
+  const raw = value;
+  const extra = raw.extra_commands === undefined ? [] : Array.isArray(raw.extra_commands) ? raw.extra_commands.map((entry, extraIndex) => parseExtraCommand(entry, `projects[${index}].extra_commands[${extraIndex}]`)) : (() => {
+    throw new Error(`projects[${index}].extra_commands must be an array`);
+  })();
+  const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : undefined;
+  const workspaceRoot = typeof raw.workspace_root === "string" && raw.workspace_root.trim() ? raw.workspace_root.trim() : undefined;
+  if (!id && !workspaceRoot)
+    throw new Error(`projects[${index}] needs id or workspace_root`);
+  return {
+    ...id ? { id } : {},
+    ...workspaceRoot ? { workspaceRoot } : {},
+    enabled: raw.enabled === undefined ? true : raw.enabled === true,
+    ...raw.strategies === undefined ? {} : { strategies: asStringArray(raw.strategies, `projects[${index}].strategies`) },
+    extraCommands: extra,
+    denyPaths: asStringArray(raw.deny_paths, `projects[${index}].deny_paths`)
+  };
+}
+function parseReaperConfig(text) {
+  let parsed;
+  try {
+    parsed = Bun.TOML.parse(text);
+  } catch (error) {
+    throw new Error(`Worktree reaper config is not valid TOML: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object")
+    throw new Error("Worktree reaper config must be a TOML table");
+  const raw = parsed;
+  const defaults = defaultReaperConfig();
+  const strategies = raw.strategies === undefined ? defaults.strategies : Array.isArray(raw.strategies) ? raw.strategies.map((entry, index) => parseStrategy(entry, index)) : (() => {
+    throw new Error("strategies must be an array of tables");
+  })();
+  const names = strategies.map((entry) => entry.name);
+  if (new Set(names).size !== names.length)
+    throw new Error("strategy names must be unique");
+  const extraCommands = raw.extra_commands === undefined ? [] : Array.isArray(raw.extra_commands) ? raw.extra_commands.map((entry, index) => parseExtraCommand(entry, `extra_commands[${index}]`)) : (() => {
+    throw new Error("extra_commands must be an array of tables");
+  })();
+  const projects = raw.projects === undefined ? [] : Array.isArray(raw.projects) ? raw.projects.map((entry, index) => parseProject(entry, index)) : (() => {
+    throw new Error("projects must be an array of tables");
+  })();
+  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean")
+    throw new Error("enabled must be a boolean");
+  return {
+    enabled: raw.enabled === undefined ? true : raw.enabled === true,
+    includeProjects: asStringArray(raw.include_projects, "include_projects"),
+    denyPaths: asStringArray(raw.deny_paths, "deny_paths"),
+    strategies,
+    extraCommands,
+    projects
+  };
+}
+async function loadReaperConfig(explicitPath) {
+  const configured = explicitPath?.trim() || process.env.T3_WORKTREE_REAPER_CONFIG?.trim();
+  const path = configured || defaultReaperConfigPath();
+  try {
+    return { config: parseReaperConfig(await readFile2(path, "utf8")), path };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      if (configured)
+        throw new Error(`Worktree reaper config is missing: ${path}`);
+      return { config: defaultReaperConfig(), path: null };
+    }
+    throw error;
+  }
+}
+function normalizeRelative(path) {
+  return path.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+function matchRelativeGlob(relativePath, pattern) {
+  const path = normalizeRelative(relativePath);
+  const glob = normalizeRelative(pattern);
+  if (glob === "" || glob === "**")
+    return path !== ".." && !path.startsWith("../");
+  let source = "^";
+  for (let index = 0;index < glob.length; ) {
+    if (glob.startsWith("**", index)) {
+      source += ".*";
+      index += 2;
+      if (glob[index] === "/")
+        index++;
+      continue;
+    }
+    const character = glob[index];
+    if (character === "*")
+      source += "[^/]*";
+    else if ("\\^$+?.()|[]{}".includes(character))
+      source += `\\${character}`;
+    else
+      source += character;
+    index++;
+  }
+  source += "$";
+  return new RegExp(source).test(path);
+}
+function matchesAnyGlob(relativePath, patterns) {
+  if (patterns.length === 0)
+    return true;
+  return patterns.some((pattern) => matchRelativeGlob(relativePath, pattern));
+}
+function selectorMatches(task, selector) {
+  const value = selector.trim();
+  if (!value)
+    return false;
+  return task.projectId === value || task.projectTitle === value || task.workspaceRoot === value;
+}
+function resolveProjectPolicy(task, config) {
+  if (!config.enabled)
+    return { enabled: false, reason: "reaper disabled by host config", strategies: [], extraCommands: [], denyPaths: [] };
+  if (config.includeProjects.length > 0 && !config.includeProjects.some((selector) => selectorMatches(task, selector))) {
+    return { enabled: false, reason: "project is not in include_projects", strategies: [], extraCommands: [], denyPaths: [] };
+  }
+  const matches = config.projects.filter((project) => {
+    if (project.id && selectorMatches(task, project.id))
+      return true;
+    if (project.workspaceRoot && task.workspaceRoot === project.workspaceRoot)
+      return true;
+    return false;
+  });
+  if (matches.length > 1) {
+    return { enabled: false, reason: `ambiguous project override for ${task.projectId}`, strategies: [], extraCommands: [], denyPaths: [] };
+  }
+  const override = matches[0];
+  if (override && !override.enabled) {
+    return { enabled: false, reason: "project disabled by host config", strategies: [], extraCommands: [], denyPaths: [] };
+  }
+  const named = override?.strategies;
+  let strategies = config.strategies.filter((strategy) => strategy.enabled);
+  if (named) {
+    const unknown = named.filter((name) => !config.strategies.some((strategy) => strategy.name === name));
+    if (unknown.length) {
+      return { enabled: false, reason: `unknown strategy ${unknown.join(", ")}`, strategies: [], extraCommands: [], denyPaths: [] };
+    }
+    strategies = named.map((name) => config.strategies.find((strategy) => strategy.name === name)).filter((strategy) => strategy.enabled);
+  }
+  return {
+    enabled: true,
+    strategies,
+    extraCommands: [...config.extraCommands, ...override?.extraCommands ?? []],
+    denyPaths: [...config.denyPaths, ...override?.denyPaths ?? []]
+  };
+}
+function relativeInside(parent, child) {
+  const rel = relative(parent, child);
+  if (rel === "")
+    return "";
+  if (rel.startsWith("..") || isAbsolute(rel))
+    return;
+  return rel.split(sep).join("/");
+}
+function isDeniedPath(path, denyPaths) {
+  return denyPaths.some((deny) => path === deny || path.startsWith(`${deny}${sep}`) || path.startsWith(`${deny}/`));
+}
+function expandUserPath(path, home3 = process.env.HOME || homedir()) {
+  if (path === "~")
+    return home3;
+  if (path.startsWith("~/"))
+    return join3(home3, path.slice(2));
+  return path;
+}
+async function resolveDenyPaths(paths, realpathFn = realpath) {
+  const resolved = [];
+  for (const path of paths) {
+    const absolute = resolve(expandUserPath(path));
+    try {
+      resolved.push(await realpathFn(absolute));
+    } catch {
+      resolved.push(absolute);
+    }
+  }
+  return resolved;
+}
+function assertCommandStaysInside(command, cwd, worktree) {
+  for (const argument of command.slice(1)) {
+    if (!argument.startsWith("/") && !argument.includes(".."))
+      continue;
+    const candidate = resolve(cwd, argument);
+    if (relativeInside(worktree, candidate) === undefined) {
+      throw new Error(`extra command argument escapes the worktree: ${argument}`);
+    }
+  }
+}
+var DEFAULT_FLUTTER_PATTERN;
+var init_worktree_reaper_config = __esm(() => {
+  DEFAULT_FLUTTER_PATTERN = String.raw`(?:^|\n)flutter:\s*(?:$|\n)|sdk:\s*flutter`;
+});
+
 // packages/t3-orchestration/src/worktree-reaper.ts
 var exports_worktree_reaper = {};
 __export(exports_worktree_reaper, {
@@ -160,16 +457,17 @@ __export(exports_worktree_reaper, {
   isFlutterPubspec: () => isFlutterPubspec,
   isCleanableLifecycle: () => isCleanableLifecycle,
   formatReaperLogs: () => formatReaperLogs,
-  discoverArtifactRoots: () => discoverArtifactRoots,
+  discoverExtraCommandTargets: () => discoverExtraCommandTargets,
+  discoverCleanTargets: () => discoverCleanTargets,
   defaultStatePath: () => defaultStatePath,
   createDefaultReaperDependencies: () => createDefaultReaperDependencies,
   cleanSettledWorktrees: () => cleanSettledWorktrees,
   REAPER_LAUNCH_AGENT_LABEL: () => REAPER_LAUNCH_AGENT_LABEL,
   ORCHESTRATION_LAUNCH_AGENT_LABEL: () => ORCHESTRATION_LAUNCH_AGENT_LABEL
 });
-import { lstat, mkdir as mkdir2, readdir, readFile as readFile2, realpath, writeFile as writeFile2 } from "fs/promises";
-import { dirname as dirname2, join as join3, resolve } from "path";
-import { homedir } from "os";
+import { lstat, mkdir as mkdir2, readdir, readFile as readFile3, realpath as realpath2, writeFile as writeFile2 } from "fs/promises";
+import { dirname as dirname2, join as join4, resolve as resolve2 } from "path";
+import { homedir as homedir2 } from "os";
 function parseGitWorktreePorcelain(text) {
   const worktrees = [];
   let current;
@@ -270,40 +568,86 @@ function shouldSkipUnchanged(state, threadId, path, currentBytes) {
 function isFlutterPubspec(text) {
   return /(?:^|\n)flutter:\s*(?:$|\n)/.test(text) || /sdk:\s*flutter/.test(text);
 }
-async function discoverArtifactRoots(worktree, deps) {
-  const cargo = [];
-  const flutter = [];
+async function walkDirectories(worktree, deps) {
+  const directories = [worktree];
   const queue = [worktree];
-  const seen = new Set;
+  const seen = new Set([worktree]);
   while (queue.length) {
     const directory = queue.shift();
-    if (seen.has(directory))
-      continue;
-    seen.add(directory);
-    const names = await deps.readDirectoryNames(directory);
-    if (names.includes("Cargo.toml") && await deps.isDirectory(join3(directory, "target"))) {
-      cargo.push(directory);
-    }
-    if (names.includes("pubspec.yaml") && await deps.isDirectory(join3(directory, "build"))) {
-      try {
-        if (isFlutterPubspec(await deps.readText(join3(directory, "pubspec.yaml"))))
-          flutter.push(directory);
-      } catch {}
-    }
-    for (const name of names) {
+    for (const name of await deps.readDirectoryNames(directory)) {
       if (SKIP_DIRECTORY_NAMES.has(name))
         continue;
-      const child = join3(directory, name);
-      if (await deps.isDirectory(child))
-        queue.push(child);
+      const child = join4(directory, name);
+      if (seen.has(child) || !await deps.isDirectory(child))
+        continue;
+      seen.add(child);
+      directories.push(child);
+      queue.push(child);
     }
   }
-  return { cargo, flutter };
+  return directories;
+}
+async function strategyMatchesDirectory(strategy, worktree, directory, names, deps) {
+  const relative2 = relativeInside(worktree, directory);
+  if (relative2 === undefined)
+    return false;
+  if (!matchesAnyGlob(relative2, strategy.match))
+    return false;
+  if (!strategy.markers.every((marker) => names.includes(marker)))
+    return false;
+  if (!await deps.isDirectory(join4(directory, strategy.artifactDir)))
+    return false;
+  if (!strategy.requireText)
+    return true;
+  try {
+    return new RegExp(strategy.requireText.pattern).test(await deps.readText(join4(directory, strategy.requireText.file)));
+  } catch {
+    return false;
+  }
+}
+async function discoverCleanTargets(worktree, strategies, deps) {
+  const targets = [];
+  for (const directory of await walkDirectories(worktree, deps)) {
+    const names = await deps.readDirectoryNames(directory);
+    for (const strategy of strategies) {
+      if (!await strategyMatchesDirectory(strategy, worktree, directory, names, deps))
+        continue;
+      targets.push({
+        strategy: strategy.name,
+        directory,
+        artifactDir: join4(directory, strategy.artifactDir),
+        command: strategy.command
+      });
+    }
+  }
+  return targets;
+}
+async function discoverExtraCommandTargets(worktree, extras, deps) {
+  if (extras.length === 0)
+    return [];
+  const directories = await walkDirectories(worktree, deps);
+  const targets = [];
+  for (const extra of extras) {
+    for (const directory of directories) {
+      const relative2 = relativeInside(worktree, directory);
+      if (relative2 === undefined)
+        continue;
+      if (!matchRelativeOrExact(relative2, extra.match))
+        continue;
+      targets.push({ match: extra.match, directory, command: extra.command });
+    }
+  }
+  return targets;
+}
+function matchRelativeOrExact(relativePath, pattern) {
+  return matchesAnyGlob(relativePath, [pattern]);
 }
 async function cleanSettledWorktrees(deps, options) {
+  const config = options.config ?? defaultReaperConfig();
   const report = {
     ok: true,
     dryRun: options.dryRun,
+    configPath: options.configPath ?? null,
     scanned: 0,
     cleaned: 0,
     skipped: 0,
@@ -311,6 +655,9 @@ async function cleanSettledWorktrees(deps, options) {
     bytesFreed: 0,
     tasks: []
   };
+  if (!config.enabled) {
+    return report;
+  }
   const state = await deps.readState();
   const tasks = await deps.listCleanableTasks();
   report.scanned = tasks.length;
@@ -334,6 +681,11 @@ async function cleanSettledWorktrees(deps, options) {
     }
     if (isRunningTask(task)) {
       record({ threadId: task.id, action: "skipped", reason: "task is running" });
+      continue;
+    }
+    const policy = resolveProjectPolicy(task, config);
+    if (!policy.enabled) {
+      record({ threadId: task.id, action: "skipped", reason: policy.reason ?? "project disabled by host config" });
       continue;
     }
     const workspaceRoot = task.workspaceRoot?.trim();
@@ -392,15 +744,31 @@ async function cleanSettledWorktrees(deps, options) {
       });
       continue;
     }
-    const artifactRoots = await discoverArtifactRoots(resolved.path, deps);
-    const artifactDirs = [
-      ...artifactRoots.cargo.map((directory) => join3(directory, "target")),
-      ...artifactRoots.flutter.map((directory) => join3(directory, "build"))
-    ];
+    const denyPaths = await resolveDenyPaths(policy.denyPaths, deps.realpath);
+    if (isDeniedPath(resolved.path, denyPaths)) {
+      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "worktree is denied by host config" });
+      continue;
+    }
+    const targets = (await discoverCleanTargets(resolved.path, policy.strategies, deps)).filter((target) => !isDeniedPath(target.directory, denyPaths) && !isDeniedPath(target.artifactDir, denyPaths));
+    let extras = [];
+    try {
+      extras = (await discoverExtraCommandTargets(resolved.path, policy.extraCommands, deps)).filter((target) => !isDeniedPath(target.directory, denyPaths));
+      for (const extra of extras)
+        assertCommandStaysInside(extra.command, extra.directory, resolved.path);
+    } catch (error) {
+      record({
+        threadId: task.id,
+        action: "failed",
+        path: resolved.path,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+      continue;
+    }
+    const artifactDirs = targets.map((target) => target.artifactDir);
     let bytesBefore = 0;
     for (const directory of artifactDirs)
       bytesBefore += await deps.measureBytes(directory);
-    if (artifactDirs.length === 0 || bytesBefore === 0) {
+    if (targets.length === 0 && extras.length === 0 || artifactDirs.length === 0 && extras.length === 0 || bytesBefore === 0 && extras.length === 0) {
       if (!options.dryRun) {
         state.threads[task.id] = { path: resolved.path, bytesAfter: 0, cleanedAt: deps.now() };
       }
@@ -411,11 +779,11 @@ async function cleanSettledWorktrees(deps, options) {
         bytesBefore: 0,
         bytesAfter: 0,
         bytesFreed: 0,
-        reason: "no cargo/flutter artifacts"
+        reason: "no matching artifacts"
       });
       continue;
     }
-    if (shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
+    if (extras.length === 0 && shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
       record({
         threadId: task.id,
         action: "unchanged",
@@ -439,10 +807,10 @@ async function cleanSettledWorktrees(deps, options) {
       continue;
     }
     try {
-      for (const directory of artifactRoots.cargo)
-        await deps.cargoClean(directory);
-      for (const directory of artifactRoots.flutter)
-        await deps.flutterClean(directory);
+      for (const target of targets)
+        await deps.runClean(target.command, target.directory);
+      for (const extra of extras)
+        await deps.runClean(extra.command, extra.directory);
     } catch (error) {
       record({
         threadId: task.id,
@@ -478,7 +846,7 @@ function isMissing(error) {
 }
 async function optionalRealpath(path) {
   try {
-    return await realpath(path);
+    return await realpath2(path);
   } catch (error) {
     if (isMissing(error))
       throw new Error(`path does not exist: ${path}`);
@@ -502,7 +870,7 @@ async function directorySize(path) {
   const entries = await readdir(path, { withFileTypes: true });
   let total = 0;
   for (const entry of entries) {
-    const child = join3(path, entry.name);
+    const child = join4(path, entry.name);
     if (entry.isSymbolicLink())
       continue;
     if (entry.isDirectory())
@@ -518,19 +886,13 @@ async function directorySize(path) {
   }
   return total;
 }
-async function runCleanCommand(command, args, directory) {
-  const result = await Bun.$`${command} ${args}`.cwd(directory).nothrow().quiet();
-  if (result.exitCode !== 0) {
-    throw new Error(`${command} ${args.join(" ")} failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
-  }
-}
-function defaultStatePath(home3 = process.env.HOME || homedir()) {
-  const t3Home = resolve(process.env.T3_HOME?.trim() || join3(home3, ".t3"));
-  return join3(t3Home, "worktree-reaper-state.json");
+function defaultStatePath(home3 = process.env.HOME || homedir2()) {
+  const t3Home = resolve2(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
+  return join4(t3Home, "worktree-reaper-state.json");
 }
 async function readReaperState(path = defaultStatePath()) {
   try {
-    const parsed = JSON.parse(await readFile2(path, "utf8"));
+    const parsed = JSON.parse(await readFile3(path, "utf8"));
     if (parsed.version !== 1 || !parsed.threads || typeof parsed.threads !== "object") {
       throw new Error(`Unsupported worktree reaper state at ${path}`);
     }
@@ -631,17 +993,17 @@ function createDefaultReaperDependencies(request) {
         throw error;
       }
     },
-    readText: (path) => readFile2(path, "utf8"),
+    readText: (path) => readFile3(path, "utf8"),
     measureBytes: directorySize,
-    cargoClean: async (directory) => {
+    async runClean(command, directory) {
       const env = { ...Bun.env };
-      delete env.CARGO_TARGET_DIR;
-      const result = await Bun.$`cargo clean --target-dir target`.cwd(directory).env(env).nothrow().quiet();
+      if (command[0] === "cargo")
+        delete env.CARGO_TARGET_DIR;
+      const result = await Bun.$`${command}`.cwd(directory).env(env).nothrow().quiet();
       if (result.exitCode !== 0) {
-        throw new Error(`cargo clean --target-dir target failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
+        throw new Error(`${command.join(" ")} failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
       }
     },
-    flutterClean: (directory) => runCleanCommand("flutter", ["clean"], directory),
     readState: readReaperState,
     writeState: writeReaperState,
     now: () => new Date().toISOString()
@@ -658,6 +1020,7 @@ function formatReaperLogs(report) {
 }
 var REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper", ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon", SKIP_DIRECTORY_NAMES;
 var init_worktree_reaper = __esm(() => {
+  init_worktree_reaper_config();
   SKIP_DIRECTORY_NAMES = new Set([
     ".git",
     ".dart_tool",
@@ -866,7 +1229,7 @@ t3ctl tasks {archive|unarchive|pin|unpin|settle|unsettle|interrupt} ID
 t3ctl tasks approvals [--project ID]
 t3ctl tasks approve ID [REQUEST_ID]
 t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]
-t3ctl worktrees clean-settled [--dry-run]`;
+t3ctl worktrees clean-settled [--dry-run] [--config PATH]`;
 var [group, action, ...args] = process.argv.slice(2);
 if (group === "--help" || group === "-h") {
   console.log(JSON.stringify({ help: USAGE }));
@@ -985,8 +1348,12 @@ try {
       throw new Error("worktrees clean-settled is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
     }
     const { cleanSettledWorktrees: cleanSettledWorktrees2, createDefaultReaperDependencies: createDefaultReaperDependencies2, formatReaperLogs: formatReaperLogs2 } = await Promise.resolve().then(() => (init_worktree_reaper(), exports_worktree_reaper));
+    const { loadReaperConfig: loadReaperConfig2 } = await Promise.resolve().then(() => (init_worktree_reaper_config(), exports_worktree_reaper_config));
+    const loaded = await loadReaperConfig2(option("config"));
     const report = await cleanSettledWorktrees2(createDefaultReaperDependencies2((command) => daemonRequest(command)), {
-      dryRun: payload.dryRun === true
+      dryRun: payload.dryRun === true,
+      config: loaded.config,
+      configPath: loaded.path
     });
     console.log(JSON.stringify({ ...report, log: formatReaperLogs2(report) }, null, 2));
     process.exit(report.ok ? 0 : 1);

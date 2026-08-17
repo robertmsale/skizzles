@@ -49,7 +49,7 @@ describe("cross-project collaboration CLI", () => {
     expect(help.help).toContain("t3ctl tasks approvals");
     expect(help.help).toContain("t3ctl tasks approve ID [REQUEST_ID]");
     expect(help.help).toContain("t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]");
-    expect(help.help).toContain("t3ctl worktrees clean-settled [--dry-run]");
+    expect(help.help).toContain("t3ctl worktrees clean-settled [--dry-run] [--config PATH]");
     expect(stderr).toBe("");
   });
 
@@ -166,7 +166,7 @@ describe("cross-project collaboration CLI", () => {
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
     expect(request).toEqual({ op: "worktrees.listCleanable" });
-    expect(JSON.parse(stdout)).toMatchObject({ ok: true, dryRun: true, scanned: 0, cleaned: 0, bytesFreed: 0 });
+    expect(JSON.parse(stdout)).toMatchObject({ ok: true, dryRun: true, configPath: null, scanned: 0, cleaned: 0, bytesFreed: 0 });
   });
 
   test("refuses remote mode so it cannot clean local disks from a host snapshot", async () => {

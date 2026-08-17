@@ -4,7 +4,7 @@ import { join } from "node:path";
 import {
   cleanSettledWorktrees,
   createDefaultReaperDependencies,
-  discoverArtifactRoots,
+  discoverCleanTargets,
   isCleanableLifecycle,
   isFlutterPubspec,
   isRunningTask,
@@ -16,6 +16,7 @@ import {
   type ReaperDependencies,
   type ReaperState,
 } from "../src/worktree-reaper.ts";
+import { defaultReaperConfig, parseReaperConfig } from "../src/worktree-reaper-config.ts";
 
 const porcelain = `worktree /repo
 HEAD abc
@@ -38,6 +39,7 @@ function task(overrides: Partial<CleanableTask> = {}): CleanableTask {
   return {
     id: "thread-1",
     projectId: "project",
+    projectTitle: "acme",
     phase: "completed",
     sessionStatus: "ready",
     latestTurnState: "completed",
@@ -144,52 +146,45 @@ describe("artifact discovery", () => {
     expect(isFlutterPubspec("name: shared\nenvironment:\n  sdk: ^3.0.0\n")).toBe(false);
   });
 
-  test("finds cargo target and flutter build directories only", async () => {
+  test("finds cargo target and flutter build directories from the tree", async () => {
     const root = `/tmp/t3-reaper-discover-${crypto.randomUUID()}`;
-    await mkdir(join(root, "services/api/target"), { recursive: true });
-    await mkdir(join(root, "clients/app/build"), { recursive: true });
-    await mkdir(join(root, "clients/app/.dart_tool"), { recursive: true });
-    await writeFile(join(root, "Cargo.toml"), "[workspace]\n");
-    await writeFile(join(root, "services/api/Cargo.toml"), "[package]\nname = \"api\"\n");
-    await writeFile(join(root, "clients/app/pubspec.yaml"), "name: app\nflutter:\n  uses-material-design: true\n");
-    await writeFile(join(root, "README.md"), "docs\n");
     const files = new Map<string, string>([
       [join(root, "Cargo.toml"), "[workspace]\n"],
       [join(root, "services/api/Cargo.toml"), "[package]\nname = \"api\"\n"],
-      [join(root, "clients/app/pubspec.yaml"), "name: app\nflutter:\n  uses-material-design: true\n"],
+      [join(root, "apps/mobile/pubspec.yaml"), "name: app\nflutter:\n  uses-material-design: true\n"],
     ]);
     const directories = new Set([
       root,
       join(root, "services"),
       join(root, "services/api"),
       join(root, "services/api/target"),
-      join(root, "clients"),
-      join(root, "clients/app"),
-      join(root, "clients/app/build"),
-      join(root, "clients/app/.dart_tool"),
+      join(root, "apps"),
+      join(root, "apps/mobile"),
+      join(root, "apps/mobile/build"),
+      join(root, "apps/mobile/.dart_tool"),
     ]);
     const names: Record<string, string[]> = {
-      [root]: ["Cargo.toml", "README.md", "clients", "services"],
+      [root]: ["Cargo.toml", "README.md", "apps", "services"],
       [join(root, "services")]: ["api"],
       [join(root, "services/api")]: ["Cargo.toml", "target"],
-      [join(root, "clients")]: ["app"],
-      [join(root, "clients/app")]: ["pubspec.yaml", "build", ".dart_tool"],
+      [join(root, "apps")]: ["mobile"],
+      [join(root, "apps/mobile")]: ["pubspec.yaml", "build", ".dart_tool"],
     };
-    const found = await discoverArtifactRoots(root, {
-      pathExists: async (path) => directories.has(path) || files.has(path),
+    const found = await discoverCleanTargets(root, defaultReaperConfig().strategies, {
       isDirectory: async (path) => directories.has(path),
       readDirectoryNames: async (path) => names[path] ?? [],
       readText: async (path) => files.get(path) ?? "",
     });
-    expect(found.cargo).toEqual([join(root, "services/api")]);
-    expect(found.flutter).toEqual([join(root, "clients/app")]);
+    expect(found.map((entry) => ({ strategy: entry.strategy, directory: entry.directory })).sort((left, right) => left.directory.localeCompare(right.directory))).toEqual([
+      { strategy: "flutter", directory: join(root, "apps/mobile") },
+      { strategy: "cargo", directory: join(root, "services/api") },
+    ]);
   });
 });
 
 describe("cleanSettledWorktrees", () => {
-  function deps(overrides: Partial<ReaperDependencies> & { tasks?: CleanableTask[] } = {}): ReaperDependencies & { cargo: string[]; flutter: string[]; states: ReaperState[] } {
-    const cargo: string[] = [];
-    const flutter: string[] = [];
+  function deps(overrides: Partial<ReaperDependencies> & { tasks?: CleanableTask[] } = {}): ReaperDependencies & { runs: Array<{ command: string[]; directory: string }>; states: ReaperState[] } {
+    const runs: Array<{ command: string[]; directory: string }> = [];
     const states: ReaperState[] = [];
     let state: ReaperState = { version: 1, threads: {} };
     const base: ReaperDependencies = {
@@ -199,23 +194,22 @@ describe("cleanSettledWorktrees", () => {
       pathExists: async (path) => path.endsWith("/target") || path.endsWith("/build") || !path.split("/").pop()?.includes("."),
       isDirectory: async (path) => {
         const name = path.split("/").pop() ?? "";
-        return name === "target" || name === "build" || name === "clients" || name === "app" || path.endsWith("t3code-task");
+        return name === "target" || name === "build" || name === "apps" || name === "mobile" || path.endsWith("t3code-task");
       },
       readDirectoryNames: async (path) => {
-        if (path === "/repo/.t3/worktrees/repo/t3code-task") return ["Cargo.toml", "target", "clients"];
-        if (path === "/repo/.t3/worktrees/repo/t3code-task/clients") return ["app"];
-        if (path === "/repo/.t3/worktrees/repo/t3code-task/clients/app") return ["pubspec.yaml", "build"];
+        if (path === "/repo/.t3/worktrees/repo/t3code-task") return ["Cargo.toml", "target", "apps"];
+        if (path === "/repo/.t3/worktrees/repo/t3code-task/apps") return ["mobile"];
+        if (path === "/repo/.t3/worktrees/repo/t3code-task/apps/mobile") return ["pubspec.yaml", "build"];
         return [];
       },
       readText: async (path) => path.endsWith("pubspec.yaml") ? "name: app\nflutter:\n" : "[package]\n",
       measureBytes: async (path) => path.endsWith("target") || path.endsWith("build") ? 1_000 : 0,
-      cargoClean: async (directory) => { cargo.push(directory); },
-      flutterClean: async (directory) => { flutter.push(directory); },
+      runClean: async (command, directory) => { runs.push({ command, directory }); },
       readState: async () => state,
       writeState: async (next) => { state = next; states.push(next); },
       now: () => "2026-08-17T00:00:00.000Z",
     };
-    return { ...base, ...overrides, cargo, flutter, states };
+    return { ...base, ...overrides, runs, states };
   }
 
   test("skips running tasks before touching a worktree", async () => {
@@ -223,18 +217,17 @@ describe("cleanSettledWorktrees", () => {
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
     expect(report).toMatchObject({ ok: true, cleaned: 0, skipped: 1, failed: 0 });
     expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "task is running" });
-    expect(harness.cargo).toEqual([]);
-    expect(harness.flutter).toEqual([]);
+    expect(harness.runs).toEqual([]);
   });
 
   test("ignores stale missing sibling worktrees when the claimed path is live", async () => {
     const harness = deps({
       listGitWorktrees: async () => [
         ...worktrees(),
-        { path: "/private/tmp/ezra-atomic-tenant-enqueue", branch: "codex/stale", bare: false },
+        { path: "/tmp/stale-linked-worktree", branch: "codex/stale", bare: false },
       ],
       realpath: async (path) => {
-        if (path === "/private/tmp/ezra-atomic-tenant-enqueue") throw new Error(`path does not exist: ${path}`);
+        if (path === "/tmp/stale-linked-worktree") throw new Error(`path does not exist: ${path}`);
         return path;
       },
     });
@@ -251,7 +244,7 @@ describe("cleanSettledWorktrees", () => {
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
     expect(report.ok).toBe(false);
     expect(report.tasks[0]).toMatchObject({ action: "failed", reason: "refusing to clean project primary checkout /repo" });
-    expect(harness.cargo).toEqual([]);
+    expect(harness.runs).toEqual([]);
   });
 
   test("dry-run reports bytes without invoking cleaners or writing state", async () => {
@@ -264,17 +257,18 @@ describe("cleanSettledWorktrees", () => {
       path: "/repo/.t3/worktrees/repo/t3code-task",
       bytesFreed: 2_000,
     });
-    expect(harness.cargo).toEqual([]);
-    expect(harness.flutter).toEqual([]);
+    expect(harness.runs).toEqual([]);
     expect(harness.states).toEqual([]);
   });
 
-  test("cleans cargo and flutter artifact roots and records last size", async () => {
+  test("cleans detected cargo and flutter artifact roots and records last size", async () => {
     const harness = deps();
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
     expect(report.ok).toBe(true);
-    expect(harness.cargo).toEqual(["/repo/.t3/worktrees/repo/t3code-task"]);
-    expect(harness.flutter).toEqual(["/repo/.t3/worktrees/repo/t3code-task/clients/app"]);
+    expect(harness.runs).toEqual([
+      { command: ["cargo", "clean", "--target-dir", "target"], directory: "/repo/.t3/worktrees/repo/t3code-task" },
+      { command: ["flutter", "clean"], directory: "/repo/.t3/worktrees/repo/t3code-task/apps/mobile" },
+    ]);
     expect(harness.states.at(-1)?.threads["thread-1"]).toEqual({
       path: "/repo/.t3/worktrees/repo/t3code-task",
       bytesAfter: 2_000,
@@ -294,16 +288,59 @@ describe("cleanSettledWorktrees", () => {
     });
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
     expect(report.tasks[0]).toMatchObject({ action: "unchanged", reason: "already cleaned at recorded size" });
-    expect(harness.cargo).toEqual([]);
+    expect(harness.runs).toEqual([]);
     expect(shouldSkipUnchanged({
       version: 1,
       threads: { "thread-1": { path: "/repo/.t3/worktrees/repo/t3code-task", bytesAfter: 2_000, cleanedAt: "earlier" } },
     }, "thread-1", "/repo/.t3/worktrees/repo/t3code-task", 2_000)).toBe(true);
   });
 
+  test("skips a project disabled in host config", async () => {
+    const harness = deps();
+    const report = await cleanSettledWorktrees(harness, {
+      dryRun: false,
+      config: parseReaperConfig(`
+[[projects]]
+id = "acme"
+enabled = false
+`),
+    });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "project disabled by host config" });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("refuses a denied worktree path", async () => {
+    const harness = deps();
+    const report = await cleanSettledWorktrees(harness, {
+      dryRun: false,
+      config: parseReaperConfig(`
+deny_paths = ["/repo/.t3/worktrees/repo/t3code-task"]
+`),
+    });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "worktree is denied by host config" });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("runs extra host commands inside the worktree", async () => {
+    const harness = deps();
+    const report = await cleanSettledWorktrees(harness, {
+      dryRun: false,
+      config: parseReaperConfig(`
+[[extra_commands]]
+match = "apps/mobile"
+command = ["dart", "pub", "cache", "clean"]
+`),
+    });
+    expect(report.ok).toBe(true);
+    expect(harness.runs.at(-1)).toEqual({
+      command: ["dart", "pub", "cache", "clean"],
+      directory: "/repo/.t3/worktrees/repo/t3code-task/apps/mobile",
+    });
+  });
+
   test("falls back to tasks.list when the running daemon lacks worktrees.listCleanable", async () => {
     const ops: string[] = [];
-    const deps = createDefaultReaperDependencies(async (payload) => {
+    const listedDeps = createDefaultReaperDependencies(async (payload) => {
       ops.push(String(payload.op));
       if (payload.op === "worktrees.listCleanable") return { ok: false, error: "Unknown operation: worktrees.listCleanable" };
       if (payload.op === "projects.list") return { ok: true, result: { projects: [{ id: "project", workspaceRoot: "/repo" }] } };
@@ -320,7 +357,7 @@ describe("cleanSettledWorktrees", () => {
       }
       return { ok: false, error: `unexpected ${String(payload.op)}` };
     });
-    const listed = await deps.listCleanableTasks();
+    const listed = await listedDeps.listCleanableTasks();
     expect(ops).toEqual(["worktrees.listCleanable", "projects.list", "tasks.list"]);
     expect(listed.map((entry) => ({ id: entry.id, workspaceRoot: entry.workspaceRoot }))).toEqual([
       { id: "settled", workspaceRoot: "/repo" },
