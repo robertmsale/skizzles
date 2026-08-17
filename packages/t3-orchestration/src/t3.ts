@@ -2,6 +2,15 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { $ } from "bun";
 import { origin, token, taskProviderDefaults } from "./config.ts";
+import {
+  approvalRespondCommand,
+  derivePendingApprovals,
+  projectPendingApprovalList,
+  requireIdentifiableApproval,
+  selectPendingApproval,
+  threadActivities,
+  type ApprovalDecision,
+} from "./approval-projection.ts";
 import { mergeArchivedTasks, projectProjects, projectTaskList, projectTask, waitForTasks, type TaskListOptions, type TaskWaitInput } from "./task-projection.ts";
 import { requireSelection, type ModelSelection, type ShellSnapshot, type Snapshot, type T3Thread, type ThreadSnapshot } from "./protocol.ts";
 
@@ -363,6 +372,16 @@ export function taskTitleCommand(threadId: string, title: string, commandId = id
   return { type: "thread.meta.update", commandId, threadId, title };
 }
 
+export function taskApprovalRespondCommand(
+  threadId: string,
+  requestId: string,
+  decision: ApprovalDecision,
+  commandId = id(),
+  createdAt = now(),
+) {
+  return approvalRespondCommand(threadId, requestId, decision, commandId, createdAt);
+}
+
 export function taskLifecycleCommand(
   action: "archive" | "unarchive" | "pin" | "unpin" | "settle" | "unsettle" | "interrupt",
   threadId: string,
@@ -398,4 +417,42 @@ export async function settleTask(threadId: string, settled: boolean): Promise<{ 
 
 export async function interruptTask(threadId: string): Promise<{ sequence: number }> {
   return dispatch(taskLifecycleCommand("interrupt", threadId));
+}
+
+const APPROVAL_TURN_WINDOW = 10;
+
+export async function listTaskApprovals(projectId?: string) {
+  const shell = await shellSnapshot();
+  const candidates = shell.threads.filter((thread) =>
+    !thread.deletedAt &&
+    !thread.archivedAt &&
+    thread.hasPendingApprovals &&
+    (!projectId || thread.projectId === projectId)
+  );
+  const snapshots = new Map<string, ThreadSnapshot>();
+  await Promise.all(candidates.map(async (thread) => {
+    snapshots.set(thread.id, await threadSnapshot(thread.id, APPROVAL_TURN_WINDOW));
+  }));
+  return projectPendingApprovalList(candidates, snapshots);
+}
+
+export async function resolveTaskApproval(input: {
+  threadId: string;
+  requestId?: string;
+  decision: ApprovalDecision;
+  reason?: string;
+}): Promise<{ sequence: number; threadId: string; requestId: string; decision: ApprovalDecision; command: string | null; reason?: string }> {
+  const snapshot = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
+  const pending = derivePendingApprovals(threadActivities(snapshot));
+  const selected = selectPendingApproval(pending, input.requestId);
+  if (input.decision === "accept") requireIdentifiableApproval(selected);
+  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision));
+  return {
+    sequence: result.sequence,
+    threadId: input.threadId,
+    requestId: selected.requestId,
+    decision: input.decision,
+    command: selected.command,
+    ...(input.reason ? { reason: input.reason } : {}),
+  };
 }

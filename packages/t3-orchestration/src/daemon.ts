@@ -24,6 +24,8 @@ const commandDependencies = {
   pinTask: t3.pinTask,
   settleTask: t3.settleTask,
   interruptTask: t3.interruptTask,
+  listTaskApprovals: t3.listTaskApprovals,
+  resolveTaskApproval: t3.resolveTaskApproval,
 };
 
 const dispatch = (command: { op: string; [key: string]: unknown }) => executeCommand(command, commandDependencies);

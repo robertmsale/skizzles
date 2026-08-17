@@ -43,6 +43,9 @@ t3ctl tasks unpin <id>
 t3ctl tasks settle <id>
 t3ctl tasks unsettle <id>
 t3ctl tasks interrupt <id>
+t3ctl tasks approvals [--project <t3-project-id>]
+t3ctl tasks approve <id> [<request-id>]
+t3ctl tasks deny <id> [<request-id>] [--reason <text>]
 ```
 
 The optional per-user LaunchAgent keeps `t3-orchestrationd` available. The daemon owns the T3 credential; the CLI communicates over a same-user Unix socket. Host activation is explicit and machine-local—it is never performed merely by installing the Skizzles plugin or skill. With direct operator approval, run `bun run packages/t3-orchestration/scripts/install.ts` from a Skizzles checkout or plugin snapshot. The installer copies the runtime into a stable receipt-owned location, refuses foreign targets, and supports verified `--uninstall`; use `--client-only` for both install and uninstall on a tailnet client that must not host the credential-owning daemon.
@@ -61,6 +64,8 @@ Use `tasks read` to inspect only the bounded conversation window needed to coord
 
 `tasks archive` and `tasks settle` go through T3's WebSocket dispatcher so T3 performs its native provider-session cleanup. `tasks interrupt` requests interruption of the active turn; it does not kill an idle provider session. None of the management commands change provider, model, reasoning, runtime, or interaction settings.
 
+`tasks approvals` lists live threads whose T3 shell flag `hasPendingApprovals` is true, then projects each pending `approval.requested` activity from the thread snapshot. Each identifiable item includes the T3 `requestId`, provider `instanceId`, request kind, command or path from the activity payload (`detail` / nested `command` / path), and worktree/cwd when T3 exposes them. This is the coordinator fallback for harnesses that prompt (Cursor, Grok, others). It does not change Codex auto-guardian. `tasks approve` and `tasks deny` dispatch T3's existing `thread.approval.respond` command with `decision` `accept` or `decline`. If a thread has exactly one pending approval, the request id may be omitted. Approve is fail-closed: it never auto-approves, never uses `acceptForSession`, and refuses when T3 does not expose the command or path. Deny accepts an optional `--reason` for the CLI result only; T3's command has no reason field, so the reason is not sent to T3.
+
 Use `handoff create` only for explicit operator-authorized ingress from a task outside T3. It requires a concrete imported T3 project id, still creates a mandatory worktree, and exposes no model or reasoning controls.
 
 ## ChatGPT Desktop parity
@@ -75,6 +80,7 @@ Use `handoff create` only for explicit operator-authorized ingress from a task o
 | rename | `tasks title` |
 | pin/unpin | `tasks pin` / `tasks unpin` |
 | archive/unarchive | `tasks archive` / `tasks unarchive` |
+| inspect/approve/deny pending harness approvals | `tasks approvals` / `tasks approve` / `tasks deny` |
 
 T3 has no backend primitive for cloning an existing provider conversation at an arbitrary message, so Desktop's exact `fork` operation is not fabricated here. T3 instead creates a new branch/worktree task and receives an explicit handoff message. Desktop host handoff and navigation are client-window operations, not cross-agent orchestration primitives; T3 owns its own task placement and UI.
 

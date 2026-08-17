@@ -17,6 +17,8 @@ export type CommandDependencies = {
   pinTask(threadId: string, pinned: boolean): Promise<unknown>;
   settleTask(threadId: string, settled: boolean): Promise<unknown>;
   interruptTask(threadId: string): Promise<unknown>;
+  listTaskApprovals(projectId?: string): Promise<unknown>;
+  resolveTaskApproval(input: { threadId: string; requestId?: string; decision: "accept" | "decline"; reason?: string }): Promise<unknown>;
 };
 
 export async function executeCommand(command: Record<string, unknown>, dependencies: CommandDependencies): Promise<unknown> {
@@ -69,6 +71,18 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
     case "tasks.settle": return dependencies.settleTask(String(command.threadId), true);
     case "tasks.unsettle": return dependencies.settleTask(String(command.threadId), false);
     case "tasks.interrupt": return dependencies.interruptTask(String(command.threadId));
+    case "tasks.approvals": return dependencies.listTaskApprovals(command.projectId ? String(command.projectId) : undefined);
+    case "tasks.approve": return dependencies.resolveTaskApproval({
+      threadId: String(command.threadId),
+      ...(command.requestId ? { requestId: String(command.requestId) } : {}),
+      decision: "accept",
+    });
+    case "tasks.deny": return dependencies.resolveTaskApproval({
+      threadId: String(command.threadId),
+      ...(command.requestId ? { requestId: String(command.requestId) } : {}),
+      decision: "decline",
+      ...(command.reason ? { reason: String(command.reason) } : {}),
+    });
     default: throw new Error(`Unknown operation: ${String(command.op)}`);
   }
 }

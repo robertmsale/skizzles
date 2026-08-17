@@ -1,0 +1,280 @@
+import type { T3Thread, T3ThreadActivity, T3ThreadShell, ThreadSnapshot } from "./protocol.ts";
+
+export type ApprovalRequestKind = "command" | "file-read" | "file-change";
+export type ApprovalDecision = "accept" | "decline";
+
+export type PendingApproval = {
+  requestId: string;
+  requestKind: ApprovalRequestKind | null;
+  createdAt: string;
+  command: string | null;
+  toolName: string | null;
+  cwd: string | null;
+  identifiable: boolean;
+};
+
+export type ProjectedApproval = {
+  threadId: string;
+  title: string;
+  projectId: string;
+  provider: string;
+  requestId: string;
+  requestKind: ApprovalRequestKind | null;
+  toolName: string | null;
+  command: string;
+  cwd: string | null;
+  worktreePath: string | null;
+  createdAt: string;
+};
+
+export type UnidentifiableApproval = {
+  threadId: string;
+  title: string;
+  projectId: string;
+  provider: string;
+  requestId: string | null;
+  reason: string;
+  createdAt: string | null;
+  worktreePath: string | null;
+};
+
+const MISSING_COMMAND_GAP =
+  "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
+const MISSING_SNAPSHOT_GAP =
+  "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function asTrimmedString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function threadActivities(snapshot: ThreadSnapshot): T3ThreadActivity[] {
+  const activities = snapshot.thread.activities;
+  if (!Array.isArray(activities)) return [];
+  return activities.filter((activity): activity is T3ThreadActivity =>
+    Boolean(activity && typeof activity === "object" && typeof activity.kind === "string" && typeof activity.createdAt === "string")
+  );
+}
+
+function requestKindFromRequestType(requestType: unknown): ApprovalRequestKind | null {
+  switch (requestType) {
+    case "command_execution_approval":
+    case "exec_command_approval":
+    case "dynamic_tool_call":
+      return "command";
+    case "file_read_approval":
+      return "file-read";
+    case "file_change_approval":
+    case "apply_patch_approval":
+      return "file-change";
+    default:
+      return null;
+  }
+}
+
+function requestKindFromPayload(payload: Record<string, unknown> | null): ApprovalRequestKind | null {
+  if (!payload) return null;
+  if (payload.requestKind === "command" || payload.requestKind === "file-read" || payload.requestKind === "file-change") {
+    return payload.requestKind;
+  }
+  return requestKindFromRequestType(payload.requestType);
+}
+
+function isStalePendingRequestFailureDetail(detail: string | null): boolean {
+  const normalized = detail?.toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes("stale pending approval request") ||
+    normalized.includes("unknown pending approval request") ||
+    normalized.includes("unknown pending permission request")
+  );
+}
+
+function compareActivitiesByOrder(left: T3ThreadActivity, right: T3ThreadActivity): number {
+  if (left.sequence !== undefined && right.sequence !== undefined && left.sequence !== right.sequence) {
+    return left.sequence - right.sequence;
+  }
+  if (left.sequence !== undefined && right.sequence === undefined) return 1;
+  if (left.sequence === undefined && right.sequence !== undefined) return -1;
+  const createdAt = left.createdAt.localeCompare(right.createdAt);
+  if (createdAt !== 0) return createdAt;
+  return (left.id ?? "").localeCompare(right.id ?? "");
+}
+
+function extractCommand(payload: Record<string, unknown> | null): string | null {
+  if (!payload) return null;
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  const input = asRecord(data?.input) ?? asRecord(item?.input);
+  const result = asRecord(item?.result) ?? asRecord(data?.result);
+  return asTrimmedString(payload.detail)
+    ?? asTrimmedString(data?.command)
+    ?? asTrimmedString(item?.command)
+    ?? asTrimmedString(input?.command)
+    ?? asTrimmedString(result?.command)
+    ?? asTrimmedString(payload.path)
+    ?? asTrimmedString(data?.path)
+    ?? asTrimmedString(item?.path)
+    ?? asTrimmedString(input?.path);
+}
+
+function extractCwd(payload: Record<string, unknown> | null): string | null {
+  if (!payload) return null;
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  const input = asRecord(data?.input) ?? asRecord(item?.input);
+  return asTrimmedString(payload.cwd)
+    ?? asTrimmedString(payload.workingDirectory)
+    ?? asTrimmedString(data?.cwd)
+    ?? asTrimmedString(data?.workingDirectory)
+    ?? asTrimmedString(item?.cwd)
+    ?? asTrimmedString(input?.cwd);
+}
+
+function extractToolName(activity: T3ThreadActivity, payload: Record<string, unknown> | null): string | null {
+  if (!payload) return asTrimmedString(activity.summary);
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  return asTrimmedString(payload.title)
+    ?? asTrimmedString(data?.toolName)
+    ?? asTrimmedString(item?.tool)
+    ?? asTrimmedString(payload.itemType)
+    ?? asTrimmedString(activity.summary);
+}
+
+export function derivePendingApprovals(activities: readonly T3ThreadActivity[]): PendingApproval[] {
+  const openByRequestId = new Map<string, PendingApproval>();
+  for (const activity of [...activities].sort(compareActivitiesByOrder)) {
+    const payload = asRecord(activity.payload);
+    const requestId = asTrimmedString(payload?.requestId);
+    if (!requestId) continue;
+    const detail = asTrimmedString(payload?.detail);
+    if (activity.kind === "approval.requested") {
+      const command = extractCommand(payload);
+      openByRequestId.set(requestId, {
+        requestId,
+        requestKind: requestKindFromPayload(payload),
+        createdAt: activity.createdAt,
+        command,
+        toolName: extractToolName(activity, payload),
+        cwd: extractCwd(payload),
+        identifiable: command !== null,
+      });
+      continue;
+    }
+    if (activity.kind === "approval.resolved") {
+      openByRequestId.delete(requestId);
+      continue;
+    }
+    if (activity.kind === "provider.approval.respond.failed" && isStalePendingRequestFailureDetail(detail)) {
+      openByRequestId.delete(requestId);
+    }
+  }
+  return [...openByRequestId.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.requestId.localeCompare(right.requestId));
+}
+
+export function selectPendingApproval(pending: readonly PendingApproval[], requestId?: string): PendingApproval {
+  const selector = requestId?.trim();
+  if (selector) {
+    const match = pending.find((approval) => approval.requestId === selector);
+    if (!match) throw new Error(`No pending approval matches request id ${selector}`);
+    return match;
+  }
+  if (pending.length === 0) {
+    throw new Error("This thread has no pending approval in the T3 thread snapshot");
+  }
+  if (pending.length > 1) {
+    throw new Error(`Thread has ${pending.length} pending approvals; pass the request id from t3ctl tasks approvals`);
+  }
+  return pending[0]!;
+}
+
+export function requireIdentifiableApproval(approval: PendingApproval): void {
+  if (approval.identifiable && approval.command) return;
+  throw new Error(MISSING_COMMAND_GAP);
+}
+
+function threadProvider(thread: T3Thread): string {
+  return thread.modelSelection.instanceId;
+}
+
+export function projectPendingApprovalList(
+  threads: readonly T3ThreadShell[],
+  snapshots: ReadonlyMap<string, ThreadSnapshot>,
+): { approvals: ProjectedApproval[]; unidentifiable: UnidentifiableApproval[]; count: number } {
+  const approvals: ProjectedApproval[] = [];
+  const unidentifiable: UnidentifiableApproval[] = [];
+  for (const thread of threads) {
+    if (thread.deletedAt || thread.archivedAt || !thread.hasPendingApprovals) continue;
+    const snapshot = snapshots.get(thread.id);
+    const pending = snapshot ? derivePendingApprovals(threadActivities(snapshot)) : [];
+    if (pending.length === 0) {
+      unidentifiable.push({
+        threadId: thread.id,
+        title: thread.title,
+        projectId: thread.projectId,
+        provider: threadProvider(thread),
+        requestId: null,
+        reason: MISSING_SNAPSHOT_GAP,
+        createdAt: thread.updatedAt ?? null,
+        worktreePath: thread.worktreePath,
+      });
+      continue;
+    }
+    for (const approval of pending) {
+      if (approval.identifiable && approval.command) {
+        approvals.push({
+          threadId: thread.id,
+          title: thread.title,
+          projectId: thread.projectId,
+          provider: threadProvider(thread),
+          requestId: approval.requestId,
+          requestKind: approval.requestKind,
+          toolName: approval.toolName,
+          command: approval.command,
+          cwd: approval.cwd ?? thread.worktreePath,
+          worktreePath: thread.worktreePath,
+          createdAt: approval.createdAt,
+        });
+        continue;
+      }
+      unidentifiable.push({
+        threadId: thread.id,
+        title: thread.title,
+        projectId: thread.projectId,
+        provider: threadProvider(thread),
+        requestId: approval.requestId,
+        reason: MISSING_COMMAND_GAP,
+        createdAt: approval.createdAt,
+        worktreePath: thread.worktreePath,
+      });
+    }
+  }
+  approvals.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.threadId.localeCompare(right.threadId) || left.requestId.localeCompare(right.requestId));
+  unidentifiable.sort((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.threadId.localeCompare(right.threadId));
+  return { approvals, unidentifiable, count: approvals.length };
+}
+
+export function approvalRespondCommand(
+  threadId: string,
+  requestId: string,
+  decision: ApprovalDecision,
+  commandId: string,
+  createdAt: string,
+) {
+  return {
+    type: "thread.approval.respond",
+    commandId,
+    threadId,
+    requestId,
+    decision,
+    createdAt,
+  };
+}

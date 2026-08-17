@@ -69,6 +69,16 @@ export type T3Message = {
   updatedAt: string;
 };
 
+export type T3ThreadActivity = {
+  id?: string;
+  kind: string;
+  summary?: string;
+  payload?: unknown;
+  turnId?: string | null;
+  sequence?: number;
+  createdAt: string;
+};
+
 export type ThreadPage = {
   beforeCursor: string | null;
   hasMore: boolean;
@@ -78,7 +88,7 @@ export type ThreadPage = {
 
 export type ThreadSnapshot = {
   snapshotSequence: number;
-  thread: T3Thread & { messages: T3Message[] };
+  thread: T3Thread & { messages: T3Message[]; activities?: T3ThreadActivity[] };
   page?: ThreadPage;
 };
 

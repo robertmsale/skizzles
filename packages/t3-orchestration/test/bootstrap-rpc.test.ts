@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bootstrapRpcRequest, bootstrapRpcResponse, requiresRpcDispatch, taskLifecycleCommand, taskTitleCommand } from "../src/t3.ts";
+import { bootstrapRpcRequest, bootstrapRpcResponse, requiresRpcDispatch, taskApprovalRespondCommand, taskLifecycleCommand, taskTitleCommand } from "../src/t3.ts";
 
 describe("T3 bootstrap RPC wire format", () => {
   test("uses the Effect-RPC shape expected by T3's layerJson websocket serializer", () => {
@@ -49,6 +49,26 @@ describe("T3 bootstrap RPC wire format", () => {
     expect(requiresRpcDispatch({ type: "thread.archive" })).toBe(true);
     expect(requiresRpcDispatch({ type: "thread.settle" })).toBe(true);
     expect(requiresRpcDispatch({ type: "thread.pin" })).toBe(false);
+    expect(requiresRpcDispatch({ type: "thread.approval.respond" })).toBe(false);
+  });
+
+  test("maps coordinator approve and deny onto T3 thread.approval.respond", () => {
+    expect(taskApprovalRespondCommand("task", "req-1", "accept", "command", "now")).toEqual({
+      type: "thread.approval.respond",
+      commandId: "command",
+      threadId: "task",
+      requestId: "req-1",
+      decision: "accept",
+      createdAt: "now",
+    });
+    expect(taskApprovalRespondCommand("task", "req-1", "decline", "command", "now")).toEqual({
+      type: "thread.approval.respond",
+      commandId: "command",
+      threadId: "task",
+      requestId: "req-1",
+      decision: "decline",
+      createdAt: "now",
+    });
   });
 
   test("management commands never include model or reasoning overrides", () => {
