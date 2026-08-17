@@ -105,13 +105,14 @@ deny_paths = ["vendor"]
 
 [[projects.extra_commands]]
 match = "acme/app"
-command = ["dart", "pub", "cache", "clean"]
+command = ["rm", "-rf", ".dart_tool"]
 ```
 
 `include_projects` matches a T3 project title, project id, or workspace root.
-Set `enabled = false` on a `[[projects]]` entry to skip that project. Extra
-commands run only in matched directories inside the resolved worktree; arguments
-that escape the worktree are refused.
+Set `enabled = false` on a `[[projects]]` entry to skip that project. Relative
+`deny_paths` are resolved against the worktree. Extra commands run only in
+matched directories inside that worktree; path-like arguments that escape it
+are refused. They are not a general sandbox: keep extras to in-tree cleanup.
 
 The reaper installer copies the runtime into
 `~/.local/share/skizzles/t3-worktree-reaper`, links `~/.local/bin/t3-worktree-reaper`,

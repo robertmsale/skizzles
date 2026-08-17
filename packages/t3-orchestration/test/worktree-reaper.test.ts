@@ -321,6 +321,18 @@ deny_paths = ["/repo/.t3/worktrees/repo/t3code-task"]
     expect(harness.runs).toEqual([]);
   });
 
+  test("resolves relative deny_paths against the worktree, not process cwd", async () => {
+    const harness = deps();
+    const report = await cleanSettledWorktrees(harness, {
+      dryRun: false,
+      config: parseReaperConfig(`deny_paths = ["apps/mobile"]\n`),
+    });
+    expect(report.ok).toBe(true);
+    expect(harness.runs).toEqual([
+      { command: ["cargo", "clean", "--target-dir", "target"], directory: "/repo/.t3/worktrees/repo/t3code-task" },
+    ]);
+  });
+
   test("runs extra host commands inside the worktree", async () => {
     const harness = deps();
     const report = await cleanSettledWorktrees(harness, {
@@ -328,12 +340,12 @@ deny_paths = ["/repo/.t3/worktrees/repo/t3code-task"]
       config: parseReaperConfig(`
 [[extra_commands]]
 match = "apps/mobile"
-command = ["dart", "pub", "cache", "clean"]
+command = ["rm", "-rf", ".dart_tool"]
 `),
     });
     expect(report.ok).toBe(true);
     expect(harness.runs.at(-1)).toEqual({
-      command: ["dart", "pub", "cache", "clean"],
+      command: ["rm", "-rf", ".dart_tool"],
       directory: "/repo/.t3/worktrees/repo/t3code-task/apps/mobile",
     });
   });

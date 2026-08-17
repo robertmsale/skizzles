@@ -116,7 +116,11 @@ function parseStrategy(value: unknown, index: number): CleanStrategy {
   return {
     name: raw.name.trim(),
     enabled: raw.enabled === undefined ? true : raw.enabled === true,
-    markers: asStringArray(raw.markers, `strategies[${index}].markers`),
+    markers: (() => {
+      const markers = asStringArray(raw.markers, `strategies[${index}].markers`);
+      if (markers.length === 0) throw new Error(`strategies[${index}].markers must not be empty`);
+      return markers;
+    })(),
     artifactDir: raw.artifact_dir.trim(),
     command: asCommand(raw.command, `strategies[${index}].command`),
     match: asStringArray(raw.match, `strategies[${index}].match`),
@@ -297,11 +301,13 @@ export function expandUserPath(path: string, home = process.env.HOME || homedir(
 
 export async function resolveDenyPaths(
   paths: string[],
+  worktree: string,
   realpathFn: (path: string) => Promise<string> = realpath,
 ): Promise<string[]> {
   const resolved: string[] = [];
   for (const path of paths) {
-    const absolute = resolve(expandUserPath(path));
+    const expanded = expandUserPath(path);
+    const absolute = isAbsolute(expanded) ? resolve(expanded) : resolve(worktree, expanded);
     try {
       resolved.push(await realpathFn(absolute));
     } catch {
@@ -311,12 +317,20 @@ export async function resolveDenyPaths(
   return resolved;
 }
 
+function pathLikeArguments(argument: string): string[] {
+  const values = [argument];
+  const separator = argument.indexOf("=");
+  if (separator >= 0) values.push(argument.slice(separator + 1));
+  return values.filter((value) => value.startsWith("/") || value.startsWith("~") || value.includes(".."));
+}
+
 export function assertCommandStaysInside(command: string[], cwd: string, worktree: string): void {
-  for (const argument of command.slice(1)) {
-    if (!argument.startsWith("/") && !argument.includes("..")) continue;
-    const candidate = resolve(cwd, argument);
-    if (relativeInside(worktree, candidate) === undefined) {
-      throw new Error(`extra command argument escapes the worktree: ${argument}`);
+  for (const argument of command) {
+    for (const value of pathLikeArguments(argument)) {
+      const candidate = resolve(cwd, expandUserPath(value));
+      if (relativeInside(worktree, candidate) === undefined) {
+        throw new Error(`command argument escapes the worktree: ${argument}`);
+      }
     }
   }
 }

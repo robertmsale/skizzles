@@ -109,7 +109,12 @@ function parseStrategy(value, index) {
   return {
     name: raw.name.trim(),
     enabled: raw.enabled === undefined ? true : raw.enabled === true,
-    markers: asStringArray(raw.markers, `strategies[${index}].markers`),
+    markers: (() => {
+      const markers = asStringArray(raw.markers, `strategies[${index}].markers`);
+      if (markers.length === 0)
+        throw new Error(`strategies[${index}].markers must not be empty`);
+      return markers;
+    })(),
     artifactDir: raw.artifact_dir.trim(),
     command: asCommand(raw.command, `strategies[${index}].command`),
     match: asStringArray(raw.match, `strategies[${index}].match`),
@@ -286,10 +291,11 @@ function expandUserPath(path, home3 = process.env.HOME || homedir()) {
     return join3(home3, path.slice(2));
   return path;
 }
-async function resolveDenyPaths(paths, realpathFn = realpath) {
+async function resolveDenyPaths(paths, worktree, realpathFn = realpath) {
   const resolved = [];
   for (const path of paths) {
-    const absolute = resolve(expandUserPath(path));
+    const expanded = expandUserPath(path);
+    const absolute = isAbsolute(expanded) ? resolve(expanded) : resolve(worktree, expanded);
     try {
       resolved.push(await realpathFn(absolute));
     } catch {
@@ -298,13 +304,20 @@ async function resolveDenyPaths(paths, realpathFn = realpath) {
   }
   return resolved;
 }
+function pathLikeArguments(argument) {
+  const values = [argument];
+  const separator = argument.indexOf("=");
+  if (separator >= 0)
+    values.push(argument.slice(separator + 1));
+  return values.filter((value) => value.startsWith("/") || value.startsWith("~") || value.includes(".."));
+}
 function assertCommandStaysInside(command, cwd, worktree) {
-  for (const argument of command.slice(1)) {
-    if (!argument.startsWith("/") && !argument.includes(".."))
-      continue;
-    const candidate = resolve(cwd, argument);
-    if (relativeInside(worktree, candidate) === undefined) {
-      throw new Error(`extra command argument escapes the worktree: ${argument}`);
+  for (const argument of command) {
+    for (const value of pathLikeArguments(argument)) {
+      const candidate = resolve(cwd, expandUserPath(value));
+      if (relativeInside(worktree, candidate) === undefined) {
+        throw new Error(`command argument escapes the worktree: ${argument}`);
+      }
     }
   }
 }
@@ -790,7 +803,7 @@ async function cleanSettledWorktrees(deps, options) {
       });
       continue;
     }
-    const denyPaths = await resolveDenyPaths(policy.denyPaths, deps.realpath);
+    const denyPaths = await resolveDenyPaths(policy.denyPaths, resolved.path, deps.realpath);
     if (isDeniedPath(resolved.path, denyPaths)) {
       record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "worktree is denied by host config" });
       continue;
@@ -799,6 +812,8 @@ async function cleanSettledWorktrees(deps, options) {
     let extras = [];
     try {
       extras = (await discoverExtraCommandTargets(resolved.path, policy.extraCommands, deps)).filter((target) => !isDeniedPath(target.directory, denyPaths));
+      for (const target of targets)
+        assertCommandStaysInside(target.command, target.directory, resolved.path);
       for (const extra of extras)
         assertCommandStaysInside(extra.command, extra.directory, resolved.path);
     } catch (error) {

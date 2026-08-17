@@ -411,7 +411,7 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
       });
       continue;
     }
-    const denyPaths = await resolveDenyPaths(policy.denyPaths, deps.realpath);
+    const denyPaths = await resolveDenyPaths(policy.denyPaths, resolved.path, deps.realpath);
     if (isDeniedPath(resolved.path, denyPaths)) {
       record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "worktree is denied by host config" });
       continue;
@@ -422,6 +422,7 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     try {
       extras = (await discoverExtraCommandTargets(resolved.path, policy.extraCommands, deps))
         .filter((target) => !isDeniedPath(target.directory, denyPaths));
+      for (const target of targets) assertCommandStaysInside(target.command, target.directory, resolved.path);
       for (const extra of extras) assertCommandStaysInside(extra.command, extra.directory, resolved.path);
     } catch (error) {
       record({

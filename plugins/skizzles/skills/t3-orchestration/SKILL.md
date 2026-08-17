@@ -46,7 +46,7 @@ t3ctl tasks interrupt <id>
 t3ctl tasks approvals [--project <t3-project-id>]
 t3ctl tasks approve <id> [<request-id>]
 t3ctl tasks deny <id> [<request-id>] [--reason <text>]
-t3ctl worktrees clean-settled [--dry-run]
+t3ctl worktrees clean-settled [--dry-run] [--config PATH]
 ```
 
 The optional per-user LaunchAgent keeps `t3-orchestrationd` available. The daemon owns the T3 credential; the CLI communicates over a same-user Unix socket. Host activation is explicit and machine-local—it is never performed merely by installing the Skizzles plugin or skill. With direct operator approval, run `bun run packages/t3-orchestration/scripts/install.ts` from a Skizzles checkout or plugin snapshot. The installer copies the runtime into a stable receipt-owned location, refuses foreign targets, and supports verified `--uninstall`; use `--client-only` for both install and uninstall on a tailnet client that must not host the credential-owning daemon.
