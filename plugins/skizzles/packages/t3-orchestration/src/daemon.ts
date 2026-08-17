@@ -134,6 +134,210 @@ import { randomUUID } from "crypto";
 import { realpath } from "fs/promises";
 var {$: $2 } = globalThis.Bun;
 
+// packages/t3-orchestration/src/approval-projection.ts
+var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
+var MISSING_SNAPSHOT_GAP = "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
+function asRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function asTrimmedString(value) {
+  if (typeof value !== "string")
+    return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+function threadActivities(snapshot) {
+  const activities = snapshot.thread.activities;
+  if (!Array.isArray(activities))
+    return [];
+  return activities.filter((activity) => Boolean(activity && typeof activity === "object" && typeof activity.kind === "string" && typeof activity.createdAt === "string"));
+}
+function requestKindFromRequestType(requestType) {
+  switch (requestType) {
+    case "command_execution_approval":
+    case "exec_command_approval":
+    case "dynamic_tool_call":
+      return "command";
+    case "file_read_approval":
+      return "file-read";
+    case "file_change_approval":
+    case "apply_patch_approval":
+      return "file-change";
+    default:
+      return null;
+  }
+}
+function requestKindFromPayload(payload) {
+  if (!payload)
+    return null;
+  if (payload.requestKind === "command" || payload.requestKind === "file-read" || payload.requestKind === "file-change") {
+    return payload.requestKind;
+  }
+  return requestKindFromRequestType(payload.requestType);
+}
+function isStalePendingRequestFailureDetail(detail) {
+  const normalized = detail?.toLowerCase();
+  if (!normalized)
+    return false;
+  return normalized.includes("stale pending approval request") || normalized.includes("unknown pending approval request") || normalized.includes("unknown pending permission request");
+}
+function compareActivitiesByOrder(left, right) {
+  if (left.sequence !== undefined && right.sequence !== undefined && left.sequence !== right.sequence) {
+    return left.sequence - right.sequence;
+  }
+  if (left.sequence !== undefined && right.sequence === undefined)
+    return 1;
+  if (left.sequence === undefined && right.sequence !== undefined)
+    return -1;
+  const createdAt = left.createdAt.localeCompare(right.createdAt);
+  if (createdAt !== 0)
+    return createdAt;
+  return (left.id ?? "").localeCompare(right.id ?? "");
+}
+function extractCommand(payload) {
+  if (!payload)
+    return null;
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  const input = asRecord(data?.input) ?? asRecord(item?.input);
+  const result = asRecord(item?.result) ?? asRecord(data?.result);
+  return asTrimmedString(payload.detail) ?? asTrimmedString(data?.command) ?? asTrimmedString(item?.command) ?? asTrimmedString(input?.command) ?? asTrimmedString(result?.command) ?? asTrimmedString(payload.path) ?? asTrimmedString(data?.path) ?? asTrimmedString(item?.path) ?? asTrimmedString(input?.path);
+}
+function extractCwd(payload) {
+  if (!payload)
+    return null;
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  const input = asRecord(data?.input) ?? asRecord(item?.input);
+  return asTrimmedString(payload.cwd) ?? asTrimmedString(payload.workingDirectory) ?? asTrimmedString(data?.cwd) ?? asTrimmedString(data?.workingDirectory) ?? asTrimmedString(item?.cwd) ?? asTrimmedString(input?.cwd);
+}
+function extractToolName(activity, payload) {
+  if (!payload)
+    return asTrimmedString(activity.summary);
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  return asTrimmedString(payload.title) ?? asTrimmedString(data?.toolName) ?? asTrimmedString(item?.tool) ?? asTrimmedString(payload.itemType) ?? asTrimmedString(activity.summary);
+}
+function derivePendingApprovals(activities) {
+  const openByRequestId = new Map;
+  for (const activity of [...activities].sort(compareActivitiesByOrder)) {
+    const payload = asRecord(activity.payload);
+    const requestId = asTrimmedString(payload?.requestId);
+    if (!requestId)
+      continue;
+    const detail = asTrimmedString(payload?.detail);
+    if (activity.kind === "approval.requested") {
+      const command = extractCommand(payload);
+      openByRequestId.set(requestId, {
+        requestId,
+        requestKind: requestKindFromPayload(payload),
+        createdAt: activity.createdAt,
+        command,
+        toolName: extractToolName(activity, payload),
+        cwd: extractCwd(payload),
+        identifiable: command !== null
+      });
+      continue;
+    }
+    if (activity.kind === "approval.resolved") {
+      openByRequestId.delete(requestId);
+      continue;
+    }
+    if (activity.kind === "provider.approval.respond.failed" && isStalePendingRequestFailureDetail(detail)) {
+      openByRequestId.delete(requestId);
+    }
+  }
+  return [...openByRequestId.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.requestId.localeCompare(right.requestId));
+}
+function selectPendingApproval(pending, requestId) {
+  const selector = requestId?.trim();
+  if (selector) {
+    const match = pending.find((approval) => approval.requestId === selector);
+    if (!match)
+      throw new Error(`No pending approval matches request id ${selector}`);
+    return match;
+  }
+  if (pending.length === 0) {
+    throw new Error("This thread has no pending approval in the T3 thread snapshot");
+  }
+  if (pending.length > 1) {
+    throw new Error(`Thread has ${pending.length} pending approvals; pass the request id from t3ctl tasks approvals`);
+  }
+  return pending[0];
+}
+function requireIdentifiableApproval(approval) {
+  if (approval.identifiable && approval.command)
+    return;
+  throw new Error(MISSING_COMMAND_GAP);
+}
+function threadProvider(thread) {
+  return thread.modelSelection.instanceId;
+}
+function projectPendingApprovalList(threads, snapshots) {
+  const approvals = [];
+  const unidentifiable = [];
+  for (const thread of threads) {
+    if (thread.deletedAt || thread.archivedAt || !thread.hasPendingApprovals)
+      continue;
+    const snapshot = snapshots.get(thread.id);
+    const pending = snapshot ? derivePendingApprovals(threadActivities(snapshot)) : [];
+    if (pending.length === 0) {
+      unidentifiable.push({
+        threadId: thread.id,
+        title: thread.title,
+        projectId: thread.projectId,
+        provider: threadProvider(thread),
+        requestId: null,
+        reason: MISSING_SNAPSHOT_GAP,
+        createdAt: thread.updatedAt ?? null,
+        worktreePath: thread.worktreePath
+      });
+      continue;
+    }
+    for (const approval of pending) {
+      if (approval.identifiable && approval.command) {
+        approvals.push({
+          threadId: thread.id,
+          title: thread.title,
+          projectId: thread.projectId,
+          provider: threadProvider(thread),
+          requestId: approval.requestId,
+          requestKind: approval.requestKind,
+          toolName: approval.toolName,
+          command: approval.command,
+          cwd: approval.cwd ?? thread.worktreePath,
+          worktreePath: thread.worktreePath,
+          createdAt: approval.createdAt
+        });
+        continue;
+      }
+      unidentifiable.push({
+        threadId: thread.id,
+        title: thread.title,
+        projectId: thread.projectId,
+        provider: threadProvider(thread),
+        requestId: approval.requestId,
+        reason: MISSING_COMMAND_GAP,
+        createdAt: approval.createdAt,
+        worktreePath: thread.worktreePath
+      });
+    }
+  }
+  approvals.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.threadId.localeCompare(right.threadId) || left.requestId.localeCompare(right.requestId));
+  unidentifiable.sort((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.threadId.localeCompare(right.threadId));
+  return { approvals, unidentifiable, count: approvals.length };
+}
+function approvalRespondCommand(threadId, requestId, decision, commandId, createdAt) {
+  return {
+    type: "thread.approval.respond",
+    commandId,
+    threadId,
+    requestId,
+    decision,
+    createdAt
+  };
+}
+
 // packages/t3-orchestration/src/task-projection.ts
 function taskPhase(thread) {
   const shell = thread;
@@ -633,6 +837,9 @@ async function sendTask(threadId, message) {
 function taskTitleCommand(threadId, title, commandId = id()) {
   return { type: "thread.meta.update", commandId, threadId, title };
 }
+function taskApprovalRespondCommand(threadId, requestId, decision, commandId = id(), createdAt = now()) {
+  return approvalRespondCommand(threadId, requestId, decision, commandId, createdAt);
+}
 function taskLifecycleCommand(action, threadId, commandId = id(), createdAt = now()) {
   switch (action) {
     case "archive":
@@ -665,6 +872,32 @@ async function settleTask(threadId, settled) {
 }
 async function interruptTask(threadId) {
   return dispatch(taskLifecycleCommand("interrupt", threadId));
+}
+var APPROVAL_TURN_WINDOW = 10;
+async function listTaskApprovals(projectId) {
+  const shell = await shellSnapshot();
+  const candidates = shell.threads.filter((thread2) => !thread2.deletedAt && !thread2.archivedAt && thread2.hasPendingApprovals && (!projectId || thread2.projectId === projectId));
+  const snapshots = new Map;
+  await Promise.all(candidates.map(async (thread2) => {
+    snapshots.set(thread2.id, await threadSnapshot(thread2.id, APPROVAL_TURN_WINDOW));
+  }));
+  return projectPendingApprovalList(candidates, snapshots);
+}
+async function resolveTaskApproval(input) {
+  const snapshot2 = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
+  const pending = derivePendingApprovals(threadActivities(snapshot2));
+  const selected = selectPendingApproval(pending, input.requestId);
+  if (input.decision === "accept")
+    requireIdentifiableApproval(selected);
+  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision));
+  return {
+    sequence: result.sequence,
+    threadId: input.threadId,
+    requestId: selected.requestId,
+    decision: input.decision,
+    command: selected.command,
+    ...input.reason ? { reason: input.reason } : {}
+  };
 }
 
 // packages/t3-orchestration/src/identity.ts
@@ -761,6 +994,21 @@ async function executeCommand(command, dependencies) {
       return dependencies.settleTask(String(command.threadId), false);
     case "tasks.interrupt":
       return dependencies.interruptTask(String(command.threadId));
+    case "tasks.approvals":
+      return dependencies.listTaskApprovals(command.projectId ? String(command.projectId) : undefined);
+    case "tasks.approve":
+      return dependencies.resolveTaskApproval({
+        threadId: String(command.threadId),
+        ...command.requestId ? { requestId: String(command.requestId) } : {},
+        decision: "accept"
+      });
+    case "tasks.deny":
+      return dependencies.resolveTaskApproval({
+        threadId: String(command.threadId),
+        ...command.requestId ? { requestId: String(command.requestId) } : {},
+        decision: "decline",
+        ...command.reason ? { reason: String(command.reason) } : {}
+      });
     default:
       throw new Error(`Unknown operation: ${String(command.op)}`);
   }
@@ -869,7 +1117,9 @@ var commandDependencies = {
   archiveTask,
   pinTask,
   settleTask,
-  interruptTask
+  interruptTask,
+  listTaskApprovals,
+  resolveTaskApproval
 };
 var dispatch2 = (command) => executeCommand(command, commandDependencies);
 var server = createServer2((socket) => {

@@ -86,7 +86,9 @@ t3ctl tasks wait <id> [<id> ...] [--timeout-ms 120000]
 t3ctl tasks wait <id> --after <id>=<cursor>
 ```
 
-Wait wakes only for completion, failure, archival/deletion, plan approval, approval, or user input—not progress chatter. Background subagent/workflow work and monitoring remain nonterminal. Rename, pin, archive, settle, and interrupt operations are also exposed through `t3ctl tasks`; they preserve the task's existing provider/model/reasoning/runtime selection.
+Wait wakes only for completion, failure, archival/deletion, plan approval, approval, or user input—not progress chatter. Background subagent/workflow work and monitoring remain nonterminal. Rename, pin, archive, settle, interrupt, and pending-approval inspect/approve/deny operations are also exposed through `t3ctl tasks`; they preserve the task's existing provider/model/reasoning/runtime selection.
+
+Coordinator approval commands wrap T3's existing `thread.approval.respond` command. `t3ctl tasks approvals` lists live `hasPendingApprovals` threads and projects `approval.requested` activity payloads from the thread snapshot. `t3ctl tasks approve ID [REQUEST_ID]` and `t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]` never auto-approve; approve refuses when T3 does not expose the command or path. Codex auto-guardian is unchanged.
 
 The supported collaboration surface now maps Desktop list/read/wait/send/create/title/pin/archive operations. T3 does not expose a native provider-conversation fork or Desktop-style host handoff/navigation API, so the tool does not pretend to clone a conversation; explicit worktree task creation plus a handoff message is the T3-native equivalent.
 

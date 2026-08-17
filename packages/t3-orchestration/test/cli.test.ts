@@ -44,7 +44,11 @@ describe("cross-project collaboration CLI", () => {
       new Response(process.stderr).text(),
     ]);
     expect(exitCode).toBe(0);
-    expect(JSON.parse(stdout)).toEqual({ help: expect.stringContaining("t3ctl tasks create") });
+    const help = JSON.parse(stdout) as { help: string };
+    expect(help.help).toContain("t3ctl tasks create");
+    expect(help.help).toContain("t3ctl tasks approvals");
+    expect(help.help).toContain("t3ctl tasks approve ID [REQUEST_ID]");
+    expect(help.help).toContain("t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]");
     expect(stderr).toBe("");
   });
 
@@ -93,6 +97,28 @@ describe("cross-project collaboration CLI", () => {
       op: "tasks.title",
       threadId: "target",
       title: "New title",
+    });
+  });
+
+  test("parses coordinator approval list and resolve commands", async () => {
+    expect(await captureCli(["tasks", "approvals", "--project", "project"])).toEqual({
+      op: "tasks.approvals",
+      projectId: "project",
+    });
+    expect(await captureCli(["tasks", "approve", "target"])).toEqual({
+      op: "tasks.approve",
+      threadId: "target",
+    });
+    expect(await captureCli(["tasks", "approve", "target", "req-1"])).toEqual({
+      op: "tasks.approve",
+      threadId: "target",
+      requestId: "req-1",
+    });
+    expect(await captureCli(["tasks", "deny", "target", "req-1", "--reason", "too broad"])).toEqual({
+      op: "tasks.deny",
+      threadId: "target",
+      requestId: "req-1",
+      reason: "too broad",
     });
   });
 

@@ -1,0 +1,218 @@
+import { describe, expect, test } from "bun:test";
+import {
+  approvalRespondCommand,
+  derivePendingApprovals,
+  projectPendingApprovalList,
+  requireIdentifiableApproval,
+  selectPendingApproval,
+  threadActivities,
+} from "../src/approval-projection.ts";
+import type { T3ThreadActivity, T3ThreadShell, ThreadSnapshot } from "../src/protocol.ts";
+
+const activity = (overrides: Partial<T3ThreadActivity> & Pick<T3ThreadActivity, "kind" | "createdAt">): T3ThreadActivity => ({
+  id: overrides.id ?? overrides.kind,
+  ...overrides,
+});
+
+const thread = (overrides: Partial<T3ThreadShell> = {}): T3ThreadShell => ({
+  id: "task",
+  projectId: "project",
+  title: "Cursor work",
+  modelSelection: { instanceId: "cursor", model: "grok-4.6", options: [] },
+  runtimeMode: "auto",
+  interactionMode: "default",
+  worktreePath: "/worktree",
+  branch: "t3code/task",
+  latestTurn: null,
+  createdAt: "2026-08-17T00:00:00Z",
+  updatedAt: "2026-08-17T00:00:00Z",
+  archivedAt: null,
+  settledOverride: null,
+  settledAt: null,
+  pinnedAt: null,
+  pinOrderKey: null,
+  deletedAt: null,
+  session: { status: "running" },
+  latestUserMessageAt: null,
+  hasPendingApprovals: true,
+  hasPendingUserInput: false,
+  hasActionableProposedPlan: false,
+  ...overrides,
+});
+
+const snapshot = (activities: T3ThreadActivity[]): ThreadSnapshot => ({
+  snapshotSequence: 1,
+  thread: {
+    ...thread(),
+    messages: [],
+    activities,
+  },
+});
+
+describe("pending approval projection", () => {
+  test("derives open approval.requested activities and extracts command text", () => {
+    expect(derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        payload: {
+          requestId: "req-1",
+          requestKind: "command",
+          detail: "git status",
+          title: "Shell",
+          cwd: "/worktree",
+        },
+      }),
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:01:00Z",
+        payload: {
+          requestId: "req-2",
+          requestType: "file_read_approval",
+          data: { path: "secrets.env" },
+        },
+      }),
+      activity({
+        kind: "approval.resolved",
+        createdAt: "2026-08-17T01:02:00Z",
+        payload: { requestId: "req-2" },
+      }),
+    ])).toEqual([{
+      requestId: "req-1",
+      requestKind: "command",
+      createdAt: "2026-08-17T01:00:00Z",
+      command: "git status",
+      toolName: "Shell",
+      cwd: "/worktree",
+      identifiable: true,
+    }]);
+  });
+
+  test("clears stale respond failures and projects nested command payloads", () => {
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        sequence: 1,
+        payload: {
+          requestId: "stale",
+          requestKind: "command",
+          detail: "rm -rf /",
+        },
+      }),
+      activity({
+        kind: "provider.approval.respond.failed",
+        createdAt: "2026-08-17T01:01:00Z",
+        sequence: 2,
+        payload: { requestId: "stale", detail: "unknown pending approval request" },
+      }),
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:02:00Z",
+        sequence: 3,
+        payload: {
+          requestId: "nested",
+          requestKind: "command",
+          data: { item: { command: "bun test", cwd: "/nested" } },
+        },
+      }),
+    ]);
+    expect(pending.map(({ requestId, command, cwd, identifiable }) => ({ requestId, command, cwd, identifiable }))).toEqual([
+      { requestId: "nested", command: "bun test", cwd: "/nested", identifiable: true },
+    ]);
+  });
+
+  test("refuses to select blindly and refuses approve without command text", () => {
+    const one = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        payload: { requestId: "req-1", requestKind: "command", detail: "ls" },
+      }),
+    ]);
+    const two = [
+      ...one,
+      {
+        requestId: "req-2",
+        requestKind: "command" as const,
+        createdAt: "2026-08-17T01:01:00Z",
+        command: "pwd",
+        toolName: null,
+        cwd: null,
+        identifiable: true,
+      },
+    ];
+    expect(selectPendingApproval(one).requestId).toBe("req-1");
+    expect(() => selectPendingApproval(two)).toThrow("pass the request id");
+    expect(selectPendingApproval(two, "req-2").requestId).toBe("req-2");
+    expect(() => selectPendingApproval(two, "missing")).toThrow("No pending approval matches");
+
+    const opaque = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        payload: { requestId: "opaque", requestKind: "command" },
+      }),
+    ]);
+    expect(opaque[0]?.identifiable).toBe(false);
+    expect(() => requireIdentifiableApproval(opaque[0]!)).toThrow("Refusing to approve blindly");
+    expect(() => requireIdentifiableApproval(one[0]!)).not.toThrow();
+  });
+
+  test("lists identifiable approvals and documents snapshot gaps", () => {
+    const live = thread();
+    const other = thread({ id: "other", title: "Grok work", modelSelection: { instanceId: "grok", model: "grok-4.6", options: [] } });
+    const archived = thread({ id: "archived", archivedAt: "now", hasPendingApprovals: true });
+    const result = projectPendingApprovalList(
+      [live, other, archived],
+      new Map([
+        [live.id, snapshot([
+          activity({
+            kind: "approval.requested",
+            createdAt: "2026-08-17T01:00:00Z",
+            payload: { requestId: "req-1", requestKind: "command", detail: "git status", title: "Shell" },
+          }),
+        ])],
+        [other.id, snapshot([])],
+      ]),
+    );
+    expect(result.count).toBe(1);
+    expect(result.approvals).toEqual([{
+      threadId: "task",
+      title: "Cursor work",
+      projectId: "project",
+      provider: "cursor",
+      requestId: "req-1",
+      requestKind: "command",
+      toolName: "Shell",
+      command: "git status",
+      cwd: "/worktree",
+      worktreePath: "/worktree",
+      createdAt: "2026-08-17T01:00:00Z",
+    }]);
+    expect(result.unidentifiable).toEqual([{
+      threadId: "other",
+      title: "Grok work",
+      projectId: "project",
+      provider: "grok",
+      requestId: null,
+      reason: expect.stringContaining("hasPendingApprovals"),
+      createdAt: "2026-08-17T00:00:00Z",
+      worktreePath: "/worktree",
+    }]);
+  });
+
+  test("reads activities from a raw thread snapshot and maps the T3 respond command", () => {
+    expect(threadActivities(snapshot([
+      activity({ kind: "approval.requested", createdAt: "now", payload: { requestId: "req-1" } }),
+    ])).map((entry) => entry.kind)).toEqual(["approval.requested"]);
+    expect(approvalRespondCommand("task", "req-1", "decline", "command", "now")).toEqual({
+      type: "thread.approval.respond",
+      commandId: "command",
+      threadId: "task",
+      requestId: "req-1",
+      decision: "decline",
+      createdAt: "now",
+    });
+  });
+});

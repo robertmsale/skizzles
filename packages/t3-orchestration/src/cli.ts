@@ -11,7 +11,10 @@ t3ctl tasks {read|history|status} ID
 t3ctl tasks wait ID [ID ...] [--timeout-ms 0..3600000] [--after ID=CURSOR]
 t3ctl tasks send ID --message TEXT
 t3ctl tasks title ID --title TITLE
-t3ctl tasks {archive|unarchive|pin|unpin|settle|unsettle|interrupt} ID`;
+t3ctl tasks {archive|unarchive|pin|unpin|settle|unsettle|interrupt} ID
+t3ctl tasks approvals [--project ID]
+t3ctl tasks approve ID [REQUEST_ID]
+t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]`;
 const [group, action, ...args] = process.argv.slice(2);
 if (group === "--help" || group === "-h") {
   console.log(JSON.stringify({ help: USAGE }));
@@ -120,6 +123,9 @@ const payload = group === "projects" && action === "import" ? { op: "projects.im
   : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") }
   : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") }
   : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") }
+  : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() }
+  : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() }
+  : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() }
   : (() => { throw new Error(`Usage:\n  ${USAGE.replaceAll("\n", "\n  ")}`); })();
 
 try {

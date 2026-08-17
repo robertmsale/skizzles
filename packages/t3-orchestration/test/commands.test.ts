@@ -30,6 +30,8 @@ function dependencies(overrides: Partial<CommandDependencies> = {}): CommandDepe
     pinTask: async (threadId, pinned) => ({ threadId, pinned }),
     settleTask: async (threadId, settled) => ({ threadId, settled }),
     interruptTask: async (threadId) => ({ threadId }),
+    listTaskApprovals: async (projectId) => ({ projectId }),
+    resolveTaskApproval: async (input) => input,
     ...overrides,
   };
 }
@@ -81,5 +83,12 @@ describe("daemon command routing", () => {
     expect(await executeCommand({ op: "tasks.settle", threadId: "one" }, deps)).toEqual({ threadId: "one", settled: true });
     expect(await executeCommand({ op: "tasks.unsettle", threadId: "one" }, deps)).toEqual({ threadId: "one", settled: false });
     expect(await executeCommand({ op: "tasks.interrupt", threadId: "one" }, deps)).toEqual({ threadId: "one" });
+    expect(await executeCommand({ op: "tasks.approvals", projectId: "project" }, deps)).toEqual({ projectId: "project" });
+    expect(await executeCommand({ op: "tasks.approve", threadId: "one", requestId: "req-1" }, deps)).toEqual({
+      threadId: "one", requestId: "req-1", decision: "accept",
+    });
+    expect(await executeCommand({ op: "tasks.deny", threadId: "one", reason: "too broad" }, deps)).toEqual({
+      threadId: "one", decision: "decline", reason: "too broad",
+    });
   });
 });
