@@ -558,6 +558,9 @@ function approvalActionIdentity(approval) {
     toolName: approval.toolName
   };
 }
+function sameApprovalAction(left, right) {
+  return left.requestKind === right.requestKind && left.command === right.command && left.cwd === right.cwd && left.toolName === right.toolName;
+}
 
 // packages/t3-orchestration/src/exclusive-lock.ts
 import { mkdir as mkdir2, open } from "fs/promises";
@@ -858,10 +861,12 @@ async function runGuardianCycle(dependencies, config) {
         continue;
       }
       if (existing?.status === "pending" && candidate.requestId) {
+        const currentAction2 = candidateAction(candidate);
         const actionlessAccept = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action);
-        const retryDecision = actionlessAccept ? "decline" : existing.decision;
-        const retryAction = actionlessAccept ? candidateAction(candidate) : existing.action;
-        const retryReason = actionlessAccept ? "legacy claim has no action identity" : "retrying incomplete guardian claim";
+        const identityMismatch = existing.decision === "accept" && hasCompleteActionIdentity(existing.action) && !sameApprovalAction(existing.action, currentAction2);
+        const retryDecision = actionlessAccept || identityMismatch ? "decline" : existing.decision;
+        const retryAction = actionlessAccept || identityMismatch ? currentAction2 : existing.action;
+        const retryReason = actionlessAccept ? "legacy claim has no action identity" : identityMismatch ? "stored accept identity does not match the current action" : "retrying incomplete guardian claim";
         const claim2 = await claimOrSkip(dependencies, {
           requestId: candidate.requestId,
           threadId: candidate.threadId,
@@ -1018,14 +1023,18 @@ async function runGuardianCycle(dependencies, config) {
         });
         continue;
       }
-      const decision = claim.status === "retry" && claim.decision ? claim.decision : judgedDecision;
+      const currentAction = candidateAction(candidate);
+      const staleRetry = claim.status === "retry" && claim.decision === "accept" && (!claim.action || !sameApprovalAction(claim.action, currentAction));
+      const decision = staleRetry ? "decline" : claim.status === "retry" && claim.decision ? claim.decision : judgedDecision;
+      const deliverAction = claim.status === "retry" && claim.action && !staleRetry ? claim.action : currentAction;
+      const reason = staleRetry ? "stored accept identity does not match the current action" : failClosed.rationale;
       const responded = await deliverClaim(dependencies, {
         threadId: candidate.threadId,
         requestId: candidate.requestId,
         decision,
-        reason: failClosed.rationale,
+        reason,
         leaseId: claim.leaseId,
-        action: candidateAction(candidate)
+        action: deliverAction
       }, config.dryRun);
       if (claim.status !== "duplicate")
         state = await dependencies.loadState();
@@ -1037,7 +1046,7 @@ async function runGuardianCycle(dependencies, config) {
         runtimeMode: candidate.runtimeMode,
         command: candidate.command,
         decision,
-        reason: failClosed.rationale,
+        reason,
         dryRun: config.dryRun,
         responded
       });
@@ -1147,18 +1156,21 @@ async function claimGuardianRequest(input, path = defaultGuardianStatePath(), op
         return;
       });
       if (!liveHolder.ok)
-        return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
-      const decision = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action) ? "decline" : existing.decision;
+        return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId, action: existing.action };
+      const identityMismatch = existing.decision === "accept" && hasCompleteActionIdentity(existing.action) && Boolean(input.action) && !sameApprovalAction(existing.action, input.action);
+      const actionlessAccept = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action);
+      const decision = actionlessAccept || identityMismatch ? "decline" : existing.decision;
+      const action = actionlessAccept || identityMismatch ? input.action : existing.action;
       const leaseId2 = newOwnershipToken();
       await writeGuardianStateAtomic(writeClaimState(state, key, {
         ...existing,
         decision,
-        ...decision === "decline" && input.action ? { action: input.action } : {},
+        ...action ? { action } : {},
         leaseId: leaseId2,
         leaseUntil: new Date(nowMs + leaseMs).toISOString(),
         attempt: (existing.attempt ?? 0) + 1
       }), path);
-      return { status: "retry", decision, leaseId: leaseId2 };
+      return { status: "retry", decision, leaseId: leaseId2, action };
     }
     const leaseId = newOwnershipToken();
     await writeGuardianStateAtomic(writeClaimState(state, key, {
@@ -1171,7 +1183,7 @@ async function claimGuardianRequest(input, path = defaultGuardianStatePath(), op
       attempt: 1,
       ...input.action ? { action: input.action } : {}
     }), path);
-    return { status: "claimed", decision: input.decision, leaseId };
+    return { status: "claimed", decision: input.decision, leaseId, action: input.action };
   });
 }
 async function renewGuardianLease(requestId, leaseId, path = defaultGuardianStatePath(), options) {
@@ -1362,7 +1374,7 @@ async function runGuardianLoop(dependencies, config, sleep = Bun.sleep, shouldCo
 
 // packages/t3-orchestration/src/auto-guardian-cli.ts
 var USAGE = `t3-auto-guardian {run|once|status} [--config PATH] [--dry-run]
-Provider-agnostic T3 Auto guardian. Watches non-Codex runtimeMode=auto threads and judges pending approvals with one-shot codex exec. Host config: ~/.config/skizzles/t3-auto-guardian.toml`;
+T3 Auto guardian. Watches runtimeMode=auto threads whose resolved driver is grok, cursor, or opencode and judges pending approvals with one-shot codex exec. Skips Codex, missing, and unknown drivers. Host config: ~/.config/skizzles/t3-auto-guardian.toml`;
 var args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h") || args.length === 0) {
   console.log(JSON.stringify({

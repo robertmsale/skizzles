@@ -79,7 +79,7 @@ type InstallJournal = {
   previousInstall?: string;
   destinations: JournalDestination[];
   installedRoot: boolean;
-  rootReceiptSha256?: string;
+  rootIdentity?: { dev: string; ino: string };
   serviceWasLoaded?: boolean;
 };
 const LOCK_EX = 2;
@@ -374,16 +374,16 @@ async function persistDestination(journal: InstallJournal, destinations: Journal
   await writeJournal(journal);
 }
 
-async function journaledRootReceiptSha256(root: string): Promise<string | undefined> {
-  const receipt = join(root, "install-receipt.json");
-  if (!await optionalLstat(receipt)) return undefined;
-  return sha256(receipt);
+async function liveRootIdentity(path: string): Promise<{ dev: string; ino: string } | undefined> {
+  const metadata = await optionalLstat(path);
+  if (!metadata || !metadata.isDirectory() || metadata.isSymbolicLink()) return undefined;
+  return { dev: String(metadata.dev), ino: String(metadata.ino) };
 }
 
-async function liveRootIsJournaled(journal: InstallJournal): Promise<boolean> {
-  if (!journal.rootReceiptSha256) return false;
-  const live = await journaledRootReceiptSha256(journal.installRoot);
-  return live === journal.rootReceiptSha256;
+async function liveRootIsJournaled(journal: Pick<InstallJournal, "installRoot" | "rootIdentity">): Promise<boolean> {
+  if (!journal.rootIdentity) return false;
+  const live = await liveRootIdentity(journal.installRoot);
+  return Boolean(live && live.dev === journal.rootIdentity.dev && live.ino === journal.rootIdentity.ino);
 }
 
 async function removeJournaledInstallRoot(journal: InstallJournal): Promise<void> {
@@ -553,10 +553,20 @@ async function rollbackTransaction(
   previousInstall: string | undefined,
   movedDestinations: JournalDestination[],
   installedRoot: boolean,
+  placedRoot?: { dev: string; ino: string },
 ): Promise<void> {
   await restoreDestinations({ kind: "install", destinations: movedDestinations });
-  if (installedRoot) await rm(installRoot, { force: true, recursive: true });
-  if (previousInstall && await optionalLstat(previousInstall)) await rename(previousInstall, installRoot);
+  if (installedRoot && placedRoot && await liveRootIsJournaled({ installRoot, rootIdentity: placedRoot })) {
+    await rm(installRoot, { force: true, recursive: true });
+  }
+  if (previousInstall && await optionalLstat(previousInstall)) {
+    if (await optionalLstat(installRoot) && !(placedRoot && await liveRootIsJournaled({ installRoot, rootIdentity: placedRoot }))) {
+      await rm(transactionRoot, { force: true, recursive: true });
+      return;
+    }
+    if (await optionalLstat(installRoot)) await rm(installRoot, { force: true, recursive: true });
+    await rename(previousInstall, installRoot);
+  }
   await rm(transactionRoot, { force: true, recursive: true });
 }
 
@@ -589,6 +599,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
   }
   const movedDestinations: JournalDestination[] = [];
   let installedRoot = false;
+  let placedRoot: { dev: string; ino: string } | undefined;
   const journal: InstallJournal = {
     version: 1,
     kind: "install",
@@ -606,11 +617,13 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await writeJournal(journal);
     await crashIf("root-moved");
     journal.installedRoot = true;
-    journal.rootReceiptSha256 = await sha256(join(stagedRoot, "install-receipt.json"));
     journal.phase = "root-installed";
     await writeJournal(journal);
     await crashIf("root-installing");
     await rename(stagedRoot, installRoot);
+    placedRoot = await liveRootIdentity(installRoot);
+    journal.rootIdentity = placedRoot;
+    await writeJournal(journal);
     installedRoot = true;
     await crashIf("root-installed");
     for (const [index, link] of receipt.links.entries()) {
@@ -664,7 +677,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       try { await deactivateIfLoaded(); }
       catch (cleanupError) { serviceRollbackError = cleanupError; }
     }
-    try { await rollbackTransaction(transactionRoot, previousInstall, movedDestinations, installedRoot); }
+    try { await rollbackTransaction(transactionRoot, previousInstall, movedDestinations, installedRoot, placedRoot); }
     catch (rollbackError) {
       throw new AggregateError(
         serviceRollbackError ? [error, serviceRollbackError, rollbackError] : [error, rollbackError],

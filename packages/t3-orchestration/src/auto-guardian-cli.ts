@@ -12,7 +12,7 @@ import {
 import { POLICY_DELTAS, POLICY_SOURCE } from "./auto-guardian-policy.ts";
 
 const USAGE = `t3-auto-guardian {run|once|status} [--config PATH] [--dry-run]
-Provider-agnostic T3 Auto guardian. Watches non-Codex runtimeMode=auto threads and judges pending approvals with one-shot codex exec. Host config: ~/.config/skizzles/t3-auto-guardian.toml`;
+T3 Auto guardian. Watches runtimeMode=auto threads whose resolved driver is grok, cursor, or opencode and judges pending approvals with one-shot codex exec. Skips Codex, missing, and unknown drivers. Host config: ~/.config/skizzles/t3-auto-guardian.toml`;
 
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h") || args.length === 0) {

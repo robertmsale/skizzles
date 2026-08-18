@@ -18,5 +18,7 @@ describe("auto guardian CLI", () => {
     expect(help.help).toContain("t3-auto-guardian {run|once|status}");
     expect(help.policySource).toContain("codex-rs/core/src/guardian");
     expect(help.help).toContain("t3-auto-guardian.toml");
+    expect(help.help).toContain("grok, cursor, or opencode");
+    expect(help.help).not.toContain("Provider-agnostic");
   });
 });

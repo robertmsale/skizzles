@@ -281,6 +281,27 @@ describe("pending approval projection", () => {
       identifiable: false,
       reason: CONFLICTING_COMMAND_GAP,
     });
+    const spacedCwd = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        payload: {
+          requestId: "req-spaced-cwd",
+          requestKind: "command",
+          data: {
+            input: { command: "git clean -fd", cwd: "/safe" },
+            item: { input: { command: "git clean -fd", cwd: "/safe " } },
+          },
+        },
+      }),
+    ]);
+    expect(spacedCwd[0]).toMatchObject({
+      requestId: "req-spaced-cwd",
+      command: null,
+      cwd: null,
+      identifiable: false,
+      reason: CONFLICTING_COMMAND_GAP,
+    });
   });
 
   test("lists identifiable approvals and documents snapshot gaps", () => {
@@ -316,7 +337,7 @@ describe("pending approval projection", () => {
       requestKind: "command",
       toolName: "Shell",
       command: "git status",
-      cwd: "/worktree",
+      cwd: null,
       worktreePath: "/worktree",
       createdAt: "2026-08-17T01:00:00Z",
     }]);
@@ -358,5 +379,23 @@ describe("pending approval projection", () => {
       decision: "decline",
       createdAt: "now",
     });
+    expect(approvalRespondCommand("task", "req-1", "accept", "command", "now", {
+      requestKind: "command",
+      command: "git status",
+      cwd: null,
+      toolName: "Shell",
+    })).toEqual({
+      type: "thread.approval.respond",
+      commandId: "command",
+      threadId: "task",
+      requestId: "req-1",
+      decision: "accept",
+      createdAt: "now",
+      command: "git status",
+      cwd: null,
+      requestKind: "command",
+      toolName: "Shell",
+    });
+    expect(() => approvalRespondCommand("task", "req-1", "accept", "command", "now")).toThrow(MISSING_COMMAND_GAP);
   });
 });

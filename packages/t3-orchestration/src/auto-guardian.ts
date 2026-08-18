@@ -8,6 +8,7 @@ import {
   MISSING_SNAPSHOT_GAP,
   approvalActionIdentity,
   requireIdentifiableApproval,
+  sameApprovalAction,
   type ApprovalActionIdentity,
   type ApprovalDecision,
   type ProjectedApproval,
@@ -111,6 +112,7 @@ export type ClaimResult = {
   status: "claimed" | "duplicate" | "retry";
   decision?: ApprovalDecision;
   leaseId?: string;
+  action?: ApprovalActionIdentity;
 };
 
 export type ApprovalList = {
@@ -457,12 +459,18 @@ export async function runGuardianCycle(
       }
 
       if (existing?.status === "pending" && candidate.requestId) {
+        const currentAction = candidateAction(candidate);
         const actionlessAccept = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action);
-        const retryDecision = actionlessAccept ? "decline" : existing.decision;
-        const retryAction = actionlessAccept ? candidateAction(candidate) : existing.action;
+        const identityMismatch = existing.decision === "accept" &&
+          hasCompleteActionIdentity(existing.action) &&
+          !sameApprovalAction(existing.action!, currentAction);
+        const retryDecision = actionlessAccept || identityMismatch ? "decline" : existing.decision;
+        const retryAction = actionlessAccept || identityMismatch ? currentAction : existing.action;
         const retryReason = actionlessAccept
           ? "legacy claim has no action identity"
-          : "retrying incomplete guardian claim";
+          : identityMismatch
+            ? "stored accept identity does not match the current action"
+            : "retrying incomplete guardian claim";
         const claim = await claimOrSkip(dependencies, {
           requestId: candidate.requestId,
           threadId: candidate.threadId,
@@ -624,14 +632,24 @@ export async function runGuardianCycle(
         });
         continue;
       }
-      const decision = claim.status === "retry" && claim.decision ? claim.decision : judgedDecision;
+      const currentAction = candidateAction(candidate);
+      const staleRetry = claim.status === "retry" &&
+        claim.decision === "accept" &&
+        (!claim.action || !sameApprovalAction(claim.action, currentAction));
+      const decision = staleRetry
+        ? "decline"
+        : claim.status === "retry" && claim.decision ? claim.decision : judgedDecision;
+      const deliverAction = claim.status === "retry" && claim.action && !staleRetry ? claim.action : currentAction;
+      const reason = staleRetry
+        ? "stored accept identity does not match the current action"
+        : failClosed.rationale;
       const responded = await deliverClaim(dependencies, {
         threadId: candidate.threadId,
         requestId: candidate.requestId,
         decision,
-        reason: failClosed.rationale,
+        reason,
         leaseId: claim.leaseId,
-        action: candidateAction(candidate),
+        action: deliverAction,
       }, config.dryRun);
       if (claim.status !== "duplicate") state = await dependencies.loadState();
       decisions.push({
@@ -642,7 +660,7 @@ export async function runGuardianCycle(
         runtimeMode: candidate.runtimeMode,
         command: candidate.command,
         decision,
-        reason: failClosed.rationale,
+        reason,
         dryRun: config.dryRun,
         responded,
       });
@@ -773,20 +791,24 @@ export async function claimGuardianRequest(
       if (existing.threadId !== input.threadId) return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       if (!leaseExpired(existing, nowMs)) return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       const liveHolder = await tryExclusiveFileLock(guardianDeliveryLockPath(path, input.threadId, input.requestId), async () => undefined);
-      if (!liveHolder.ok) return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
-      const decision = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action)
-        ? "decline"
-        : existing.decision;
+      if (!liveHolder.ok) return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId, action: existing.action };
+      const identityMismatch = existing.decision === "accept" &&
+        hasCompleteActionIdentity(existing.action) &&
+        Boolean(input.action) &&
+        !sameApprovalAction(existing.action!, input.action);
+      const actionlessAccept = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action);
+      const decision = actionlessAccept || identityMismatch ? "decline" : existing.decision;
+      const action = actionlessAccept || identityMismatch ? input.action : existing.action;
       const leaseId = newOwnershipToken();
       await writeGuardianStateAtomic(writeClaimState(state, key, {
         ...existing,
         decision,
-        ...(decision === "decline" && input.action ? { action: input.action } : {}),
+        ...(action ? { action } : {}),
         leaseId,
         leaseUntil: new Date(nowMs + leaseMs).toISOString(),
         attempt: (existing.attempt ?? 0) + 1,
       }), path);
-      return { status: "retry", decision, leaseId };
+      return { status: "retry", decision, leaseId, action };
     }
     const leaseId = newOwnershipToken();
     await writeGuardianStateAtomic(writeClaimState(state, key, {
@@ -799,7 +821,7 @@ export async function claimGuardianRequest(
       attempt: 1,
       ...(input.action ? { action: input.action } : {}),
     }), path);
-    return { status: "claimed", decision: input.decision, leaseId };
+    return { status: "claimed", decision: input.decision, leaseId, action: input.action };
   });
 }
 

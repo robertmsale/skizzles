@@ -7,6 +7,7 @@ import {
   approvalActionIdentity,
   approvalRespondCommand,
   derivePendingApprovals,
+  hasBindableApprovalAction,
   projectPendingApprovalList,
   providerDriversFromConfig,
   requireIdentifiableApproval,
@@ -383,8 +384,9 @@ export function taskApprovalRespondCommand(
   decision: ApprovalDecision,
   commandId = id(),
   createdAt = now(),
+  expected?: ApprovalActionIdentity,
 ) {
-  return approvalRespondCommand(threadId, requestId, decision, commandId, createdAt);
+  return approvalRespondCommand(threadId, requestId, decision, commandId, createdAt, expected);
 }
 
 export function taskLifecycleCommand(
@@ -455,16 +457,33 @@ export async function resolveTaskApproval(input: {
   reason?: string;
   expected?: ApprovalActionIdentity;
 }): Promise<{ sequence: number; threadId: string; requestId: string; decision: ApprovalDecision; command: string | null; reason?: string }> {
-  const snapshot = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
-  const pending = derivePendingApprovals(threadActivities(snapshot));
-  const selected = selectPendingApproval(pending, input.requestId);
+  const selectFresh = async () => {
+    const snapshot = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
+    return selectPendingApproval(derivePendingApprovals(threadActivities(snapshot)), input.requestId);
+  };
+  const selected = await selectFresh();
+  const bound = input.decision === "accept"
+    ? (input.expected ?? approvalActionIdentity(selected))
+    : undefined;
   if (input.decision === "accept") {
     requireIdentifiableApproval(selected);
-    if (input.expected && !sameApprovalAction(approvalActionIdentity(selected), input.expected)) {
+    if (!hasBindableApprovalAction(bound) || !sameApprovalAction(approvalActionIdentity(selected), bound)) {
+      throw new Error(APPROVAL_ACTION_CHANGED);
+    }
+    const confirmed = await selectFresh();
+    requireIdentifiableApproval(confirmed);
+    if (!sameApprovalAction(approvalActionIdentity(confirmed), bound) || confirmed.requestId !== selected.requestId) {
       throw new Error(APPROVAL_ACTION_CHANGED);
     }
   }
-  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision));
+  const result = await dispatch(taskApprovalRespondCommand(
+    input.threadId,
+    selected.requestId,
+    input.decision,
+    undefined,
+    undefined,
+    bound,
+  ));
   return {
     sequence: result.sequence,
     threadId: input.threadId,

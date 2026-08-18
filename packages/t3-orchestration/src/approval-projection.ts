@@ -80,6 +80,10 @@ function asTrimmedString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function asLiteralString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
 export function threadActivities(snapshot: ThreadSnapshot): T3ThreadActivity[] {
   const activities = snapshot.thread.activities;
   if (!Array.isArray(activities)) return [];
@@ -141,19 +145,19 @@ function uniqueTypedActions(payload: Record<string, unknown>): string[] {
   const itemResult = asRecord(item?.result);
   const dataResult = asRecord(data?.result);
   const values = [
-    asTrimmedString(data?.command),
-    asTrimmedString(item?.command),
-    asTrimmedString(dataInput?.command),
-    asTrimmedString(itemInput?.command),
-    asTrimmedString(itemResult?.command),
-    asTrimmedString(dataResult?.command),
-    asTrimmedString(payload.path),
-    asTrimmedString(data?.path),
-    asTrimmedString(item?.path),
-    asTrimmedString(dataInput?.path),
-    asTrimmedString(itemInput?.path),
-    asTrimmedString(itemResult?.path),
-    asTrimmedString(dataResult?.path),
+    asLiteralString(data?.command),
+    asLiteralString(item?.command),
+    asLiteralString(dataInput?.command),
+    asLiteralString(itemInput?.command),
+    asLiteralString(itemResult?.command),
+    asLiteralString(dataResult?.command),
+    asLiteralString(payload.path),
+    asLiteralString(data?.path),
+    asLiteralString(item?.path),
+    asLiteralString(dataInput?.path),
+    asLiteralString(itemInput?.path),
+    asLiteralString(itemResult?.path),
+    asLiteralString(dataResult?.path),
   ].filter((value): value is string => value !== null);
   return [...new Set(values)];
 }
@@ -170,20 +174,20 @@ function uniqueTypedCwds(payload: Record<string, unknown>): string[] {
   const itemResult = asRecord(item?.result);
   const dataResult = asRecord(data?.result);
   return uniqueNonEmpty([
-    asTrimmedString(payload.cwd),
-    asTrimmedString(payload.workingDirectory),
-    asTrimmedString(data?.cwd),
-    asTrimmedString(data?.workingDirectory),
-    asTrimmedString(item?.cwd),
-    asTrimmedString(item?.workingDirectory),
-    asTrimmedString(dataInput?.cwd),
-    asTrimmedString(dataInput?.workingDirectory),
-    asTrimmedString(itemInput?.cwd),
-    asTrimmedString(itemInput?.workingDirectory),
-    asTrimmedString(itemResult?.cwd),
-    asTrimmedString(itemResult?.workingDirectory),
-    asTrimmedString(dataResult?.cwd),
-    asTrimmedString(dataResult?.workingDirectory),
+    asLiteralString(payload.cwd),
+    asLiteralString(payload.workingDirectory),
+    asLiteralString(data?.cwd),
+    asLiteralString(data?.workingDirectory),
+    asLiteralString(item?.cwd),
+    asLiteralString(item?.workingDirectory),
+    asLiteralString(dataInput?.cwd),
+    asLiteralString(dataInput?.workingDirectory),
+    asLiteralString(itemInput?.cwd),
+    asLiteralString(itemInput?.workingDirectory),
+    asLiteralString(itemResult?.cwd),
+    asLiteralString(itemResult?.workingDirectory),
+    asLiteralString(dataResult?.cwd),
+    asLiteralString(dataResult?.workingDirectory),
   ]);
 }
 
@@ -193,11 +197,11 @@ function uniqueTypedTools(payload: Record<string, unknown>): string[] {
   const dataInput = asRecord(data?.input);
   const itemInput = asRecord(item?.input);
   return uniqueNonEmpty([
-    asTrimmedString(data?.toolName),
-    asTrimmedString(item?.tool),
-    asTrimmedString(item?.toolName),
-    asTrimmedString(dataInput?.toolName),
-    asTrimmedString(itemInput?.toolName),
+    asLiteralString(data?.toolName),
+    asLiteralString(item?.tool),
+    asLiteralString(item?.toolName),
+    asLiteralString(dataInput?.toolName),
+    asLiteralString(itemInput?.toolName),
   ]);
 }
 
@@ -211,12 +215,12 @@ function extractTypedAction(payload: Record<string, unknown> | null): {
   const typed = uniqueTypedActions(payload);
   const cwds = uniqueTypedCwds(payload);
   const tools = uniqueTypedTools(payload);
-  const detail = asTrimmedString(payload.detail);
+  const detail = asLiteralString(payload.detail);
   if (typed.length > 1 || cwds.length > 1 || tools.length > 1) {
     return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
   }
   if (typed.length === 1) {
-    if (detail && detail !== typed[0]) return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+    if (detail !== null && detail !== typed[0]) return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
     return { command: typed[0]!, cwd: cwds[0] ?? null, toolName: tools[0] ?? null };
   }
   return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, reason: MISSING_COMMAND_GAP };
@@ -249,7 +253,7 @@ export function derivePendingApprovals(activities: readonly T3ThreadActivity[]):
         command: extracted.command,
         toolName: extracted.toolName ?? extractToolName(activity, payload),
         cwd: extracted.cwd,
-        identifiable: extracted.command !== null,
+        identifiable: extracted.command !== null && extracted.command.trim() !== "",
         ...(extracted.reason ? { reason: extracted.reason } : {}),
       });
       continue;
@@ -300,6 +304,10 @@ export function sameApprovalAction(left: ApprovalActionIdentity, right: Approval
     left.command === right.command &&
     left.cwd === right.cwd &&
     left.toolName === right.toolName;
+}
+
+export function hasBindableApprovalAction(action: ApprovalActionIdentity | undefined): action is ApprovalActionIdentity {
+  return Boolean(action && typeof action.command === "string" && action.command.trim() !== "");
 }
 
 function threadProvider(thread: T3Thread): string {
@@ -378,7 +386,7 @@ export function projectPendingApprovalList(
           requestKind: approval.requestKind,
           toolName: approval.toolName,
           command: approval.command,
-          cwd: approval.cwd ?? thread.worktreePath,
+          cwd: approval.cwd,
           worktreePath: thread.worktreePath,
           createdAt: approval.createdAt,
         });
@@ -410,7 +418,25 @@ export function approvalRespondCommand(
   decision: ApprovalDecision,
   commandId: string,
   createdAt: string,
+  expected?: ApprovalActionIdentity,
 ) {
+  if (decision === "accept") {
+    if (!hasBindableApprovalAction(expected)) {
+      throw new Error(MISSING_COMMAND_GAP);
+    }
+    return {
+      type: "thread.approval.respond",
+      commandId,
+      threadId,
+      requestId,
+      decision,
+      createdAt,
+      command: expected.command,
+      cwd: expected.cwd,
+      requestKind: expected.requestKind,
+      toolName: expected.toolName,
+    };
+  }
   return {
     type: "thread.approval.respond",
     commandId,

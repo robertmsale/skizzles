@@ -100,6 +100,16 @@ function fixture(options: {
         return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       }
       if (existing?.status === "pending") {
+        const identityMismatch = existing.decision === "accept" &&
+          Boolean(existing.action?.command?.trim()) &&
+          (!input.action ||
+            existing.action?.requestKind !== input.action.requestKind ||
+            existing.action?.command !== input.action.command ||
+            existing.action?.cwd !== input.action.cwd ||
+            existing.action?.toolName !== input.action.toolName);
+        const actionlessAccept = existing.decision === "accept" && !existing.action?.command;
+        const decision = actionlessAccept || identityMismatch ? "decline" : existing.decision;
+        const action = actionlessAccept || identityMismatch ? input.action : existing.action;
         const leaseId = `retry-${input.requestId}`;
         state = {
           ...state,
@@ -107,15 +117,15 @@ function fixture(options: {
             ...state.responded,
             [key]: {
               ...existing,
-              decision: input.decision,
-              ...(input.action ? { action: input.action } : {}),
+              decision,
+              ...(action ? { action } : {}),
               leaseId,
               leaseUntil: new Date(Date.now() + 30_000).toISOString(),
               attempt: (existing.attempt ?? 0) + 1,
             },
           },
         };
-        return { status: "retry", decision: input.decision, leaseId };
+        return { status: "retry", decision, leaseId, action };
       }
       const leaseId = `claim-${input.requestId}`;
       state = {
@@ -344,6 +354,92 @@ describe("guardian cycle", () => {
       responded: true,
     });
     expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+    expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
+  });
+
+  test("does not reuse a stored accept when the current action identity changed", async () => {
+    const { deps, resolved } = fixture({
+      list: { approvals: [approval({ command: "rm -rf /important" })], unidentifiable: [] },
+      state: {
+        schema: 4,
+        responded: {
+          [guardianClaimKey("cursor-task", "req-1")]: {
+            threadId: "cursor-task",
+            decision: "accept",
+            at: "2026-08-17T01:00:00Z",
+            status: "pending",
+            leaseUntil: new Date(0).toISOString(),
+            action: { requestKind: "command", command: "echo safe", cwd: "/worktree", toolName: "Shell" },
+          },
+        },
+        lastPollAt: null,
+        lastError: null,
+      },
+      judge: { ok: true, assessment: { outcome: "deny", rationale: "destructive and unauthorized" }, raw: "" },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      decision: "decline",
+      reason: "stored accept identity does not match the current action",
+      responded: true,
+    });
+    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+    expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
+  });
+
+  test("claim retry returns the stored action and declines when it no longer matches", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-claim-identity-");
+    try {
+      const path = join(root, "state.json");
+      const first = await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "accept",
+        at: "2026-08-17T02:00:00Z",
+        action: { requestKind: "command", command: "echo safe", cwd: "/worktree", toolName: "Shell" },
+      }, path, { now: () => 1_000, leaseMs: 10 });
+      expect(first).toMatchObject({
+        status: "claimed",
+        decision: "accept",
+        action: { command: "echo safe" },
+      });
+      const retry = await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "decline",
+        at: "2026-08-17T02:00:01Z",
+        action: { requestKind: "command", command: "rm -rf /important", cwd: "/worktree", toolName: "Shell" },
+      }, path, { now: () => 1_000_000, leaseMs: 10 });
+      expect(retry).toMatchObject({
+        status: "retry",
+        decision: "decline",
+        action: { command: "rm -rf /important" },
+      });
+      expect((await loadGuardianState(path)).responded[guardianClaimKey("cursor-task", "req-1")]).toMatchObject({
+        decision: "decline",
+        action: { command: "rm -rf /important" },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not pair a stale accept decision with the current judged action", async () => {
+    const { deps, resolved } = fixture({
+      list: { approvals: [approval({ command: "rm -rf /important" })], unidentifiable: [] },
+      judge: { ok: true, assessment: { outcome: "deny", rationale: "destructive and unauthorized" }, raw: "" },
+    });
+    deps.claimRequest = async () => ({
+      status: "retry",
+      decision: "accept",
+      leaseId: "stale-lease",
+      action: { requestKind: "command", command: "echo safe", cwd: "/worktree", toolName: "Shell" },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      decision: "decline",
+      reason: "stored accept identity does not match the current action",
+    });
     expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
   });
 

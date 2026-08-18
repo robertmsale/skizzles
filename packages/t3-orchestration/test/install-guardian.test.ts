@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 const roots: string[] = [];
@@ -367,6 +367,46 @@ describe("auto guardian installer", () => {
     const recovered = await installWithEnvironment(root, fixture.environment);
     expect(recovered.exitCode).not.toBe(0);
     expect(await readFile(join(installRoot, "runtime", "planted.txt"), "utf8")).toBe("foreign-root");
+  });
+
+  test("does not delete a replacement root after the journaled inode is no longer live", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    await rm(installRoot, { recursive: true, force: true });
+    await mkdir(join(installRoot, "runtime"), { recursive: true });
+    await writeFile(join(installRoot, "runtime", "foreign-marker.txt"), "keep-replaced");
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await readFile(join(installRoot, "runtime", "foreign-marker.txt"), "utf8")).toBe("keep-replaced");
+  });
+
+  test("does not delete a replacement root that replays the staged receipt hash", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installing",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const journal = JSON.parse(await readFile(join(root, ".local/share/skizzles/t3-auto-guardian.journal"), "utf8")) as {
+      transactionRoot: string;
+    };
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    await mkdir(join(installRoot, "runtime"), { recursive: true });
+    await copyFile(join(journal.transactionRoot, "new-install/install-receipt.json"), join(installRoot, "install-receipt.json"));
+    await writeFile(join(installRoot, "runtime", "foreign-marker.txt"), "keep-me");
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await readFile(join(installRoot, "runtime", "foreign-marker.txt"), "utf8")).toBe("keep-me");
+    expect((await readdir(installRoot)).includes("runtime")).toBe(true);
   });
 
   test("A-crash then B-install then A-recovery cannot clobber a completed B install", async () => {

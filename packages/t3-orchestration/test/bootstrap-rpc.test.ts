@@ -53,14 +53,24 @@ describe("T3 bootstrap RPC wire format", () => {
   });
 
   test("maps coordinator approve and deny onto T3 thread.approval.respond", () => {
-    expect(taskApprovalRespondCommand("task", "req-1", "accept", "command", "now")).toEqual({
+    expect(taskApprovalRespondCommand("task", "req-1", "accept", "command", "now", {
+      requestKind: "command",
+      command: "git status",
+      cwd: "/worktree",
+      toolName: "Shell",
+    })).toEqual({
       type: "thread.approval.respond",
       commandId: "command",
       threadId: "task",
       requestId: "req-1",
       decision: "accept",
       createdAt: "now",
+      command: "git status",
+      cwd: "/worktree",
+      requestKind: "command",
+      toolName: "Shell",
     });
+    expect(() => taskApprovalRespondCommand("task", "req-1", "accept", "command", "now")).toThrow();
     expect(taskApprovalRespondCommand("task", "req-1", "decline", "command", "now")).toEqual({
       type: "thread.approval.respond",
       commandId: "command",

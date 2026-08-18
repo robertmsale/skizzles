@@ -148,6 +148,9 @@ function asTrimmedString(value) {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
 }
+function asLiteralString(value) {
+  return typeof value === "string" ? value : null;
+}
 function threadActivities(snapshot) {
   const activities = snapshot.thread.activities;
   if (!Array.isArray(activities))
@@ -204,19 +207,19 @@ function uniqueTypedActions(payload) {
   const itemResult = asRecord(item?.result);
   const dataResult = asRecord(data?.result);
   const values = [
-    asTrimmedString(data?.command),
-    asTrimmedString(item?.command),
-    asTrimmedString(dataInput?.command),
-    asTrimmedString(itemInput?.command),
-    asTrimmedString(itemResult?.command),
-    asTrimmedString(dataResult?.command),
-    asTrimmedString(payload.path),
-    asTrimmedString(data?.path),
-    asTrimmedString(item?.path),
-    asTrimmedString(dataInput?.path),
-    asTrimmedString(itemInput?.path),
-    asTrimmedString(itemResult?.path),
-    asTrimmedString(dataResult?.path)
+    asLiteralString(data?.command),
+    asLiteralString(item?.command),
+    asLiteralString(dataInput?.command),
+    asLiteralString(itemInput?.command),
+    asLiteralString(itemResult?.command),
+    asLiteralString(dataResult?.command),
+    asLiteralString(payload.path),
+    asLiteralString(data?.path),
+    asLiteralString(item?.path),
+    asLiteralString(dataInput?.path),
+    asLiteralString(itemInput?.path),
+    asLiteralString(itemResult?.path),
+    asLiteralString(dataResult?.path)
   ].filter((value) => value !== null);
   return [...new Set(values)];
 }
@@ -231,20 +234,20 @@ function uniqueTypedCwds(payload) {
   const itemResult = asRecord(item?.result);
   const dataResult = asRecord(data?.result);
   return uniqueNonEmpty([
-    asTrimmedString(payload.cwd),
-    asTrimmedString(payload.workingDirectory),
-    asTrimmedString(data?.cwd),
-    asTrimmedString(data?.workingDirectory),
-    asTrimmedString(item?.cwd),
-    asTrimmedString(item?.workingDirectory),
-    asTrimmedString(dataInput?.cwd),
-    asTrimmedString(dataInput?.workingDirectory),
-    asTrimmedString(itemInput?.cwd),
-    asTrimmedString(itemInput?.workingDirectory),
-    asTrimmedString(itemResult?.cwd),
-    asTrimmedString(itemResult?.workingDirectory),
-    asTrimmedString(dataResult?.cwd),
-    asTrimmedString(dataResult?.workingDirectory)
+    asLiteralString(payload.cwd),
+    asLiteralString(payload.workingDirectory),
+    asLiteralString(data?.cwd),
+    asLiteralString(data?.workingDirectory),
+    asLiteralString(item?.cwd),
+    asLiteralString(item?.workingDirectory),
+    asLiteralString(dataInput?.cwd),
+    asLiteralString(dataInput?.workingDirectory),
+    asLiteralString(itemInput?.cwd),
+    asLiteralString(itemInput?.workingDirectory),
+    asLiteralString(itemResult?.cwd),
+    asLiteralString(itemResult?.workingDirectory),
+    asLiteralString(dataResult?.cwd),
+    asLiteralString(dataResult?.workingDirectory)
   ]);
 }
 function uniqueTypedTools(payload) {
@@ -253,11 +256,11 @@ function uniqueTypedTools(payload) {
   const dataInput = asRecord(data?.input);
   const itemInput = asRecord(item?.input);
   return uniqueNonEmpty([
-    asTrimmedString(data?.toolName),
-    asTrimmedString(item?.tool),
-    asTrimmedString(item?.toolName),
-    asTrimmedString(dataInput?.toolName),
-    asTrimmedString(itemInput?.toolName)
+    asLiteralString(data?.toolName),
+    asLiteralString(item?.tool),
+    asLiteralString(item?.toolName),
+    asLiteralString(dataInput?.toolName),
+    asLiteralString(itemInput?.toolName)
   ]);
 }
 function extractTypedAction(payload) {
@@ -266,12 +269,12 @@ function extractTypedAction(payload) {
   const typed = uniqueTypedActions(payload);
   const cwds = uniqueTypedCwds(payload);
   const tools = uniqueTypedTools(payload);
-  const detail = asTrimmedString(payload.detail);
+  const detail = asLiteralString(payload.detail);
   if (typed.length > 1 || cwds.length > 1 || tools.length > 1) {
     return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
   }
   if (typed.length === 1) {
-    if (detail && detail !== typed[0])
+    if (detail !== null && detail !== typed[0])
       return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
     return { command: typed[0], cwd: cwds[0] ?? null, toolName: tools[0] ?? null };
   }
@@ -301,7 +304,7 @@ function derivePendingApprovals(activities) {
         command: extracted.command,
         toolName: extracted.toolName ?? extractToolName(activity, payload),
         cwd: extracted.cwd,
-        identifiable: extracted.command !== null,
+        identifiable: extracted.command !== null && extracted.command.trim() !== "",
         ...extracted.reason ? { reason: extracted.reason } : {}
       });
       continue;
@@ -347,6 +350,9 @@ function approvalActionIdentity(approval) {
 }
 function sameApprovalAction(left, right) {
   return left.requestKind === right.requestKind && left.command === right.command && left.cwd === right.cwd && left.toolName === right.toolName;
+}
+function hasBindableApprovalAction(action) {
+  return Boolean(action && typeof action.command === "string" && action.command.trim() !== "");
 }
 function threadProvider(thread) {
   return thread.modelSelection.instanceId;
@@ -416,7 +422,7 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
           requestKind: approval.requestKind,
           toolName: approval.toolName,
           command: approval.command,
-          cwd: approval.cwd ?? thread.worktreePath,
+          cwd: approval.cwd,
           worktreePath: thread.worktreePath,
           createdAt: approval.createdAt
         });
@@ -441,7 +447,24 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
   unidentifiable.sort((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.threadId.localeCompare(right.threadId));
   return { approvals, unidentifiable, count: approvals.length };
 }
-function approvalRespondCommand(threadId, requestId, decision, commandId, createdAt) {
+function approvalRespondCommand(threadId, requestId, decision, commandId, createdAt, expected) {
+  if (decision === "accept") {
+    if (!hasBindableApprovalAction(expected)) {
+      throw new Error(MISSING_COMMAND_GAP);
+    }
+    return {
+      type: "thread.approval.respond",
+      commandId,
+      threadId,
+      requestId,
+      decision,
+      createdAt,
+      command: expected.command,
+      cwd: expected.cwd,
+      requestKind: expected.requestKind,
+      toolName: expected.toolName
+    };
+  }
   return {
     type: "thread.approval.respond",
     commandId,
@@ -951,8 +974,8 @@ async function sendTask(threadId, message) {
 function taskTitleCommand(threadId, title, commandId = id()) {
   return { type: "thread.meta.update", commandId, threadId, title };
 }
-function taskApprovalRespondCommand(threadId, requestId, decision, commandId = id(), createdAt = now()) {
-  return approvalRespondCommand(threadId, requestId, decision, commandId, createdAt);
+function taskApprovalRespondCommand(threadId, requestId, decision, commandId = id(), createdAt = now(), expected) {
+  return approvalRespondCommand(threadId, requestId, decision, commandId, createdAt, expected);
 }
 function taskLifecycleCommand(action, threadId, commandId = id(), createdAt = now()) {
   switch (action) {
@@ -1005,16 +1028,24 @@ async function listTaskApprovals(projectId) {
   return projectPendingApprovalList(candidates, snapshots, projects, drivers);
 }
 async function resolveTaskApproval(input) {
-  const snapshot2 = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
-  const pending = derivePendingApprovals(threadActivities(snapshot2));
-  const selected = selectPendingApproval(pending, input.requestId);
+  const selectFresh = async () => {
+    const snapshot2 = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
+    return selectPendingApproval(derivePendingApprovals(threadActivities(snapshot2)), input.requestId);
+  };
+  const selected = await selectFresh();
+  const bound = input.decision === "accept" ? input.expected ?? approvalActionIdentity(selected) : undefined;
   if (input.decision === "accept") {
     requireIdentifiableApproval(selected);
-    if (input.expected && !sameApprovalAction(approvalActionIdentity(selected), input.expected)) {
+    if (!hasBindableApprovalAction(bound) || !sameApprovalAction(approvalActionIdentity(selected), bound)) {
+      throw new Error(APPROVAL_ACTION_CHANGED);
+    }
+    const confirmed = await selectFresh();
+    requireIdentifiableApproval(confirmed);
+    if (!sameApprovalAction(approvalActionIdentity(confirmed), bound) || confirmed.requestId !== selected.requestId) {
       throw new Error(APPROVAL_ACTION_CHANGED);
     }
   }
-  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision));
+  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision, undefined, undefined, bound));
   return {
     sequence: result.sequence,
     threadId: input.threadId,
