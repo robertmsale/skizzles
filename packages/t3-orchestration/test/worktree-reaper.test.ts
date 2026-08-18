@@ -925,4 +925,85 @@ command = ["rm", "-rf", ".dart_tool"]
     });
     expect(harness.runs).toEqual([]);
   });
+
+  test("does not clean when the same task leaves the cleanable list but still occupies the path", async () => {
+    const shared = "/repo/.t3/worktrees/repo/shared";
+    const settledA = task({
+      id: "settled-A",
+      branch: "t3code/task",
+      worktreePath: shared,
+    });
+    let listings = 0;
+    const harness = deps({
+      listCleanableTasks: async () => {
+        listings += 1;
+        return {
+          tasks: listings === 1 ? [settledA] : [],
+          truncated: false,
+          occupied: [{ id: "settled-A", path: shared }],
+        };
+      },
+      listGitWorktrees: async () => [
+        { path: "/repo", branch: "master", bare: false },
+        { path: shared, branch: "t3code/task", bare: false },
+      ],
+      isDirectory: async (path) => path === shared || path.endsWith("/target"),
+      readDirectoryNames: async (path) => path === shared ? ["Cargo.toml", "target"] : [],
+      readTask: async () => settledA,
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(listings).toBeGreaterThan(1);
+    expect(report.ok).toBe(false);
+    expect(report.cleaned).toBe(0);
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "settled-A",
+      action: "failed",
+      reason: "task is no longer listed as cleanable",
+    });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("does not clean when the same task is still listed but has resumed running", async () => {
+    const shared = "/repo/.t3/worktrees/repo/shared";
+    const settledA = task({
+      id: "settled-A",
+      branch: "t3code/task",
+      worktreePath: shared,
+    });
+    const runningA = task({
+      id: "settled-A",
+      branch: "t3code/task",
+      worktreePath: shared,
+      sessionStatus: "running",
+      latestTurnState: "running",
+      phase: "running",
+    });
+    let listings = 0;
+    const harness = deps({
+      listCleanableTasks: async () => {
+        listings += 1;
+        return {
+          tasks: [listings === 1 ? settledA : runningA],
+          truncated: false,
+          occupied: [{ id: "settled-A", path: shared }],
+        };
+      },
+      listGitWorktrees: async () => [
+        { path: "/repo", branch: "master", bare: false },
+        { path: shared, branch: "t3code/task", bare: false },
+      ],
+      isDirectory: async (path) => path === shared || path.endsWith("/target"),
+      readDirectoryNames: async (path) => path === shared ? ["Cargo.toml", "target"] : [],
+      readTask: async () => settledA,
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(listings).toBeGreaterThan(1);
+    expect(report.cleaned).toBe(0);
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "settled-A",
+      action: "skipped",
+      reason: "task is running",
+    });
+    expect(harness.runs).toEqual([]);
+  });
 });

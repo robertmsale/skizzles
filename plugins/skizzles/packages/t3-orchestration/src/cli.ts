@@ -995,6 +995,24 @@ async function cleanSettledWorktrees(deps, options) {
       };
     }
     const nextOccupied = await resolveOccupiedWorktrees(fresh.occupied, deps.realpath);
+    const freshTask = fresh.tasks.find((entry) => entry.id === task.id);
+    if (!freshTask) {
+      return { ok: false, action: "failed", path, reason: "task is no longer listed as cleanable" };
+    }
+    if (!isCleanableLifecycle(freshTask)) {
+      return { ok: false, action: "skipped", path, reason: "not settled or archived" };
+    }
+    if (isRunningTask(freshTask) || isLivenessUnavailable(freshTask)) {
+      return {
+        ok: false,
+        action: "skipped",
+        path,
+        reason: isLivenessUnavailable(freshTask) ? "liveness unavailable" : "task is running"
+      };
+    }
+    if (taskTargetIdentityChanged(task, freshTask)) {
+      return { ok: false, action: "failed", path, reason: "task identity changed during occupancy refresh" };
+    }
     const owner = otherTaskOccupyingPath(task.id, path, nextOccupied);
     if (owner) {
       return { ok: false, action: "failed", path, reason: `worktree ${path} is owned by another task ${owner.id}` };
@@ -1102,13 +1120,13 @@ async function cleanSettledWorktrees(deps, options) {
         continue;
       }
     }
-    const refreshed = await refreshOccupancy(current, plan.path);
-    if (!refreshed.ok) {
-      record({ threadId: task.id, action: refreshed.action, path: refreshed.path, reason: refreshed.reason });
-      continue;
-    }
-    occupied = refreshed.occupied;
     if (options.dryRun) {
+      const refreshed = await refreshOccupancy(current, plan.path);
+      if (!refreshed.ok) {
+        record({ threadId: task.id, action: refreshed.action, path: refreshed.path, reason: refreshed.reason });
+        continue;
+      }
+      occupied = refreshed.occupied;
       record({
         threadId: task.id,
         action: "would-clean",
@@ -1119,9 +1137,17 @@ async function cleanSettledWorktrees(deps, options) {
       });
       continue;
     }
+    let aborted;
     try {
-      for (const target of plan.targets)
+      for (const target of plan.targets) {
+        const refreshed = await refreshOccupancy(current, plan.path);
+        if (!refreshed.ok) {
+          aborted = refreshed;
+          break;
+        }
+        occupied = refreshed.occupied;
         await deps.runClean(target.command, target.directory);
+      }
     } catch (error) {
       record({
         threadId: task.id,
@@ -1130,6 +1156,10 @@ async function cleanSettledWorktrees(deps, options) {
         bytesBefore: plan.bytesBefore,
         reason: error instanceof Error ? error.message : String(error)
       });
+      continue;
+    }
+    if (aborted) {
+      record({ threadId: task.id, action: aborted.action, path: aborted.path, reason: aborted.reason });
       continue;
     }
     let bytesAfter = 0;
