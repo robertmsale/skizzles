@@ -118,6 +118,22 @@ describe("worktree reaper installer", () => {
     expect(plist).toContain(`T3_ORCHESTRATION_REMOTE_CONFIG=${join(root, "remote.json")}`);
   });
 
+  test("canonicalizes relative remote-config selectors against the install cwd", async () => {
+    const root = `/tmp/t3-reaper-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_ORCHESTRATION_REMOTE_CONFIG: "remote.json",
+      T3_WORKTREE_REAPER_CONFIG: "reaper.toml",
+    });
+    expect(result.exitCode).toBe(0);
+    const plist = await readFile(join(root, "Library/LaunchAgents/io.github.skizzles.t3-worktree-reaper.plist"), "utf8");
+    expect(plist).toContain(`T3_ORCHESTRATION_REMOTE_CONFIG=${resolve("remote.json")}`);
+    expect(plist).toContain(`T3_WORKTREE_REAPER_CONFIG=${resolve("reaper.toml")}`);
+    expect(plist).not.toContain("T3_ORCHESTRATION_REMOTE_CONFIG=remote.json");
+  });
+
   test("refuses --client-only and unknown flags", async () => {
     const root = `/tmp/t3-reaper-install-${crypto.randomUUID()}`;
     roots.push(root);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { daemonRequest } from "./client.ts";
-import { configuredRemoteUrl } from "./remote-config.ts";
+import { requireLocalReaperTransport } from "./remote-config.ts";
 import { cleanSettledWorktrees, createDefaultReaperDependencies, formatReaperLogs } from "./worktree-reaper.ts";
 
 const args = process.argv.slice(2);
@@ -29,9 +29,7 @@ if (unknown.length) {
 }
 
 try {
-  if (await configuredRemoteUrl()) {
-    throw new Error("t3-worktree-reaper is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
-  }
+  await requireLocalReaperTransport();
   const { loadReaperConfig } = await import("./worktree-reaper-config.ts");
   const loaded = await loadReaperConfig(configPath);
   const report = await cleanSettledWorktrees(createDefaultReaperDependencies((payload) => daemonRequest(payload)), {

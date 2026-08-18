@@ -13,7 +13,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 const REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper";
 const ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon";
@@ -233,6 +233,23 @@ async function bunExecutable(): Promise<string> {
   return path;
 }
 
+const PATH_SELECTOR_ENV = new Set([
+  "CODEX_HOME",
+  "T3_HOME",
+  "T3_ORCHESTRATION_SOCKET",
+  "T3_WORKTREE_REAPER_CONFIG",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "T3_ORCHESTRATION_REMOTE_CONFIG",
+]);
+
+export function canonicalizeLaunchSelector(name: string, value: string, cwd = process.cwd()): string {
+  const trimmed = value.trim();
+  if (!PATH_SELECTOR_ENV.has(name) || !trimmed) return trimmed;
+  const expanded = trimmed === "~" ? (process.env.HOME ?? trimmed) : trimmed.startsWith("~/") ? join(process.env.HOME ?? "", trimmed.slice(2)) : trimmed;
+  return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
+}
+
 function plistFor(cliPath: string, bunPath: string): string {
   const inheritedConfig = [
     "CODEX_HOME",
@@ -243,9 +260,11 @@ function plistFor(cliPath: string, bunPath: string): string {
     "XDG_DATA_HOME",
     "T3_ORCHESTRATION_REMOTE_URL",
     "T3_ORCHESTRATION_REMOTE_CONFIG",
-  ].flatMap((name) =>
-    process.env[name] ? [`<string>${name}=${escapeXml(process.env[name]!)}</string>`] : []
-  );
+  ].flatMap((name) => {
+    const value = process.env[name];
+    if (!value) return [];
+    return [`<string>${name}=${escapeXml(canonicalizeLaunchSelector(name, value))}</string>`];
+  });
   const launchPath = `${home}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${home}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

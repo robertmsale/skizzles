@@ -38,7 +38,7 @@ __export(exports_worktree_reaper_config, {
 });
 import { readFile as readFile2, realpath } from "fs/promises";
 import { homedir } from "os";
-import { isAbsolute, join as join3, relative, resolve, sep } from "path";
+import { isAbsolute as isAbsolute2, join as join3, relative, resolve as resolve2, sep } from "path";
 function defaultReaperConfig() {
   return {
     enabled: true,
@@ -68,7 +68,7 @@ function defaultReaperConfig() {
   };
 }
 function defaultReaperConfigPath(home3 = process.env.HOME || homedir()) {
-  const configRoot = resolve(process.env.XDG_CONFIG_HOME?.trim() || join3(home3, ".config"));
+  const configRoot = resolve2(process.env.XDG_CONFIG_HOME?.trim() || join3(home3, ".config"));
   return join3(configRoot, "skizzles/t3-worktree-reaper.toml");
 }
 function asStringArray(value, label) {
@@ -142,7 +142,7 @@ function parseStrategy(value, index) {
     if (typeof text.file !== "string" || text.file.trim() === "" || typeof text.pattern !== "string" || text.pattern.trim() === "") {
       throw new Error(`strategies[${index}].require_text needs file and pattern`);
     }
-    if (text.file.includes("..") || isAbsolute(text.file))
+    if (text.file.includes("..") || isAbsolute2(text.file))
       throw new Error(`strategies[${index}].require_text.file must be a relative file name`);
     requireText = { file: text.file.trim(), pattern: text.pattern };
   }
@@ -343,7 +343,7 @@ function relativeInside(parent, child) {
   const rel = relative(parent, child);
   if (rel === "")
     return "";
-  if (rel.startsWith("..") || isAbsolute(rel))
+  if (rel.startsWith("..") || isAbsolute2(rel))
     return;
   return rel.split(sep).join("/");
 }
@@ -361,7 +361,7 @@ async function resolveDenyPaths(paths, worktree, realpathFn = realpath) {
   const resolved = [];
   for (const path of paths) {
     const expanded = expandUserPath(path);
-    const absolute = isAbsolute(expanded) ? resolve(expanded) : resolve(worktree, expanded);
+    const absolute = isAbsolute2(expanded) ? resolve2(expanded) : resolve2(worktree, expanded);
     try {
       resolved.push(await realpathFn(absolute));
     } catch {
@@ -436,7 +436,7 @@ var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-
 
 // packages/t3-orchestration/src/remote-config.ts
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname, join as join2 } from "path";
+import { dirname, isAbsolute, join as join2, resolve } from "path";
 var home2 = process.env.HOME ?? (() => {
   throw new Error("HOME is required");
 })();
@@ -476,6 +476,23 @@ async function configuredRemoteUrl() {
     throw error;
   }
 }
+async function requireLocalReaperTransport() {
+  const explicit = process.env.T3_ORCHESTRATION_REMOTE_CONFIG?.trim();
+  if (explicit) {
+    const path = isAbsolute(explicit) ? explicit : resolve(explicit);
+    try {
+      await readFile(path, "utf8");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(`explicit remote orchestration config is unavailable: ${path}`);
+      }
+      throw error;
+    }
+  }
+  if (await configuredRemoteUrl()) {
+    throw new Error("t3-worktree-reaper is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
+  }
+}
 
 // packages/t3-orchestration/src/client.ts
 function daemonResponseTimeoutMs(payload) {
@@ -489,7 +506,7 @@ function daemonResponseTimeoutMs(payload) {
 function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = daemonResponseTimeoutMs(payload), remoteUrl) {
   if (remoteUrl)
     return remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs);
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     const socket = connect(socketPath);
     let buffer = "";
     let settled = false;
@@ -516,7 +533,7 @@ function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = da
       finish(() => {
         socket.end();
         try {
-          resolve(JSON.parse(line));
+          resolve2(JSON.parse(line));
         } catch {
           reject(new Error("t3-orchestrationd returned malformed JSON"));
         }
@@ -599,7 +616,7 @@ async function remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs) {
 // packages/t3-orchestration/src/worktree-reaper.ts
 init_worktree_reaper_config();
 import { lstat, mkdir as mkdir2, readdir, readFile as readFile3, realpath as realpath2, writeFile as writeFile2 } from "fs/promises";
-import { dirname as dirname2, join as join4, resolve as resolve2 } from "path";
+import { dirname as dirname2, join as join4, resolve as resolve3 } from "path";
 import { homedir as homedir2 } from "os";
 var SKIP_DIRECTORY_NAMES = new Set([
   ".git",
@@ -651,8 +668,8 @@ function normalizeBranch(branch) {
 function isRunningTask(task) {
   return task.sessionStatus === "running" || task.sessionStatus === "starting" || task.latestTurnState === "running" || task.phase === "running" || task.phase === "starting" || task.backgroundLiveness === "working" || task.backgroundLiveness === "monitoring";
 }
-function isArchivedLivenessUnavailable(task) {
-  return task.archived === true && (task.backgroundLiveness === "unknown" || task.backgroundLiveness === undefined);
+function isLivenessUnavailable(task) {
+  return task.backgroundLiveness !== null && task.backgroundLiveness !== "working" && task.backgroundLiveness !== "monitoring";
 }
 function isCleanableLifecycle(task) {
   return !task.deleted && (task.settled === true || task.archived === true);
@@ -861,11 +878,11 @@ async function cleanSettledWorktrees(deps, options) {
       record({ threadId: task.id, action: "skipped", reason: "not settled or archived" });
       continue;
     }
-    if (isRunningTask(task) || isArchivedLivenessUnavailable(task)) {
+    if (isRunningTask(task) || isLivenessUnavailable(task)) {
       record({
         threadId: task.id,
         action: "skipped",
-        reason: isArchivedLivenessUnavailable(task) ? "archived liveness unavailable" : "task is running"
+        reason: isLivenessUnavailable(task) ? "liveness unavailable" : "task is running"
       });
       continue;
     }
@@ -913,12 +930,12 @@ async function cleanSettledWorktrees(deps, options) {
       });
       continue;
     }
-    if (isRunningTask(current) || isArchivedLivenessUnavailable(current)) {
+    if (isRunningTask(current) || isLivenessUnavailable(current)) {
       record({
         threadId: task.id,
         action: "skipped",
         path: plan.path,
-        reason: isArchivedLivenessUnavailable(current) ? "archived liveness unavailable" : "task is running"
+        reason: isLivenessUnavailable(current) ? "liveness unavailable" : "task is running"
       });
       continue;
     }
@@ -1035,7 +1052,7 @@ async function directorySize(path) {
   return total;
 }
 function defaultStatePath(home3 = process.env.HOME || homedir2()) {
-  const t3Home = resolve2(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
+  const t3Home = resolve3(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
   return join4(t3Home, "worktree-reaper-state.json");
 }
 async function readReaperState(path = defaultStatePath()) {
@@ -1201,9 +1218,7 @@ if (unknown.length) {
   process.exit(1);
 }
 try {
-  if (await configuredRemoteUrl()) {
-    throw new Error("t3-worktree-reaper is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
-  }
+  await requireLocalReaperTransport();
   const { loadReaperConfig: loadReaperConfig2 } = await Promise.resolve().then(() => (init_worktree_reaper_config(), exports_worktree_reaper_config));
   const loaded = await loadReaperConfig2(configPath);
   const report = await cleanSettledWorktrees(createDefaultReaperDependencies((payload) => daemonRequest(payload)), {

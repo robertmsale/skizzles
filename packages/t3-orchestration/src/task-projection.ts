@@ -70,10 +70,11 @@ function projectName(projects: Map<string, T3Project>, thread: T3Thread): string
 }
 
 export function projectedBackgroundLiveness(thread: T3Thread | T3ThreadShell): "working" | "monitoring" | "unknown" | null {
+  if (!Object.hasOwn(thread, "backgroundLiveness")) return "unknown";
   const value = (thread as Partial<T3ThreadShell>).backgroundLiveness;
+  if (value === null) return null;
   if (value === "working" || value === "monitoring" || value === "unknown") return value;
-  if (thread.archivedAt && !Object.hasOwn(thread, "backgroundLiveness")) return "unknown";
-  return value ?? null;
+  return "unknown";
 }
 
 export function projectTask(thread: T3Thread | T3ThreadShell, projects: Map<string, T3Project>, pinnedIndex?: number) {

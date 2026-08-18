@@ -145,8 +145,10 @@ export function isRunningTask(task: CleanableTask): boolean {
     || task.backgroundLiveness === "working" || task.backgroundLiveness === "monitoring";
 }
 
-export function isArchivedLivenessUnavailable(task: CleanableTask): boolean {
-  return task.archived === true && (task.backgroundLiveness === "unknown" || task.backgroundLiveness === undefined);
+export function isLivenessUnavailable(task: CleanableTask): boolean {
+  return task.backgroundLiveness !== null
+    && task.backgroundLiveness !== "working"
+    && task.backgroundLiveness !== "monitoring";
 }
 
 export function isCleanableLifecycle(task: CleanableTask): boolean {
@@ -398,11 +400,11 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
       record({ threadId: task.id, action: "skipped", reason: "not settled or archived" });
       continue;
     }
-    if (isRunningTask(task) || isArchivedLivenessUnavailable(task)) {
+    if (isRunningTask(task) || isLivenessUnavailable(task)) {
       record({
         threadId: task.id,
         action: "skipped",
-        reason: isArchivedLivenessUnavailable(task) ? "archived liveness unavailable" : "task is running",
+        reason: isLivenessUnavailable(task) ? "liveness unavailable" : "task is running",
       });
       continue;
     }
@@ -450,12 +452,12 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
       });
       continue;
     }
-    if (isRunningTask(current) || isArchivedLivenessUnavailable(current)) {
+    if (isRunningTask(current) || isLivenessUnavailable(current)) {
       record({
         threadId: task.id,
         action: "skipped",
         path: plan.path,
-        reason: isArchivedLivenessUnavailable(current) ? "archived liveness unavailable" : "task is running",
+        reason: isLivenessUnavailable(current) ? "liveness unavailable" : "task is running",
       });
       continue;
     }

@@ -5,7 +5,7 @@ import {
   cleanSettledWorktrees,
   createDefaultReaperDependencies,
   discoverCleanTargets,
-  isArchivedLivenessUnavailable,
+  isLivenessUnavailable,
   isCleanableLifecycle,
   isFlutterPubspec,
   isRunningTask,
@@ -19,7 +19,7 @@ import {
   type ReaperState,
 } from "../src/worktree-reaper.ts";
 import { defaultReaperConfig, parseReaperConfig } from "../src/worktree-reaper-config.ts";
-import { mergeArchivedTasks, projectCleanableWorktrees } from "../src/task-projection.ts";
+import { mergeArchivedTasks, projectCleanableWorktrees, projectTask } from "../src/task-projection.ts";
 import type { T3Thread } from "../src/protocol.ts";
 
 const porcelain = `worktree /repo
@@ -47,6 +47,7 @@ function task(overrides: Partial<CleanableTask> = {}): CleanableTask {
     phase: "completed",
     sessionStatus: "ready",
     latestTurnState: "completed",
+    backgroundLiveness: null,
     archived: false,
     deleted: false,
     settled: true,
@@ -142,8 +143,10 @@ describe("lifecycle gates", () => {
     expect(isRunningTask(task({ phase: "archived", backgroundLiveness: "working" }))).toBe(true);
     expect(isRunningTask(task({ phase: "archived", backgroundLiveness: "monitoring" }))).toBe(true);
     expect(isRunningTask(task({ phase: "completed", sessionStatus: "ready", latestTurnState: "completed" }))).toBe(false);
-    expect(isArchivedLivenessUnavailable(task({ archived: true, backgroundLiveness: "unknown" }))).toBe(true);
-    expect(isArchivedLivenessUnavailable(task({ archived: true, backgroundLiveness: null }))).toBe(false);
+    expect(isLivenessUnavailable(task({ archived: true, backgroundLiveness: "unknown" }))).toBe(true);
+    expect(isLivenessUnavailable(task({ settled: true, archived: false, backgroundLiveness: "unknown" }))).toBe(true);
+    expect(isLivenessUnavailable(task({ backgroundLiveness: "paused" as "unknown" }))).toBe(true);
+    expect(isLivenessUnavailable(task({ archived: true, backgroundLiveness: null }))).toBe(false);
   });
 });
 
@@ -422,7 +425,54 @@ command = ["rm", "-rf", ".dart_tool"]
       workspaceRoot: entry.workspaceRoot,
     })) });
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
-    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "archived liveness unavailable" });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "liveness unavailable" });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("skips settled tasks whose projected liveness is an unrecognized runtime value", async () => {
+    const listed = projectTask({
+      id: "settled-paused",
+      projectId: "project",
+      title: "Settled",
+      modelSelection: { instanceId: "codex", model: "model", options: [{ id: "reasoningEffort", value: "high" }] },
+      runtimeMode: "auto",
+      interactionMode: "default",
+      worktreePath: "/repo/.t3/worktrees/repo/t3code-task",
+      branch: "t3code/task",
+      settledOverride: "settled",
+      archivedAt: null,
+      backgroundLiveness: "paused" as "unknown",
+      session: { status: "ready" },
+    }, new Map([["project", { id: "project", title: "acme", workspaceRoot: "/repo" }]]));
+    expect(listed.backgroundLiveness).toBe("unknown");
+    const harness = deps({
+      tasks: [{
+        id: listed.id,
+        projectId: listed.projectId,
+        projectTitle: listed.projectTitle,
+        phase: listed.phase,
+        sessionStatus: listed.sessionStatus,
+        latestTurnState: listed.latestTurnState,
+        backgroundLiveness: listed.backgroundLiveness,
+        archived: listed.archived,
+        deleted: listed.deleted,
+        settled: listed.settled,
+        branch: listed.branch,
+        worktreePath: listed.worktreePath,
+        workspaceRoot: listed.workspaceRoot,
+      }],
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "liveness unavailable" });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("skips settled non-archived tasks whose liveness is unknown", async () => {
+    const harness = deps({
+      tasks: [task({ archived: false, settled: true, phase: "completed", backgroundLiveness: "unknown" })],
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "liveness unavailable" });
     expect(harness.runs).toEqual([]);
   });
 
@@ -431,7 +481,7 @@ command = ["rm", "-rf", ".dart_tool"]
       tasks: [task({ archived: true, settled: true, phase: "archived", backgroundLiveness: "unknown" })],
     });
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
-    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "archived liveness unavailable" });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "liveness unavailable" });
     expect(harness.runs).toEqual([]);
   });
 

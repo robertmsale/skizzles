@@ -187,4 +187,26 @@ describe("cross-project collaboration CLI", () => {
     expect(stdout).toBe("");
     expect(stderr).toContain("refuses remote t3ctl mode");
   });
+
+  test("fails closed when an explicit remote config selector is missing", async () => {
+    root = await mkdtemp("/tmp/t3-cli-");
+    const process = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "worktrees", "clean-settled", "--dry-run"], {
+      env: {
+        ...Bun.env,
+        HOME: root,
+        T3_HOME: root,
+        T3_ORCHESTRATION_REMOTE_CONFIG: join(root, "missing-remote.json"),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("explicit remote orchestration config is unavailable");
+  });
 });

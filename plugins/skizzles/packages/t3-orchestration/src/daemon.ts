@@ -393,12 +393,14 @@ function projectName(projects, thread) {
   return projects.get(thread.projectId)?.title ?? null;
 }
 function projectedBackgroundLiveness(thread) {
+  if (!Object.hasOwn(thread, "backgroundLiveness"))
+    return "unknown";
   const value = thread.backgroundLiveness;
+  if (value === null)
+    return null;
   if (value === "working" || value === "monitoring" || value === "unknown")
     return value;
-  if (thread.archivedAt && !Object.hasOwn(thread, "backgroundLiveness"))
-    return "unknown";
-  return value ?? null;
+  return "unknown";
 }
 function projectTask(thread, projects, pinnedIndex) {
   const shell = thread;

@@ -104,6 +104,14 @@ describe("task list projection", () => {
     });
   });
 
+  test("maps unrecognized and absent liveness to unknown for settled and archived tasks", () => {
+    const settled = thread({ id: "settled-only", settledOverride: "settled" });
+    const { backgroundLiveness: _drop, ...settledAbsent } = settled;
+    expect(projectedBackgroundLiveness({ ...settled, backgroundLiveness: "paused" as "unknown" })).toBe("unknown");
+    expect(projectedBackgroundLiveness(settledAbsent as typeof settled)).toBe("unknown");
+    expect(projectedBackgroundLiveness(thread({ settledOverride: "settled", backgroundLiveness: null }))).toBe(null);
+  });
+
   test("marks archived rows missing liveness as unknown instead of idle", () => {
     const { backgroundLiveness: _ignored, ...archivedOnly } = thread({ id: "archived-only", archivedAt: "now", session: { status: "stopped" } });
     expect(Object.hasOwn(archivedOnly, "backgroundLiveness")).toBe(false);
