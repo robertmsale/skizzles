@@ -612,7 +612,17 @@ async function snapshotTree(root: string): Promise<TreeEntry[]> {
 async function assertStableRoot(): Promise<void> {
   const metadata = await optionalLstat(installRoot);
   if (!metadata || !metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(`Managed install root is missing: ${installRoot}`);
-  const entries = (await readdir(installRoot, { withFileTypes: true })).map((entry) => entry.name).sort();
+  const entries: string[] = [];
+  for (const entry of await readdir(installRoot, { withFileTypes: true })) {
+    if (entry.name === "install-receipt.json" || entry.name === "runtime") {
+      entries.push(entry.name);
+      continue;
+    }
+    const live = await optionalLstat(join(installRoot, entry.name));
+    if (live && live.isFile() && !live.isSymbolicLink() && live.size === 0) continue;
+    entries.push(entry.name);
+  }
+  entries.sort();
   if (JSON.stringify(entries) !== JSON.stringify(["install-receipt.json", "runtime"])) {
     throw new Error(`Managed install root drifted under ${installRoot}`);
   }
@@ -909,22 +919,20 @@ async function parkOpenedInode(
   if (!selectedPathStillBound(selected, expected, kind, fd)) {
     return !pathStillExpected(selected, expected);
   }
+  const dropName = pathOfOpenedFd(fd);
+  if (!dropName || !pathStillExpected(dropName, expected) || !fdMatches(fd, expected, kind)) return false;
+  let swapped = false;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_PARK_SWAP")) {
+    swapped = true;
+    await rememberSelectedMutationPath("park", selected);
+    await plantForeignDestination(selected);
+  }
   const parked = join(installerStateDir, `parked-${randomUUID()}`);
   if (rawLstat(parked)) return false;
   if (!cloneOpenedInode(fd, parked, kind)) return false;
-  if (!selectedPathStillBound(selected, expected, kind, fd)) {
-    return !pathStillExpected(selected, expected) && Boolean(rawLstat(parked));
-  }
-  const dropName = pathOfOpenedFd(fd);
-  if (!dropName || !pathStillExpected(dropName, expected) || !fdMatches(fd, expected, kind)) return false;
-  if (consumeInstallerHook("T3_AUTO_GUARDIAN_PARK_SWAP")) {
-    await rememberSelectedMutationPath("park", selected);
-    await plantForeignDestination(selected);
-    return false;
-  }
-  const leftover = join(installerStateDir, `parked-${randomUUID()}`);
-  if (rawLstat(leftover) || !exclusiveRename(dropName, leftover)) return false;
-  return Boolean(rawLstat(parked)) && !rawLstat(selected);
+  if (swapped || !fdMatches(fd, expected, kind)) return false;
+  if (!pathStillExpected(dropName, expected)) return false;
+  return Boolean(rawLstat(parked));
 }
 
 async function parkIfStillBound(path: string, expected?: NodeIdentity): Promise<boolean> {
@@ -953,7 +961,10 @@ async function clearJournalAt(path: string, identity = path === journalPath ? jo
   if (!await parkIfStillBound(path, identity)) {
     throw new Error(`Failed to clear installer journal at ${path}`);
   }
-  if (path === journalPath) journalPathIdentity = undefined;
+  if (path === journalPath) {
+    const leftover = await liveNodeIdentity(path);
+    journalPathIdentity = leftover && identity && sameNode(leftover, identity) ? leftover : undefined;
+  }
   if (path === journalPath && journalTmpPath) {
     if (!await unlinkVerifiedRegularFile(journalTmpPath, journalTmpIdentity)) {
       throw new Error(`Failed to clear installer journal temporary ${journalTmpPath}`);
@@ -1153,26 +1164,93 @@ async function unlinkExactArtifact(path: string, artifact: DestinationArtifact |
   return relocateVerifiedNode(path, identity);
 }
 
+async function adoptLeftoverDestination(backup: string, dest: string): Promise<boolean> {
+  const destMeta = await optionalLstat(dest);
+  const backupMeta = await optionalLstat(backup);
+  if (!destMeta || !backupMeta) return false;
+  if (backupMeta.isSymbolicLink() && destMeta.isSymbolicLink()) {
+    return await readlink(dest) === await readlink(backup);
+  }
+  if (
+    backupMeta.isFile() && !backupMeta.isSymbolicLink()
+    && destMeta.isFile() && !destMeta.isSymbolicLink() && destMeta.size === 0
+  ) {
+    const identity = await liveNodeIdentity(dest);
+    if (!identity) return false;
+    loadPosixSymbols();
+    let fd: number | undefined;
+    try {
+      fd = openIdentityFd(dest, "file");
+    } catch {
+      return false;
+    }
+    try {
+      if (!selectedPathStillBound(dest, identity, "file", fd)) return false;
+      const buf = await readFile(backup);
+      ftruncateSync(fd, 0);
+      let offset = 0;
+      while (offset < buf.length) {
+        const n = writeSync(fd, buf, offset, buf.length - offset, offset);
+        if (n <= 0) return false;
+        offset += n;
+      }
+      fsyncSync(fd);
+      return fdMatches(fd, identity, "file");
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return false;
+}
+
+async function leftoverEmptyRegularFile(path: string): Promise<boolean> {
+  const metadata = await optionalLstat(path);
+  return Boolean(metadata && metadata.isFile() && !metadata.isSymbolicLink() && metadata.size === 0);
+}
+
 async function restoreDestinations(journal: Pick<InstallJournal, "kind" | "destinations">): Promise<boolean> {
   let complete = true;
   for (const destination of [...journal.destinations].reverse()) {
-    const live = await optionalLstat(destination.destination);
-    if (live && !(destination.installed && await liveIsJournalArtifact(destination.destination, destination.artifact))) {
-      if (destination.backup && await optionalLstat(destination.backup)) complete = false;
+    const dest = destination.destination;
+    const live = await optionalLstat(dest);
+    const destArt = live ? await snapshotArtifact(dest) : undefined;
+    const backupExists = Boolean(destination.backup && await optionalLstat(destination.backup));
+    const backupArt = backupExists ? await snapshotArtifact(destination.backup!) : undefined;
+    const leftoverEmpty = await leftoverEmptyRegularFile(dest);
+    const destMatchesBackup = Boolean(destArt && backupArt && sameArtifact(destArt, backupArt));
+    const installedLive = Boolean(destination.installed && await liveIsJournalArtifact(dest, destination.artifact));
+    if (live && !leftoverEmpty && !destMatchesBackup && !installedLive) {
+      if (backupExists) complete = false;
       continue;
     }
-    if (destination.backup && await optionalLstat(destination.backup)) {
-      if (live && !await unlinkExactArtifact(destination.destination, destination.artifact)) {
+    if (backupExists) {
+      if (destMatchesBackup && !destination.installed) continue;
+      if (destMatchesBackup && leftoverEmpty) continue;
+      if (destMatchesBackup && live?.isSymbolicLink()) continue;
+      if (live && !leftoverEmpty && !await unlinkExactArtifact(dest, destination.artifact)) {
         complete = false;
         continue;
       }
-      const backupIdentity = await liveNodeIdentity(destination.backup);
-      if (!backupIdentity || !await exclusiveRenameOwned(destination.backup, destination.destination, backupIdentity)) {
+      const still = await optionalLstat(dest);
+      const stillArt = still ? await snapshotArtifact(dest) : undefined;
+      if (stillArt && backupArt && sameArtifact(stillArt, backupArt)) continue;
+      if (await leftoverEmptyRegularFile(dest)) {
+        if (!await adoptLeftoverDestination(destination.backup!, dest)) {
+          complete = false;
+          continue;
+        }
+      } else if (!still) {
+        const backupIdentity = await liveNodeIdentity(destination.backup!);
+        if (!backupIdentity || !await exclusiveRenameOwned(destination.backup!, dest, backupIdentity)) {
+          complete = false;
+          continue;
+        }
+      } else if (!await adoptLeftoverDestination(destination.backup!, dest)) {
         complete = false;
         continue;
       }
     } else if (destination.installed) {
-      if (live && !await unlinkExactArtifact(destination.destination, destination.artifact)) complete = false;
+      if (live && !leftoverEmpty && !await unlinkExactArtifact(dest, destination.artifact)) complete = false;
     }
   }
   return complete;
@@ -1433,27 +1511,33 @@ async function disposeTransactionAfterExtract(
 async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
   const destinationsRestored = await restoreDestinations(journal);
   if (journal.previousInstall && await optionalLstat(journal.previousInstall)) {
-    if (await optionalLstat(journal.installRoot) && !await journaledInstallRootIsExact(journal)) {
+    const leftoverRootHusk = async () => Boolean(await optionalLstat(journal.installRoot) && await isLeftoverDisposedInstallRoot(journal.installRoot));
+    if (await optionalLstat(journal.installRoot) && !await leftoverRootHusk() && !await journaledInstallRootIsExact(journal)) {
       if (!await readReceipt()) await clearLeftoverDisposedInstallRoot();
     }
-    if (await optionalLstat(journal.installRoot) && !await journaledInstallRootIsExact(journal)) {
+    if (await optionalLstat(journal.installRoot) && !await leftoverRootHusk() && !await journaledInstallRootIsExact(journal)) {
       if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
       return;
     }
-    if (await optionalLstat(journal.installRoot)) {
+    if (await optionalLstat(journal.installRoot) && !await leftoverRootHusk()) {
       if (!journal.rootIdentity) {
         if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
         return;
       }
       await removeExactDirectory(journal.installRoot, journal.rootIdentity, journal.rootTree);
     }
-    if (await optionalLstat(journal.installRoot) && !await readReceipt()) await clearLeftoverDisposedInstallRoot();
-    if (await optionalLstat(journal.installRoot)) {
+    if (await optionalLstat(journal.installRoot) && !await leftoverRootHusk() && !await readReceipt()) await clearLeftoverDisposedInstallRoot();
+    if (await optionalLstat(journal.installRoot) && !await leftoverRootHusk()) {
       if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
       return;
     }
     const previousIdentity = await liveRootIdentity(journal.previousInstall);
-    if (!previousIdentity || !await exclusiveRenameOwned(journal.previousInstall, journal.installRoot, previousIdentity)) {
+    if (!previousIdentity) throw new Error(`Refusing to replace unowned install root ${journal.installRoot}`);
+    if (await optionalLstat(journal.installRoot) && await isLeftoverDisposedInstallRoot(journal.installRoot)) {
+      if (!await adoptLeftoverInstallRoot(journal.previousInstall, journal.installRoot)) {
+        throw new Error(`Refusing to replace unowned install root ${journal.installRoot}`);
+      }
+    } else if (!await exclusiveRenameOwned(journal.previousInstall, journal.installRoot, previousIdentity)) {
       throw new Error(`Refusing to replace unowned install root ${journal.installRoot}`);
     }
   } else {
@@ -1487,7 +1571,10 @@ async function recoverJournalAt(path: string): Promise<void> {
     if (!await parkIfStillBound(path, identity)) {
       throw new Error(`Failed to clear malformed installer journal at ${path}`);
     }
-    if (path === journalPath) journalPathIdentity = undefined;
+    if (path === journalPath) {
+      const leftoverLive = await liveNodeIdentity(path);
+      journalPathIdentity = leftoverLive && sameNode(leftoverLive, identity) ? leftoverLive : undefined;
+    }
     return;
   }
   if (journal.phase !== "complete") {
@@ -1563,10 +1650,22 @@ async function readReceipt(): Promise<Receipt | undefined> {
   }
 }
 
+async function isLeftoverDestinationHusk(path: string): Promise<boolean> {
+  const metadata = await optionalLstat(path);
+  if (!metadata) return false;
+  if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.size === 0) return true;
+  if (metadata.isSymbolicLink()) {
+    const target = await readlink(path);
+    return expectedLinks().some((link) => link.path === path && link.target === target);
+  }
+  return false;
+}
+
 async function assertDestinationOwnership(path: string, receipt: Receipt | undefined): Promise<void> {
   if (isForeignLaunchAgent(path)) throw new Error(`Refusing to write ${path === orchestrationLaunchAgent ? ORCHESTRATION_LAUNCH_AGENT_LABEL : REAPER_LAUNCH_AGENT_LABEL}`);
   const metadata = await optionalLstat(path);
   if (!metadata) return;
+  if (await isLeftoverDestinationHusk(path)) return;
   if (!receipt || (!receipt.links.some((entry) => entry.path === path) && !receipt.files.some((entry) => entry.path === path))) {
     throw new Error(`Refusing to replace unowned path ${path}`);
   }
@@ -1610,24 +1709,116 @@ async function relocateOwnedDestination(path: string, backup: string, receipt: R
 }
 
 async function placeExclusiveLink(destination: string, target: string): Promise<void> {
-  await requireDestinationAbsent(destination);
-  try {
-    await symlink(target, destination);
-  } catch (error) {
-    if (isAlreadyExists(error)) throw new Error(`Refusing to replace foreign destination ${destination}`);
-    throw error;
+  const existing = await optionalLstat(destination);
+  if (!existing) {
+    try {
+      await symlink(target, destination);
+    } catch (error) {
+      if (isAlreadyExists(error)) throw new Error(`Refusing to replace foreign destination ${destination}`);
+      throw error;
+    }
+    return;
   }
+  if (existing.isSymbolicLink() && await readlink(destination) === target) return;
+  throw new Error(`Refusing to replace foreign destination ${destination}`);
 }
 
 async function placeExclusiveFile(destination: string, staged: string): Promise<void> {
-  await requireDestinationAbsent(destination);
+  const existing = await optionalLstat(destination);
+  if (!existing) {
+    try {
+      await link(staged, destination);
+    } catch (error) {
+      if (isAlreadyExists(error)) throw new Error(`Refusing to replace foreign destination ${destination}`);
+      throw error;
+    }
+    await unlink(staged);
+    return;
+  }
+  if (!existing.isFile() || existing.isSymbolicLink() || existing.size !== 0) {
+    throw new Error(`Refusing to replace foreign destination ${destination}`);
+  }
+  const identity = await liveNodeIdentity(destination);
+  if (!identity) throw new Error(`Refusing to replace foreign destination ${destination}`);
+  loadPosixSymbols();
+  let fd: number | undefined;
   try {
-    await link(staged, destination);
-  } catch (error) {
-    if (isAlreadyExists(error)) throw new Error(`Refusing to replace foreign destination ${destination}`);
-    throw error;
+    fd = openIdentityFd(destination, "file");
+  } catch {
+    throw new Error(`Refusing to replace foreign destination ${destination}`);
+  }
+  try {
+    if (!selectedPathStillBound(destination, identity, "file", fd)) {
+      throw new Error(`Refusing to replace foreign destination ${destination}`);
+    }
+    const buf = await readFile(staged);
+    ftruncateSync(fd, 0);
+    let offset = 0;
+    while (offset < buf.length) {
+      const n = writeSync(fd, buf, offset, buf.length - offset, offset);
+      if (n <= 0) throw new Error(`Refusing to replace foreign destination ${destination}`);
+      offset += n;
+    }
+    fsyncSync(fd);
+    if (!fdMatches(fd, identity, "file")) {
+      throw new Error(`Refusing to replace foreign destination ${destination}`);
+    }
+  } finally {
+    closeSync(fd);
   }
   await unlink(staged);
+}
+
+async function leftoverTreeHasNonemptyFile(path: string): Promise<boolean> {
+  const walk = async (directory: string): Promise<boolean> => {
+    const names = await readdir(directory).catch(() => null);
+    if (!names) return false;
+    for (const name of names) {
+      const full = join(directory, name);
+      const metadata = await optionalLstat(full);
+      if (!metadata) continue;
+      if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.size > 0) return true;
+      if (metadata.isDirectory() && !metadata.isSymbolicLink() && await leftoverTreeHasNonemptyFile(full)) return true;
+    }
+    return false;
+  };
+  const metadata = await optionalLstat(path);
+  if (!metadata) return false;
+  if (metadata.isFile() && !metadata.isSymbolicLink()) return metadata.size > 0;
+  if (metadata.isDirectory() && !metadata.isSymbolicLink()) return walk(path);
+  return false;
+}
+
+async function isLeftoverDisposedInstallRoot(path: string): Promise<boolean> {
+  const metadata = await optionalLstat(path);
+  if (!metadata || !metadata.isDirectory() || metadata.isSymbolicLink()) return false;
+  return !await leftoverTreeHasNonemptyFile(path);
+}
+
+async function adoptLeftoverInstallRoot(staged: string, leftover: string): Promise<boolean> {
+  const tree = await snapshotOwnedTree(staged).catch(() => undefined);
+  if (!tree) return false;
+  for (const entry of [...tree].sort((left, right) => left.path.length - right.path.length)) {
+    const from = join(staged, entry.path);
+    const to = join(leftover, entry.path);
+    if (entry.kind === "dir") {
+      const existing = await optionalLstat(to);
+      if (!existing) await mkdir(to, { recursive: true, mode: 0o755 });
+      else if (!existing.isDirectory() || existing.isSymbolicLink()) return false;
+      continue;
+    }
+    if (entry.kind === "link") {
+      const existing = await optionalLstat(to);
+      if (!existing) await symlink(entry.target, to);
+      else if (!existing.isSymbolicLink() || await readlink(to) !== entry.target) return false;
+      continue;
+    }
+    const existing = await optionalLstat(to);
+    if (!existing) await copyFile(from, to);
+    else if (!existing.isFile() || existing.isSymbolicLink()) return false;
+    else await copyFile(from, to);
+  }
+  return true;
 }
 
 async function relocateOwnedRoot(source: string, destination: string): Promise<void> {
@@ -1853,13 +2044,18 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await crashIf("root-installing");
     await injectForeignDestination("root-place-commit", installRoot);
     if (await optionalLstat(installRoot) && !await readReceipt()) await clearLeftoverDisposedInstallRoot();
-    if (await optionalLstat(installRoot)) throw new Error(`Refusing to replace unowned install root ${installRoot}`);
+    const leftoverHusk = Boolean(await optionalLstat(installRoot) && await isLeftoverDisposedInstallRoot(installRoot));
+    if (await optionalLstat(installRoot) && !leftoverHusk) throw new Error(`Refusing to replace unowned install root ${installRoot}`);
     const stagedRootIdentity = await liveRootIdentity(stagedRoot);
     if (!stagedRootIdentity) throw new Error(`Refusing to replace unowned install root ${installRoot}`);
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_ROOT_PLACE_EMPTY")) {
       await mkdir(installRoot, { recursive: true, mode: 0o755 });
     }
-    if (!await exclusiveRenameOwned(stagedRoot, installRoot, stagedRootIdentity)) {
+    if (leftoverHusk) {
+      if (!await adoptLeftoverInstallRoot(stagedRoot, installRoot)) {
+        throw new Error(`Refusing to replace unowned install root ${installRoot}`);
+      }
+    } else if (!await exclusiveRenameOwned(stagedRoot, installRoot, stagedRootIdentity)) {
       throw new Error(`Refusing to replace unowned install root ${installRoot}`);
     }
     placedRoot = await liveRootIdentity(installRoot);
@@ -1874,7 +2070,14 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       const existing = await optionalLstat(destination);
       const backup = existing ? join(backupsRoot, `link-${index}`) : undefined;
       const staged = join(journal.transactionRoot, "staged-links", String(index));
-      if (backup) {
+      if (backup && !previous) {
+        if (!await isLeftoverDestinationHusk(destination)) {
+          throw new Error(`Refusing to replace unowned path ${destination}`);
+        }
+        const artifact = await snapshotArtifact(staged);
+        await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
+        await placeExclusiveLink(destination, link.target);
+      } else if (backup) {
         await injectForeignDestination("link-backup", destination);
         await requireDestinationOwned(destination, previous!);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
@@ -1902,7 +2105,14 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       const existing = await optionalLstat(destination);
       const backup = existing ? join(backupsRoot, `file-${index}`) : undefined;
       const staged = join(installRoot, "launchAgent.plist");
-      if (backup) {
+      if (backup && !previous) {
+        if (!await isLeftoverDestinationHusk(destination)) {
+          throw new Error(`Refusing to replace unowned path ${destination}`);
+        }
+        const artifact = await snapshotArtifact(staged);
+        await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
+        await placeExclusiveFile(destination, staged);
+      } else if (backup) {
         await injectForeignDestination("plist-backup", destination);
         await requireDestinationOwned(destination, previous!);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: false });

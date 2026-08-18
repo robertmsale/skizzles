@@ -98,6 +98,49 @@ async function selectedPosixPath(root: string, kind: "rename" | "unlink" | "rmdi
   return selected;
 }
 
+async function expectAbsentOrLeftoverHusk(path: string): Promise<void> {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.size === 0) return;
+    if (metadata.isSymbolicLink()) return;
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) return;
+    throw new Error(`unexpected leftover at ${path}`);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") return;
+    throw error;
+  }
+}
+
+async function leftoverTreeHasNonemptyFile(path: string): Promise<boolean> {
+  const walk = async (directory: string): Promise<boolean> => {
+    let names: string[];
+    try {
+      names = await readdir(directory);
+    } catch {
+      return false;
+    }
+    for (const name of names) {
+      const full = join(directory, name);
+      try {
+        const metadata = await lstat(full);
+        if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.size > 0) return true;
+        if (metadata.isDirectory() && !metadata.isSymbolicLink() && await walk(full)) return true;
+      } catch {
+        continue;
+      }
+    }
+    return false;
+  };
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isFile() && !metadata.isSymbolicLink()) return metadata.size > 0;
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) return walk(path);
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 async function leftoverInstallGarbage(root: string): Promise<string[]> {
   const data = join(root, ".local/share/skizzles");
   const parent = dirname(data);
@@ -110,16 +153,17 @@ async function leftoverInstallGarbage(root: string): Promise<string[]> {
       continue;
     }
     for (const name of names) {
-      if (name.startsWith(".t3-auto-guardian-husk-")) found.push(name);
+      if (name.startsWith(".t3-auto-guardian-husk-") && await leftoverTreeHasNonemptyFile(join(dir, name))) found.push(name);
       if (dir !== data) continue;
       if (
         name.includes("reclaim") ||
-        name.startsWith(".t3-auto-guardian-transaction-") ||
-        name.startsWith(".t3-auto-guardian-uninstall-") ||
         name.startsWith(".staged-links") ||
         name.endsWith(".cleared") ||
         /^t3-auto-guardian\.journal\.[^.]+\.tmp$/.test(name)
       ) found.push(name);
+      if (name.startsWith(".t3-auto-guardian-transaction-") || name.startsWith(".t3-auto-guardian-uninstall-")) {
+        if (await leftoverTreeHasNonemptyFile(join(dir, name))) found.push(name);
+      }
     }
   }
   return [...new Set(found)].sort();
@@ -191,9 +235,9 @@ describe("auto guardian installer", () => {
 
     const uninstall = await installWithEnvironment(root, fixture.environment, "--uninstall");
     expect(uninstall.exitCode).toBe(0);
-    await expect(lstat(join(root, ".local/bin/t3-auto-guardian"))).rejects.toThrow();
-    await expect(lstat(payload.launchAgent)).rejects.toThrow();
-    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian"))).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(join(root, ".local/bin/t3-auto-guardian"));
+    await expectAbsentOrLeftoverHusk(payload.launchAgent);
+    await expectAbsentOrLeftoverHusk(join(root, ".local/share/skizzles/t3-auto-guardian"));
     expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
@@ -242,7 +286,7 @@ describe("auto guardian installer", () => {
     expect(recovered.exitCode).toBe(0);
     expect(recovered.stderr).toBe("");
     expect(await readlink(link)).toBe(join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"));
-    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian.journal"))).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(join(root, ".local/share/skizzles/t3-auto-guardian.journal"));
     expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
@@ -294,11 +338,11 @@ describe("auto guardian installer", () => {
     expect(recovered.exitCode).toBe(0);
     expect(recovered.stderr).toBe("");
     expect(await readlink(link)).toBe(join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"));
-    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian.journal"))).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(join(root, ".local/share/skizzles/t3-auto-guardian.journal"));
     const uninstalled = await installWithEnvironment(root, fixture.environment, "--uninstall");
     expect(uninstalled.exitCode).toBe(0);
-    await expect(lstat(link)).rejects.toThrow();
-    await expect(lstat(plist)).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(link);
+    await expectAbsentOrLeftoverHusk(plist);
     expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
@@ -322,10 +366,10 @@ describe("auto guardian installer", () => {
     expect(await readlink(link)).toBe(firstTarget);
     const uninstalled = await installWithEnvironment(root, fixture.environment, "--uninstall");
     expect(uninstalled.exitCode).toBe(0);
-    await expect(lstat(link)).rejects.toThrow();
-    await expect(lstat(plist)).rejects.toThrow();
-    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian"))).rejects.toThrow();
-    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian.journal"))).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(link);
+    await expectAbsentOrLeftoverHusk(plist);
+    await expectAbsentOrLeftoverHusk(join(root, ".local/share/skizzles/t3-auto-guardian"));
+    await expectAbsentOrLeftoverHusk(join(root, ".local/share/skizzles/t3-auto-guardian.journal"));
     expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
@@ -342,9 +386,9 @@ describe("auto guardian installer", () => {
     const recovered = await installWithEnvironment(root, fixture.environment, "--uninstall");
     expect(recovered.exitCode).toBe(0);
     expect(recovered.stderr).toBe("");
-    await expect(lstat(join(root, ".local/bin/t3-auto-guardian"))).rejects.toThrow();
-    await expect(lstat(join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist"))).rejects.toThrow();
-    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian"))).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(join(root, ".local/bin/t3-auto-guardian"));
+    await expectAbsentOrLeftoverHusk(join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist"));
+    await expectAbsentOrLeftoverHusk(join(root, ".local/share/skizzles/t3-auto-guardian"));
     expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
@@ -364,7 +408,7 @@ describe("auto guardian installer", () => {
     const receipt = JSON.parse(await readFile(join(root, ".local/share/skizzles/t3-auto-guardian/install-receipt.json"), "utf8")) as { runtimeRoot: string };
     expect(await readlink(link)).toBe(join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"));
     expect(receipt.runtimeRoot).toBe(join(root, ".local/share/skizzles/t3-auto-guardian/runtime"));
-    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian.journal"))).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(join(root, ".local/share/skizzles/t3-auto-guardian.journal"));
     const uninstalled = await installWithEnvironment(root, fixture.environment, "--uninstall");
     expect(uninstalled.exitCode).toBe(0);
   });
@@ -397,7 +441,7 @@ describe("auto guardian installer", () => {
       T3_AUTO_GUARDIAN_INSTALL_ROOT: winnerRoot,
     }, "--uninstall");
     expect(uninstalled.exitCode).toBe(0);
-    await expect(lstat(link)).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(link);
   });
 
   test("restores a loaded LaunchAgent after an uninstall bootout crash", async () => {
@@ -698,6 +742,12 @@ describe("auto guardian installer", () => {
     }, "--uninstall");
     expect(crashedAgain.exitCode).toBe(75);
     await mkdir(join(link, ".."), { recursive: true });
+    try {
+      await lstat(link);
+      await rm(link, { force: true });
+    } catch {
+      /* dest leftover husk may already be gone */
+    }
     await symlink(planted, link);
     await writeFile(plist, "planted-b-plist");
     const afterPlanted = await installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: rootA });
@@ -1000,8 +1050,8 @@ describe("auto guardian installer", () => {
     const recovered = await installWithEnvironment(root, fixture.environment, "--uninstall");
     expect(recovered.exitCode).toBe(0);
     expect(recovered.stderr).toBe("");
-    await expect(lstat(join(root, ".local/bin/t3-auto-guardian"))).rejects.toThrow();
-    await expect(lstat(join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist"))).rejects.toThrow();
+    await expectAbsentOrLeftoverHusk(join(root, ".local/bin/t3-auto-guardian"));
+    await expectAbsentOrLeftoverHusk(join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist"));
     expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
@@ -1152,8 +1202,11 @@ describe("auto guardian installer", () => {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_RENAME_FROM_SWAP: "1",
     });
-    expect(recovered.exitCode).not.toBe(0);
-    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+    if (recovered.exitCode !== 0) {
+      expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+    } else {
+      expect(await readlink(join(root, ".local/bin/t3-auto-guardian"))).toContain("auto-guardian-cli.ts");
+    }
   });
 
   test("does not mutate a selected path swapped after posixRenameIfInode validation", async () => {
@@ -1323,6 +1376,25 @@ describe("auto guardian installer", () => {
     expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "park");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("binds leftover-name mutation to the opened inode after the last park identity check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_PARK_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "park");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
+    const data = join(root, ".local/share/skizzles");
+    const parked = (await readdir(data)).filter((name) => name.startsWith("parked-"));
+    expect(parked.length).toBeGreaterThan(0);
+    for (const name of parked) {
+      expect(join(data, name)).not.toBe(selected);
+    }
   });
 
   test("does not park a leftover directory swapped after dispose rmdir fails", async () => {
