@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, copyFile, lstat, mkdir, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const roots: string[] = [];
 
@@ -96,6 +96,12 @@ async function selectedPosixPath(root: string, kind: "rename" | "unlink" | "rmdi
   const selected = recorded.trim();
   expect(selected.startsWith(`${root}/`) || selected.startsWith(`/private${root}/`)).toBe(true);
   return selected;
+}
+
+async function plantedAsideRemains(selected: string): Promise<boolean> {
+  const names = await readdir(dirname(selected)).catch(() => [] as string[]);
+  const prefix = `${basename(selected)}.aside-`;
+  return names.some((name) => name.startsWith(prefix));
 }
 
 async function leftoverInstallGarbage(root: string): Promise<string[]> {
@@ -1278,6 +1284,7 @@ describe("auto guardian installer", () => {
     expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "park");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
+    expect(await plantedAsideRemains(selected)).toBe(false);
   });
 
   test("does not park a malformed journal swapped after the truncate helper returns", async () => {
@@ -1294,6 +1301,7 @@ describe("auto guardian installer", () => {
     expect(recovered.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "park");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
+    expect(await plantedAsideRemains(selected)).toBe(false);
   });
 
   test("does not park a zero-length journal swapped after the truncate helper returns", async () => {
@@ -1309,6 +1317,7 @@ describe("auto guardian installer", () => {
     expect(recovered.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "park");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
+    expect(await plantedAsideRemains(selected)).toBe(false);
   });
 
   test("does not park an exclusiveMove leftover swapped after unlinkOpenedInode truncate", async () => {
@@ -1323,6 +1332,7 @@ describe("auto guardian installer", () => {
     expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "park");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
+    expect(await plantedAsideRemains(selected)).toBe(false);
   });
 
   test("does not park a leftover directory swapped after dispose rmdir fails", async () => {
@@ -1338,6 +1348,7 @@ describe("auto guardian installer", () => {
     expect(recovered.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "park");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
+    expect(await plantedAsideRemains(selected)).toBe(false);
   });
 
   test("fails closed when leftover husk dispose is swapped", async () => {
