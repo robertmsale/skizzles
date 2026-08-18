@@ -259,13 +259,13 @@ async function unlinkOpenedInode(
   hook?: { env: string; sidecar: "unlink" | "exclusive-unlink" | "exclusive-move" },
 ): Promise<boolean> {
   loadPosixSymbols();
-  const liveName = pathOfOpenedFd(fd);
-  if (!liveName || !pathStillExpected(liveName, expected) || !fdMatches(fd, expected, kind)) return false;
+  const drop = pathOfOpenedFd(fd);
+  if (!drop || !fdMatches(fd, expected, kind) || !pathStillExpected(drop, expected)) return false;
   let swapped = false;
   if (hook && consumeInstallerHook(hook.env)) {
     swapped = true;
-    await rememberSelectedMutationPath(hook.sidecar, liveName);
-    await plantForeignDestination(liveName);
+    await rememberSelectedMutationPath(hook.sidecar, drop);
+    await plantForeignDestination(drop);
   }
   try {
     const metadata = fstatSync(fd);
@@ -273,10 +273,10 @@ async function unlinkOpenedInode(
   } catch {
     /* symlink fds cannot be truncated */
   }
-  const drop = pathOfOpenedFd(fd);
-  if (!drop || !fdMatches(fd, expected, kind) || !pathStillExpected(drop, expected)) return false;
-  if (drop === liveName && swapped) return false;
-  const removed = kind === "dir" ? rmdirSymbol!(cString(drop)) === 0 : unlinkSymbol!(cString(drop)) === 0;
+  const victim = pathOfOpenedFd(fd);
+  if (!victim) return false;
+  if (swapped && victim === drop) return false;
+  const removed = kind === "dir" ? rmdirSymbol!(cString(victim)) === 0 : unlinkSymbol!(cString(victim)) === 0;
   return removed && !swapped;
 }
 
