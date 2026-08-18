@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, openSync, readSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, openSync, readlinkSync, readSync, writeSync } from "node:fs";
 import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
@@ -145,16 +145,22 @@ type ExclusiveRename = (from: string, to: string) => number;
 type CloneFdToPath = (fd: number, to: string) => number;
 type LstatFn = (path: Buffer, buf: Buffer) => number;
 type PathFn = (path: Buffer) => number;
+type ProcPidFdInfo = (pid: number, fd: number, flavor: number, buf: Buffer, size: number) => number;
 type StatLayout = { dev: number; ino: number; mode: number; devSize: 4 | 8; inoSize: 4 | 8; modeSize: 2 | 4 };
 type RawStat = { dev: string; ino: string; mode: number };
 
 const AT_FDCWD_DARWIN = -2;
+const PROC_PIDFDVNODEPATHINFO = 2;
+const VNODE_FDINFO_WITH_PATH_SIZE = 1200;
+const VNODE_PATH_OFFSET = 176;
+const VNODE_PATH_SIZE = 1024;
 let exclusiveRenameSymbol: ExclusiveRename | undefined;
 let swapRenameSymbol: ExclusiveRename | undefined;
 let cloneFdToPathSymbol: CloneFdToPath | undefined;
 let lstatSymbol: LstatFn | undefined;
 let unlinkSymbol: PathFn | undefined;
 let rmdirSymbol: PathFn | undefined;
+let procPidFdInfoSymbol: ProcPidFdInfo | undefined;
 let statLayout: StatLayout | undefined;
 let flockSymbol: ((fd: number, operation: number) => number) | undefined;
 
@@ -175,7 +181,7 @@ function readUnsigned(buf: Buffer, offset: number, size: 2 | 4 | 8): bigint {
 }
 
 function loadPosixSymbols(): void {
-  if (exclusiveRenameSymbol && lstatSymbol && unlinkSymbol && rmdirSymbol) return;
+  if (exclusiveRenameSymbol && lstatSymbol && unlinkSymbol && rmdirSymbol && (process.platform !== "darwin" || procPidFdInfoSymbol)) return;
   let last: unknown;
   for (const candidate of libcCandidates()) {
     try {
@@ -183,6 +189,7 @@ function loadPosixSymbols(): void {
         ? dlopen(candidate, {
           renamex_np: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
           fclonefileat: { args: [FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+          proc_pidfdinfo: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
           lstat: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
           unlink: { args: [FFIType.ptr], returns: FFIType.i32 },
           rmdir: { args: [FFIType.ptr], returns: FFIType.i32 },
@@ -205,6 +212,11 @@ function loadPosixSymbols(): void {
       lstatSymbol = symbols.lstat;
       unlinkSymbol = symbols.unlink;
       rmdirSymbol = symbols.rmdir;
+      if (process.platform === "darwin") {
+        procPidFdInfoSymbol = (pid, fd, flavor, buf, size) =>
+          (symbols as { proc_pidfdinfo: (pid: number, fd: number, flavor: number, buf: Buffer, size: number) => number })
+            .proc_pidfdinfo(pid, fd, flavor, buf, size);
+      }
       return;
     } catch (error) {
       last = error;
@@ -221,6 +233,31 @@ function exclusiveRename(from: string, to: string): boolean {
 function swapRename(from: string, to: string): boolean {
   loadPosixSymbols();
   return Boolean(swapRenameSymbol && swapRenameSymbol(from, to) === 0);
+}
+
+function pathOfOpenedFd(fd: number): string | undefined {
+  loadPosixSymbols();
+  if (process.platform === "darwin") {
+    if (!procPidFdInfoSymbol) return undefined;
+    const buf = Buffer.alloc(VNODE_FDINFO_WITH_PATH_SIZE);
+    if (procPidFdInfoSymbol(process.pid, fd, PROC_PIDFDVNODEPATHINFO, buf, VNODE_FDINFO_WITH_PATH_SIZE) <= 0) return undefined;
+    const path = buf.toString("utf8", VNODE_PATH_OFFSET, VNODE_PATH_OFFSET + VNODE_PATH_SIZE);
+    const end = path.indexOf("\0");
+    return (end === -1 ? path : path.slice(0, end)) || undefined;
+  }
+  try {
+    return readlinkSync(`/proc/self/fd/${String(fd)}`);
+  } catch {
+    return undefined;
+  }
+}
+
+function unlinkOpenedInode(fd: number, expected: NodeIdentity, kind: "file" | "dir"): boolean {
+  loadPosixSymbols();
+  const current = pathOfOpenedFd(fd);
+  if (!current || !pathStillExpected(current, expected) || !fdMatches(fd, expected, kind)) return false;
+  if (kind === "dir") return rmdirSymbol!(cString(current)) === 0;
+  return unlinkSymbol!(cString(current)) === 0;
 }
 
 function cloneOpenedInode(fd: number, to: string, kind: "file" | "dir"): boolean {
@@ -401,18 +438,23 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    try {
-      if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
-    } catch {
-      /* symlink fds cannot be truncated */
-    }
-    if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP")) {
+    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP");
+    if (swapped) {
       await rememberSelectedMutationPath("unlink", selected);
       await plantForeignDestination(selected);
-      return false;
     }
-    if (unlinkSymbol!(cString(selected)) !== 0) return false;
+    const nlink = fstatSync(fd).nlink;
+    if (nlink <= 1) {
+      try {
+        if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
+      } catch {
+        /* symlink fds cannot be truncated */
+      }
+      unlinkOpenedInode(fd, expected, "file");
+    } else if (!swapped && selectedPathStillBound(selected, expected, "file", fd)) {
+      unlinkSymbol!(cString(selected));
+    }
+    if (swapped) return false;
     return !pathStillExpected(selected, expected);
   } catch {
     return false;
@@ -714,18 +756,13 @@ async function publishJournal(temporary: string, tmpIdentity: NodeIdentity): Pro
   }
   const live = await liveNodeIdentity(journalPath);
   if (!live) {
-    try {
-      await link(temporary, journalPath);
-    } catch (error) {
-      if (isAlreadyExists(error)) throw new Error("Refusing to overwrite unverified installer journal");
-      throw error;
+    const tmpLive = await liveNodeIdentity(temporary);
+    if (!tmpLive || !sameNode(tmpLive, tmpIdentity) || await optionalLstat(journalPath) || !exclusiveRename(temporary, journalPath)) {
+      throw new Error("Refusing to overwrite unverified installer journal");
     }
     const published = await liveNodeIdentity(journalPath);
     if (!published || !sameNode(published, tmpIdentity)) {
       throw new Error("Refusing to publish installer journal after identity drift");
-    }
-    if (!await unlinkVerifiedRegularFile(temporary, tmpIdentity)) {
-      throw new Error(`Failed to clear exclusive journal temporary ${temporary}`);
     }
     journalPathIdentity = published;
     journalTmpIdentity = undefined;
@@ -797,18 +834,23 @@ async function unlinkExclusiveRegularFile(path: string, expected: NodeIdentity):
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    try {
-      if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
-    } catch {
-      /* symlink fds cannot be truncated */
-    }
-    if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    if (consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP")) {
+    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP");
+    if (swapped) {
       await rememberSelectedMutationPath("exclusive-unlink", selected);
       await plantForeignDestination(selected);
-      return false;
     }
-    if (unlinkSymbol!(cString(selected)) !== 0) return false;
+    const nlink = fstatSync(fd).nlink;
+    if (nlink <= 1) {
+      try {
+        if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
+      } catch {
+        /* symlink fds cannot be truncated */
+      }
+      unlinkOpenedInode(fd, expected, "file");
+    } else if (!swapped && selectedPathStillBound(selected, expected, "file", fd)) {
+      unlinkSymbol!(cString(selected));
+    }
+    if (swapped) return false;
     return !pathStillExpected(selected, expected);
   } catch {
     return false;
@@ -919,25 +961,24 @@ async function exclusiveMoveOwned(from: string, to: string, expected: NodeIdenti
     if (renamed) await plantForeignDestination(selected);
     if (!cloneOpenedInode(fd, to, kind)) return false;
     if (renamed) return false;
+    if (!fdMatches(fd, expected, kind)) return Boolean(rawLstat(to));
+    const exclusiveSwap = consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_MOVE_SWAP");
+    if (exclusiveSwap) {
+      await rememberSelectedMutationPath("exclusive-move", selected);
+      await plantForeignDestination(selected);
+    }
     if (kind === "file") {
       try {
         if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
       } catch {
         /* symlink fds cannot be truncated */
       }
-    }
-    if (!selectedPathStillBound(selected, expected, kind, fd)) return Boolean(rawLstat(to));
-    if (consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_MOVE_SWAP")) {
-      await rememberSelectedMutationPath("exclusive-move", selected);
-      await plantForeignDestination(selected);
-      return false;
-    }
-    if (kind === "file") {
-      if (unlinkSymbol!(cString(selected)) !== 0) return Boolean(rawLstat(to));
-    } else {
+      unlinkOpenedInode(fd, expected, "file");
+    } else if (selectedPathStillBound(selected, expected, kind, fd)) {
       const tree = await snapshotOwnedTree(selected).catch(() => undefined);
       if (tree) await disposeVerifiedDirectory(selected, expected, tree);
     }
+    if (exclusiveSwap) return false;
     return Boolean(rawLstat(to));
   } catch {
     return false;
