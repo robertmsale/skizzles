@@ -273,8 +273,11 @@ async function unlinkOpenedInode(
   } catch {
     /* symlink fds cannot be truncated */
   }
-  if (swapped) return false;
-  return kind === "dir" ? rmdirSymbol!(cString(liveName)) === 0 : unlinkSymbol!(cString(liveName)) === 0;
+  const drop = pathOfOpenedFd(fd);
+  if (!drop || !fdMatches(fd, expected, kind) || !pathStillExpected(drop, expected)) return false;
+  if (drop === liveName && swapped) return false;
+  const removed = kind === "dir" ? rmdirSymbol!(cString(drop)) === 0 : unlinkSymbol!(cString(drop)) === 0;
+  return removed && !swapped;
 }
 
 function cloneOpenedInode(fd: number, to: string, kind: "file" | "dir"): boolean {
