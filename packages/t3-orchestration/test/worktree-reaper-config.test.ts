@@ -83,6 +83,16 @@ enabled = false
     expect(() => assertAllowedCleanCommand(["git", "-C/tmp", "clean", "-fd"], "target")).toThrow();
     expect(() => assertAllowedCleanCommand(["rm", "-rf", "src"], "src")).toThrow();
     expect(() => assertAllowedCleanCommand(["rm", "-rf", ".git"], ".git")).toThrow();
+    expect(() => assertAllowedCleanCommand(["rm", "-rf", "lib"], "lib")).toThrow("generated artifact");
+    for (const source of ["packages", "app", "assets", "docs", "tests"]) {
+      expect(() => assertAllowedCleanCommand(["rm", "-rf", source], source)).toThrow("generated artifact");
+    }
+    expect(() => parseReaperConfig(`
+[[extra_commands]]
+match = "**"
+artifact_dir = "lib"
+command = ["rm", "-rf", "lib"]
+`)).toThrow("generated artifact");
     expect(() => parseReaperConfig(`
 [[extra_commands]]
 match = "apps/mobile"

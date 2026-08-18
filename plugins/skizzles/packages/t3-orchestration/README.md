@@ -112,9 +112,11 @@ command = ["rm", "-rf", ".dart_tool"]
 `include_projects` matches a T3 project title, project id, or workspace root.
 Set `enabled = false` on a `[[projects]]` entry to skip that project. Relative
 `deny_paths` are resolved against the worktree. Extra commands are additional
-artifact cleaners: they must name an `artifact_dir` and use only `cargo clean`,
-`flutter clean`, or `rm -rf <artifact_dir>`. Shells, `git`, and deletes of
-`src` or `.git` are refused.
+artifact cleaners: `artifact_dir` must be a generated directory (`target`,
+`build`, or `.dart_tool`) and the command may only be `cargo clean`,
+`flutter clean`, or `rm -rf` of that same generated directory. Source
+directories such as `lib`, `app`, `packages`, `assets`, `docs`, and `tests`
+are refused.
 
 The reaper installer copies the runtime into
 `~/.local/share/skizzles/t3-worktree-reaper`, links `~/.local/bin/t3-worktree-reaper`,

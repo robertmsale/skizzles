@@ -392,6 +392,14 @@ function taskCursor(thread) {
 function projectName(projects, thread) {
   return projects.get(thread.projectId)?.title ?? null;
 }
+function projectedBackgroundLiveness(thread) {
+  const value = thread.backgroundLiveness;
+  if (value === "working" || value === "monitoring" || value === "unknown")
+    return value;
+  if (thread.archivedAt && !Object.hasOwn(thread, "backgroundLiveness"))
+    return "unknown";
+  return value ?? null;
+}
 function projectTask(thread, projects, pinnedIndex) {
   const shell = thread;
   return {
@@ -405,7 +413,7 @@ function projectTask(thread, projects, pinnedIndex) {
     pendingApproval: shell.hasPendingApprovals ?? false,
     pendingUserInput: shell.hasPendingUserInput ?? false,
     actionablePlan: shell.hasActionableProposedPlan ?? false,
-    backgroundLiveness: shell.backgroundLiveness ?? null,
+    backgroundLiveness: projectedBackgroundLiveness(thread),
     pinnedIndex: pinnedIndex ?? null,
     archived: thread.archivedAt != null,
     deleted: thread.deletedAt != null,
@@ -466,7 +474,10 @@ function projectProjects(snapshot) {
 }
 function mergeArchivedTasks(shell, full) {
   const activeIds = new Set(shell.threads.map((thread) => thread.id));
-  const archived = full.threads.filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt && thread.archivedAt);
+  const archived = full.threads.filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt && thread.archivedAt).map((thread) => ({
+    ...thread,
+    backgroundLiveness: Object.hasOwn(thread, "backgroundLiveness") ? thread.backgroundLiveness ?? null : "unknown"
+  }));
   return {
     snapshotSequence: Math.max(shell.snapshotSequence, full.snapshotSequence),
     projects: full.projects,

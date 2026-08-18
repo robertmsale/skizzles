@@ -101,10 +101,12 @@ const FORBIDDEN_EXEC = new Set([
   "osascript", "chmod", "chown", "mv", "cp", "dd", "find", "xargs",
   "npm", "pnpm", "yarn", "bun", "deno", "make", "cmake",
 ]);
-const FORBIDDEN_ARTIFACTS = new Set([".git", "src", ".", ".."]);
+export const GENERATED_ARTIFACT_DIRS = new Set(["target", "build", ".dart_tool"]);
 
 export function assertAllowedArtifact(artifactDir: string, label: string): void {
-  if (FORBIDDEN_ARTIFACTS.has(artifactDir)) throw new Error(`${label} cannot target ${artifactDir}`);
+  if (!GENERATED_ARTIFACT_DIRS.has(artifactDir)) {
+    throw new Error(`${label} must be a generated artifact directory (${[...GENERATED_ARTIFACT_DIRS].join(", ")}), not ${artifactDir}`);
+  }
 }
 
 export function assertAllowedCleanCommand(command: string[], artifactDir: string): void {
@@ -388,5 +390,4 @@ export async function resolveDenyPaths(
   }
   return resolved;
 }
-
 

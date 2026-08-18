@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mergeArchivedTasks, projectCleanableWorktrees, projectProjects, projectTask, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
-import type { ShellSnapshot, Snapshot, T3ThreadShell } from "../src/protocol.ts";
+import { mergeArchivedTasks, projectCleanableWorktrees, projectedBackgroundLiveness, projectProjects, projectTask, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
+import type { ShellSnapshot, Snapshot, T3Thread, T3ThreadShell } from "../src/protocol.ts";
 
 const project = { id: "project", title: "Project", workspaceRoot: "/repo", deletedAt: null };
 const thread = (overrides: Partial<T3ThreadShell> = {}): T3ThreadShell => ({
@@ -102,6 +102,23 @@ describe("task list projection", () => {
       workspaceRoot: "/repo",
       branch: "t3code/task",
     });
+  });
+
+  test("marks archived rows missing liveness as unknown instead of idle", () => {
+    const { backgroundLiveness: _ignored, ...archivedOnly } = thread({ id: "archived-only", archivedAt: "now", session: { status: "stopped" } });
+    expect(Object.hasOwn(archivedOnly, "backgroundLiveness")).toBe(false);
+    expect(projectedBackgroundLiveness(archivedOnly as T3Thread)).toBe("unknown");
+    const merged = mergeArchivedTasks(shell([]), {
+      snapshotSequence: 12,
+      projects: [project],
+      threads: [archivedOnly as T3Thread],
+    });
+    const listed = projectCleanableWorktrees(merged);
+    expect(listed.tasks).toEqual([expect.objectContaining({
+      id: "archived-only",
+      archived: true,
+      backgroundLiveness: "unknown",
+    })]);
   });
 
   test("lists every settled or archived task for the worktree reaper", () => {

@@ -5,18 +5,22 @@ import {
   cleanSettledWorktrees,
   createDefaultReaperDependencies,
   discoverCleanTargets,
+  isArchivedLivenessUnavailable,
   isCleanableLifecycle,
   isFlutterPubspec,
   isRunningTask,
   parseGitWorktreePorcelain,
   resolveRegisteredWorktree,
   shouldSkipUnchanged,
+  taskTargetIdentityChanged,
   type CleanableTask,
   type GitWorktree,
   type ReaperDependencies,
   type ReaperState,
 } from "../src/worktree-reaper.ts";
 import { defaultReaperConfig, parseReaperConfig } from "../src/worktree-reaper-config.ts";
+import { mergeArchivedTasks, projectCleanableWorktrees } from "../src/task-projection.ts";
+import type { T3Thread } from "../src/protocol.ts";
 
 const porcelain = `worktree /repo
 HEAD abc
@@ -138,6 +142,8 @@ describe("lifecycle gates", () => {
     expect(isRunningTask(task({ phase: "archived", backgroundLiveness: "working" }))).toBe(true);
     expect(isRunningTask(task({ phase: "archived", backgroundLiveness: "monitoring" }))).toBe(true);
     expect(isRunningTask(task({ phase: "completed", sessionStatus: "ready", latestTurnState: "completed" }))).toBe(false);
+    expect(isArchivedLivenessUnavailable(task({ archived: true, backgroundLiveness: "unknown" }))).toBe(true);
+    expect(isArchivedLivenessUnavailable(task({ archived: true, backgroundLiveness: null }))).toBe(false);
   });
 });
 
@@ -371,6 +377,81 @@ command = ["rm", "-rf", ".dart_tool"]
     });
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
     expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "task is running" });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("does not clean archived-only snapshot rows that lost background liveness", async () => {
+    const archived: T3Thread = {
+      id: "archived-live",
+      projectId: "project",
+      title: "Archived",
+      modelSelection: { instanceId: "codex", model: "model", options: [{ id: "reasoningEffort", value: "high" }] },
+      runtimeMode: "auto",
+      interactionMode: "default",
+      worktreePath: "/repo/.t3/worktrees/repo/t3code-task",
+      branch: "t3code/task",
+      archivedAt: "now",
+      settledOverride: "settled",
+      session: { status: "stopped" },
+    };
+    expect(Object.hasOwn(archived, "backgroundLiveness")).toBe(false);
+    const listed = projectCleanableWorktrees(mergeArchivedTasks({
+      snapshotSequence: 1,
+      projects: [{ id: "project", title: "acme", workspaceRoot: "/repo" }],
+      threads: [],
+      updatedAt: "now",
+    }, {
+      snapshotSequence: 2,
+      projects: [{ id: "project", title: "acme", workspaceRoot: "/repo" }],
+      threads: [archived],
+    }));
+    expect(listed.tasks[0]).toMatchObject({ id: "archived-live", backgroundLiveness: "unknown", archived: true });
+    const harness = deps({ tasks: listed.tasks.map((entry) => ({
+      id: entry.id,
+      projectId: entry.projectId,
+      projectTitle: entry.projectTitle,
+      phase: entry.phase,
+      sessionStatus: entry.sessionStatus,
+      latestTurnState: entry.latestTurnState,
+      backgroundLiveness: entry.backgroundLiveness,
+      archived: entry.archived,
+      deleted: entry.deleted,
+      settled: entry.settled,
+      branch: entry.branch,
+      worktreePath: entry.worktreePath,
+      workspaceRoot: entry.workspaceRoot,
+    })) });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "archived liveness unavailable" });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("skips archived tasks whose projected liveness is unknown", async () => {
+    const harness = deps({
+      tasks: [task({ archived: true, settled: true, phase: "archived", backgroundLiveness: "unknown" })],
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.tasks[0]).toMatchObject({ action: "skipped", reason: "archived liveness unavailable" });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("re-resolves when the fresh task identity no longer matches the listed target", async () => {
+    const harness = deps({
+      readTask: async () => task({
+        worktreePath: "/repo/.t3/worktrees/repo/other",
+        branch: "t3code/other",
+      }),
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(taskTargetIdentityChanged(
+      task(),
+      task({ worktreePath: "/repo/.t3/worktrees/repo/other", branch: "t3code/other" }),
+    )).toBe(true);
+    expect(report.tasks[0]).toMatchObject({
+      action: "unchanged",
+      path: "/repo/.t3/worktrees/repo/other",
+      reason: "no matching artifacts",
+    });
     expect(harness.runs).toEqual([]);
   });
 

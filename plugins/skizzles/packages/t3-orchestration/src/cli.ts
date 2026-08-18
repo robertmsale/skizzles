@@ -163,7 +163,8 @@ __export(exports_worktree_reaper_config, {
   defaultReaperConfigPath: () => defaultReaperConfigPath,
   defaultReaperConfig: () => defaultReaperConfig,
   assertAllowedCleanCommand: () => assertAllowedCleanCommand,
-  assertAllowedArtifact: () => assertAllowedArtifact
+  assertAllowedArtifact: () => assertAllowedArtifact,
+  GENERATED_ARTIFACT_DIRS: () => GENERATED_ARTIFACT_DIRS
 });
 import { readFile as readFile2, realpath } from "fs/promises";
 import { homedir } from "os";
@@ -215,8 +216,9 @@ function asCommand(value, label) {
   return command;
 }
 function assertAllowedArtifact(artifactDir, label) {
-  if (FORBIDDEN_ARTIFACTS.has(artifactDir))
-    throw new Error(`${label} cannot target ${artifactDir}`);
+  if (!GENERATED_ARTIFACT_DIRS.has(artifactDir)) {
+    throw new Error(`${label} must be a generated artifact directory (${[...GENERATED_ARTIFACT_DIRS].join(", ")}), not ${artifactDir}`);
+  }
 }
 function assertAllowedCleanCommand(command, artifactDir) {
   assertAllowedArtifact(artifactDir, "artifact_dir");
@@ -498,7 +500,7 @@ async function resolveDenyPaths(paths, worktree, realpathFn = realpath) {
   }
   return resolved;
 }
-var DEFAULT_FLUTTER_PATTERN, FORBIDDEN_EXEC, FORBIDDEN_ARTIFACTS;
+var DEFAULT_FLUTTER_PATTERN, FORBIDDEN_EXEC, GENERATED_ARTIFACT_DIRS;
 var init_worktree_reaper_config = __esm(() => {
   DEFAULT_FLUTTER_PATTERN = String.raw`(?:^|\n)flutter:\s*(?:$|\n)|sdk:\s*flutter`;
   FORBIDDEN_EXEC = new Set([
@@ -533,13 +535,14 @@ var init_worktree_reaper_config = __esm(() => {
     "make",
     "cmake"
   ]);
-  FORBIDDEN_ARTIFACTS = new Set([".git", "src", ".", ".."]);
+  GENERATED_ARTIFACT_DIRS = new Set(["target", "build", ".dart_tool"]);
 });
 
 // packages/t3-orchestration/src/worktree-reaper.ts
 var exports_worktree_reaper = {};
 __export(exports_worktree_reaper, {
   writeReaperState: () => writeReaperState,
+  taskTargetIdentityChanged: () => taskTargetIdentityChanged,
   shouldSkipUnchanged: () => shouldSkipUnchanged,
   resolveRegisteredWorktree: () => resolveRegisteredWorktree,
   readReaperState: () => readReaperState,
@@ -549,6 +552,7 @@ __export(exports_worktree_reaper, {
   isRunningTask: () => isRunningTask,
   isFlutterPubspec: () => isFlutterPubspec,
   isCleanableLifecycle: () => isCleanableLifecycle,
+  isArchivedLivenessUnavailable: () => isArchivedLivenessUnavailable,
   formatReaperLogs: () => formatReaperLogs,
   discoverCleanTargets: () => discoverCleanTargets,
   defaultStatePath: () => defaultStatePath,
@@ -599,8 +603,14 @@ function normalizeBranch(branch) {
 function isRunningTask(task) {
   return task.sessionStatus === "running" || task.sessionStatus === "starting" || task.latestTurnState === "running" || task.phase === "running" || task.phase === "starting" || task.backgroundLiveness === "working" || task.backgroundLiveness === "monitoring";
 }
+function isArchivedLivenessUnavailable(task) {
+  return task.archived === true && (task.backgroundLiveness === "unknown" || task.backgroundLiveness === undefined);
+}
 function isCleanableLifecycle(task) {
   return !task.deleted && (task.settled === true || task.archived === true);
+}
+function taskTargetIdentityChanged(before, after) {
+  return before.projectId !== after.projectId || (before.workspaceRoot ?? "") !== (after.workspaceRoot ?? "") || (before.worktreePath ?? "") !== (after.worktreePath ?? "") || (before.branch ?? "") !== (after.branch ?? "");
 }
 function resolveRegisteredWorktree(task, worktrees, resolvedPaths) {
   if (worktrees.length === 0)
@@ -715,6 +725,60 @@ async function discoverCleanTargets(worktree, strategies, deps) {
   }
   return targets;
 }
+async function planClean(task, config, deps, worktreesByRoot) {
+  const policy = resolveProjectPolicy(task, config);
+  if (!policy.enabled)
+    return { ok: false, action: "skipped", reason: policy.reason ?? "project disabled by host config" };
+  const workspaceRoot = task.workspaceRoot?.trim();
+  if (!workspaceRoot)
+    return { ok: false, action: "failed", reason: "project workspaceRoot is missing" };
+  let worktrees = worktreesByRoot.get(workspaceRoot);
+  if (!worktrees) {
+    try {
+      worktrees = await deps.listGitWorktrees(workspaceRoot);
+    } catch (error) {
+      return { ok: false, action: "failed", reason: `git worktree list failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    worktreesByRoot.set(workspaceRoot, worktrees);
+  }
+  const resolvedPaths = new Map;
+  try {
+    resolvedPaths.set(workspaceRoot, await deps.realpath(workspaceRoot));
+  } catch (error) {
+    return { ok: false, action: "skipped", reason: `workspaceRoot is not resolvable: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (task.worktreePath?.trim()) {
+    try {
+      resolvedPaths.set(task.worktreePath, await deps.realpath(task.worktreePath));
+    } catch (error) {
+      return { ok: false, action: "skipped", reason: `claimed worktreePath is not resolvable: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+  for (const worktree of worktrees) {
+    try {
+      resolvedPaths.set(worktree.path, await deps.realpath(worktree.path));
+    } catch {}
+  }
+  const resolved = resolveRegisteredWorktree(task, worktrees, resolvedPaths);
+  if (!resolved.ok)
+    return { ok: false, action: resolved.failClosed ? "failed" : "skipped", reason: resolved.reason };
+  const denyPaths = await resolveDenyPaths(policy.denyPaths, resolved.path, deps.realpath);
+  if (isDeniedPath(resolved.path, denyPaths)) {
+    return { ok: false, action: "skipped", path: resolved.path, reason: "worktree is denied by host config" };
+  }
+  const targets = (await discoverCleanTargets(resolved.path, policy.strategies, deps)).filter((target) => !isDeniedPath(target.directory, denyPaths) && !isDeniedPath(target.artifactDir, denyPaths));
+  try {
+    for (const target of targets)
+      assertAllowedCleanCommand(target.command, target.artifactName);
+  } catch (error) {
+    return { ok: false, action: "failed", path: resolved.path, reason: error instanceof Error ? error.message : String(error) };
+  }
+  const artifactDirs = targets.map((target) => target.artifactDir);
+  let bytesBefore = 0;
+  for (const directory of artifactDirs)
+    bytesBefore += await deps.measureBytes(directory);
+  return { ok: true, path: resolved.path, targets, artifactDirs, bytesBefore };
+}
 async function cleanSettledWorktrees(deps, options) {
   const config = options.config ?? defaultReaperConfig();
   const report = {
@@ -752,101 +816,27 @@ async function cleanSettledWorktrees(deps, options) {
       record({ threadId: task.id, action: "skipped", reason: "not settled or archived" });
       continue;
     }
-    if (isRunningTask(task)) {
-      record({ threadId: task.id, action: "skipped", reason: "task is running" });
-      continue;
-    }
-    const policy = resolveProjectPolicy(task, config);
-    if (!policy.enabled) {
-      record({ threadId: task.id, action: "skipped", reason: policy.reason ?? "project disabled by host config" });
-      continue;
-    }
-    const workspaceRoot = task.workspaceRoot?.trim();
-    if (!workspaceRoot) {
-      record({ threadId: task.id, action: "failed", reason: "project workspaceRoot is missing" });
-      continue;
-    }
-    let worktrees = worktreesByRoot.get(workspaceRoot);
-    if (!worktrees) {
-      try {
-        worktrees = await deps.listGitWorktrees(workspaceRoot);
-      } catch (error) {
-        record({
-          threadId: task.id,
-          action: "failed",
-          reason: `git worktree list failed: ${error instanceof Error ? error.message : String(error)}`
-        });
-        continue;
-      }
-      worktreesByRoot.set(workspaceRoot, worktrees);
-    }
-    const resolvedPaths = new Map;
-    try {
-      resolvedPaths.set(workspaceRoot, await deps.realpath(workspaceRoot));
-    } catch (error) {
+    if (isRunningTask(task) || isArchivedLivenessUnavailable(task)) {
       record({
         threadId: task.id,
         action: "skipped",
-        reason: `workspaceRoot is not resolvable: ${error instanceof Error ? error.message : String(error)}`
+        reason: isArchivedLivenessUnavailable(task) ? "archived liveness unavailable" : "task is running"
       });
       continue;
     }
-    if (task.worktreePath?.trim()) {
-      try {
-        resolvedPaths.set(task.worktreePath, await deps.realpath(task.worktreePath));
-      } catch (error) {
-        record({
-          threadId: task.id,
-          action: "skipped",
-          reason: `claimed worktreePath is not resolvable: ${error instanceof Error ? error.message : String(error)}`
-        });
-        continue;
-      }
-    }
-    for (const worktree of worktrees) {
-      try {
-        resolvedPaths.set(worktree.path, await deps.realpath(worktree.path));
-      } catch {}
-    }
-    const resolved = resolveRegisteredWorktree(task, worktrees, resolvedPaths);
-    if (!resolved.ok) {
-      record({
-        threadId: task.id,
-        action: resolved.failClosed ? "failed" : "skipped",
-        reason: resolved.reason
-      });
+    let plan = await planClean(task, config, deps, worktreesByRoot);
+    if (!plan.ok) {
+      record({ threadId: task.id, action: plan.action, path: plan.path, reason: plan.reason });
       continue;
     }
-    const denyPaths = await resolveDenyPaths(policy.denyPaths, resolved.path, deps.realpath);
-    if (isDeniedPath(resolved.path, denyPaths)) {
-      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "worktree is denied by host config" });
-      continue;
-    }
-    const targets = (await discoverCleanTargets(resolved.path, policy.strategies, deps)).filter((target) => !isDeniedPath(target.directory, denyPaths) && !isDeniedPath(target.artifactDir, denyPaths));
-    try {
-      for (const target of targets)
-        assertAllowedCleanCommand(target.command, target.artifactName);
-    } catch (error) {
-      record({
-        threadId: task.id,
-        action: "failed",
-        path: resolved.path,
-        reason: error instanceof Error ? error.message : String(error)
-      });
-      continue;
-    }
-    const artifactDirs = targets.map((target) => target.artifactDir);
-    let bytesBefore = 0;
-    for (const directory of artifactDirs)
-      bytesBefore += await deps.measureBytes(directory);
-    if (targets.length === 0 || bytesBefore === 0) {
+    if (plan.targets.length === 0 || plan.bytesBefore === 0) {
       if (!options.dryRun) {
-        state.threads[task.id] = { path: resolved.path, bytesAfter: 0, cleanedAt: deps.now() };
+        state.threads[task.id] = { path: plan.path, bytesAfter: 0, cleanedAt: deps.now() };
       }
       record({
         threadId: task.id,
         action: "unchanged",
-        path: resolved.path,
+        path: plan.path,
         bytesBefore: 0,
         bytesAfter: 0,
         bytesFreed: 0,
@@ -854,13 +844,13 @@ async function cleanSettledWorktrees(deps, options) {
       });
       continue;
     }
-    if (shouldSkipUnchanged(state, task.id, resolved.path, bytesBefore)) {
+    if (shouldSkipUnchanged(state, task.id, plan.path, plan.bytesBefore)) {
       record({
         threadId: task.id,
         action: "unchanged",
-        path: resolved.path,
-        bytesBefore,
-        bytesAfter: bytesBefore,
+        path: plan.path,
+        bytesBefore: plan.bytesBefore,
+        bytesAfter: plan.bytesBefore,
         bytesFreed: 0,
         reason: "already cleaned at recorded size"
       });
@@ -873,55 +863,79 @@ async function cleanSettledWorktrees(deps, options) {
       record({
         threadId: task.id,
         action: "failed",
-        path: resolved.path,
+        path: plan.path,
         reason: `could not revalidate task: ${error instanceof Error ? error.message : String(error)}`
       });
       continue;
     }
-    if (isRunningTask(current)) {
-      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "task is running" });
+    if (isRunningTask(current) || isArchivedLivenessUnavailable(current)) {
+      record({
+        threadId: task.id,
+        action: "skipped",
+        path: plan.path,
+        reason: isArchivedLivenessUnavailable(current) ? "archived liveness unavailable" : "task is running"
+      });
       continue;
     }
     if (!isCleanableLifecycle(current)) {
-      record({ threadId: task.id, action: "skipped", path: resolved.path, reason: "not settled or archived" });
+      record({ threadId: task.id, action: "skipped", path: plan.path, reason: "not settled or archived" });
       continue;
+    }
+    if (taskTargetIdentityChanged(task, current)) {
+      plan = await planClean(current, config, deps, worktreesByRoot);
+      if (!plan.ok) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: `task identity changed: ${plan.reason}` });
+        continue;
+      }
+      if (plan.targets.length === 0 || plan.bytesBefore === 0) {
+        record({
+          threadId: task.id,
+          action: "unchanged",
+          path: plan.path,
+          bytesBefore: 0,
+          bytesAfter: 0,
+          bytesFreed: 0,
+          reason: "no matching artifacts"
+        });
+        continue;
+      }
     }
     if (options.dryRun) {
       record({
         threadId: task.id,
         action: "would-clean",
-        path: resolved.path,
-        bytesBefore,
+        path: plan.path,
+        bytesBefore: plan.bytesBefore,
         bytesAfter: 0,
-        bytesFreed: bytesBefore
+        bytesFreed: plan.bytesBefore
       });
       continue;
     }
     try {
-      for (const target of targets)
+      for (const target of plan.targets)
         await deps.runClean(target.command, target.directory);
     } catch (error) {
       record({
         threadId: task.id,
         action: "failed",
-        path: resolved.path,
-        bytesBefore,
+        path: plan.path,
+        bytesBefore: plan.bytesBefore,
         reason: error instanceof Error ? error.message : String(error)
       });
       continue;
     }
     let bytesAfter = 0;
-    for (const directory of artifactDirs) {
+    for (const directory of plan.artifactDirs) {
       if (await deps.pathExists(directory))
         bytesAfter += await deps.measureBytes(directory);
     }
-    const bytesFreed = Math.max(0, bytesBefore - bytesAfter);
-    state.threads[task.id] = { path: resolved.path, bytesAfter, cleanedAt: deps.now() };
+    const bytesFreed = Math.max(0, plan.bytesBefore - bytesAfter);
+    state.threads[task.id] = { path: plan.path, bytesAfter, cleanedAt: deps.now() };
     record({
       threadId: task.id,
       action: "cleaned",
-      path: resolved.path,
-      bytesBefore,
+      path: plan.path,
+      bytesBefore: plan.bytesBefore,
       bytesAfter,
       bytesFreed
     });
