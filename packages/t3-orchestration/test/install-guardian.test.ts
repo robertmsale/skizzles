@@ -983,4 +983,87 @@ describe("auto guardian installer", () => {
     await expect(lstat(join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist"))).rejects.toThrow();
     expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
+
+  test("fails closed when relocate source is replaced after the last identity check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    const link = join(root, ".local/bin/t3-auto-guardian");
+    const firstTarget = await readlink(link);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_RELOCATE_COMMIT: "1",
+      T3_AUTO_GUARDIAN_RELOCATE_RESTORE_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(installRoot, "utf8")).toBe("foreign-link");
+    expect(await readlink(link)).toBe(firstTarget);
+  });
+
+  test("fails closed when the journal is replaced after the last publish identity check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const journal = join(root, ".local/share/skizzles/t3-auto-guardian.journal");
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_JOURNAL_PUBLISH_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(journal, "utf8")).toBe("foreign-link");
+  });
+
+  test("fails closed when the journal aside is replaced after the last unlink identity check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_JOURNAL_UNLINK_COMMIT: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+  });
+
+  test("fails closed when a dispose aside is replaced after the last hash/readlink check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_DISPOSE_UNLINK_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+  });
+
+  test("fails closed when a directory is replaced after the final emptiness and identity check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_DISPOSE_RMDIR_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    const staged = join(root, ".local/share/skizzles/t3-auto-guardian/staged-links");
+    expect((await lstat(staged)).isDirectory()).toBe(true);
+    expect(await readdir(staged)).toEqual([]);
+  });
+
+  test("fails closed when an empty install root appears after the absence check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_ROOT_PLACE_EMPTY: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect((await lstat(installRoot)).isDirectory()).toBe(true);
+    expect(await readdir(installRoot)).toEqual([]);
+  });
 });

@@ -132,7 +132,51 @@ function consumeInstallerHook(name: string): boolean {
   return true;
 }
 
+const RENAME_EXCL = 0x00000004;
+const RENAME_NOREPLACE = 0x00000001;
+const AT_FDCWD = -100;
+
+type ExclusiveRename = (from: string, to: string) => number;
+let exclusiveRenameSymbol: ExclusiveRename | undefined;
 let flockSymbol: ((fd: number, operation: number) => number) | undefined;
+
+function libcCandidates(): string[] {
+  return process.platform === "darwin"
+    ? ["libSystem.B.dylib", "libc.dylib"]
+    : [`libc.${suffix}`, "libc.so.6", "libc.so"];
+}
+
+function cString(value: string): Buffer {
+  return Buffer.from(`${value}\0`);
+}
+
+function loadExclusiveRename(): ExclusiveRename {
+  if (exclusiveRenameSymbol) return exclusiveRenameSymbol;
+  let last: unknown;
+  for (const candidate of libcCandidates()) {
+    try {
+      if (process.platform === "darwin") {
+        const symbol = dlopen(candidate, {
+          renamex_np: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+        }).symbols.renamex_np;
+        exclusiveRenameSymbol = (from, to) => symbol(cString(from), cString(to), RENAME_EXCL);
+      } else {
+        const symbol = dlopen(candidate, {
+          renameat2: { args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+        }).symbols.renameat2;
+        exclusiveRenameSymbol = (from, to) => symbol(AT_FDCWD, cString(from), AT_FDCWD, cString(to), RENAME_NOREPLACE);
+      }
+      return exclusiveRenameSymbol;
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw new Error(`exclusive rename is unavailable (${last instanceof Error ? last.message : String(last)})`);
+}
+
+function exclusiveRename(from: string, to: string): boolean {
+  return loadExclusiveRename()(from, to) === 0;
+}
 
 function loadFlock(): (fd: number, operation: number) => number {
   if (flockSymbol) return flockSymbol;
@@ -422,7 +466,18 @@ async function publishJournal(temporary: string, tmpIdentity: NodeIdentity): Pro
   if (!journalPathIdentity || !sameNode(live, journalPathIdentity)) {
     throw new Error("Refusing to overwrite unverified installer journal");
   }
-  await rename(temporary, journalPath);
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_PUBLISH_SWAP")) {
+    await plantForeignDestination(journalPath);
+  }
+  if (!await unlinkSameNode(journalPath, journalPathIdentity)) {
+    throw new Error("Refusing to overwrite unverified installer journal");
+  }
+  try {
+    await link(temporary, journalPath);
+  } catch (error) {
+    if (isAlreadyExists(error)) throw new Error("Refusing to overwrite unverified installer journal");
+    throw error;
+  }
   const published = await liveNodeIdentity(journalPath);
   if (!published || !sameNode(published, tmpIdentity)) {
     throw new Error("Refusing to publish installer journal after identity drift");
@@ -480,12 +535,10 @@ async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity):
   if (!confirmedMeta || !confirmedMeta.isFile() || confirmedMeta.isSymbolicLink() || !confirmed || !sameNode(confirmed, expected)) {
     return false;
   }
-  try {
-    await unlink(aside);
-  } catch {
-    return false;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_UNLINK_COMMIT")) {
+    await plantForeignDestination(aside);
   }
-  return !await optionalLstat(aside);
+  return unlinkSameNode(aside, expected);
 }
 
 async function clearJournalAt(path: string, identity = path === journalPath ? journalPathIdentity : undefined): Promise<void> {
@@ -545,7 +598,38 @@ function sameNode(left: NodeIdentity, right: NodeIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-async function relocateVerifiedNode(path: string, expected: NodeIdentity, aside = `${path}.reclaim-${randomUUID()}`): Promise<boolean> {
+async function exclusiveRenameOwned(from: string, to: string, expected: NodeIdentity): Promise<boolean> {
+  const live = await liveNodeIdentity(from);
+  if (!live || !sameNode(live, expected)) return false;
+  if (await optionalLstat(to)) return false;
+  return exclusiveRename(from, to);
+}
+
+async function unlinkSameNode(path: string, expected: NodeIdentity): Promise<boolean> {
+  const live = await optionalLstat(path);
+  const identity = await liveNodeIdentity(path);
+  if (!live || live.isDirectory() || !identity || !sameNode(identity, expected)) return false;
+  try { await unlink(path); }
+  catch { return false; }
+  return true;
+}
+
+async function rmdirSameNode(path: string, expected: NodeIdentity): Promise<boolean> {
+  const live = await liveRootIdentity(path);
+  if (!live || !sameNode(live, expected)) return false;
+  const children = await readdir(path).catch(() => null);
+  if (!children || children.length > 0) return false;
+  try { await rmdir(path); }
+  catch { return false; }
+  return true;
+}
+
+async function relocateVerifiedNode(
+  path: string,
+  expected: NodeIdentity,
+  aside = `${path}.reclaim-${randomUUID()}`,
+  commitHook?: string,
+): Promise<boolean> {
   const current = await liveNodeIdentity(path);
   if (!current || !sameNode(current, expected)) return false;
   if (await optionalLstat(aside)) return false;
@@ -555,16 +639,17 @@ async function relocateVerifiedNode(path: string, expected: NodeIdentity, aside 
   const confirmed = await liveNodeIdentity(path);
   if (!confirmed || !sameNode(confirmed, expected)) return false;
   if (await optionalLstat(aside)) return false;
-  try {
-    await rename(path, aside);
-  } catch {
-    return false;
+  if (commitHook && consumeInstallerHook(commitHook)) {
+    await plantForeignDestination(path);
   }
+  if (!await exclusiveRenameOwned(path, aside, expected)) return false;
   const moved = await liveNodeIdentity(aside);
   if (moved && sameNode(moved, expected)) return true;
+  if (commitHook && consumeInstallerHook("T3_AUTO_GUARDIAN_RELOCATE_RESTORE_SWAP")) {
+    await plantForeignDestination(path);
+  }
   if (!await optionalLstat(path)) {
-    try { await rename(aside, path); }
-    catch { return false; }
+    if (!exclusiveRename(aside, path)) return false;
   }
   return false;
 }
@@ -599,7 +684,10 @@ async function restoreDestinations(journal: Pick<InstallJournal, "kind" | "desti
         complete = false;
         continue;
       }
-      await rename(destination.backup, destination.destination);
+      if (!exclusiveRename(destination.backup, destination.destination)) {
+        complete = false;
+        continue;
+      }
     } else if (destination.installed) {
       if (live && !await unlinkExactArtifact(destination.destination, destination.artifact)) complete = false;
     }
@@ -717,9 +805,10 @@ async function disposeVerifiedNode(path: string, kind: "file" | "link", expected
   if (kind === "link" && (!asideMeta.isSymbolicLink() || expected.kind !== "link" || await readlink(aside) !== expected.target)) {
     return false;
   }
-  try { await unlink(aside); }
-  catch { return false; }
-  return !await optionalLstat(aside);
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_UNLINK_SWAP")) {
+    await plantForeignDestination(aside);
+  }
+  return unlinkSameNode(aside, identity);
 }
 
 async function disposeVerifiedDirectory(
@@ -746,6 +835,8 @@ async function disposeVerifiedDirectory(
     const full = join(path, entry.path);
     const root = await liveRootIdentity(path);
     if (!root || !sameNode(root, identity)) return false;
+    const dirIdentity = await liveRootIdentity(full);
+    if (!dirIdentity) return false;
     const children = await readdir(full).catch(() => null);
     if (!children || children.length > 0) return false;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_DIR_SWAP")) {
@@ -753,10 +844,11 @@ async function disposeVerifiedDirectory(
     }
     const remaining = await readdir(full).catch(() => null);
     if (!remaining || remaining.length > 0) return false;
-    const dirIdentity = await liveRootIdentity(full);
-    if (!dirIdentity) return false;
-    try { await rmdir(full); }
-    catch { return false; }
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_RMDIR_SWAP")) {
+      await rename(full, `${full}.aside-${randomUUID()}`).catch(() => undefined);
+      await mkdir(full, { recursive: true, mode: 0o700 });
+    }
+    if (!await rmdirSameNode(full, dirIdentity)) return false;
   }
   const still = await liveRootIdentity(path);
   if (!still || !sameNode(still, identity)) return false;
@@ -767,9 +859,12 @@ async function disposeVerifiedDirectory(
   }
   const leftoverAfter = await readdir(path).catch(() => null);
   if (!leftoverAfter || leftoverAfter.length > 0) return false;
-  try { await rmdir(path); }
-  catch { return false; }
-  return true;
+  if (!sameNode(still, identity)) return false;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_RMDIR_SWAP")) {
+    await rename(path, `${path}.aside-${randomUUID()}`).catch(() => undefined);
+    await mkdir(path, { recursive: true, mode: 0o700 });
+  }
+  return rmdirSameNode(path, identity);
 }
 
 async function removeJournaledTransactionRoot(
@@ -845,7 +940,9 @@ async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
       if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
       return;
     }
-    await rename(journal.previousInstall, journal.installRoot);
+    if (!exclusiveRename(journal.previousInstall, journal.installRoot)) {
+      throw new Error(`Refusing to replace unowned install root ${journal.installRoot}`);
+    }
   } else {
     await removeJournaledInstallRoot(journal);
   }
@@ -931,7 +1028,7 @@ async function relocateOwnedDestination(path: string, backup: string, receipt: R
   await requireDestinationOwned(path, receipt);
   const expected = await liveNodeIdentity(path);
   if (!expected) throw new Error(`Refusing to replace foreign destination ${path}`);
-  if (!await relocateVerifiedNode(path, expected, backup)) {
+  if (!await relocateVerifiedNode(path, expected, backup, "T3_AUTO_GUARDIAN_RELOCATE_COMMIT")) {
     throw new Error(`Refusing to replace foreign destination ${path}`);
   }
 }
@@ -966,7 +1063,7 @@ async function relocateOwnedRoot(source: string, destination: string): Promise<v
   if (!live || !sameNode(live, expected) || !await liveTreeMatches(source, tree)) {
     throw new Error(`Refusing to replace unowned install root ${source}`);
   }
-  if (!await relocateVerifiedNode(source, expected, destination)) {
+  if (!await relocateVerifiedNode(source, expected, destination, "T3_AUTO_GUARDIAN_RELOCATE_COMMIT")) {
     throw new Error(`Refusing to replace unowned install root ${source}`);
   }
 }
@@ -1106,7 +1203,9 @@ async function rollbackTransaction(
       if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
       return;
     }
-    await rename(previousInstall, installRoot);
+    if (!exclusiveRename(previousInstall, installRoot)) {
+      throw new Error(`Refusing to replace unowned install root ${installRoot}`);
+    }
   }
   if (!destinationsRestored) {
     throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
@@ -1172,7 +1271,14 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await crashIf("root-installing");
     await injectForeignDestination("root-place-commit", installRoot);
     if (await optionalLstat(installRoot)) throw new Error(`Refusing to replace unowned install root ${installRoot}`);
-    await rename(stagedRoot, installRoot);
+    const stagedRootIdentity = await liveRootIdentity(stagedRoot);
+    if (!stagedRootIdentity) throw new Error(`Refusing to replace unowned install root ${installRoot}`);
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_ROOT_PLACE_EMPTY")) {
+      await mkdir(installRoot, { recursive: true, mode: 0o755 });
+    }
+    if (!await exclusiveRenameOwned(stagedRoot, installRoot, stagedRootIdentity)) {
+      throw new Error(`Refusing to replace unowned install root ${installRoot}`);
+    }
     placedRoot = await liveRootIdentity(installRoot);
     journal.rootIdentity = placedRoot;
     try { journal.rootTree = await snapshotOwnedTree(installRoot); }
