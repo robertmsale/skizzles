@@ -917,23 +917,14 @@ async function parkOpenedInode(
   }
   const dropName = pathOfOpenedFd(fd);
   if (!dropName || !pathStillExpected(dropName, expected) || !fdMatches(fd, expected, kind)) return false;
-  let swapped = false;
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_PARK_SWAP")) {
-    swapped = true;
     await rememberSelectedMutationPath("park", selected);
     await plantForeignDestination(selected);
-  }
-  const leftover = join(installerStateDir, `parked-${randomUUID()}`);
-  if (rawLstat(leftover)) return false;
-  if (!pathStillExpected(dropName, expected) || !fdMatches(fd, expected, kind)) {
-    const current = pathOfOpenedFd(fd);
-    if (current && current !== dropName && pathStillExpected(current, expected) && fdMatches(fd, expected, kind)) {
-      exclusiveRename(current, leftover);
-    }
     return false;
   }
-  if (!exclusiveRename(dropName, leftover)) return false;
-  return !swapped && Boolean(rawLstat(parked)) && !rawLstat(selected);
+  const leftover = join(installerStateDir, `parked-${randomUUID()}`);
+  if (rawLstat(leftover) || !exclusiveRename(dropName, leftover)) return false;
+  return Boolean(rawLstat(parked)) && !rawLstat(selected);
 }
 
 async function parkIfStillBound(path: string, expected?: NodeIdentity): Promise<boolean> {
