@@ -803,6 +803,18 @@ describe("auto guardian installer", () => {
     expect(await readFile(link, "utf8")).toBe("foreign-link");
   });
 
+  test("refuses an unreceipted empty destination as a leftover husk", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const plist = join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist");
+    await mkdir(join(plist, ".."), { recursive: true });
+    await writeFile(plist, "");
+    const result = await installWithEnvironment(root, fixture.environment);
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(plist, "utf8")).toBe("");
+  });
+
   test("fails closed when a foreign plist appears before first-install place", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
@@ -1427,6 +1439,23 @@ describe("auto guardian installer", () => {
     });
     expect(recovered.exitCode).not.toBe(0);
     expect(await findFileWithContent(root, "keep")).toBeTruthy();
+  });
+
+  test("does not pathname-copy an adopt leftover file swapped after identity bind", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_ADOPT_ROOT_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
   });
 
   test("fails closed when leftover husk relocate source is swapped", async () => {

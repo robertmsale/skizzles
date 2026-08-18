@@ -99,6 +99,12 @@ const TRANSACTION_TOKEN_NAME = ".skizzles-transaction";
 let journalPathIdentity: NodeIdentity | undefined;
 let journalTmpIdentity: NodeIdentity | undefined;
 let journalTmpPath: string | undefined;
+const leftoverDestinationIdentities = new Map<string, NodeIdentity>();
+const leftoverDestinationInodes = new Set<string>();
+
+function leftoverInodeKey(identity: NodeIdentity): string {
+  return `${identity.dev}:${identity.ino}`;
+}
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
@@ -270,7 +276,11 @@ async function unlinkOpenedInode(
   }
   try {
     const metadata = fstatSync(fd);
-    if (kind === "file" && metadata.isFile() && metadata.nlink <= 1) ftruncateSync(fd, 0);
+    if (kind === "file" && metadata.isFile() && metadata.nlink <= 1) {
+      ftruncateSync(fd, 0);
+      leftoverDestinationInodes.add(leftoverInodeKey(expected));
+      if (selected) leftoverDestinationIdentities.set(selected, expected);
+    }
   } catch {
     /* symlink fds cannot be truncated */
   }
@@ -1650,15 +1660,22 @@ async function readReceipt(): Promise<Receipt | undefined> {
   }
 }
 
+function recordedLeftoverDestination(path: string, identity: NodeIdentity): boolean {
+  if (leftoverDestinationInodes.has(leftoverInodeKey(identity))) return true;
+  const recorded = leftoverDestinationIdentities.get(path);
+  return Boolean(recorded && sameNode(recorded, identity));
+}
+
 async function isLeftoverDestinationHusk(path: string): Promise<boolean> {
   const metadata = await optionalLstat(path);
   if (!metadata) return false;
-  if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.size === 0) return true;
   if (metadata.isSymbolicLink()) {
     const target = await readlink(path);
     return expectedLinks().some((link) => link.path === path && link.target === target);
   }
-  return false;
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size !== 0) return false;
+  const identity = await liveNodeIdentity(path);
+  return Boolean(identity && recordedLeftoverDestination(path, identity));
 }
 
 async function assertDestinationOwnership(path: string, receipt: Receipt | undefined): Promise<void> {
@@ -1739,7 +1756,9 @@ async function placeExclusiveFile(destination: string, staged: string): Promise<
     throw new Error(`Refusing to replace foreign destination ${destination}`);
   }
   const identity = await liveNodeIdentity(destination);
-  if (!identity) throw new Error(`Refusing to replace foreign destination ${destination}`);
+  if (!identity || !recordedLeftoverDestination(destination, identity)) {
+    throw new Error(`Refusing to replace foreign destination ${destination}`);
+  }
   loadPosixSymbols();
   let fd: number | undefined;
   try {
@@ -1795,6 +1814,58 @@ async function isLeftoverDisposedInstallRoot(path: string): Promise<boolean> {
   return !await leftoverTreeHasNonemptyFile(path);
 }
 
+async function writeThroughVerifiedFile(from: string, to: string, identity: NodeIdentity): Promise<boolean> {
+  loadPosixSymbols();
+  let source: number | undefined;
+  let dest: number | undefined;
+  try {
+    source = openIdentityFd(from, "file");
+    dest = openIdentityFd(to, "file");
+  } catch {
+    if (source !== undefined) closeSync(source);
+    if (dest !== undefined) closeSync(dest);
+    return false;
+  }
+  try {
+    if (!selectedPathStillBound(to, identity, "file", dest)) return false;
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_ADOPT_ROOT_SWAP")) {
+      await plantForeignDestination(to);
+    }
+    if (!pathStillExpected(to, identity) || !fdMatches(dest, identity, "file")) return false;
+    const buf = Buffer.alloc(65536);
+    let offset = 0;
+    ftruncateSync(dest, 0);
+    for (;;) {
+      const n = readSync(source, buf, 0, buf.length, offset);
+      if (n === 0) break;
+      if (writeSync(dest, buf, 0, n, offset) !== n) return false;
+      offset += n;
+    }
+    fsyncSync(dest);
+    return fdMatches(dest, identity, "file") && pathStillExpected(to, identity);
+  } catch {
+    return false;
+  } finally {
+    closeSync(source);
+    closeSync(dest);
+  }
+}
+
+async function exclusiveCreateFileFromOpened(from: string, to: string): Promise<boolean> {
+  loadPosixSymbols();
+  let source: number | undefined;
+  try {
+    source = openIdentityFd(from, "file");
+  } catch {
+    return false;
+  }
+  try {
+    return cloneOpenedInode(source, to, "file");
+  } finally {
+    closeSync(source);
+  }
+}
+
 async function adoptLeftoverInstallRoot(staged: string, leftover: string): Promise<boolean> {
   const tree = await snapshotOwnedTree(staged).catch(() => undefined);
   if (!tree) return false;
@@ -1803,20 +1874,35 @@ async function adoptLeftoverInstallRoot(staged: string, leftover: string): Promi
     const to = join(leftover, entry.path);
     if (entry.kind === "dir") {
       const existing = await optionalLstat(to);
-      if (!existing) await mkdir(to, { recursive: true, mode: 0o755 });
-      else if (!existing.isDirectory() || existing.isSymbolicLink()) return false;
+      if (!existing) {
+        try {
+          await mkdir(to, { recursive: false, mode: 0o755 });
+        } catch {
+          return false;
+        }
+      } else if (!existing.isDirectory() || existing.isSymbolicLink()) return false;
       continue;
     }
     if (entry.kind === "link") {
       const existing = await optionalLstat(to);
-      if (!existing) await symlink(entry.target, to);
-      else if (!existing.isSymbolicLink() || await readlink(to) !== entry.target) return false;
+      if (!existing) {
+        try {
+          await symlink(entry.target, to);
+        } catch {
+          return false;
+        }
+      } else if (!existing.isSymbolicLink() || await readlink(to) !== entry.target) return false;
       continue;
     }
     const existing = await optionalLstat(to);
-    if (!existing) await copyFile(from, to);
-    else if (!existing.isFile() || existing.isSymbolicLink()) return false;
-    else await copyFile(from, to);
+    if (!existing) {
+      if (!await exclusiveCreateFileFromOpened(from, to)) return false;
+      continue;
+    }
+    if (!existing.isFile() || existing.isSymbolicLink()) return false;
+    const identity = await liveNodeIdentity(to);
+    if (!identity) return false;
+    if (!await writeThroughVerifiedFile(from, to, identity)) return false;
   }
   return true;
 }
