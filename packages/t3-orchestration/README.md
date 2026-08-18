@@ -67,7 +67,7 @@ It will not:
 - proceed without an explicit occupancy list or boolean truncation proof from the daemon
 - proceed when the settled/archived task list is truncated
 - clean after a refresh listing drops the task or shows it running, even if it still occupies the path
-- start an existing-task turn through `t3ctl tasks send`, `dispatch`, or native HTTP/RPC `thread.turn.start` while a clean lease is held, or clean while a turn-start gate is held
+- start an existing-task turn through this package's `t3ctl tasks send` / `dispatch` / `rawDispatch` while a clean lease is held, or clean while a turn-start gate is held. T3 Desktop and other direct callers of T3's own HTTP/WS are outside this package and are not admitted by the local lease.
 - clean a task whose session, latest turn, or phase is running or starting
 - guess when two worktrees match the same branch
 

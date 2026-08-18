@@ -7,9 +7,11 @@ import {
   cleanLeaseLockPath,
   defaultProcessStartKey,
   holdExclusiveCleanLease,
+  inspectPathIdentity,
   isLiveLeaseRecord,
   parseLeaseRecord,
   readLiveCleanLease,
+  unlinkIfSameIdentity,
   withWorktreeGate,
 } from "../src/worktree-reaper-lease.ts";
 
@@ -227,5 +229,35 @@ describe("worktree clean lease", () => {
       },
     })).rejects.toThrow(/reserved for artifact cleanup/);
     expect(JSON.parse(await Bun.file(lockPath).text())).toMatchObject({ token: "replacement", threadId: "live-owner" });
+  });
+
+  test("does not unlink a replacement .reclaim claim installed between identity check and unlink", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    const lockPath = cleanLeaseLockPath(path, root);
+    const claimPath = `${lockPath}.reclaim`;
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    await writeFile(claimPath, `${JSON.stringify({
+      pid: 2147483647,
+      startKey: "dead-claimant",
+      token: "orphan",
+      createdAt: "now",
+    })}\n`);
+    const orphanIdentity = await inspectPathIdentity(claimPath);
+    expect(orphanIdentity).toBeDefined();
+    const liveClaim = {
+      pid: process.pid,
+      startKey: defaultProcessStartKey(process.pid),
+      token: "live-claimant",
+      createdAt: "now",
+    };
+    const removed = await unlinkIfSameIdentity(claimPath, orphanIdentity!, {
+      afterStat: async () => {
+        await rm(claimPath, { force: true });
+        await writeFile(claimPath, `${JSON.stringify(liveClaim)}\n`);
+      },
+    });
+    expect(removed).toBe(false);
+    expect(JSON.parse(await Bun.file(claimPath).text())).toMatchObject({ token: "live-claimant", pid: process.pid });
   });
 });

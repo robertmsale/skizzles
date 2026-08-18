@@ -45,7 +45,7 @@ describe("existing-task turn-start gate", () => {
     expect(cleanerAcquiredDuringDispatch).toBe(false);
   });
 
-  test("native HTTP/RPC thread.turn.start refuses a worktree reserved for cleanup without a package helper pre-entry", async () => {
+  test("in-process rawDispatch thread.turn.start refuses a worktree reserved for cleanup", async () => {
     const root = `/tmp/t3-turn-gate-${crypto.randomUUID()}`;
     const path = `${root}/shared`;
     const clean = await acquireWorktreeGate(path, "task-A", "clean", { home: root });

@@ -628,7 +628,7 @@ import { homedir as homedir3 } from "os";
 
 // packages/t3-orchestration/src/worktree-reaper-lease.ts
 import { createHash } from "crypto";
-import { link, lstat, mkdir as mkdir2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
+import { link, lstat, mkdir as mkdir2, open, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
 import { homedir as homedir2 } from "os";
 import { join as join4 } from "path";
 function cleanLeaseHome(home3 = process.env.T3_HOME?.trim() || join4(process.env.HOME || homedir2(), ".t3")) {
@@ -760,11 +760,53 @@ function isLiveReclaimClaim(record, fns) {
     acquiredAt: record.createdAt
   }, fns);
 }
-async function unlinkIfSameIdentity(path, inspected) {
-  if (!await hasIdentity(path, inspected))
-    return false;
-  await rm2(path, { force: true });
-  return !await hasIdentity(path, inspected);
+async function inspectPathIdentity(path) {
+  try {
+    return lockIdentity(await lstat(path, { bigint: true }));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+}
+async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!opened || opened.dev !== inspected.dev || opened.ino !== inspected.ino)
+      return false;
+    if (hooks.afterStat)
+      await hooks.afterStat();
+    const trash = `${path}.unlinking-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename2(path, trash);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+    const moved = await inspectPathIdentity(trash);
+    if (!moved || moved.dev !== inspected.dev || moved.ino !== inspected.ino) {
+      try {
+        await rename2(trash, path);
+      } catch {}
+      return false;
+    }
+    await rm2(trash, { force: true });
+    return true;
+  } finally {
+    await handle.close();
+  }
 }
 async function recoverOrphanReclaimClaim(lockPath, fns) {
   const claimPath = reclaimClaimPath(lockPath);

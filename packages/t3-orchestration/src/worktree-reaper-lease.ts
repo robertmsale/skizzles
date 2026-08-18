@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { link, lstat, mkdir, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-type LockIdentity = { dev: bigint; ino: bigint };
+export type LockIdentity = { dev: bigint; ino: bigint };
 
 export type CleanLeaseTask = {
   id: string;
@@ -209,10 +209,58 @@ function isLiveReclaimClaim(record: ReclaimClaimRecord, fns: LeaseProcessFns): b
   }, fns);
 }
 
-async function unlinkIfSameIdentity(path: string, inspected: LockIdentity): Promise<boolean> {
-  if (!await hasIdentity(path, inspected)) return false;
-  await rm(path, { force: true });
-  return !await hasIdentity(path, inspected);
+export async function inspectPathIdentity(path: string): Promise<LockIdentity | undefined> {
+  try {
+    return lockIdentity(await lstat(path, { bigint: true }));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+export async function unlinkIfSameIdentity(
+  path: string,
+  inspected: LockIdentity,
+  hooks: { afterStat?: () => Promise<void> } = {},
+): Promise<boolean> {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!opened || opened.dev !== inspected.dev || opened.ino !== inspected.ino) return false;
+    if (hooks.afterStat) await hooks.afterStat();
+    const trash = `${path}.unlinking-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename(path, trash);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+    const moved = await inspectPathIdentity(trash);
+    if (!moved || moved.dev !== inspected.dev || moved.ino !== inspected.ino) {
+      try {
+        await rename(trash, path);
+      } catch {
+        // Path may already hold a newer replacement; leave the moved name for diagnosis.
+      }
+      return false;
+    }
+    await rm(trash, { force: true });
+    return true;
+  } finally {
+    await handle.close();
+  }
 }
 
 async function recoverOrphanReclaimClaim(lockPath: string, fns: LeaseProcessFns): Promise<boolean> {

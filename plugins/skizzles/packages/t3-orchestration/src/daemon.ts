@@ -545,7 +545,7 @@ async function waitForTasks(input, loadSnapshot, sleep = Bun.sleep, clock = Date
 
 // packages/t3-orchestration/src/worktree-reaper-lease.ts
 import { createHash } from "crypto";
-import { link, lstat, mkdir, rm, writeFile } from "fs/promises";
+import { link, lstat, mkdir, open, rename, rm, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join as join2 } from "path";
 function cleanLeaseHome(home2 = process.env.T3_HOME?.trim() || join2(process.env.HOME || homedir(), ".t3")) {
@@ -677,11 +677,53 @@ function isLiveReclaimClaim(record, fns) {
     acquiredAt: record.createdAt
   }, fns);
 }
-async function unlinkIfSameIdentity(path, inspected) {
-  if (!await hasIdentity(path, inspected))
-    return false;
-  await rm(path, { force: true });
-  return !await hasIdentity(path, inspected);
+async function inspectPathIdentity(path) {
+  try {
+    return lockIdentity(await lstat(path, { bigint: true }));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+}
+async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!opened || opened.dev !== inspected.dev || opened.ino !== inspected.ino)
+      return false;
+    if (hooks.afterStat)
+      await hooks.afterStat();
+    const trash = `${path}.unlinking-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename(path, trash);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+    const moved = await inspectPathIdentity(trash);
+    if (!moved || moved.dev !== inspected.dev || moved.ino !== inspected.ino) {
+      try {
+        await rename(trash, path);
+      } catch {}
+      return false;
+    }
+    await rm(trash, { force: true });
+    return true;
+  } finally {
+    await handle.close();
+  }
 }
 async function recoverOrphanReclaimClaim(lockPath, fns) {
   const claimPath = reclaimClaimPath(lockPath);
