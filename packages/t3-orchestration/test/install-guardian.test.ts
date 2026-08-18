@@ -94,7 +94,7 @@ async function selectedPosixPath(root: string, kind: "rename" | "unlink" | "rmdi
     "utf8",
   );
   const selected = recorded.trim();
-  expect(selected.startsWith(`${root}/`)).toBe(true);
+  expect(selected.startsWith(`${root}/`) || selected.startsWith(`/private${root}/`)).toBe(true);
   return selected;
 }
 
@@ -1209,6 +1209,19 @@ describe("auto guardian installer", () => {
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
   });
 
+  test("does not mutate a helper-resolved pathname swapped after unlinkOpenedInode bind", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "exclusive-unlink");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
   test("does not mutate a selected path swapped after exclusiveMoveOwned validation", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
@@ -1221,6 +1234,21 @@ describe("auto guardian installer", () => {
     expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "exclusive-move");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("fails closed when a malformed journal is replaced after identity capture", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const journal = join(root, ".local/share/skizzles/t3-auto-guardian.journal");
+    await writeFile(journal, "not-json");
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_MALFORMED_JOURNAL_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
   });
 
   test("fails closed when leftover husk dispose is swapped", async () => {

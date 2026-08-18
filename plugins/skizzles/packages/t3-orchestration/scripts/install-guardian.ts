@@ -252,12 +252,41 @@ function pathOfOpenedFd(fd: number): string | undefined {
   }
 }
 
-function unlinkOpenedInode(fd: number, expected: NodeIdentity, kind: "file" | "dir"): boolean {
+async function unlinkOpenedInode(
+  fd: number,
+  expected: NodeIdentity,
+  kind: "file" | "dir",
+  hook?: { env: string; sidecar: "unlink" | "exclusive-unlink" | "exclusive-move" },
+): Promise<boolean> {
   loadPosixSymbols();
   const current = pathOfOpenedFd(fd);
   if (!current || !pathStillExpected(current, expected) || !fdMatches(fd, expected, kind)) return false;
-  if (kind === "dir") return rmdirSymbol!(cString(current)) === 0;
-  return unlinkSymbol!(cString(current)) === 0;
+  let swapped = false;
+  if (hook && consumeInstallerHook(hook.env)) {
+    swapped = true;
+    await rememberSelectedMutationPath(hook.sidecar, current);
+    await plantForeignDestination(current);
+  }
+  let nlink = 0;
+  try {
+    const metadata = fstatSync(fd);
+    nlink = metadata.nlink;
+    if (kind === "file" && metadata.isFile() && nlink <= 1) ftruncateSync(fd, 0);
+  } catch {
+    /* symlink fds cannot be truncated */
+  }
+  const liveName = pathOfOpenedFd(fd);
+  if (
+    nlink <= 1 &&
+    liveName &&
+    !(swapped && liveName === current) &&
+    pathStillExpected(liveName, expected) &&
+    fdMatches(fd, expected, kind)
+  ) {
+    if (kind === "dir") rmdirSymbol!(cString(liveName));
+    else unlinkSymbol!(cString(liveName));
+  }
+  return !swapped;
 }
 
 function cloneOpenedInode(fd: number, to: string, kind: "file" | "dir"): boolean {
@@ -438,23 +467,9 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP");
-    if (swapped) {
-      await rememberSelectedMutationPath("unlink", selected);
-      await plantForeignDestination(selected);
+    if (!await unlinkOpenedInode(fd, expected, "file", { env: "T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP", sidecar: "unlink" })) {
+      return false;
     }
-    const nlink = fstatSync(fd).nlink;
-    if (nlink <= 1) {
-      try {
-        if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
-      } catch {
-        /* symlink fds cannot be truncated */
-      }
-      unlinkOpenedInode(fd, expected, "file");
-    } else if (!swapped && selectedPathStillBound(selected, expected, "file", fd)) {
-      unlinkSymbol!(cString(selected));
-    }
-    if (swapped) return false;
     return !pathStillExpected(selected, expected);
   } catch {
     return false;
@@ -834,23 +849,9 @@ async function unlinkExclusiveRegularFile(path: string, expected: NodeIdentity):
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP");
-    if (swapped) {
-      await rememberSelectedMutationPath("exclusive-unlink", selected);
-      await plantForeignDestination(selected);
+    if (!await unlinkOpenedInode(fd, expected, "file", { env: "T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP", sidecar: "exclusive-unlink" })) {
+      return false;
     }
-    const nlink = fstatSync(fd).nlink;
-    if (nlink <= 1) {
-      try {
-        if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
-      } catch {
-        /* symlink fds cannot be truncated */
-      }
-      unlinkOpenedInode(fd, expected, "file");
-    } else if (!swapped && selectedPathStillBound(selected, expected, "file", fd)) {
-      unlinkSymbol!(cString(selected));
-    }
-    if (swapped) return false;
     return !pathStillExpected(selected, expected);
   } catch {
     return false;
@@ -876,10 +877,6 @@ async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity):
 async function clearJournalAt(path: string, identity = path === journalPath ? journalPathIdentity : undefined): Promise<void> {
   if (!await unlinkVerifiedRegularFile(path, identity)) {
     throw new Error(`Failed to clear installer journal at ${path}`);
-  }
-  const leftover = await optionalLstat(path);
-  if (leftover && leftover.isFile() && !leftover.isSymbolicLink() && leftover.size === 0) {
-    await unlink(path).catch(() => undefined);
   }
   if (path === journalPath && journalTmpPath) {
     if (!await unlinkVerifiedRegularFile(journalTmpPath, journalTmpIdentity)) {
@@ -962,23 +959,14 @@ async function exclusiveMoveOwned(from: string, to: string, expected: NodeIdenti
     if (!cloneOpenedInode(fd, to, kind)) return false;
     if (renamed) return false;
     if (!fdMatches(fd, expected, kind)) return Boolean(rawLstat(to));
-    const exclusiveSwap = consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_MOVE_SWAP");
-    if (exclusiveSwap) {
-      await rememberSelectedMutationPath("exclusive-move", selected);
-      await plantForeignDestination(selected);
-    }
     if (kind === "file") {
-      try {
-        if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
-      } catch {
-        /* symlink fds cannot be truncated */
+      if (!await unlinkOpenedInode(fd, expected, "file", { env: "T3_AUTO_GUARDIAN_EXCLUSIVE_MOVE_SWAP", sidecar: "exclusive-move" })) {
+        return false;
       }
-      unlinkOpenedInode(fd, expected, "file");
     } else if (selectedPathStillBound(selected, expected, kind, fd)) {
       const tree = await snapshotOwnedTree(selected).catch(() => undefined);
       if (tree) await disposeVerifiedDirectory(selected, expected, tree);
     }
-    if (exclusiveSwap) return false;
     return Boolean(rawLstat(to));
   } catch {
     return false;
@@ -1394,9 +1382,17 @@ async function recoverJournalAt(path: string): Promise<void> {
   const identity = await liveNodeIdentity(path);
   const journal = await readJournalFrom(path);
   if (!journal) {
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_MALFORMED_JOURNAL_SWAP")) {
+      await plantForeignDestination(path);
+    }
     const leftover = await optionalLstat(path);
-    if (leftover && leftover.isFile() && !leftover.isSymbolicLink()) {
-      await unlink(path).catch(() => undefined);
+    if (!leftover) return;
+    if (!leftover.isFile() || leftover.isSymbolicLink() || !identity) {
+      throw new Error(`Refusing to clear malformed installer journal at ${path}`);
+    }
+    const live = await liveNodeIdentity(path);
+    if (!live || !sameNode(live, identity) || !await unlinkExclusiveRegularFile(path, identity)) {
+      throw new Error(`Failed to clear malformed installer journal at ${path}`);
     }
     return;
   }
