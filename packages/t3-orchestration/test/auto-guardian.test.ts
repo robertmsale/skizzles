@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP, UNBOUND_ACCEPT_GAP } from "../src/approval-projection.ts";
@@ -19,12 +20,17 @@ import {
   withGuardianDeliveryLock,
   isCodexProvider,
   isGuardianEligible,
+  inferDriverFromInstanceId,
+  readSqliteThreadContext,
+  resolveGuardianProviderDriver,
   resolveGuardianRuntimeMode,
   runGuardianCycle,
+  threadContextFromSqliteRows,
   type ApprovalList,
   type ClaimResult,
   type GuardianDependencies,
   type GuardianState,
+  type ThreadContext,
   type JudgeInput,
   type JudgeResult,
 } from "../src/auto-guardian.ts";
@@ -73,7 +79,7 @@ function fixture(options: {
   history?: Array<{ role: string; text: string }>;
   judge?: JudgeResult;
   state?: GuardianState;
-  threadRuntimeMode?: Record<string, string | undefined> | ((threadId: string) => string | undefined | Promise<string | undefined>);
+  threadContext?: Record<string, ThreadContext | undefined> | ((threadId: string) => ThreadContext | undefined | Promise<ThreadContext | undefined>);
 } = {}): { deps: GuardianDependencies; resolved: Array<Record<string, unknown>>; judged: number; threadLookups: string[] } {
   const resolved: Array<Record<string, unknown>> = [];
   const threadLookups: string[] = [];
@@ -81,10 +87,10 @@ function fixture(options: {
   let state = options.state ?? emptyGuardianState();
   const deps: GuardianDependencies = {
     listTaskApprovals: async () => options.list ?? { approvals: [approval()], unidentifiable: [] },
-    threadRuntimeMode: async (threadId) => {
+    threadContext: async (threadId) => {
       threadLookups.push(threadId);
-      if (typeof options.threadRuntimeMode === "function") return options.threadRuntimeMode(threadId);
-      if (options.threadRuntimeMode) return options.threadRuntimeMode[threadId];
+      if (typeof options.threadContext === "function") return options.threadContext(threadId);
+      if (options.threadContext) return options.threadContext[threadId];
       return undefined;
     },
     resolveTaskApproval: async (input) => {
@@ -276,6 +282,46 @@ describe("guardian eligibility filter", () => {
     expect(resolveGuardianRuntimeMode(undefined, undefined)).toEqual({ runtimeMode: undefined, source: "missing" });
   });
 
+  test("resolves providerDriver from the thread when the approval event omits it", () => {
+    expect(inferDriverFromInstanceId("cursor")).toBe("cursor");
+    expect(inferDriverFromInstanceId("grok")).toBe("grok");
+    expect(inferDriverFromInstanceId("codex")).toBe("codex");
+    expect(inferDriverFromInstanceId("cursor-work")).toBeUndefined();
+    expect(inferDriverFromInstanceId("personal")).toBeUndefined();
+    expect(resolveGuardianProviderDriver(undefined, "cursor")).toEqual({ providerDriver: "cursor", source: "thread" });
+    expect(resolveGuardianProviderDriver(null, undefined, { provider: "cursor" })).toEqual({ providerDriver: "cursor", source: "thread" });
+    expect(resolveGuardianProviderDriver(undefined, "personal", { providerDriver: "cursor" })).toEqual({ providerDriver: "cursor", source: "thread" });
+    expect(resolveGuardianProviderDriver("codex", "cursor", { providerDriver: "cursor" })).toEqual({ providerDriver: "codex", source: "event" });
+    expect(resolveGuardianProviderDriver(undefined, "personal")).toEqual({ providerDriver: undefined, source: "missing" });
+  });
+
+  test("reads Auto and Cursor identity from T3 sqlite thread and session rows", async () => {
+    expect(threadContextFromSqliteRows(
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "cursor" }) },
+      { runtime_mode: "auto" },
+    )).toEqual({ runtimeMode: "auto", provider: "cursor", providerDriver: "cursor" });
+    const root = await mkdtemp("/tmp/t3-guardian-sqlite-");
+    try {
+      const path = join(root, "state.sqlite");
+      const db = new Database(path);
+      db.run("CREATE TABLE projection_threads (thread_id TEXT, runtime_mode TEXT, model_selection_json TEXT)");
+      db.run("CREATE TABLE provider_session_runtime (thread_id TEXT, runtime_mode TEXT)");
+      db.run(
+        "INSERT INTO projection_threads VALUES (?, 'auto', ?)",
+        ["596426a6-6d6e-43a4-b0d3-23ed99208aeb", JSON.stringify({ instanceId: "cursor" })],
+      );
+      db.run("INSERT INTO provider_session_runtime VALUES (?, 'auto')", ["596426a6-6d6e-43a4-b0d3-23ed99208aeb"]);
+      db.close();
+      expect(readSqliteThreadContext("596426a6-6d6e-43a4-b0d3-23ed99208aeb", path)).toEqual({
+        runtimeMode: "auto",
+        provider: "cursor",
+        providerDriver: "cursor",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("keeps unidentifiable snapshot gaps distinct from missing commands", () => {
     const candidates = candidatesFromApprovalList({
       approvals: [approval()],
@@ -296,7 +342,7 @@ describe("guardian cycle", () => {
   test("judges when the approval event omits runtimeMode and the thread is auto", async () => {
     const result = fixture({
       list: { approvals: [approval({ runtimeMode: undefined })], unidentifiable: [] },
-      threadRuntimeMode: { "cursor-task": "auto" },
+      threadContext: { "cursor-task": { runtimeMode: "auto" } },
     });
     const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
     expect(result.threadLookups).toEqual(["cursor-task"]);
@@ -306,6 +352,9 @@ describe("guardian cycle", () => {
       threadId: "cursor-task",
       runtimeMode: "auto",
       runtimeModeSource: "thread",
+      providerDriver: "cursor",
+      providerDriverSource: "event",
+      inferredFromThread: ["runtimeMode"],
       responded: true,
     });
     expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
@@ -315,7 +364,7 @@ describe("guardian cycle", () => {
     for (const runtimeMode of ["full-access", "plan", "ask"] as const) {
       const result = fixture({
         list: { approvals: [approval({ runtimeMode: undefined })], unidentifiable: [] },
-        threadRuntimeMode: { "cursor-task": runtimeMode },
+        threadContext: { "cursor-task": { runtimeMode } },
       });
       const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
       expect(result.threadLookups).toEqual(["cursor-task"]);
@@ -333,7 +382,7 @@ describe("guardian cycle", () => {
 
   test("judges an explicit auto runtimeMode on the approval event without a thread lookup", async () => {
     const result = fixture({
-      threadRuntimeMode: { "cursor-task": "full-access" },
+      threadContext: { "cursor-task": { runtimeMode: "full-access" } },
     });
     const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
     expect(result.threadLookups).toEqual([]);
@@ -342,6 +391,9 @@ describe("guardian cycle", () => {
       action: "judged",
       runtimeMode: "auto",
       runtimeModeSource: "event",
+      providerDriver: "cursor",
+      providerDriverSource: "event",
+      inferredFromThread: [],
       responded: true,
     });
     expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
@@ -350,7 +402,7 @@ describe("guardian cycle", () => {
   test("skips an explicit non-auto runtimeMode on the approval event even when the thread is auto", async () => {
     const result = fixture({
       list: { approvals: [approval({ runtimeMode: "full-access" })], unidentifiable: [] },
-      threadRuntimeMode: { "cursor-task": "auto" },
+      threadContext: { "cursor-task": { runtimeMode: "auto" } },
     });
     const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
     expect(result.threadLookups).toEqual([]);
@@ -368,7 +420,7 @@ describe("guardian cycle", () => {
   test("still skips Codex when the approval event omits runtimeMode and the thread is auto", async () => {
     const { deps, resolved, judged } = fixture({
       list: { approvals: [approval({ threadId: "codex-task", provider: "codex", providerDriver: "codex", runtimeMode: undefined })], unidentifiable: [] },
-      threadRuntimeMode: { "codex-task": "auto" },
+      threadContext: { "codex-task": { runtimeMode: "auto" } },
     });
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(judged).toBe(0);
@@ -414,23 +466,81 @@ describe("guardian cycle", () => {
     expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline", reason: UNBOUND_ACCEPT_GAP })]);
   });
 
-  test("skips allowlisted instance IDs when the driver is missing or Codex", async () => {
-    const missing = fixture({
+  test("infers a known non-Codex driver from the thread when the approval omits providerDriver", async () => {
+    const result = fixture({
       list: { approvals: [approval({ providerDriver: null })], unidentifiable: [] },
     });
-    expect((await runGuardianCycle(missing.deps, defaultGuardianConfig())).decisions[0]).toMatchObject({
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(1);
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      providerDriver: "cursor",
+      providerDriverSource: "thread",
+      inferredFromThread: ["providerDriver"],
+      responded: true,
+    });
+    expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+  });
+
+  test("skips unknown instance IDs and explicit Codex drivers when providerDriver is omitted or Codex", async () => {
+    const unknown = fixture({
+      list: { approvals: [approval({ provider: "personal", providerDriver: null })], unidentifiable: [] },
+    });
+    expect((await runGuardianCycle(unknown.deps, defaultGuardianConfig())).decisions[0]).toMatchObject({
       action: "skipped_codex",
+      providerDriver: "undefined",
+      providerDriverSource: "missing",
+      reason: "provider driver is unavailable (missing)",
       responded: false,
     });
-    expect(missing.resolved).toEqual([]);
+    expect(unknown.resolved).toEqual([]);
     const mismatched = fixture({
       list: { approvals: [approval({ provider: "cursor", providerDriver: "codex" })], unidentifiable: [] },
     });
     expect((await runGuardianCycle(mismatched.deps, defaultGuardianConfig())).decisions[0]).toMatchObject({
       action: "skipped_codex",
+      providerDriver: "codex",
+      providerDriverSource: "event",
       responded: false,
     });
     expect(mismatched.resolved).toEqual([]);
+  });
+
+  test("judges a stale approvals DTO that omits runtimeMode and providerDriver when the thread is Cursor Auto", async () => {
+    const result = fixture({
+      list: { approvals: [approval({ runtimeMode: undefined, providerDriver: null })], unidentifiable: [] },
+      threadContext: { "cursor-task": { runtimeMode: "auto", provider: "cursor", providerDriver: "cursor" } },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.threadLookups).toEqual(["cursor-task"]);
+    expect(result.judged).toBe(1);
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      runtimeMode: "auto",
+      runtimeModeSource: "thread",
+      providerDriver: "cursor",
+      providerDriverSource: "thread",
+      inferredFromThread: ["runtimeMode", "providerDriver"],
+      responded: true,
+    });
+  });
+
+  test("skips a stale approvals DTO when the thread runtime is not auto", async () => {
+    const result = fixture({
+      list: { approvals: [approval({ runtimeMode: undefined, providerDriver: null })], unidentifiable: [] },
+      threadContext: { "cursor-task": { runtimeMode: "full-access", provider: "cursor" } },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_runtime",
+      runtimeMode: "full-access",
+      runtimeModeSource: "thread",
+      providerDriver: "cursor",
+      providerDriverSource: "thread",
+      inferredFromThread: ["runtimeMode", "providerDriver"],
+      responded: false,
+    });
   });
 
   test("never judges a custom instance whose T3 driver is Codex", async () => {

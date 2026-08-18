@@ -6,6 +6,7 @@ import { connect } from "net";
 
 // packages/t3-orchestration/src/config.ts
 import { join } from "path";
+var {$ } = globalThis.Bun;
 var home = process.env.HOME ?? (() => {
   throw new Error("HOME is required");
 })();
@@ -25,7 +26,22 @@ function parseTailscaleGatewayPort(value) {
 }
 var TAILSCALE_GATEWAY_PORT = parseTailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
 var TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
+var KEYCHAIN_SERVICE = "t3-orchestration";
 var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
+async function origin() {
+  const path = join(T3_HOME, "userdata/server-runtime.json");
+  const runtime = await Bun.file(path).json();
+  if (typeof runtime.origin !== "string" || !/^https?:\/\//.test(runtime.origin))
+    throw new Error(`Invalid T3 runtime origin in ${path}`);
+  return runtime.origin.replace(/\/$/, "");
+}
+async function token() {
+  const result = await $`security find-generic-password -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`.quiet();
+  const value = result.text().trim();
+  if (!value)
+    throw new Error("No T3 token. Run t3ctl auth configure.");
+  return value;
+}
 
 // packages/t3-orchestration/src/remote-config.ts
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
@@ -699,6 +715,7 @@ import { mkdir as mkdir3, mkdtemp, readFile as readFile3, rename as rename2, rm 
 import { homedir as homedir2, tmpdir } from "os";
 import { dirname as dirname3, join as join4, resolve as resolve3 } from "path";
 import { randomBytes } from "crypto";
+import { Database } from "bun:sqlite";
 
 // packages/t3-orchestration/src/approval-projection.ts
 var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
@@ -859,6 +876,121 @@ function resolveGuardianRuntimeMode(eventRuntimeMode, threadRuntimeMode) {
     return { runtimeMode: fromThread, source: "thread" };
   return { runtimeMode: undefined, source: "missing" };
 }
+function inferDriverFromInstanceId(instanceId) {
+  const value = instanceId?.trim().toLowerCase();
+  if (!value)
+    return;
+  if (value === CODEX_PROVIDER_INSTANCE)
+    return CODEX_PROVIDER_INSTANCE;
+  if (NON_CODEX_PROVIDERS.includes(value))
+    return value;
+  return;
+}
+function resolveGuardianProviderDriver(eventDriver, eventProvider, thread) {
+  const fromEvent = normalizeRuntimeMode(eventDriver);
+  if (fromEvent)
+    return { providerDriver: fromEvent, source: "event" };
+  const fromThreadDriver = normalizeRuntimeMode(thread?.providerDriver);
+  if (fromThreadDriver)
+    return { providerDriver: fromThreadDriver, source: "thread" };
+  const fromInstance = inferDriverFromInstanceId(normalizeRuntimeMode(thread?.provider) ?? normalizeRuntimeMode(eventProvider));
+  if (fromInstance)
+    return { providerDriver: fromInstance, source: "thread" };
+  return { providerDriver: undefined, source: "missing" };
+}
+function asSqliteRow(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function firstToken(...values) {
+  for (const value of values) {
+    const token2 = normalizeRuntimeMode(value);
+    if (token2)
+      return token2;
+  }
+  return;
+}
+function instanceIdFromUnknown(value) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed)
+      return;
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return instanceIdFromUnknown(JSON.parse(trimmed));
+      } catch {
+        return;
+      }
+    }
+    return trimmed;
+  }
+  const record = asSqliteRow(value);
+  return firstToken(record?.instanceId, record?.instance_id);
+}
+function threadContextFromSqliteRows(thread, session) {
+  const provider = firstToken(thread?.provider_instance_id, instanceIdFromUnknown(thread?.model_selection_json), instanceIdFromUnknown(thread?.model_selection), session?.instance_id, session?.provider_instance_id);
+  return {
+    runtimeMode: firstToken(thread?.runtime_mode, thread?.runtimeMode, session?.runtime_mode, session?.runtimeMode),
+    provider,
+    providerDriver: firstToken(thread?.provider_driver, session?.driver, session?.provider_driver, inferDriverFromInstanceId(provider))
+  };
+}
+function defaultT3StateSqlitePath(home3 = process.env.HOME || homedir2()) {
+  const t3Home = resolve3(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
+  return join4(t3Home, "userdata/state.sqlite");
+}
+function readSqliteThreadContext(threadId, dbPath = defaultT3StateSqlitePath()) {
+  if (!threadId.trim())
+    return;
+  try {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const thread = asSqliteRow(db.query("SELECT * FROM projection_threads WHERE thread_id = ?").get(threadId));
+      const session = asSqliteRow(db.query("SELECT * FROM provider_session_runtime WHERE thread_id = ?").get(threadId));
+      if (!thread && !session)
+        return;
+      return threadContextFromSqliteRows(thread, session);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return;
+  }
+}
+async function fetchT3ThreadContext(threadId) {
+  if (!threadId.trim())
+    return;
+  try {
+    const query = new URLSearchParams({ turnLimit: "1" });
+    const response = await fetch(`${await origin()}/api/orchestration/threads/${encodeURIComponent(threadId)}?${query}`, {
+      headers: { authorization: `Bearer ${await token()}`, "content-type": "application/json" }
+    });
+    if (!response.ok)
+      return;
+    const payload = await response.json();
+    const provider = normalizeRuntimeMode(payload.thread?.modelSelection?.instanceId);
+    return {
+      runtimeMode: normalizeRuntimeMode(payload.thread?.runtimeMode),
+      provider,
+      providerDriver: inferDriverFromInstanceId(provider)
+    };
+  } catch {
+    return;
+  }
+}
+async function lookupT3ThreadContext(threadId) {
+  const sqlite = readSqliteThreadContext(threadId);
+  if (sqlite?.runtimeMode && (sqlite.providerDriver || sqlite.provider))
+    return sqlite;
+  const remote = await fetchT3ThreadContext(threadId);
+  if (!sqlite && !remote)
+    return;
+  const provider = sqlite?.provider ?? remote?.provider;
+  return {
+    runtimeMode: sqlite?.runtimeMode ?? remote?.runtimeMode,
+    provider,
+    providerDriver: sqlite?.providerDriver ?? remote?.providerDriver ?? inferDriverFromInstanceId(provider)
+  };
+}
 function isCodexDriver(driver) {
   return driver?.trim().toLowerCase() === CODEX_PROVIDER_INSTANCE;
 }
@@ -929,23 +1061,49 @@ function candidateAction(candidate) {
     toolName: candidate.toolName
   });
 }
-async function resolveCandidateRuntimeMode(dependencies, candidate, cache) {
-  const fromEvent = resolveGuardianRuntimeMode(candidate.runtimeMode);
-  if (fromEvent.source !== "missing")
-    return fromEvent;
-  if (!dependencies.threadRuntimeMode)
-    return fromEvent;
-  if (!cache.has(candidate.threadId)) {
+function inferredFromThread(resolved) {
+  const fields = [];
+  if (resolved.runtimeModeSource === "thread")
+    fields.push("runtimeMode");
+  if (resolved.providerDriverSource === "thread")
+    fields.push("providerDriver");
+  return fields;
+}
+async function resolveCandidateFields(dependencies, candidate, cache) {
+  const eventMode = resolveGuardianRuntimeMode(candidate.runtimeMode);
+  const eventDriver = resolveGuardianProviderDriver(candidate.providerDriver, candidate.provider);
+  if (eventMode.source !== "missing" && eventDriver.source === "event") {
+    return {
+      runtimeMode: eventMode.runtimeMode,
+      runtimeModeSource: eventMode.source,
+      providerDriver: eventDriver.providerDriver,
+      providerDriverSource: eventDriver.source
+    };
+  }
+  if (!cache.has(candidate.threadId) && dependencies.threadContext) {
     try {
-      cache.set(candidate.threadId, normalizeRuntimeMode(await dependencies.threadRuntimeMode(candidate.threadId)));
+      cache.set(candidate.threadId, await dependencies.threadContext(candidate.threadId) ?? null);
     } catch {
-      cache.set(candidate.threadId, undefined);
+      cache.set(candidate.threadId, null);
     }
   }
-  return resolveGuardianRuntimeMode(candidate.runtimeMode, cache.get(candidate.threadId));
+  const thread = cache.get(candidate.threadId);
+  const runtime = resolveGuardianRuntimeMode(candidate.runtimeMode, thread?.runtimeMode);
+  const driver = resolveGuardianProviderDriver(candidate.providerDriver, candidate.provider, thread);
+  return {
+    runtimeMode: runtime.runtimeMode,
+    runtimeModeSource: runtime.source,
+    providerDriver: driver.providerDriver,
+    providerDriverSource: driver.source
+  };
 }
 function skippedRuntimeReason(resolved) {
-  return `runtimeMode ${resolved.runtimeMode ?? "undefined"} (${resolved.source}) is not auto`;
+  return `runtimeMode ${resolved.runtimeMode ?? "undefined"} (${resolved.runtimeModeSource}) is not auto`;
+}
+function skippedDriverReason(resolved) {
+  if (!resolved.providerDriver)
+    return `provider driver is unavailable (${resolved.providerDriverSource})`;
+  return "provider is Codex or not a known non-Codex Auto harness";
 }
 async function claimOrSkip(dependencies, input, dryRun) {
   if (dryRun)
@@ -1016,12 +1174,19 @@ async function runGuardianCycle(dependencies, config) {
       await dependencies.reconcileRequests(liveRequestIds);
     state = await dependencies.loadState();
     const decisions = [];
-    const threadModes = new Map;
+    const threadContexts = new Map;
     for (const candidate of candidates) {
-      const resolved = await resolveCandidateRuntimeMode(dependencies, candidate, threadModes);
+      const resolved = await resolveCandidateFields(dependencies, candidate, threadContexts);
       const runtimeMode = resolved.runtimeMode ?? "undefined";
-      const runtimeModeSource = resolved.source;
-      const eligibility = isGuardianEligible({ ...candidate, runtimeMode: resolved.runtimeMode });
+      const runtimeModeSource = resolved.runtimeModeSource;
+      const providerDriver = resolved.providerDriver ?? "undefined";
+      const providerDriverSource = resolved.providerDriverSource;
+      const inferred = inferredFromThread(resolved);
+      const eligibility = isGuardianEligible({
+        ...candidate,
+        runtimeMode: resolved.runtimeMode,
+        providerDriver: resolved.providerDriver ?? null
+      });
       if (!eligibility.eligible) {
         decisions.push({
           action: eligibility.action,
@@ -1030,9 +1195,12 @@ async function runGuardianCycle(dependencies, config) {
           provider: candidate.provider,
           runtimeMode,
           runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
           command: candidate.command,
           decision: null,
-          reason: eligibility.action === "skipped_runtime" ? skippedRuntimeReason(resolved) : eligibility.reason,
+          reason: eligibility.action === "skipped_runtime" ? skippedRuntimeReason(resolved) : eligibility.action === "skipped_codex" ? skippedDriverReason(resolved) : eligibility.reason,
           dryRun: config.dryRun,
           responded: false
         });
@@ -1047,6 +1215,9 @@ async function runGuardianCycle(dependencies, config) {
           provider: candidate.provider,
           runtimeMode,
           runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
           command: candidate.command,
           decision: null,
           reason: project.reason,
@@ -1064,6 +1235,9 @@ async function runGuardianCycle(dependencies, config) {
           provider: candidate.provider,
           runtimeMode,
           runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
           command: candidate.command,
           decision: existing.decision,
           reason: "already responded to this requestId",
@@ -1094,6 +1268,9 @@ async function runGuardianCycle(dependencies, config) {
             provider: candidate.provider,
             runtimeMode,
             runtimeModeSource,
+            providerDriver,
+            providerDriverSource,
+            inferredFromThread: inferred,
             command: candidate.command,
             decision: existing.decision,
             reason: "already responded to this requestId",
@@ -1120,6 +1297,9 @@ async function runGuardianCycle(dependencies, config) {
           provider: candidate.provider,
           runtimeMode,
           runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
           command: candidate.command,
           decision: decision2,
           reason: reason2,
@@ -1136,6 +1316,9 @@ async function runGuardianCycle(dependencies, config) {
           provider: candidate.provider,
           runtimeMode,
           runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
           command: null,
           decision: null,
           reason: MISSING_SNAPSHOT_GAP,
@@ -1160,6 +1343,9 @@ async function runGuardianCycle(dependencies, config) {
             provider: candidate.provider,
             runtimeMode,
             runtimeModeSource,
+            providerDriver,
+            providerDriverSource,
+            inferredFromThread: inferred,
             command: null,
             decision: "decline",
             reason: "already responded to this requestId",
@@ -1186,6 +1372,9 @@ async function runGuardianCycle(dependencies, config) {
           provider: candidate.provider,
           runtimeMode,
           runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
           command: null,
           decision: "decline",
           reason: denyReason,
@@ -1236,6 +1425,9 @@ async function runGuardianCycle(dependencies, config) {
           provider: candidate.provider,
           runtimeMode,
           runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
           command: candidate.command,
           decision: judgedDecision,
           reason: "already responded to this requestId",
@@ -1267,6 +1459,9 @@ async function runGuardianCycle(dependencies, config) {
         provider: candidate.provider,
         runtimeMode,
         runtimeModeSource,
+        providerDriver,
+        providerDriverSource,
+        inferredFromThread: inferred,
         command: candidate.command,
         decision,
         reason,
@@ -1588,14 +1783,7 @@ function createDefaultGuardianDependencies(request) {
       op: "tasks.approvals",
       ...projectId ? { projectId } : {}
     }),
-    threadRuntimeMode: async (threadId) => {
-      const history = await call({
-        op: "tasks.history",
-        threadId,
-        turns: 1
-      });
-      return typeof history.thread?.runtimeMode === "string" ? history.thread.runtimeMode : undefined;
-    },
+    threadContext: (threadId) => lookupT3ThreadContext(threadId),
     resolveTaskApproval: async (input) => call({
       op: input.decision === "accept" ? "tasks.approve" : "tasks.deny",
       threadId: input.threadId,
