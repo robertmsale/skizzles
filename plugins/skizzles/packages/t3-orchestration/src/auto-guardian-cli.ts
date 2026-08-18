@@ -536,9 +536,10 @@ function projectAllowed(target, config) {
 }
 
 // packages/t3-orchestration/src/auto-guardian.ts
-import { mkdir as mkdir2, mkdtemp, open, readFile as readFile3, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
+import { lstat, mkdir as mkdir2, mkdtemp, readFile as readFile3, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
 import { homedir as homedir2, tmpdir } from "os";
 import { dirname as dirname2, join as join4, resolve as resolve2 } from "path";
+import { randomBytes } from "crypto";
 
 // packages/t3-orchestration/src/approval-projection.ts
 var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
@@ -553,10 +554,12 @@ function requireIdentifiableApproval(approval) {
 var CODEX_PROVIDER_INSTANCE = "codex";
 var NON_CODEX_PROVIDERS = ["grok", "cursor", "opencode"];
 var AUTO_RUNTIME_MODE = "auto";
-var STATE_SCHEMA = 2;
+var STATE_SCHEMA = 3;
 var HISTORY_TURNS = 10;
 var LOCK_RETRY_MS = 10;
 var LOCK_ATTEMPTS = 500;
+var GUARDIAN_LOCK_STALE_MS = 5000;
+var GUARDIAN_CLAIM_LEASE_MS = 30000;
 function defaultGuardianStatePath(home3 = process.env.HOME || homedir2()) {
   const t3Home = resolve2(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
   return join4(t3Home, "t3-auto-guardian-state.json");
@@ -581,7 +584,9 @@ function normalizeClaims(value) {
       decision: claim.decision,
       at: claim.at,
       status: claim.status === "pending" ? "pending" : "completed",
-      ...typeof claim.ownerPid === "number" ? { ownerPid: claim.ownerPid } : {}
+      ...typeof claim.leaseId === "string" ? { leaseId: claim.leaseId } : {},
+      ...typeof claim.leaseUntil === "string" ? { leaseUntil: claim.leaseUntil } : {},
+      ...typeof claim.attempt === "number" ? { attempt: claim.attempt } : {}
     };
   }
   return claims;
@@ -653,16 +658,23 @@ async function claimOrSkip(dependencies, input, dryRun) {
     return { status: "claimed" };
   return dependencies.claimRequest(input);
 }
-async function respond(dependencies, input, dryRun) {
+async function deliverClaim(dependencies, input, dryRun) {
   if (dryRun)
     return false;
-  await dependencies.resolveTaskApproval({
-    threadId: input.threadId,
-    requestId: input.requestId,
-    decision: input.decision,
-    reason: input.reason
-  });
-  return true;
+  try {
+    await dependencies.resolveTaskApproval({
+      threadId: input.threadId,
+      requestId: input.requestId,
+      decision: input.decision,
+      reason: input.reason
+    });
+    await dependencies.completeRequest(input.requestId);
+    return true;
+  } catch {
+    if (input.leaseId)
+      await dependencies.releaseRequest(input.requestId, input.leaseId);
+    return false;
+  }
 }
 async function runGuardianCycle(dependencies, config) {
   const now = dependencies.now();
@@ -674,6 +686,9 @@ async function runGuardianCycle(dependencies, config) {
   try {
     const list = await dependencies.listTaskApprovals();
     const candidates = candidatesFromApprovalList(list);
+    const liveRequestIds = candidates.flatMap((candidate) => candidate.requestId ? [candidate.requestId] : []);
+    await dependencies.reconcileRequests(liveRequestIds);
+    state = await dependencies.loadState();
     const decisions = [];
     for (const candidate of candidates) {
       const eligibility = isGuardianEligible(candidate);
@@ -746,14 +761,13 @@ async function runGuardianCycle(dependencies, config) {
           });
           continue;
         }
-        const responded2 = await respond(dependencies, {
+        const responded2 = await deliverClaim(dependencies, {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           decision: existing.decision,
-          reason: "retrying incomplete guardian claim"
+          reason: "retrying incomplete guardian claim",
+          leaseId: claim2.leaseId
         }, config.dryRun);
-        if (!config.dryRun && responded2)
-          await dependencies.completeRequest(candidate.requestId);
         state = await dependencies.loadState();
         decisions.push({
           action: config.dryRun ? "dry_run" : "judged",
@@ -806,14 +820,13 @@ async function runGuardianCycle(dependencies, config) {
           });
           continue;
         }
-        const responded2 = await respond(dependencies, {
+        const responded2 = await deliverClaim(dependencies, {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           decision: "decline",
-          reason: MISSING_COMMAND_GAP
+          reason: MISSING_COMMAND_GAP,
+          leaseId: claim2.leaseId
         }, config.dryRun);
-        if (!config.dryRun && responded2)
-          await dependencies.completeRequest(candidate.requestId);
         if (claim2.status !== "duplicate")
           state = await dependencies.loadState();
         decisions.push({
@@ -877,14 +890,13 @@ async function runGuardianCycle(dependencies, config) {
         continue;
       }
       const decision = claim.status === "retry" && claim.decision ? claim.decision : judgedDecision;
-      const responded = await respond(dependencies, {
+      const responded = await deliverClaim(dependencies, {
         threadId: candidate.threadId,
         requestId: candidate.requestId,
         decision,
-        reason: failClosed.rationale
+        reason: failClosed.rationale,
+        leaseId: claim.leaseId
       }, config.dryRun);
-      if (!config.dryRun && responded)
-        await dependencies.completeRequest(candidate.requestId);
       if (claim.status !== "duplicate")
         state = await dependencies.loadState();
       decisions.push({
@@ -926,7 +938,7 @@ async function runGuardianCycle(dependencies, config) {
 async function loadGuardianState(path = defaultGuardianStatePath()) {
   try {
     const parsed = JSON.parse(await readFile3(path, "utf8"));
-    if (parsed.schema !== 1 && parsed.schema !== 2 || !parsed.responded || typeof parsed.responded !== "object") {
+    if (parsed.schema !== 1 && parsed.schema !== 2 && parsed.schema !== 3 || !parsed.responded || typeof parsed.responded !== "object") {
       return emptyGuardianState();
     }
     return {
@@ -948,38 +960,57 @@ async function writeGuardianStateAtomic(state, path) {
 `, { mode: 384 });
   await rename2(temporary, path);
 }
-function lockOwnerAlive(pidText) {
-  const pid = Number(pidText.trim());
-  if (!Number.isInteger(pid) || pid <= 0)
-    return false;
+function isExclusiveCreateConflict(error) {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "EEXIST");
+}
+function newOwnershipToken() {
+  return `${Date.now().toString(16)}.${randomBytes(8).toString("hex")}`;
+}
+async function releaseOwnedLock(lockPath, token) {
   try {
-    process.kill(pid, 0);
+    const current = (await readFile3(lockPath, "utf8")).trim();
+    if (current === token)
+      await rm2(lockPath, { force: true });
+  } catch {}
+}
+async function stealStaleGuardianLock(lockPath, staleMs = GUARDIAN_LOCK_STALE_MS, clock = Date.now) {
+  try {
+    const firstStat = await lstat(lockPath);
+    if (clock() - firstStat.mtimeMs < staleMs)
+      return false;
+    const firstToken = (await readFile3(lockPath, "utf8")).trim();
+    const secondStat = await lstat(lockPath);
+    if (secondStat.ino !== firstStat.ino)
+      return false;
+    if (clock() - secondStat.mtimeMs < staleMs)
+      return false;
+    const secondToken = (await readFile3(lockPath, "utf8")).trim();
+    if (secondToken !== firstToken)
+      return false;
+    await rm2(lockPath, { force: true });
     return true;
   } catch {
     return false;
   }
 }
-async function withGuardianStateLock(path, body) {
+async function withGuardianStateLock(path, body, options = {}) {
   const lockPath = `${path}.lock`;
+  const staleMs = options.staleMs ?? GUARDIAN_LOCK_STALE_MS;
+  const clock = options.now ?? Date.now;
   await mkdir2(dirname2(path), { recursive: true, mode: 448 });
   for (let attempt = 0;attempt < LOCK_ATTEMPTS; attempt++) {
+    const token = newOwnershipToken();
     try {
-      const handle = await open(lockPath, "wx");
+      await writeFile2(lockPath, `${token}
+`, { flag: "wx", mode: 384 });
       try {
-        await handle.write(Buffer.from(`${process.pid}
-`));
         return await body();
       } finally {
-        await handle.close();
-        await rm2(lockPath, { force: true });
+        await releaseOwnedLock(lockPath, token);
       }
     } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") {
-        try {
-          const owner = await readFile3(lockPath, "utf8");
-          if (!lockOwnerAlive(owner))
-            await rm2(lockPath, { force: true });
-        } catch {}
+      if (isExclusiveCreateConflict(error)) {
+        await stealStaleGuardianLock(lockPath, staleMs, clock);
         await Bun.sleep(LOCK_RETRY_MS);
         continue;
       }
@@ -1000,34 +1031,51 @@ async function mergeGuardianState(path, patch) {
     return next;
   });
 }
-async function claimGuardianRequest(input, path = defaultGuardianStatePath()) {
+function leaseExpired(claim, nowMs) {
+  if (!claim.leaseUntil)
+    return true;
+  const until = Date.parse(claim.leaseUntil);
+  return !Number.isFinite(until) || until <= nowMs;
+}
+function writeClaimState(state, requestId, claim) {
+  return {
+    schema: STATE_SCHEMA,
+    lastPollAt: state.lastPollAt,
+    lastError: state.lastError,
+    responded: { ...state.responded, [requestId]: claim }
+  };
+}
+async function claimGuardianRequest(input, path = defaultGuardianStatePath(), options = {}) {
   return withGuardianStateLock(path, async () => {
+    const nowMs = options.now?.() ?? Date.now();
+    const leaseMs = options.leaseMs ?? GUARDIAN_CLAIM_LEASE_MS;
     const state = await loadGuardianState(path);
     const existing = state.responded[input.requestId];
     if (existing?.status === "completed")
       return { status: "duplicate", decision: existing.decision };
     if (existing?.status === "pending") {
-      if (existing.ownerPid && lockOwnerAlive(String(existing.ownerPid))) {
-        return { status: "duplicate", decision: existing.decision };
-      }
-      return { status: "retry", decision: existing.decision };
+      if (!leaseExpired(existing, nowMs))
+        return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
+      const leaseId2 = newOwnershipToken();
+      await writeGuardianStateAtomic(writeClaimState(state, input.requestId, {
+        ...existing,
+        leaseId: leaseId2,
+        leaseUntil: new Date(nowMs + leaseMs).toISOString(),
+        attempt: (existing.attempt ?? 0) + 1
+      }), path);
+      return { status: "retry", decision: existing.decision, leaseId: leaseId2 };
     }
-    await writeGuardianStateAtomic({
-      schema: STATE_SCHEMA,
-      lastPollAt: state.lastPollAt,
-      lastError: state.lastError,
-      responded: {
-        ...state.responded,
-        [input.requestId]: {
-          threadId: input.threadId,
-          decision: input.decision,
-          at: input.at,
-          status: "pending",
-          ownerPid: process.pid
-        }
-      }
-    }, path);
-    return { status: "claimed", decision: input.decision };
+    const leaseId = newOwnershipToken();
+    await writeGuardianStateAtomic(writeClaimState(state, input.requestId, {
+      threadId: input.threadId,
+      decision: input.decision,
+      at: input.at,
+      status: "pending",
+      leaseId,
+      leaseUntil: new Date(nowMs + leaseMs).toISOString(),
+      attempt: 1
+    }), path);
+    return { status: "claimed", decision: input.decision, leaseId };
   });
 }
 async function completeGuardianRequest(requestId, path = defaultGuardianStatePath()) {
@@ -1036,15 +1084,47 @@ async function completeGuardianRequest(requestId, path = defaultGuardianStatePat
     const existing = state.responded[requestId];
     if (!existing)
       return;
+    await writeGuardianStateAtomic(writeClaimState(state, requestId, {
+      ...existing,
+      status: "completed",
+      leaseId: undefined,
+      leaseUntil: undefined
+    }), path);
+  });
+}
+async function releaseGuardianRequest(requestId, leaseId, path = defaultGuardianStatePath()) {
+  await withGuardianStateLock(path, async () => {
+    const state = await loadGuardianState(path);
+    const existing = state.responded[requestId];
+    if (!existing || existing.status !== "pending" || existing.leaseId !== leaseId)
+      return;
+    await writeGuardianStateAtomic(writeClaimState(state, requestId, {
+      ...existing,
+      leaseUntil: new Date(0).toISOString()
+    }), path);
+  });
+}
+async function reconcileGuardianRequests(liveRequestIds, path = defaultGuardianStatePath()) {
+  return withGuardianStateLock(path, async () => {
+    const state = await loadGuardianState(path);
+    const live = new Set(liveRequestIds);
+    const responded = { ...state.responded };
+    let completed = 0;
+    for (const [requestId, claim] of Object.entries(responded)) {
+      if (claim.status !== "pending" || live.has(requestId))
+        continue;
+      responded[requestId] = { ...claim, status: "completed", leaseId: undefined, leaseUntil: undefined };
+      completed++;
+    }
+    if (completed === 0)
+      return 0;
     await writeGuardianStateAtomic({
       schema: STATE_SCHEMA,
       lastPollAt: state.lastPollAt,
       lastError: state.lastError,
-      responded: {
-        ...state.responded,
-        [requestId]: { ...existing, status: "completed" }
-      }
+      responded
     }, path);
+    return completed;
   });
 }
 async function runCodexJudge(input) {
@@ -1143,7 +1223,11 @@ function createDefaultGuardianDependencies(request) {
       return;
     }),
     claimRequest: (input) => claimGuardianRequest(input),
-    completeRequest: (requestId) => completeGuardianRequest(requestId)
+    completeRequest: (requestId) => completeGuardianRequest(requestId),
+    releaseRequest: (requestId, leaseId) => releaseGuardianRequest(requestId, leaseId),
+    reconcileRequests: (liveRequestIds) => reconcileGuardianRequests(liveRequestIds).then(() => {
+      return;
+    })
   };
 }
 async function runGuardianLoop(dependencies, config, sleep = Bun.sleep, shouldContinue = () => true) {

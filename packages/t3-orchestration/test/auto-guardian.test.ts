@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP } from "../src/approval-projection.ts";
 import { defaultGuardianConfig } from "../src/auto-guardian-config.ts";
 import {
@@ -10,10 +10,14 @@ import {
   emptyGuardianState,
   loadGuardianState,
   mergeGuardianState,
+  reconcileGuardianRequests,
+  releaseGuardianRequest,
+  stealStaleGuardianLock,
   isCodexProvider,
   isGuardianEligible,
   runGuardianCycle,
   type ApprovalList,
+  type ClaimResult,
   type GuardianDependencies,
   type GuardianState,
   type JudgeResult,
@@ -86,26 +90,69 @@ function fixture(options: {
     claimRequest: async (input) => {
       const existing = state.responded[input.requestId];
       if (existing?.status === "completed") return { status: "duplicate", decision: existing.decision };
-      if (existing?.status === "pending") {
-        if (existing.ownerPid === process.pid) return { status: "duplicate", decision: existing.decision };
-        return { status: "retry", decision: existing.decision };
+      const leaseUntil = existing?.leaseUntil ? Date.parse(existing.leaseUntil) : 0;
+      if (existing?.status === "pending" && Number.isFinite(leaseUntil) && leaseUntil > Date.now()) {
+        return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       }
+      if (existing?.status === "pending") {
+        const leaseId = `retry-${input.requestId}`;
+        state = {
+          ...state,
+          responded: {
+            ...state.responded,
+            [input.requestId]: {
+              ...existing,
+              leaseId,
+              leaseUntil: new Date(Date.now() + 30_000).toISOString(),
+              attempt: (existing.attempt ?? 0) + 1,
+            },
+          },
+        };
+        return { status: "retry", decision: existing.decision, leaseId };
+      }
+      const leaseId = `claim-${input.requestId}`;
       state = {
         ...state,
         responded: {
           ...state.responded,
-          [input.requestId]: { threadId: input.threadId, decision: input.decision, at: input.at, status: "pending", ownerPid: process.pid },
+          [input.requestId]: {
+            threadId: input.threadId,
+            decision: input.decision,
+            at: input.at,
+            status: "pending",
+            leaseId,
+            leaseUntil: new Date(Date.now() + 30_000).toISOString(),
+            attempt: 1,
+          },
         },
       };
-      return { status: "claimed", decision: input.decision };
+      return { status: "claimed", decision: input.decision, leaseId };
     },
     completeRequest: async (requestId) => {
       const existing = state.responded[requestId];
       if (!existing) return;
       state = {
         ...state,
-        responded: { ...state.responded, [requestId]: { ...existing, status: "completed" } },
+        responded: { ...state.responded, [requestId]: { ...existing, status: "completed", leaseId: undefined, leaseUntil: undefined } },
       };
+    },
+    releaseRequest: async (requestId, leaseId) => {
+      const existing = state.responded[requestId];
+      if (!existing || existing.status !== "pending" || existing.leaseId !== leaseId) return;
+      state = {
+        ...state,
+        responded: { ...state.responded, [requestId]: { ...existing, leaseUntil: new Date(0).toISOString() } },
+      };
+    },
+    reconcileRequests: async (liveRequestIds) => {
+      const live = new Set(liveRequestIds);
+      const responded = { ...state.responded };
+      for (const [requestId, claim] of Object.entries(responded)) {
+        if (claim.status === "pending" && !live.has(requestId)) {
+          responded[requestId] = { ...claim, status: "completed", leaseId: undefined, leaseUntil: undefined };
+        }
+      }
+      state = { ...state, responded };
     },
   };
   return { deps, resolved, get judged() { return judged; } };
@@ -178,8 +225,8 @@ describe("guardian cycle", () => {
   test("retries an incomplete claim instead of orphaning it", async () => {
     const { deps, resolved } = fixture({
       state: {
-        schema: 2,
-        responded: { "req-1": { threadId: "cursor-task", decision: "accept", at: "2026-08-17T01:00:00Z", status: "pending" } },
+        schema: 3,
+        responded: { "req-1": { threadId: "cursor-task", decision: "accept", at: "2026-08-17T01:00:00Z", status: "pending", leaseUntil: new Date(0).toISOString() } },
         lastPollAt: null,
         lastError: null,
       },
@@ -225,7 +272,7 @@ describe("guardian cycle", () => {
   test("dedups on requestId and never responds twice", async () => {
     const { deps, resolved } = fixture({
       state: {
-        schema: 2,
+        schema: 3,
         responded: { "req-1": { threadId: "cursor-task", decision: "accept", at: "2026-08-17T01:00:00Z", status: "completed" } },
         lastPollAt: null,
         lastError: null,
@@ -251,6 +298,8 @@ describe("guardian cycle", () => {
         recordPoll: first.deps.recordPoll,
         claimRequest: first.deps.claimRequest,
         completeRequest: first.deps.completeRequest,
+        releaseRequest: first.deps.releaseRequest,
+        reconcileRequests: first.deps.reconcileRequests,
       },
     };
     const [left, right] = await Promise.all([
@@ -334,5 +383,195 @@ describe("guardian cycle", () => {
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(report.decisions[0]).toMatchObject({ decision: "decline", responded: true });
     expect(resolved[0]).toMatchObject({ decision: "decline" });
+  });
+
+  test("releases a live-process lease after dispatch failure so the next cycle retries", async () => {
+    const { deps, resolved } = fixture();
+    let attempts = 0;
+    deps.resolveTaskApproval = async (input) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("transient T3 dispatch failure");
+      resolved.push(input);
+      return { sequence: attempts, ...input };
+    };
+    const first = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(first.ok).toBe(true);
+    expect(first.decisions[0]?.responded).toBe(false);
+    expect(resolved).toEqual([]);
+    const second = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(second.decisions[0]).toMatchObject({ action: "judged", responded: true, decision: "accept" });
+    expect(resolved).toHaveLength(1);
+  });
+
+  test("reconciles a pending claim whose request left the snapshot after T3 accepted", async () => {
+    const { deps, resolved } = fixture({
+      list: { approvals: [], unidentifiable: [] },
+      state: {
+        schema: 3,
+        responded: {
+          "req-gone": {
+            threadId: "cursor-task",
+            decision: "accept",
+            at: "2026-08-17T01:00:00Z",
+            status: "pending",
+            leaseId: "lease-1",
+            leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+          },
+        },
+        lastPollAt: null,
+        lastError: null,
+      },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.ok).toBe(true);
+    expect(resolved).toEqual([]);
+    expect((await deps.loadState()).responded["req-gone"]?.status).toBe("completed");
+  });
+});
+
+describe("guardian lock and multi-process claims", () => {
+  test("steals only a stale lock after inode and token re-check", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-stale-lock-");
+    try {
+      const lockPath = join(root, "state.json.lock");
+      await writeFile(lockPath, "old-token\n", { flag: "wx", mode: 0o600 });
+      const past = new Date(Date.now() - 30_000);
+      await utimes(lockPath, past, past);
+      expect(await stealStaleGuardianLock(lockPath, 5_000)).toBe(true);
+      await writeFile(lockPath, "fresh-token\n", { flag: "wx", mode: 0o600 });
+      expect(await stealStaleGuardianLock(lockPath, 5_000)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("recovers an empty stale lock and then exclusive-creates", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-empty-lock-");
+    try {
+      const path = join(root, "state.json");
+      const lockPath = `${path}.lock`;
+      await writeFile(lockPath, "", { flag: "wx", mode: 0o600 });
+      const past = new Date(Date.now() - 30_000);
+      await utimes(lockPath, past, past);
+      const result = await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "accept",
+        at: "2026-08-17T02:00:00Z",
+      }, path);
+      expect(result.status).toBe("claimed");
+      expect((await loadGuardianState(path)).responded["req-1"]?.status).toBe("pending");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("file lock serializes many unique claims without lost writes", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-unique-");
+    try {
+      const path = join(root, "state.json");
+      const count = 40;
+      const results = await Promise.all(Array.from({ length: count }, (_, index) => claimGuardianRequest({
+        requestId: `req-${index}`,
+        threadId: "cursor-task",
+        decision: "accept",
+        at: "2026-08-17T02:00:00Z",
+      }, path)));
+      expect(results.every((result) => result.status === "claimed")).toBe(true);
+      expect(Object.keys((await loadGuardianState(path)).responded)).toHaveLength(count);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("multi-process unique and same request IDs stay exclusive", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-mp-");
+    try {
+      const path = join(root, "state.json");
+      const modulePath = resolve(import.meta.dir, "../src/auto-guardian.ts");
+      const run = async (requestId: string) => {
+        const child = Bun.spawn([
+          "bun",
+          "-e",
+          `import { claimGuardianRequest } from ${JSON.stringify(modulePath)}; const result = await claimGuardianRequest({ requestId: process.argv[1], threadId: "t", decision: "accept", at: "2026-08-17T02:00:00Z" }, ${JSON.stringify(path)}); console.log(JSON.stringify(result));`,
+          requestId,
+        ], { stdout: "pipe", stderr: "pipe" });
+        const [exitCode, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        expect(exitCode).toBe(0);
+        expect(stderr).toBe("");
+        return JSON.parse(stdout) as ClaimResult;
+      };
+      const unique = await Promise.all(Array.from({ length: 12 }, (_, index) => run(`unique-${index}`)));
+      expect(unique.every((result) => result.status === "claimed")).toBe(true);
+      expect(Object.keys((await loadGuardianState(path)).responded).filter((id) => id.startsWith("unique-"))).toHaveLength(12);
+      const same = await Promise.all(Array.from({ length: 12 }, () => run("same-req")));
+      expect(same.filter((result) => result.status === "claimed")).toHaveLength(1);
+      expect(same.filter((result) => result.status === "duplicate")).toHaveLength(11);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("expired lease takeover is written back so only one recoverer retries", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-takeover-");
+    try {
+      const path = join(root, "state.json");
+      const first = await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "accept",
+        at: "2026-08-17T02:00:00Z",
+      }, path, { now: () => 1_000, leaseMs: 10 });
+      expect(first.status).toBe("claimed");
+      const recoveries = await Promise.all([
+        claimGuardianRequest({
+          requestId: "req-1",
+          threadId: "cursor-task",
+          decision: "decline",
+          at: "2026-08-17T02:00:01Z",
+        }, path, { now: () => 2_000, leaseMs: 10_000 }),
+        claimGuardianRequest({
+          requestId: "req-1",
+          threadId: "cursor-task",
+          decision: "decline",
+          at: "2026-08-17T02:00:01Z",
+        }, path, { now: () => 2_000, leaseMs: 10_000 }),
+      ]);
+      expect(recoveries.filter((result) => result.status === "retry")).toHaveLength(1);
+      expect(recoveries.filter((result) => result.status === "duplicate")).toHaveLength(1);
+      expect((await loadGuardianState(path)).responded["req-1"]?.decision).toBe("accept");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("release then claim retries after a failed dispatch", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-release-");
+    try {
+      const path = join(root, "state.json");
+      const claimed = await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "accept",
+        at: "2026-08-17T02:00:00Z",
+      }, path);
+      expect(claimed.leaseId).toBeTruthy();
+      await releaseGuardianRequest("req-1", claimed.leaseId!, path);
+      const retry = await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "accept",
+        at: "2026-08-17T02:00:01Z",
+      }, path);
+      expect(retry.status).toBe("retry");
+      await reconcileGuardianRequests([], path);
+      expect((await loadGuardianState(path)).responded["req-1"]?.status).toBe("completed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
