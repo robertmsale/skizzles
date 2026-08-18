@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP } from "../src/approval-projection.ts";
 import { defaultGuardianConfig } from "../src/auto-guardian-config.ts";
@@ -12,7 +12,7 @@ import {
   mergeGuardianState,
   reconcileGuardianRequests,
   releaseGuardianRequest,
-  stealStaleGuardianLock,
+  renewGuardianLease,
   isCodexProvider,
   isGuardianEligible,
   runGuardianCycle,
@@ -128,13 +128,27 @@ function fixture(options: {
       };
       return { status: "claimed", decision: input.decision, leaseId };
     },
-    completeRequest: async (requestId) => {
+    renewRequest: async (requestId, leaseId) => {
       const existing = state.responded[requestId];
-      if (!existing) return;
+      if (!existing || existing.status !== "pending" || existing.leaseId !== leaseId) return false;
       state = {
         ...state,
-        responded: { ...state.responded, [requestId]: { ...existing, status: "completed", leaseId: undefined, leaseUntil: undefined } },
+        responded: {
+          ...state.responded,
+          [requestId]: { ...existing, leaseUntil: new Date(Date.now() + 30_000).toISOString() },
+        },
       };
+      return true;
+    },
+    completeRequest: async (requestId, leaseId) => {
+      const existing = state.responded[requestId];
+      if (!existing || existing.leaseId !== leaseId) return false;
+      if (existing.status === "completed") return true;
+      state = {
+        ...state,
+        responded: { ...state.responded, [requestId]: { ...existing, status: "completed", leaseUntil: undefined } },
+      };
+      return true;
     },
     releaseRequest: async (requestId, leaseId) => {
       const existing = state.responded[requestId];
@@ -324,6 +338,7 @@ describe("guardian cycle", () => {
         loadState: first.deps.loadState,
         recordPoll: first.deps.recordPoll,
         claimRequest: first.deps.claimRequest,
+        renewRequest: first.deps.renewRequest,
         completeRequest: first.deps.completeRequest,
         releaseRequest: first.deps.releaseRequest,
         reconcileRequests: first.deps.reconcileRequests,
@@ -374,7 +389,8 @@ describe("guardian cycle", () => {
       expect((await claimGuardianRequest(input, path)).status).toBe("claimed");
       await mergeGuardianState(path, { lastPollAt: "2026-08-17T03:00:00Z", lastError: null });
       expect((await claimGuardianRequest(input, path)).status).toBe("duplicate");
-      await completeGuardianRequest(input.requestId, path);
+      const claimed = await loadGuardianState(path);
+      await completeGuardianRequest(input.requestId, claimed.responded["req-1"]!.leaseId!, path);
       expect((await claimGuardianRequest(input, path)).status).toBe("duplicate");
       const persisted = await loadGuardianState(path);
       expect(persisted.responded["req-1"]?.decision).toBe("accept");
@@ -454,32 +470,90 @@ describe("guardian cycle", () => {
     expect(resolved).toEqual([]);
     expect((await deps.loadState()).responded["req-gone"]?.status).toBe("completed");
   });
+
+  test("does not reconcile a live pending requestId across a snapshot gap", async () => {
+    const { deps, resolved } = fixture({
+      list: { approvals: [], unidentifiable: [unidentifiable({ requestId: null, reason: MISSING_SNAPSHOT_GAP })] },
+      state: {
+        schema: 3,
+        responded: {
+          "req-live": {
+            threadId: "cursor-task",
+            decision: "accept",
+            at: "2026-08-17T01:00:00Z",
+            status: "pending",
+            leaseId: "lease-live",
+            leaseUntil: new Date(Date.now() + 60_000).toISOString(),
+          },
+        },
+        lastPollAt: null,
+        lastError: null,
+      },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.ok).toBe(true);
+    expect(report.decisions[0]).toMatchObject({ action: "skipped_snapshot_gap", requestId: null });
+    expect(resolved).toEqual([]);
+    expect((await deps.loadState()).responded["req-live"]?.status).toBe("pending");
+  });
 });
 
 describe("guardian lock and multi-process claims", () => {
-  test("steals only a stale lock after inode and token re-check", async () => {
-    const root = await mkdtemp("/tmp/t3-guardian-stale-lock-");
+  test("a live lock owner cannot overlap another process", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-live-lock-");
     try {
-      const lockPath = join(root, "state.json.lock");
-      await writeFile(lockPath, "old-token\n", { flag: "wx", mode: 0o600 });
-      const past = new Date(Date.now() - 30_000);
-      await utimes(lockPath, past, past);
-      expect(await stealStaleGuardianLock(lockPath, 5_000)).toBe(true);
-      await writeFile(lockPath, "fresh-token\n", { flag: "wx", mode: 0o600 });
-      expect(await stealStaleGuardianLock(lockPath, 5_000)).toBe(false);
+      const path = join(root, "state.json");
+      const eventsPath = join(root, "events.jsonl");
+      const modulePath = resolve(import.meta.dir, "../src/auto-guardian.ts");
+      const script = `
+        import { appendFile } from "node:fs/promises";
+        import { withGuardianStateLock } from ${JSON.stringify(modulePath)};
+        const path = ${JSON.stringify(path)};
+        const events = ${JSON.stringify(eventsPath)};
+        const role = process.argv[1];
+        const log = (phase) => appendFile(events, JSON.stringify({ role, phase, at: Date.now() }) + "\\n");
+        if (role === "B") await Bun.sleep(35);
+        await withGuardianStateLock(path, async () => {
+          await log("enter");
+          if (role === "A") await Bun.sleep(120);
+          await log("leave");
+        });
+      `;
+      const spawn = (role: string) => Bun.spawn(["bun", "-e", script, role], { stdout: "pipe", stderr: "pipe" });
+      const first = spawn("A");
+      const second = spawn("B");
+      const [firstExit, secondExit, firstErr, secondErr] = await Promise.all([
+        first.exited,
+        second.exited,
+        new Response(first.stderr).text(),
+        new Response(second.stderr).text(),
+      ]);
+      expect(firstExit).toBe(0);
+      expect(secondExit).toBe(0);
+      expect(firstErr).toBe("");
+      expect(secondErr).toBe("");
+      const events = (await readFile(eventsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { role: string; phase: string; at: number });
+      const firstEnter = events.find((event) => event.role === "A" && event.phase === "enter")?.at;
+      const firstLeave = events.find((event) => event.role === "A" && event.phase === "leave")?.at;
+      const secondEnter = events.find((event) => event.role === "B" && event.phase === "enter")?.at;
+      const secondLeave = events.find((event) => event.role === "B" && event.phase === "leave")?.at;
+      expect(firstEnter).toBeGreaterThan(0);
+      expect(firstLeave).toBeGreaterThan(0);
+      expect(secondEnter).toBeGreaterThan(0);
+      expect(secondLeave).toBeGreaterThan(0);
+      const overlap = firstEnter! < secondLeave! && secondEnter! < firstLeave!;
+      expect({ overlap, firstEnter, firstLeave, secondEnter, secondLeave }).toMatchObject({ overlap: false });
+      expect(secondEnter).toBeGreaterThanOrEqual(firstLeave!);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  test("recovers an empty stale lock and then exclusive-creates", async () => {
+  test("recovers an abandoned lock file and then exclusive-creates", async () => {
     const root = await mkdtemp("/tmp/t3-guardian-empty-lock-");
     try {
       const path = join(root, "state.json");
-      const lockPath = `${path}.lock`;
-      await writeFile(lockPath, "", { flag: "wx", mode: 0o600 });
-      const past = new Date(Date.now() - 30_000);
-      await utimes(lockPath, past, past);
+      await writeFile(`${path}.lock`, "", { flag: "wx", mode: 0o600 });
       const result = await claimGuardianRequest({
         requestId: "req-1",
         threadId: "cursor-task",
@@ -596,6 +670,61 @@ describe("guardian lock and multi-process claims", () => {
       }, path);
       expect(retry.status).toBe("retry");
       await reconcileGuardianRequests([], path);
+      expect((await loadGuardianState(path)).responded["req-1"]?.status).toBe("completed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("expired owner cannot renew, deliver, or complete after a retry takeover", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-lease-fence-");
+    try {
+      const path = join(root, "state.json");
+      const first = await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "accept",
+        at: "2026-08-17T02:00:00Z",
+      }, path, { now: () => 1_000, leaseMs: 10 });
+      expect(first.leaseId).toBeTruthy();
+      const second = await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "decline",
+        at: "2026-08-17T02:00:01Z",
+      }, path, { now: () => 2_000, leaseMs: 10_000 });
+      expect(second.status).toBe("retry");
+      expect(second.leaseId).toBeTruthy();
+      expect(second.leaseId).not.toBe(first.leaseId);
+      expect(await renewGuardianLease("req-1", first.leaseId!, path)).toBe(false);
+      expect(await completeGuardianRequest("req-1", first.leaseId!, path)).toBe(false);
+      expect((await loadGuardianState(path)).responded["req-1"]).toMatchObject({
+        status: "pending",
+        leaseId: second.leaseId,
+        decision: "accept",
+      });
+      const resolved: Array<Record<string, unknown>> = [];
+      const report = await runGuardianCycle({
+        listTaskApprovals: async () => ({ approvals: [approval()], unidentifiable: [] }),
+        resolveTaskApproval: async (input) => {
+          resolved.push(input);
+          return input;
+        },
+        taskHistory: async () => ({ messages: [] }),
+        judge: async () => ({ ok: true, assessment: { outcome: "allow", rationale: "unused" }, raw: "" }),
+        now: () => "2026-08-17T02:00:02Z",
+        loadState: () => loadGuardianState(path),
+        recordPoll: async () => undefined,
+        claimRequest: async () => ({ status: "retry", decision: "accept", leaseId: first.leaseId }),
+        renewRequest: (requestId, leaseId) => renewGuardianLease(requestId, leaseId, path),
+        completeRequest: (requestId, leaseId) => completeGuardianRequest(requestId, leaseId, path),
+        releaseRequest: (requestId, leaseId) => releaseGuardianRequest(requestId, leaseId, path),
+        reconcileRequests: async () => undefined,
+      }, defaultGuardianConfig());
+      expect(report.decisions[0]?.responded).toBe(false);
+      expect(resolved).toEqual([]);
+      expect(await renewGuardianLease("req-1", second.leaseId!, path)).toBe(true);
+      expect(await completeGuardianRequest("req-1", second.leaseId!, path)).toBe(true);
       expect((await loadGuardianState(path)).responded["req-1"]?.status).toBe("completed");
     } finally {
       await rm(root, { recursive: true, force: true });

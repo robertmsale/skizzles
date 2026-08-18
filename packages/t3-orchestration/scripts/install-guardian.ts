@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
   copyFile,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   readlink,
@@ -54,18 +56,25 @@ const installRoot = resolve(process.env.T3_AUTO_GUARDIAN_INSTALL_ROOT?.trim() ||
 const runtimeRoot = join(installRoot, "runtime");
 const receiptPath = join(installRoot, "install-receipt.json");
 const journalPath = join(dirname(installRoot), "t3-auto-guardian.journal");
+const installerLockPath = join(dirname(installRoot), "t3-auto-guardian.lock");
 const cliName = "auto-guardian-cli.ts";
-type InstallPhase = "prepared" | "root-moved" | "root-installed" | "destinations-moved" | "complete";
+type JournalKind = "install" | "uninstall";
 type JournalDestination = { destination: string; backup?: string; installed: boolean };
 type InstallJournal = {
   version: 1;
-  phase: InstallPhase;
+  kind?: JournalKind;
+  phase: string;
   transactionRoot: string;
   installRoot: string;
   previousInstall?: string;
   destinations: JournalDestination[];
   installedRoot: boolean;
 };
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const LOCK_UN = 8;
+const INSTALLER_LOCK_ATTEMPTS = 600;
+const INSTALLER_LOCK_RETRY_MS = 50;
 const GUARDIAN_RUNTIME_FILES = [
   "auto-guardian-cli.ts",
   "auto-guardian.ts",
@@ -74,6 +83,7 @@ const GUARDIAN_RUNTIME_FILES = [
   "approval-projection.ts",
   "client.ts",
   "config.ts",
+  "exclusive-lock.ts",
   "protocol.ts",
   "remote-config.ts",
 ] as const;
@@ -81,6 +91,48 @@ const FORBIDDEN_RUNTIME_FILES = new Set(["cli.ts", "daemon.ts"]);
 
 function isMissing(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+
+let flockSymbol: ((fd: number, operation: number) => number) | undefined;
+
+function loadFlock(): (fd: number, operation: number) => number {
+  if (flockSymbol) return flockSymbol;
+  const candidates = process.platform === "darwin"
+    ? ["libSystem.B.dylib", "libc.dylib"]
+    : [`libc.${suffix}`, "libc.so.6", "libc.so"];
+  let last: unknown;
+  for (const candidate of candidates) {
+    try {
+      flockSymbol = dlopen(candidate, {
+        flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      }).symbols.flock;
+      return flockSymbol;
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw new Error(`flock is unavailable (${last instanceof Error ? last.message : String(last)})`);
+}
+
+async function withInstallerLock<T>(body: () => Promise<T>): Promise<T> {
+  await mkdir(dirname(installerLockPath), { recursive: true, mode: 0o755 });
+  const handle = await open(installerLockPath, "a", 0o600);
+  try {
+    const flock = loadFlock();
+    for (let attempt = 0; attempt < INSTALLER_LOCK_ATTEMPTS; attempt++) {
+      if (flock(handle.fd, LOCK_EX | LOCK_NB) === 0) {
+        try {
+          return await body();
+        } finally {
+          flock(handle.fd, LOCK_UN);
+        }
+      }
+      await Bun.sleep(INSTALLER_LOCK_RETRY_MS);
+    }
+    throw new Error(`Timed out waiting for T3 auto guardian installer lock ${installerLockPath}`);
+  } finally {
+    await handle.close();
+  }
 }
 
 async function optionalLstat(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
@@ -254,16 +306,33 @@ async function clearJournal(): Promise<void> {
   await rm(`${journalPath}.tmp`, { force: true });
 }
 
-async function crashIf(phase: InstallPhase): Promise<void> {
+async function crashIf(phase: string): Promise<void> {
   if (process.env.T3_AUTO_GUARDIAN_INSTALL_CRASH === phase) process.exit(75);
 }
 
-async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
-  for (const destination of [...journal.destinations].reverse()) {
-    if (destination.installed) await rm(destination.destination, { force: true, recursive: true });
-    if (destination.backup && await optionalLstat(destination.backup)) await rename(destination.backup, destination.destination);
+async function restoreDestinations(destinations: JournalDestination[]): Promise<void> {
+  for (const destination of [...destinations].reverse()) {
+    if (destination.backup && await optionalLstat(destination.backup)) {
+      await rm(destination.destination, { force: true, recursive: true });
+      await rename(destination.backup, destination.destination);
+    } else if (destination.installed) {
+      await rm(destination.destination, { force: true, recursive: true });
+    }
   }
-  if (journal.installedRoot) await rm(journal.installRoot, { force: true, recursive: true });
+}
+
+async function persistDestination(journal: InstallJournal, destinations: JournalDestination[], entry: JournalDestination): Promise<void> {
+  const index = destinations.findIndex((item) => item.destination === entry.destination);
+  if (index >= 0) destinations[index] = entry;
+  else destinations.push(entry);
+  journal.destinations = destinations.map((item) => ({ ...item }));
+  journal.phase = journal.kind === "uninstall" ? journal.phase : "destinations-moved";
+  await writeJournal(journal);
+}
+
+async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
+  await restoreDestinations(journal.destinations);
+  if (journal.kind !== "uninstall" && journal.installedRoot) await rm(journal.installRoot, { force: true, recursive: true });
   if (journal.previousInstall && await optionalLstat(journal.previousInstall)) {
     if (await optionalLstat(journal.installRoot)) await rm(journal.installRoot, { force: true, recursive: true });
     await rename(journal.previousInstall, journal.installRoot);
@@ -410,13 +479,10 @@ async function stageInstall(runtimeVersion: string, temporaryRoot: string): Prom
 async function rollbackTransaction(
   transactionRoot: string,
   previousInstall: string | undefined,
-  movedDestinations: Array<{ destination: string; backup?: string; installed: boolean }>,
+  movedDestinations: JournalDestination[],
   installedRoot: boolean,
 ): Promise<void> {
-  for (const { destination, backup, installed } of movedDestinations.reverse()) {
-    if (installed) await rm(destination, { force: true, recursive: true });
-    if (backup) await rename(backup, destination);
-  }
+  await restoreDestinations(movedDestinations);
   if (installedRoot) await rm(installRoot, { force: true, recursive: true });
   if (previousInstall && await optionalLstat(previousInstall)) await rename(previousInstall, installRoot);
   await rm(transactionRoot, { force: true, recursive: true });
@@ -449,10 +515,11 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await rm(transactionRoot, { recursive: true, force: true });
     throw error;
   }
-  const movedDestinations: Array<{ destination: string; backup?: string; installed: boolean }> = [];
+  const movedDestinations: JournalDestination[] = [];
   let installedRoot = false;
   const journal: InstallJournal = {
     version: 1,
+    kind: "install",
     phase: "prepared",
     transactionRoot,
     installRoot,
@@ -476,25 +543,38 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       const destination = link.path;
       const existing = await optionalLstat(destination);
       const backup = existing ? join(backupsRoot, `link-${index}`) : undefined;
-      if (backup) await rename(destination, backup);
-      const moved = { destination, backup, installed: false };
-      movedDestinations.push(moved);
-      await rename(join(installRoot, "staged-links", String(index)), destination);
-      moved.installed = true;
+      const staged = join(installRoot, "staged-links", String(index));
+      if (backup) {
+        await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
+        await rename(destination, backup);
+        await crashIf("link-backed-up");
+        await rename(staged, destination);
+        await persistDestination(journal, movedDestinations, { destination, backup, installed: true });
+      } else {
+        await persistDestination(journal, movedDestinations, { destination, installed: true });
+        await rename(staged, destination);
+      }
+      await crashIf("link-installed");
     }
     for (const [index, file] of receipt.files.entries()) {
       const destination = file.path;
       if (isForeignLaunchAgent(destination)) throw new Error(`Refusing to write ${destination === orchestrationLaunchAgent ? ORCHESTRATION_LAUNCH_AGENT_LABEL : REAPER_LAUNCH_AGENT_LABEL}`);
       const existing = await optionalLstat(destination);
       const backup = existing ? join(backupsRoot, `file-${index}`) : undefined;
-      if (backup) await rename(destination, backup);
-      const moved = { destination, backup, installed: false };
-      movedDestinations.push(moved);
-      await rename(join(installRoot, "launchAgent.plist"), destination);
-      moved.installed = true;
+      const staged = join(installRoot, "launchAgent.plist");
+      if (backup) {
+        await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
+        await rename(destination, backup);
+        await crashIf("plist-backed-up");
+        await rename(staged, destination);
+        await persistDestination(journal, movedDestinations, { destination, backup, installed: true });
+      } else {
+        await persistDestination(journal, movedDestinations, { destination, installed: true });
+        await rename(staged, destination);
+      }
+      await crashIf("plist-installed");
     }
     await rm(join(installRoot, "staged-links"), { recursive: true, force: true });
-    journal.destinations = movedDestinations;
     journal.phase = "destinations-moved";
     await writeJournal(journal);
     await activate();
@@ -543,42 +623,61 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
     if (bootout.exitCode !== 0) throw new Error(`Could not stop ${GUARDIAN_LAUNCH_AGENT_LABEL}: ${bootout.stderr.toString().trim()}`);
   }
   const transactionRoot = await mkdtemp(join(dirname(installRoot), ".t3-auto-guardian-uninstall-"));
-  const movedDestinations: Array<{ destination: string; backup?: string }> = [];
   const installBackup = join(transactionRoot, "install");
-  let movedInstall = false;
+  const movedDestinations: JournalDestination[] = [];
+  const journal: InstallJournal = {
+    version: 1,
+    kind: "uninstall",
+    phase: "prepared",
+    transactionRoot,
+    installRoot,
+    destinations: [],
+    installedRoot: false,
+  };
+  await writeJournal(journal);
   try {
     for (const [index, link] of previous.links.entries()) {
       const backup = join(transactionRoot, `link-${index}`);
+      await persistDestination(journal, movedDestinations, { destination: link.path, backup, installed: false });
       await rename(link.path, backup);
-      movedDestinations.push({ destination: link.path, backup });
+      await crashIf("uninstall-link-moved");
     }
     for (const [index, file] of previous.files.entries()) {
       if (isForeignLaunchAgent(file.path)) throw new Error(`Refusing to remove ${file.path === orchestrationLaunchAgent ? ORCHESTRATION_LAUNCH_AGENT_LABEL : REAPER_LAUNCH_AGENT_LABEL}`);
       const backup = join(transactionRoot, `file-${index}`);
+      await persistDestination(journal, movedDestinations, { destination: file.path, backup, installed: false });
       await rename(file.path, backup);
-      movedDestinations.push({ destination: file.path, backup });
+      await crashIf("uninstall-plist-moved");
     }
+    journal.previousInstall = installBackup;
+    await writeJournal(journal);
     await rename(installRoot, installBackup);
-    movedInstall = true;
+    journal.phase = "root-moved";
+    await writeJournal(journal);
+    await crashIf("uninstall-root-moved");
+    journal.phase = "complete";
+    await writeJournal(journal);
   } catch (error) {
-    if (movedInstall) await rename(installBackup, installRoot);
-    for (const { destination, backup } of movedDestinations.reverse()) {
-      await rm(destination, { force: true, recursive: true });
-      if (backup) await rename(backup, destination);
+    try { await rollbackFromJournal(journal); }
+    catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], "T3 auto guardian uninstall and filesystem rollback both failed");
     }
-    await rm(transactionRoot, { force: true, recursive: true });
     if (serviceWasLoaded) {
       try { await activate(); }
       catch (recoveryError) { throw new AggregateError([error, recoveryError], "T3 auto guardian uninstall and service rollback both failed"); }
     }
+    await clearJournal();
     throw error;
   }
   await rm(transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  await clearJournal();
   console.log(JSON.stringify({ ok: true, uninstalled: true, installRoot, launchAgentLabel: GUARDIAN_LAUNCH_AGENT_LABEL }));
 }
 
 const runtimeVersion = await readPackageVersion();
-await recoverInterruptedInstall();
-const previous = await readReceipt();
-if (uninstall) await uninstallInstallation(previous);
-else await install(runtimeVersion, previous);
+await withInstallerLock(async () => {
+  await recoverInterruptedInstall();
+  const previous = await readReceipt();
+  if (uninstall) await uninstallInstallation(previous);
+  else await install(runtimeVersion, previous);
+});

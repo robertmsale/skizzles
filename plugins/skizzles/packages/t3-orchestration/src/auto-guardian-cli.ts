@@ -536,9 +536,9 @@ function projectAllowed(target, config) {
 }
 
 // packages/t3-orchestration/src/auto-guardian.ts
-import { lstat, mkdir as mkdir2, mkdtemp, readFile as readFile3, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
+import { mkdir as mkdir3, mkdtemp, readFile as readFile3, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
 import { homedir as homedir2, tmpdir } from "os";
-import { dirname as dirname2, join as join4, resolve as resolve2 } from "path";
+import { dirname as dirname3, join as join4, resolve as resolve2 } from "path";
 import { randomBytes } from "crypto";
 
 // packages/t3-orchestration/src/approval-projection.ts
@@ -550,15 +550,62 @@ function requireIdentifiableApproval(approval) {
   throw new Error(MISSING_COMMAND_GAP);
 }
 
+// packages/t3-orchestration/src/exclusive-lock.ts
+import { mkdir as mkdir2, open } from "fs/promises";
+import { dirname as dirname2 } from "path";
+import { dlopen, FFIType, suffix } from "bun:ffi";
+var LOCK_EX = 2;
+var LOCK_NB = 4;
+var LOCK_UN = 8;
+var DEFAULT_ATTEMPTS = 500;
+var DEFAULT_RETRY_MS = 10;
+var flockSymbol;
+function loadFlock() {
+  if (flockSymbol)
+    return flockSymbol;
+  const candidates = process.platform === "darwin" ? ["libSystem.B.dylib", "libc.dylib"] : [`libc.${suffix}`, "libc.so.6", "libc.so"];
+  let last;
+  for (const candidate of candidates) {
+    try {
+      flockSymbol = dlopen(candidate, {
+        flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 }
+      }).symbols.flock;
+      return flockSymbol;
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw new Error(`flock is unavailable (${last instanceof Error ? last.message : String(last)})`);
+}
+async function withExclusiveFileLock(lockPath, body, options = {}) {
+  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
+  const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
+  await mkdir2(dirname2(lockPath), { recursive: true, mode: 448 });
+  const handle = await open(lockPath, "a", 384);
+  try {
+    const flock = loadFlock();
+    for (let attempt = 0;attempt < attempts; attempt++) {
+      if (flock(handle.fd, LOCK_EX | LOCK_NB) === 0) {
+        try {
+          return await body();
+        } finally {
+          flock(handle.fd, LOCK_UN);
+        }
+      }
+      await Bun.sleep(retryMs);
+    }
+    throw new Error(`Timed out waiting for exclusive lock ${lockPath}`);
+  } finally {
+    await handle.close();
+  }
+}
+
 // packages/t3-orchestration/src/auto-guardian.ts
 var CODEX_PROVIDER_INSTANCE = "codex";
 var NON_CODEX_PROVIDERS = ["grok", "cursor", "opencode"];
 var AUTO_RUNTIME_MODE = "auto";
 var STATE_SCHEMA = 3;
 var HISTORY_TURNS = 10;
-var LOCK_RETRY_MS = 10;
-var LOCK_ATTEMPTS = 500;
-var GUARDIAN_LOCK_STALE_MS = 5000;
 var GUARDIAN_CLAIM_LEASE_MS = 30000;
 function defaultGuardianStatePath(home3 = process.env.HOME || homedir2()) {
   const t3Home = resolve2(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
@@ -669,6 +716,10 @@ async function claimOrSkip(dependencies, input, dryRun) {
 async function deliverClaim(dependencies, input, dryRun) {
   if (dryRun)
     return false;
+  if (!input.leaseId)
+    return false;
+  if (!await dependencies.renewRequest(input.requestId, input.leaseId))
+    return false;
   try {
     await dependencies.resolveTaskApproval({
       threadId: input.threadId,
@@ -676,13 +727,11 @@ async function deliverClaim(dependencies, input, dryRun) {
       decision: input.decision,
       reason: input.reason
     });
-    await dependencies.completeRequest(input.requestId);
-    return true;
   } catch {
-    if (input.leaseId)
-      await dependencies.releaseRequest(input.requestId, input.leaseId);
+    await dependencies.releaseRequest(input.requestId, input.leaseId);
     return false;
   }
+  return dependencies.completeRequest(input.requestId, input.leaseId);
 }
 async function runGuardianCycle(dependencies, config) {
   const now = dependencies.now();
@@ -695,7 +744,9 @@ async function runGuardianCycle(dependencies, config) {
     const list = await dependencies.listTaskApprovals();
     const candidates = candidatesFromApprovalList(list);
     const liveRequestIds = candidates.flatMap((candidate) => candidate.requestId ? [candidate.requestId] : []);
-    await dependencies.reconcileRequests(liveRequestIds);
+    const snapshotIncomplete = candidates.some((candidate) => candidate.snapshotGap);
+    if (!snapshotIncomplete)
+      await dependencies.reconcileRequests(liveRequestIds);
     state = await dependencies.loadState();
     const decisions = [];
     for (const candidate of candidates) {
@@ -962,70 +1013,17 @@ async function loadGuardianState(path = defaultGuardianStatePath()) {
   }
 }
 async function writeGuardianStateAtomic(state, path) {
-  await mkdir2(dirname2(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname3(path), { recursive: true, mode: 448 });
   const temporary = `${path}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
   await writeFile2(temporary, `${JSON.stringify(state, null, 2)}
 `, { mode: 384 });
   await rename2(temporary, path);
 }
-function isExclusiveCreateConflict(error) {
-  return Boolean(error && typeof error === "object" && "code" in error && error.code === "EEXIST");
-}
 function newOwnershipToken() {
   return `${Date.now().toString(16)}.${randomBytes(8).toString("hex")}`;
 }
-async function releaseOwnedLock(lockPath, token) {
-  try {
-    const current = (await readFile3(lockPath, "utf8")).trim();
-    if (current === token)
-      await rm2(lockPath, { force: true });
-  } catch {}
-}
-async function stealStaleGuardianLock(lockPath, staleMs = GUARDIAN_LOCK_STALE_MS, clock = Date.now) {
-  try {
-    const firstStat = await lstat(lockPath);
-    if (clock() - firstStat.mtimeMs < staleMs)
-      return false;
-    const firstToken = (await readFile3(lockPath, "utf8")).trim();
-    const secondStat = await lstat(lockPath);
-    if (secondStat.ino !== firstStat.ino)
-      return false;
-    if (clock() - secondStat.mtimeMs < staleMs)
-      return false;
-    const secondToken = (await readFile3(lockPath, "utf8")).trim();
-    if (secondToken !== firstToken)
-      return false;
-    await rm2(lockPath, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function withGuardianStateLock(path, body, options = {}) {
-  const lockPath = `${path}.lock`;
-  const staleMs = options.staleMs ?? GUARDIAN_LOCK_STALE_MS;
-  const clock = options.now ?? Date.now;
-  await mkdir2(dirname2(path), { recursive: true, mode: 448 });
-  for (let attempt = 0;attempt < LOCK_ATTEMPTS; attempt++) {
-    const token = newOwnershipToken();
-    try {
-      await writeFile2(lockPath, `${token}
-`, { flag: "wx", mode: 384 });
-      try {
-        return await body();
-      } finally {
-        await releaseOwnedLock(lockPath, token);
-      }
-    } catch (error) {
-      if (isExclusiveCreateConflict(error)) {
-        await stealStaleGuardianLock(lockPath, staleMs, clock);
-        await Bun.sleep(LOCK_RETRY_MS);
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw new Error(`Timed out waiting for T3 auto guardian state lock ${lockPath}`);
+async function withGuardianStateLock(path, body) {
+  return withExclusiveFileLock(`${path}.lock`, body);
 }
 async function mergeGuardianState(path, patch) {
   return withGuardianStateLock(path, async () => {
@@ -1086,18 +1084,35 @@ async function claimGuardianRequest(input, path = defaultGuardianStatePath(), op
     return { status: "claimed", decision: input.decision, leaseId };
   });
 }
-async function completeGuardianRequest(requestId, path = defaultGuardianStatePath()) {
-  await withGuardianStateLock(path, async () => {
+async function renewGuardianLease(requestId, leaseId, path = defaultGuardianStatePath(), options = {}) {
+  return withGuardianStateLock(path, async () => {
+    const nowMs = options.now?.() ?? Date.now();
+    const leaseMs = options.leaseMs ?? GUARDIAN_CLAIM_LEASE_MS;
     const state = await loadGuardianState(path);
     const existing = state.responded[requestId];
-    if (!existing)
-      return;
+    if (!existing || existing.status !== "pending" || existing.leaseId !== leaseId)
+      return false;
+    await writeGuardianStateAtomic(writeClaimState(state, requestId, {
+      ...existing,
+      leaseUntil: new Date(nowMs + leaseMs).toISOString()
+    }), path);
+    return true;
+  });
+}
+async function completeGuardianRequest(requestId, leaseId, path = defaultGuardianStatePath()) {
+  return withGuardianStateLock(path, async () => {
+    const state = await loadGuardianState(path);
+    const existing = state.responded[requestId];
+    if (!existing || existing.leaseId !== leaseId)
+      return false;
+    if (existing.status === "completed")
+      return true;
     await writeGuardianStateAtomic(writeClaimState(state, requestId, {
       ...existing,
       status: "completed",
-      leaseId: undefined,
       leaseUntil: undefined
     }), path);
+    return true;
   });
 }
 async function releaseGuardianRequest(requestId, leaseId, path = defaultGuardianStatePath()) {
@@ -1231,7 +1246,8 @@ function createDefaultGuardianDependencies(request) {
       return;
     }),
     claimRequest: (input) => claimGuardianRequest(input),
-    completeRequest: (requestId) => completeGuardianRequest(requestId),
+    renewRequest: (requestId, leaseId) => renewGuardianLease(requestId, leaseId),
+    completeRequest: (requestId, leaseId) => completeGuardianRequest(requestId, leaseId),
     releaseRequest: (requestId, leaseId) => releaseGuardianRequest(requestId, leaseId),
     reconcileRequests: (liveRequestIds) => reconcileGuardianRequests(liveRequestIds).then(() => {
       return;
