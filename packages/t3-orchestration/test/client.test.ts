@@ -109,4 +109,28 @@ describe("daemon client", () => {
       result: { timedOut: true, ready: [], tasks: [] },
     });
   });
+
+  test("settles a held tasks.wait at the injected client ceiling", async () => {
+    const socketPath = await listen((socket) => socket.once("data", (chunk) => {
+      expect(JSON.parse(chunk.toString())).toEqual({
+        op: "tasks.wait",
+        threadIds: ["one"],
+        timeoutMs: 0,
+        after: {},
+      });
+    }));
+    const started = Date.now();
+    const settled = daemonRequest({
+      op: "tasks.wait",
+      threadIds: ["one"],
+      timeoutMs: 3_600_000,
+      after: {},
+    }, socketPath, 80).then(() => "resolved" as const, (error) => {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("t3ctl tasks.wait timed out after 80ms");
+      return "rejected" as const;
+    });
+    expect(await Promise.race([settled, Bun.sleep(1_000).then(() => "pending" as const)])).toBe("rejected");
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
 });

@@ -54,7 +54,8 @@ if (group === "auth" && action === "configure") {
   if (!pairingToken) throw new Error("Pipe a one-time T3 pairing token on stdin");
   const { origin } = await import("./config.ts");
   const deadline = createClientDeadline(clientDeadlineMs);
-  let body: string;
+  let body = "";
+  let failure: string | undefined;
   try {
     const response = await withClientDeadline(fetch(`${await origin()}/oauth/token`, {
       method: "POST",
@@ -74,13 +75,15 @@ if (group === "auth" && action === "configure") {
     body = await withClientDeadline(response.text(), deadline.signal, "auth.configure", clientDeadlineMs);
     if (!response.ok) throw new Error(`T3 pairing exchange failed (${response.status}): ${body}`);
   } catch (error) {
-    const message = deadline.signal.aborted || (error instanceof Error && error.name === "AbortError")
+    failure = deadline.signal.aborted
       ? clientTimeoutMessage("auth.configure", clientDeadlineMs)
       : error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
-    process.exit(1);
   } finally {
     deadline.dispose();
+  }
+  if (failure) {
+    process.stderr.write(`${failure}\n`);
+    process.exit(1);
   }
   const accessToken = (JSON.parse(body) as { access_token?: unknown }).access_token;
   if (typeof accessToken !== "string" || !accessToken) throw new Error("T3 pairing response did not contain an access token");

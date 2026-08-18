@@ -258,28 +258,45 @@ function createClientDeadline(deadlineMs) {
     }
   };
 }
-function isAbortError(error) {
-  return error instanceof Error && error.name === "AbortError";
+function abandonReader(reader) {
+  reader.cancel().catch(() => {
+    return;
+  });
 }
 function whenAborted(signal, op, deadlineMs) {
-  return new Promise((_, reject) => {
+  let onAbort;
+  const promise = new Promise((_, reject) => {
     const fail = () => reject(clientTimeoutError(op, deadlineMs));
     if (signal.aborted) {
       fail();
       return;
     }
-    signal.addEventListener("abort", fail, { once: true });
+    onAbort = fail;
+    signal.addEventListener("abort", fail);
   });
+  return {
+    promise,
+    dispose: () => {
+      if (!onAbort)
+        return;
+      signal.removeEventListener("abort", onAbort);
+      onAbort = undefined;
+    }
+  };
 }
 async function withClientDeadline(promise, signal, op, deadlineMs) {
   const timedOut = whenAborted(signal, op, deadlineMs);
   promise.catch(() => {
     return;
   });
-  timedOut.catch(() => {
+  timedOut.promise.catch(() => {
     return;
   });
-  return await Promise.race([promise, timedOut]);
+  try {
+    return await Promise.race([promise, timedOut.promise]);
+  } finally {
+    timedOut.dispose();
+  }
 }
 function requestPayload(payload, deadlineMs) {
   if (payload.op !== "tasks.wait")
@@ -303,6 +320,7 @@ function localDaemonRequest(payload, socketPath, deadlineMs) {
       if (settled)
         return;
       settled = true;
+      deadline.signal.removeEventListener("abort", failWithTimeout);
       deadline.dispose();
       callback();
     };
@@ -388,15 +406,13 @@ async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
           break;
         size += value.byteLength;
         if (size > 1048576) {
-          await reader.cancel();
+          abandonReader(reader);
           throw new Error("remote daemon response exceeds 1 MiB");
         }
         chunks.push(value);
       }
     } catch (error) {
-      await reader.cancel().catch(() => {
-        return;
-      });
+      abandonReader(reader);
       throw error;
     }
     const combined = new Uint8Array(size);
@@ -416,9 +432,8 @@ async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
       throw new Error(body.error || `remote t3-orchestrationd failed with HTTP ${response.status}`);
     return body;
   } catch (error) {
-    if (deadline.signal.aborted || isAbortError(error)) {
+    if (deadline.signal.aborted)
       throw clientTimeoutError(payload.op, deadlineMs);
-    }
     throw error;
   } finally {
     deadline.dispose();
@@ -473,7 +488,8 @@ if (group === "auth" && action === "configure") {
     throw new Error("Pipe a one-time T3 pairing token on stdin");
   const { origin: origin2 } = await Promise.resolve().then(() => (init_config(), exports_config));
   const deadline = createClientDeadline(clientDeadlineMs);
-  let body;
+  let body = "";
+  let failure;
   try {
     const response = await withClientDeadline(fetch(`${await origin2()}/oauth/token`, {
       method: "POST",
@@ -494,12 +510,14 @@ if (group === "auth" && action === "configure") {
     if (!response.ok)
       throw new Error(`T3 pairing exchange failed (${response.status}): ${body}`);
   } catch (error) {
-    const message = deadline.signal.aborted || error instanceof Error && error.name === "AbortError" ? clientTimeoutMessage("auth.configure", clientDeadlineMs) : error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}
-`);
-    process.exit(1);
+    failure = deadline.signal.aborted ? clientTimeoutMessage("auth.configure", clientDeadlineMs) : error instanceof Error ? error.message : String(error);
   } finally {
     deadline.dispose();
+  }
+  if (failure) {
+    process.stderr.write(`${failure}
+`);
+    process.exit(1);
   }
   const accessToken = JSON.parse(body).access_token;
   if (typeof accessToken !== "string" || !accessToken)

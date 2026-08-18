@@ -58,19 +58,29 @@ export function createClientDeadline(deadlineMs: number): { signal: AbortSignal;
   };
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
+function abandonReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  void reader.cancel().catch(() => undefined);
 }
 
-function whenAborted(signal: AbortSignal, op: unknown, deadlineMs: number): Promise<never> {
-  return new Promise((_, reject) => {
+function whenAborted(signal: AbortSignal, op: unknown, deadlineMs: number): { promise: Promise<never>; dispose: () => void } {
+  let onAbort: (() => void) | undefined;
+  const promise = new Promise<never>((_, reject) => {
     const fail = () => reject(clientTimeoutError(op, deadlineMs));
     if (signal.aborted) {
       fail();
       return;
     }
-    signal.addEventListener("abort", fail, { once: true });
+    onAbort = fail;
+    signal.addEventListener("abort", fail);
   });
+  return {
+    promise,
+    dispose: () => {
+      if (!onAbort) return;
+      signal.removeEventListener("abort", onAbort);
+      onAbort = undefined;
+    },
+  };
 }
 
 export async function withClientDeadline<T>(
@@ -81,8 +91,12 @@ export async function withClientDeadline<T>(
 ): Promise<T> {
   const timedOut = whenAborted(signal, op, deadlineMs);
   void promise.catch(() => undefined);
-  void timedOut.catch(() => undefined);
-  return await Promise.race([promise, timedOut]);
+  void timedOut.promise.catch(() => undefined);
+  try {
+    return await Promise.race([promise, timedOut.promise]);
+  } finally {
+    timedOut.dispose();
+  }
 }
 
 function requestPayload(payload: Record<string, unknown>, deadlineMs: number): Record<string, unknown> {
@@ -115,6 +129,7 @@ function localDaemonRequest(
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
+      deadline.signal.removeEventListener("abort", failWithTimeout);
       deadline.dispose();
       callback();
     };
@@ -194,13 +209,13 @@ async function remoteDaemonRequest(
         if (done) break;
         size += value.byteLength;
         if (size > 1_048_576) {
-          await reader.cancel();
+          abandonReader(reader);
           throw new Error("remote daemon response exceeds 1 MiB");
         }
         chunks.push(value);
       }
     } catch (error) {
-      await reader.cancel().catch(() => undefined);
+      abandonReader(reader);
       throw error;
     }
     const combined = new Uint8Array(size);
@@ -213,9 +228,7 @@ async function remoteDaemonRequest(
     if (!response.ok) throw new Error(body.error || `remote t3-orchestrationd failed with HTTP ${response.status}`);
     return body;
   } catch (error) {
-    if (deadline.signal.aborted || isAbortError(error)) {
-      throw clientTimeoutError(payload.op, deadlineMs);
-    }
+    if (deadline.signal.aborted) throw clientTimeoutError(payload.op, deadlineMs);
     throw error;
   } finally {
     deadline.dispose();

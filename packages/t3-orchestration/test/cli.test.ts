@@ -109,6 +109,37 @@ describe("cross-project collaboration CLI", () => {
     });
   });
 
+  test("exits a held tasks.wait within the injected client ceiling", async () => {
+    root = await mkdtemp("/tmp/t3-cli-");
+    const socketPath = join(root, "daemon.sock");
+    let received: Record<string, unknown> | undefined;
+    server = createServer((socket) => socket.once("data", (chunk) => {
+      received = JSON.parse(chunk.toString()) as Record<string, unknown>;
+    }));
+    await new Promise<void>((resolveListen) => server!.listen(socketPath, resolveListen));
+    const started = Date.now();
+    const process = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "tasks", "wait", "one", "--timeout-ms", "3600000"], {
+      env: { ...Bun.env, T3_ORCHESTRATION_SOCKET: socketPath, T3_ORCHESTRATION_CLIENT_DEADLINE_MS: "80" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toBe("t3ctl tasks.wait timed out after 80ms\n");
+    expect(received).toEqual({
+      op: "tasks.wait",
+      threadIds: ["one"],
+      timeoutMs: 0,
+      after: {},
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   test("exits promptly when a local daemon never responds", async () => {
     root = await mkdtemp("/tmp/t3-cli-");
     const socketPath = join(root, "daemon.sock");
