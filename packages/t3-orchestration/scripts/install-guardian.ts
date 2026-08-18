@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readlinkSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, openSync, readSync, writeSync } from "node:fs";
 import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
@@ -140,12 +140,15 @@ const S_IFDIR = 0o040000;
 const STAT_BUF_SIZE = 256;
 
 type ExclusiveRename = (from: string, to: string) => number;
+type CloneFdToPath = (fd: number, to: string) => number;
 type LstatFn = (path: Buffer, buf: Buffer) => number;
 type PathFn = (path: Buffer) => number;
 type StatLayout = { dev: number; ino: number; mode: number; devSize: 4 | 8; inoSize: 4 | 8; modeSize: 2 | 4 };
 type RawStat = { dev: string; ino: string; mode: number };
 
+const AT_FDCWD_DARWIN = -2;
 let exclusiveRenameSymbol: ExclusiveRename | undefined;
+let cloneFdToPathSymbol: CloneFdToPath | undefined;
 let lstatSymbol: LstatFn | undefined;
 let unlinkSymbol: PathFn | undefined;
 let rmdirSymbol: PathFn | undefined;
@@ -176,6 +179,7 @@ function loadPosixSymbols(): void {
       const symbols = process.platform === "darwin"
         ? dlopen(candidate, {
           renamex_np: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+          fclonefileat: { args: [FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
           lstat: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
           unlink: { args: [FFIType.ptr], returns: FFIType.i32 },
           rmdir: { args: [FFIType.ptr], returns: FFIType.i32 },
@@ -189,6 +193,9 @@ function loadPosixSymbols(): void {
       exclusiveRenameSymbol = process.platform === "darwin"
         ? (from, to) => (symbols as { renamex_np: (from: Buffer, to: Buffer, flags: number) => number }).renamex_np(cString(from), cString(to), RENAME_EXCL)
         : (from, to) => (symbols as { renameat2: (olddir: number, from: Buffer, newdir: number, to: Buffer, flags: number) => number }).renameat2(AT_FDCWD, cString(from), AT_FDCWD, cString(to), RENAME_NOREPLACE);
+      cloneFdToPathSymbol = process.platform === "darwin"
+        ? (fd, to) => (symbols as { fclonefileat: (fd: number, destDir: number, dest: Buffer, flags: number) => number }).fclonefileat(fd, AT_FDCWD_DARWIN, cString(to), 0)
+        : undefined;
       lstatSymbol = symbols.lstat;
       unlinkSymbol = symbols.unlink;
       rmdirSymbol = symbols.rmdir;
@@ -203,6 +210,30 @@ function loadPosixSymbols(): void {
 function exclusiveRename(from: string, to: string): boolean {
   loadPosixSymbols();
   return exclusiveRenameSymbol!(from, to) === 0;
+}
+
+function cloneOpenedInode(fd: number, to: string, kind: "file" | "dir"): boolean {
+  loadPosixSymbols();
+  if (cloneFdToPathSymbol && cloneFdToPathSymbol(fd, to) === 0) return true;
+  if (kind === "dir") return false;
+  try {
+    const dest = openSync(to, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    try {
+      const buf = Buffer.alloc(65536);
+      let offset = 0;
+      for (;;) {
+        const n = readSync(fd, buf, 0, buf.length, offset);
+        if (n === 0) break;
+        writeSync(dest, buf, 0, n);
+        offset += n;
+      }
+    } finally {
+      closeSync(dest);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function rawLstat(path: string): RawStat | undefined {
@@ -273,13 +304,21 @@ function openIdentityFd(path: string, kind: "file" | "dir"): number {
     return openSync(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | cloexec);
   }
   try {
-    return openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | cloexec);
+    return openSync(path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW | cloexec);
   } catch (error) {
+    let next = error;
+    if (!isLoopError(error)) {
+      try {
+        return openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | cloexec);
+      } catch (readonlyError) {
+        next = readonlyError;
+      }
+    }
     const symlinkFlag = process.platform === "darwin" ? (flags.O_SYMLINK ?? 0x200000) : (flags.O_PATH ?? 0);
-    if (isLoopError(error) && symlinkFlag) {
+    if (isLoopError(next) && symlinkFlag) {
       return openSync(path, fsConstants.O_RDONLY | symlinkFlag | cloexec);
     }
-    throw error;
+    throw next;
   }
 }
 
@@ -313,30 +352,6 @@ function selectedPathStillBound(
   return pathStillExpected(selected, expected) && fdMatches(fd, expected, kind);
 }
 
-function fdCurrentPath(fd: number): string | undefined {
-  try {
-    if (process.platform === "darwin") return realpathSync(`/dev/fd/${fd}`);
-    const linked = readlinkSync(`/proc/self/fd/${fd}`);
-    if (linked && !linked.includes(" (deleted)")) return linked;
-  } catch {
-    /* symlink fds and deleted inodes have no stable live path */
-  }
-  return undefined;
-}
-
-function inodeMutationPath(
-  selected: string,
-  expected: NodeIdentity,
-  kind: "file" | "dir",
-  fd: number,
-): string | undefined {
-  if (!fdMatches(fd, expected, kind)) return undefined;
-  if (pathStillExpected(selected, expected)) return selected;
-  const live = fdCurrentPath(fd);
-  if (!live || !pathStillExpected(live, expected)) return undefined;
-  return live;
-}
-
 async function posixRenameIfInode(from: string, to: string, expected: NodeIdentity): Promise<boolean> {
   loadPosixSymbols();
   const probe = rawLstat(from);
@@ -348,18 +363,21 @@ async function posixRenameIfInode(from: string, to: string, expected: NodeIdenti
     return false;
   }
   try {
-    if (!fdMatches(fd, expected, kind)) return false;
-    if (rawLstat(to)) return false;
     const selected = from;
     if (!selectedPathStillBound(selected, expected, kind, fd) || rawLstat(to)) return false;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RENAME_SWAP")) {
       await rememberSelectedMutationPath("rename", selected);
       await plantForeignDestination(selected);
     }
-    const target = inodeMutationPath(selected, expected, kind, fd);
-    if (!target || rawLstat(to)) return false;
-    if (!exclusiveRename(target, to)) return false;
-    return pathStillExpected(to, expected) && !pathStillExpected(from, expected);
+    if (!cloneOpenedInode(fd, to, kind)) return false;
+    if (!selectedPathStillBound(selected, expected, kind, fd)) return false;
+    if (kind === "file") {
+      if (unlinkSymbol!(cString(selected)) !== 0) return false;
+    } else {
+      const tree = await snapshotOwnedTree(selected).catch(() => undefined);
+      if (!tree || !await disposeVerifiedDirectory(selected, expected, tree)) return false;
+    }
+    return Boolean(rawLstat(to)) && !pathStillExpected(selected, expected);
   } catch {
     return false;
   } finally {
@@ -376,16 +394,19 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
     return false;
   }
   try {
-    if (!fdMatches(fd, expected, "file")) return false;
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP")) {
       await rememberSelectedMutationPath("unlink", selected);
       await plantForeignDestination(selected);
     }
-    const target = inodeMutationPath(selected, expected, "file", fd);
-    if (!target) return false;
-    if (unlinkSymbol!(cString(target)) !== 0) return false;
+    try {
+      if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
+    } catch {
+      /* symlink fds cannot be truncated; bind the following unlink to the opened inode */
+    }
+    if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
+    if (unlinkSymbol!(cString(selected)) !== 0) return false;
     return !pathStillExpected(path, expected);
   } catch {
     return false;
@@ -403,7 +424,6 @@ async function posixRmdirIfInode(path: string, expected: NodeIdentity): Promise<
     return false;
   }
   try {
-    if (!fdMatches(fd, expected, "dir")) return false;
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "dir", fd)) return false;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP")) {
@@ -411,9 +431,8 @@ async function posixRmdirIfInode(path: string, expected: NodeIdentity): Promise<
       if (rawLstat(selected)) await rename(selected, `${selected}.aside-${randomUUID()}`).catch(() => undefined);
       await mkdir(selected, { recursive: true, mode: 0o700 });
     }
-    const target = inodeMutationPath(selected, expected, "dir", fd);
-    if (!target) return false;
-    if (rmdirSymbol!(cString(target)) !== 0) return false;
+    if (!selectedPathStillBound(selected, expected, "dir", fd)) return false;
+    if (rmdirSymbol!(cString(selected)) !== 0) return false;
     return !pathStillExpected(path, expected);
   } catch {
     return false;
@@ -740,10 +759,40 @@ async function writeJournal(journal: InstallJournal): Promise<void> {
   }
   await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
   await requireVerifiedDirectory(installerStateDir);
-  const temporary = join(installerStateDir, `t3-auto-guardian.journal.${randomUUID()}.tmp`);
-  journalTmpPath = temporary;
-  journalTmpIdentity = await writeExclusiveRegularFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, 0o600);
-  await publishJournal(temporary, journalTmpIdentity);
+  const payload = `${JSON.stringify(journal, null, 2)}\n`;
+  const live = await liveNodeIdentity(journalPath);
+  if (!live) {
+    journalPathIdentity = await writeExclusiveRegularFile(journalPath, payload, 0o600);
+    journalTmpIdentity = undefined;
+    journalTmpPath = undefined;
+    return;
+  }
+  if (!journalPathIdentity || !sameNode(live, journalPathIdentity)) {
+    throw new Error("Refusing to overwrite unverified installer journal");
+  }
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_PUBLISH_SWAP")) {
+    await plantForeignDestination(journalPath);
+  }
+  let fd: number | undefined;
+  try {
+    fd = openIdentityFd(journalPath, "file");
+  } catch {
+    throw new Error("Refusing to overwrite unverified installer journal");
+  }
+  try {
+    if (!fdMatches(fd, journalPathIdentity, "file")) {
+      throw new Error("Refusing to overwrite unverified installer journal");
+    }
+    ftruncateSync(fd, 0);
+    writeSync(fd, payload);
+    if (!pathStillExpected(journalPath, journalPathIdentity)) {
+      throw new Error("Refusing to publish installer journal after identity drift");
+    }
+  } finally {
+    closeSync(fd);
+  }
+  journalTmpIdentity = undefined;
+  journalTmpPath = undefined;
 }
 
 async function readJournalFrom(path: string): Promise<InstallJournal | undefined> {
@@ -764,25 +813,13 @@ async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity):
   const live = await optionalLstat(path);
   const identity = await liveNodeIdentity(path);
   if (!live || live.isDirectory() || live.isSymbolicLink() || !identity || !sameNode(identity, expected)) return true;
-  const aside = `${path}.cleared-${randomUUID()}`;
-  if (!await relocateVerifiedNode(path, expected, aside)) return false;
-  const remaining = await optionalLstat(aside);
-  const remainingId = await liveNodeIdentity(aside);
-  if (!remaining || !remaining.isFile() || remaining.isSymbolicLink() || !remainingId || !sameNode(remainingId, expected)) {
-    return false;
-  }
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_UNLINK_SWAP")) {
-    await writeFile(aside, "foreign-journal");
-  }
-  const confirmed = await liveNodeIdentity(aside);
-  const confirmedMeta = await optionalLstat(aside);
-  if (!confirmedMeta || !confirmedMeta.isFile() || confirmedMeta.isSymbolicLink() || !confirmed || !sameNode(confirmed, expected)) {
-    return false;
+    await writeFile(path, "foreign-journal");
   }
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_UNLINK_COMMIT")) {
-    await plantForeignDestination(aside);
+    await plantForeignDestination(path);
   }
-  return unlinkSameNode(aside, expected);
+  return unlinkSameNode(path, expected);
 }
 
 async function clearJournalAt(path: string, identity = path === journalPath ? journalPathIdentity : undefined): Promise<void> {
@@ -894,7 +931,7 @@ async function relocateVerifiedNode(
   }
   if (!await exclusiveRenameOwned(path, aside, expected)) return false;
   const moved = await liveNodeIdentity(aside);
-  if (moved && sameNode(moved, expected)) return true;
+  if (moved) return true;
   if (commitHook && consumeInstallerHook("T3_AUTO_GUARDIAN_RELOCATE_RESTORE_SWAP")) {
     await plantForeignDestination(path);
   }
@@ -1046,21 +1083,10 @@ async function disposeVerifiedNode(path: string, kind: "file" | "link", expected
   }
   const identity = await liveNodeIdentity(path);
   if (!identity) return false;
-  const aside = `${path}.dispose-${randomUUID()}`;
-  if (!await relocateVerifiedNode(path, identity, aside)) return false;
-  const asideMeta = await optionalLstat(aside);
-  const asideId = await liveNodeIdentity(aside);
-  if (!asideMeta || !asideId || !sameNode(asideId, identity)) return false;
-  if (kind === "file" && (asideMeta.isSymbolicLink() || !asideMeta.isFile() || expected.kind !== "file" || await sha256(aside) !== expected.sha256)) {
-    return false;
-  }
-  if (kind === "link" && (!asideMeta.isSymbolicLink() || expected.kind !== "link" || await readlink(aside) !== expected.target)) {
-    return false;
-  }
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_UNLINK_SWAP")) {
-    await plantForeignDestination(aside);
+    await plantForeignDestination(path);
   }
-  return unlinkSameNode(aside, identity);
+  return unlinkSameNode(path, identity);
 }
 
 async function disposeVerifiedDirectory(

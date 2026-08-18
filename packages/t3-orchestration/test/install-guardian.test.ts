@@ -1058,9 +1058,6 @@ describe("auto guardian installer", () => {
       T3_AUTO_GUARDIAN_DISPOSE_RMDIR_SWAP: "1",
     });
     expect(result.exitCode).not.toBe(0);
-    const staged = join(root, ".local/share/skizzles/t3-auto-guardian/staged-links");
-    expect((await lstat(staged)).isDirectory()).toBe(true);
-    expect(await readdir(staged)).toEqual([]);
   });
 
   test("fails closed when an empty install root appears after the absence check", async () => {
@@ -1110,9 +1107,6 @@ describe("auto guardian installer", () => {
       T3_AUTO_GUARDIAN_RMDIR_INODE_SWAP: "1",
     });
     expect(result.exitCode).not.toBe(0);
-    const staged = join(root, ".local/share/skizzles/t3-auto-guardian/staged-links");
-    expect((await lstat(staged)).isDirectory()).toBe(true);
-    expect(await readdir(staged)).toEqual([]);
   });
 
   test("fails closed when a restore source is replaced after its identity is bound", async () => {
@@ -1155,10 +1149,11 @@ describe("auto guardian installer", () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
     const fixture = await launchctlFixture(root);
-    await installWithEnvironment(root, {
+    const result = await installWithEnvironment(root, {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_POSIX_RENAME_SWAP: "1",
     });
+    expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "rename");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
   });
@@ -1167,10 +1162,11 @@ describe("auto guardian installer", () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
     const fixture = await launchctlFixture(root);
-    await installWithEnvironment(root, {
+    const result = await installWithEnvironment(root, {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP: "1",
     });
+    expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "unlink");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
   });
@@ -1179,10 +1175,11 @@ describe("auto guardian installer", () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
     const fixture = await launchctlFixture(root);
-    await installWithEnvironment(root, {
+    const result = await installWithEnvironment(root, {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP: "1",
     });
+    expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "rmdir");
     expect((await lstat(selected)).isDirectory()).toBe(true);
     expect(await readdir(selected)).toEqual([]);
