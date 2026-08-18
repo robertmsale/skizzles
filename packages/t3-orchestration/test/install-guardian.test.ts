@@ -1245,10 +1245,26 @@ describe("auto guardian installer", () => {
     await writeFile(journal, "not-json");
     const recovered = await installWithEnvironment(root, {
       ...fixture.environment,
-      T3_AUTO_GUARDIAN_MALFORMED_JOURNAL_SWAP: "1",
+      T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP: "1",
     });
     expect(recovered.exitCode).not.toBe(0);
-    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+    const selected = await selectedPosixPath(root, "exclusive-unlink");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("fails closed when a zero-length journal is replaced after the helper's final bind", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    await writeFile(join(root, ".local/share/skizzles/t3-auto-guardian.journal"), "");
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "exclusive-unlink");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
   });
 
   test("fails closed when leftover husk dispose is swapped", async () => {

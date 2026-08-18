@@ -259,34 +259,22 @@ async function unlinkOpenedInode(
   hook?: { env: string; sidecar: "unlink" | "exclusive-unlink" | "exclusive-move" },
 ): Promise<boolean> {
   loadPosixSymbols();
-  const current = pathOfOpenedFd(fd);
-  if (!current || !pathStillExpected(current, expected) || !fdMatches(fd, expected, kind)) return false;
+  const liveName = pathOfOpenedFd(fd);
+  if (!liveName || !pathStillExpected(liveName, expected) || !fdMatches(fd, expected, kind)) return false;
   let swapped = false;
   if (hook && consumeInstallerHook(hook.env)) {
     swapped = true;
-    await rememberSelectedMutationPath(hook.sidecar, current);
-    await plantForeignDestination(current);
+    await rememberSelectedMutationPath(hook.sidecar, liveName);
+    await plantForeignDestination(liveName);
   }
-  let nlink = 0;
   try {
     const metadata = fstatSync(fd);
-    nlink = metadata.nlink;
-    if (kind === "file" && metadata.isFile() && nlink <= 1) ftruncateSync(fd, 0);
+    if (kind === "file" && metadata.isFile() && metadata.nlink <= 1) ftruncateSync(fd, 0);
   } catch {
     /* symlink fds cannot be truncated */
   }
-  const liveName = pathOfOpenedFd(fd);
-  if (
-    nlink <= 1 &&
-    liveName &&
-    !(swapped && liveName === current) &&
-    pathStillExpected(liveName, expected) &&
-    fdMatches(fd, expected, kind)
-  ) {
-    if (kind === "dir") rmdirSymbol!(cString(liveName));
-    else unlinkSymbol!(cString(liveName));
-  }
-  return !swapped;
+  if (swapped) return false;
+  return kind === "dir" ? rmdirSymbol!(cString(liveName)) === 0 : unlinkSymbol!(cString(liveName)) === 0;
 }
 
 function cloneOpenedInode(fd: number, to: string, kind: "file" | "dir"): boolean {
@@ -467,10 +455,7 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    if (!await unlinkOpenedInode(fd, expected, "file", { env: "T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP", sidecar: "unlink" })) {
-      return false;
-    }
-    return !pathStillExpected(selected, expected);
+    return await unlinkOpenedInode(fd, expected, "file", { env: "T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP", sidecar: "unlink" });
   } catch {
     return false;
   } finally {
@@ -849,10 +834,7 @@ async function unlinkExclusiveRegularFile(path: string, expected: NodeIdentity):
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    if (!await unlinkOpenedInode(fd, expected, "file", { env: "T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP", sidecar: "exclusive-unlink" })) {
-      return false;
-    }
-    return !pathStillExpected(selected, expected);
+    return await unlinkOpenedInode(fd, expected, "file", { env: "T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP", sidecar: "exclusive-unlink" });
   } catch {
     return false;
   } finally {
@@ -1394,6 +1376,7 @@ async function recoverJournalAt(path: string): Promise<void> {
     if (!live || !sameNode(live, identity) || !await unlinkExclusiveRegularFile(path, identity)) {
       throw new Error(`Failed to clear malformed installer journal at ${path}`);
     }
+    if (path === journalPath) journalPathIdentity = identity;
     return;
   }
   if (journal.phase !== "complete") {
