@@ -735,13 +735,13 @@ async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
 
 // packages/t3-orchestration/src/worktree-reaper.ts
 init_worktree_reaper_config();
-import { lstat as lstat2, mkdir as mkdir3, readdir, readFile as readFile3, realpath as realpath2, writeFile as writeFile3 } from "fs/promises";
+import { lstat as lstat2, mkdir as mkdir3, open as open2, readdir, readFile as readFile3, realpath as realpath2, writeFile as writeFile3 } from "fs/promises";
 import { dirname as dirname2, join as join5, resolve as resolve3 } from "path";
 import { homedir as homedir3 } from "os";
 
 // packages/t3-orchestration/src/worktree-reaper-lease.ts
 import { createHash } from "crypto";
-import { link, lstat, mkdir as mkdir2, open, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
+import { link, lstat, mkdir as mkdir2, open, rename as rename2, rm as rm2, unlink, writeFile as writeFile2 } from "fs/promises";
 import { homedir as homedir2 } from "os";
 import { join as join4 } from "path";
 function cleanLeaseHome(home3 = process.env.T3_HOME?.trim() || join4(process.env.HOME || homedir2(), ".t3")) {
@@ -805,6 +805,9 @@ function lockIdentity(info) {
   if (info.dev < 0n || info.ino <= 0n)
     return;
   return { dev: info.dev, ino: info.ino };
+}
+function sameLockIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
 }
 async function hasIdentity(path, expected) {
   try {
@@ -908,14 +911,76 @@ async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
       }
       throw error;
     }
+    const movedAtRename = await inspectOpenIdentity(trash);
     if (hooks.afterMoved)
       await hooks.afterMoved(trash);
-    const moved = await inspectOpenIdentity(trash);
-    if (!moved || moved.dev !== inspected.dev || moved.ino !== inspected.ino) {
+    if (!sameLockIdentity(movedAtRename, inspected)) {
       if (hooks.afterMismatch)
         await hooks.afterMismatch(trash);
+      await restoreNamedIdentity(trash, path, movedAtRename);
+      return false;
+    }
+    if (hooks.afterVerified)
+      await hooks.afterVerified(trash);
+    const stillMoved = await inspectOpenIdentity(trash);
+    if (!sameLockIdentity(stillMoved, inspected)) {
+      return false;
+    }
+    await disposeNamedIdentity(trash, inspected);
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+async function restoreNamedIdentity(source, destination, expected) {
+  if (!expected)
+    return;
+  const current = await inspectOpenIdentity(source);
+  if (!sameLockIdentity(current, expected))
+    return;
+  try {
+    await link(source, destination);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST")
+      throw error;
+    return;
+  }
+  const published = await inspectOpenIdentity(destination);
+  if (!sameLockIdentity(published, expected))
+    return;
+  const stillSource = await inspectOpenIdentity(source);
+  if (sameLockIdentity(stillSource, expected)) {
+    await disposeNamedIdentity(source, expected);
+  }
+}
+async function disposeNamedIdentity(path, inspected) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return true;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!sameLockIdentity(opened, inspected))
+      return false;
+    const secret = `${path}.gc-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename2(path, secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return true;
+      }
+      throw error;
+    }
+    const moved = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(moved, inspected)) {
       try {
-        await link(trash, path);
+        await link(secret, path);
       } catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
         if (code !== "EEXIST")
@@ -923,11 +988,18 @@ async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
       }
       return false;
     }
-    if (hooks.afterVerified)
-      await hooks.afterVerified(trash);
-    const stillMoved = await inspectOpenIdentity(trash);
-    if (!stillMoved || stillMoved.dev !== inspected.dev || stillMoved.ino !== inspected.ino) {
+    const held = lockIdentity(await handle.stat({ bigint: true }));
+    const named = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(held, inspected) || !sameLockIdentity(named, inspected) || !held) {
       return false;
+    }
+    try {
+      await unlink(secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return true;
+      }
+      throw error;
     }
     return true;
   } finally {
@@ -1046,8 +1118,9 @@ async function acquireWorktreeGate(path, threadId, role, options = {}) {
   await mkdir2(cleanLeaseHome(options.home), { recursive: true, mode: 448 });
   const processStartKey = options.processStartKey ?? defaultProcessStartKey;
   const startKey = processStartKey(process.pid);
-  if (!startKey)
+  if (typeof startKey !== "string" || startKey.trim() === "") {
     throw new Error("could not record process start key for worktree lease");
+  }
   const record = {
     token,
     threadId,
@@ -1429,7 +1502,11 @@ async function planClean(task, config, deps, worktreesByRoot, occupied) {
     if (!directoryIdentity) {
       return { ok: false, action: "failed", path: resolved.path, reason: `could not identify clean directory inode ${target.directory}` };
     }
-    identified.push({ ...target, directoryIdentity });
+    const artifactIdentity = await deps.statIdentity(target.artifactDir);
+    if (!artifactIdentity) {
+      return { ok: false, action: "failed", path: resolved.path, reason: `could not identify artifact directory inode ${target.artifactDir}` };
+    }
+    identified.push({ ...target, directoryIdentity, artifactIdentity });
   }
   const artifactDirs = identified.map((target) => target.artifactDir);
   let bytesBefore = 0;
@@ -1446,6 +1523,10 @@ async function assertPlanIdentities(plan, deps) {
     const directoryIdentity = await deps.statIdentity(target.directory);
     if (!sameFsIdentity(directoryIdentity, target.directoryIdentity)) {
       return { ok: false, reason: `clean directory ${target.directory} was replaced after planning` };
+    }
+    const artifactIdentity = await deps.statIdentity(target.artifactDir);
+    if (!sameFsIdentity(artifactIdentity, target.artifactIdentity)) {
+      return { ok: false, reason: `artifact directory ${target.artifactDir} was replaced after planning` };
     }
   }
   return { ok: true };
@@ -1708,7 +1789,12 @@ async function cleanSettledWorktrees(deps, options) {
             aborted = { ok: false, action: "failed", path: plan.path, reason: stillBound.reason };
             break;
           }
-          await deps.runClean(target.command, target.directory, lease.signal);
+          await deps.runClean(target.command, target.directory, lease.signal, {
+            directoryIdentity: target.directoryIdentity,
+            artifactDir: target.artifactDir,
+            artifactName: target.artifactName,
+            artifactIdentity: target.artifactIdentity
+          });
         }
       } catch (error) {
         record({
@@ -1875,6 +1961,98 @@ function parseListCleanableResult(result) {
 function taskListEnumerationTruncated(moreRecent) {
   return !Number.isInteger(moreRecent) || moreRecent < 0 || moreRecent > 0;
 }
+var IDENTITY_BOUND_CLEAN_EVAL = `
+const spec = JSON.parse(process.env.T3_REAPER_CLEAN_SPEC ?? "null");
+if (!spec || !Array.isArray(spec.command) || typeof spec.artifactName !== "string") {
+  process.stderr.write("clean refused: missing identity-bound launch spec\\n");
+  process.exit(76);
+}
+const { lstat } = await import("node:fs/promises");
+const cwd = await lstat(".", { bigint: true });
+if (cwd.dev !== BigInt(spec.directoryDev) || cwd.ino !== BigInt(spec.directoryIno)) {
+  process.stderr.write("clean directory was replaced after planning\\n");
+  process.exit(77);
+}
+const artifact = await lstat(spec.artifactName, { bigint: true });
+if (artifact.dev !== BigInt(spec.artifactDev) || artifact.ino !== BigInt(spec.artifactIno)) {
+  process.stderr.write("artifact directory was replaced after planning\\n");
+  process.exit(78);
+}
+const env = { ...process.env };
+delete env.T3_REAPER_CLEAN_SPEC;
+const proc = Bun.spawn(spec.command, { stdout: "inherit", stderr: "inherit", env });
+process.exit(await proc.exited);
+`;
+async function runIdentityBoundClean(command, directory, binding, signal, hooks = {}) {
+  if (signal?.aborted)
+    throw new Error("clean aborted: task resumed");
+  if (!binding.artifactName.trim()) {
+    throw new Error("clean refused: missing artifact identity binding");
+  }
+  const directoryHandle = await open2(directory, "r");
+  try {
+    const directoryStat = await directoryHandle.stat({ bigint: true });
+    const directoryIdentity = { dev: directoryStat.dev, ino: directoryStat.ino };
+    if (!sameFsIdentity(directoryIdentity, binding.directoryIdentity)) {
+      throw new Error(`clean directory ${directory} was replaced after planning`);
+    }
+    const artifactHandle = await open2(binding.artifactDir, "r");
+    try {
+      const artifactStat = await artifactHandle.stat({ bigint: true });
+      const artifactIdentity = { dev: artifactStat.dev, ino: artifactStat.ino };
+      if (!sameFsIdentity(artifactIdentity, binding.artifactIdentity)) {
+        throw new Error(`artifact directory ${binding.artifactDir} was replaced after planning`);
+      }
+      if (hooks.afterParentBound)
+        await hooks.afterParentBound();
+      if (signal?.aborted)
+        throw new Error("clean aborted: task resumed");
+      const env = { ...Bun.env };
+      if (command[0] === "cargo")
+        delete env.CARGO_TARGET_DIR;
+      env.T3_REAPER_CLEAN_SPEC = JSON.stringify({
+        command,
+        artifactName: binding.artifactName,
+        directoryDev: String(binding.directoryIdentity.dev),
+        directoryIno: String(binding.directoryIdentity.ino),
+        artifactDev: String(binding.artifactIdentity.dev),
+        artifactIno: String(binding.artifactIdentity.ino)
+      });
+      const proc = Bun.spawn([process.execPath, "--eval", IDENTITY_BOUND_CLEAN_EVAL], {
+        cwd: directory,
+        env,
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+      const abort = () => {
+        try {
+          proc.kill();
+        } catch {}
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        const exitCode = await proc.exited;
+        if (signal?.aborted)
+          throw new Error("clean aborted: task resumed");
+        if (exitCode === 77)
+          throw new Error(`clean directory ${directory} was replaced after planning`);
+        if (exitCode === 78)
+          throw new Error(`artifact directory ${binding.artifactDir} was replaced after planning`);
+        if (exitCode !== 0) {
+          const stderr = await new Response(proc.stderr).text();
+          const stdout = await new Response(proc.stdout).text();
+          throw new Error(`${command.join(" ")} failed in ${directory}: ${stderr.trim() || stdout.trim() || `exit ${exitCode}`}`);
+        }
+      } finally {
+        signal?.removeEventListener("abort", abort);
+      }
+    } finally {
+      await artifactHandle.close();
+    }
+  } finally {
+    await directoryHandle.close();
+  }
+}
 function createDefaultReaperDependencies(request) {
   const occupiedFromTasks = (tasks) => tasks.flatMap((task) => {
     const path = task.worktreePath?.trim();
@@ -1981,36 +2159,10 @@ function createDefaultReaperDependencies(request) {
     readText: (path) => readFile3(path, "utf8"),
     measureBytes: directorySize,
     statIdentity: inspectPathIdentity,
-    async runClean(command, directory, signal) {
-      if (signal?.aborted)
-        throw new Error("clean aborted: task resumed");
-      const env = { ...Bun.env };
-      if (command[0] === "cargo")
-        delete env.CARGO_TARGET_DIR;
-      const proc = Bun.spawn(command, {
-        cwd: directory,
-        env,
-        stdout: "pipe",
-        stderr: "pipe"
-      });
-      const abort = () => {
-        try {
-          proc.kill();
-        } catch {}
-      };
-      signal?.addEventListener("abort", abort, { once: true });
-      try {
-        const exitCode = await proc.exited;
-        if (signal?.aborted)
-          throw new Error("clean aborted: task resumed");
-        if (exitCode !== 0) {
-          const stderr = await new Response(proc.stderr).text();
-          const stdout = await new Response(proc.stdout).text();
-          throw new Error(`${command.join(" ")} failed in ${directory}: ${stderr.trim() || stdout.trim() || `exit ${exitCode}`}`);
-        }
-      } finally {
-        signal?.removeEventListener("abort", abort);
-      }
+    async runClean(command, directory, signal, binding) {
+      if (!binding)
+        throw new Error("clean refused: missing directory and artifact identity binding");
+      await runIdentityBoundClean(command, directory, binding, signal);
     },
     holdCleanLease(task, path) {
       return holdExclusiveCleanLease(task, path, async (threadId) => {

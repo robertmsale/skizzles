@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   acquireWorktreeGate,
@@ -302,6 +302,84 @@ describe("worktree clean lease", () => {
     });
     expect(removed).toBe(false);
     expect(JSON.parse(await Bun.file(lockPath).text())).toMatchObject({ token: "newer-at-path", threadId: "newer" });
+  });
+
+  test("acquireWorktreeGate fails closed on a whitespace-only startKey instead of publishing a reclaimable lease", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    let firstEntered = false;
+    await expect(acquireWorktreeGate(path, "task", "clean", {
+      home: root,
+      processStartKey: () => "   ",
+    })).rejects.toThrow(/start key/);
+    expect(await readLiveCleanLease(path, root)).toBeNull();
+
+    const lockPath = cleanLeaseLockPath(path, root);
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    await writeFile(lockPath, `${JSON.stringify({
+      token: "blank-owner",
+      threadId: "blank",
+      path,
+      role: "clean",
+      pid: process.pid,
+      startKey: "   ",
+      acquiredAt: "now",
+    })}\n`);
+    expect(isLiveLeaseRecord(JSON.parse(await Bun.file(lockPath).text()), {
+      processProbe: () => undefined,
+      processStartKey: () => "   ",
+    })).toBe(false);
+    const first = await acquireWorktreeGate(path, "first", "clean", {
+      home: root,
+      processStartKey: () => defaultProcessStartKey(process.pid),
+    });
+    firstEntered = true;
+    await expect(acquireWorktreeGate(path, "second", "clean", { home: root })).rejects.toThrow(/reserved for artifact cleanup/);
+    expect(firstEntered).toBe(true);
+    await first.release();
+  });
+
+  test("releases do not leave .unlinking husks after a verified lease move", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    const first = await acquireWorktreeGate(path, "task", "clean", { home: root });
+    await first.release();
+    const second = await acquireWorktreeGate(path, "task", "clean", { home: root });
+    await second.release();
+    const leftovers = (await readdir(join(root, "worktree-reaper-leases"))).filter((name) => (
+      name.includes(".unlinking-") || name.includes(".gc-")
+    ));
+    expect(leftovers).toEqual([]);
+  });
+
+  test("does not publish a replaced trash source onto the original path", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    const lockPath = cleanLeaseLockPath(path, root);
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    await writeFile(lockPath, `${JSON.stringify({ token: "original", threadId: "old", path, role: "clean", pid: 1, startKey: "x", acquiredAt: "now" })}\n`);
+    const identity = await inspectPathIdentity(lockPath);
+    expect(identity).toBeDefined();
+    let trashPath = "";
+    const removed = await unlinkIfSameIdentity(lockPath, identity!, {
+      afterStat: async () => {
+        await rm(lockPath, { force: true });
+        await writeFile(lockPath, `${JSON.stringify({ token: "moved-source", threadId: "moved", path, role: "clean", pid: 1, startKey: "y", acquiredAt: "now" })}\n`);
+      },
+      afterMoved: async (trash) => {
+        trashPath = trash;
+      },
+      afterMismatch: async (trash) => {
+        await rm(trash, { force: true });
+        await writeFile(trash, `${JSON.stringify({ token: "unrelated-B", threadId: "b", path, role: "clean", pid: 1, startKey: "b", acquiredAt: "now" })}\n`);
+        await rm(trash, { force: true });
+        await writeFile(trash, `${JSON.stringify({ token: "unrelated-C", threadId: "c", path, role: "clean", pid: 1, startKey: "c", acquiredAt: "now" })}\n`);
+      },
+    });
+    expect(removed).toBe(false);
+    expect(trashPath).not.toBe("");
+    await expect(Bun.file(lockPath).exists()).resolves.toBe(false);
+    expect(JSON.parse(await Bun.file(trashPath).text())).toMatchObject({ token: "unrelated-C", threadId: "c" });
   });
 
   test("reclaim mutex fails closed instead of publishing a null startKey that a second claimant would treat as orphan", async () => {

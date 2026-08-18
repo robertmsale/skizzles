@@ -4,7 +4,7 @@
 // packages/t3-orchestration/src/daemon.ts
 import { connect, createServer as createServer2 } from "net";
 import { chmodSync } from "fs";
-import { lstat as lstat2, mkdir as mkdir2, unlink } from "fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, unlink as unlink2 } from "fs/promises";
 import { dirname } from "path";
 
 // packages/t3-orchestration/src/config.ts
@@ -545,7 +545,7 @@ async function waitForTasks(input, loadSnapshot, sleep = Bun.sleep, clock = Date
 
 // packages/t3-orchestration/src/worktree-reaper-lease.ts
 import { createHash } from "crypto";
-import { link, lstat, mkdir, open, rename, rm, writeFile } from "fs/promises";
+import { link, lstat, mkdir, open, rename, rm, unlink, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join as join2 } from "path";
 function cleanLeaseHome(home2 = process.env.T3_HOME?.trim() || join2(process.env.HOME || homedir(), ".t3")) {
@@ -609,6 +609,9 @@ function lockIdentity(info) {
   if (info.dev < 0n || info.ino <= 0n)
     return;
   return { dev: info.dev, ino: info.ino };
+}
+function sameLockIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
 }
 async function hasIdentity(path, expected) {
   try {
@@ -702,14 +705,76 @@ async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
       }
       throw error;
     }
+    const movedAtRename = await inspectOpenIdentity(trash);
     if (hooks.afterMoved)
       await hooks.afterMoved(trash);
-    const moved = await inspectOpenIdentity(trash);
-    if (!moved || moved.dev !== inspected.dev || moved.ino !== inspected.ino) {
+    if (!sameLockIdentity(movedAtRename, inspected)) {
       if (hooks.afterMismatch)
         await hooks.afterMismatch(trash);
+      await restoreNamedIdentity(trash, path, movedAtRename);
+      return false;
+    }
+    if (hooks.afterVerified)
+      await hooks.afterVerified(trash);
+    const stillMoved = await inspectOpenIdentity(trash);
+    if (!sameLockIdentity(stillMoved, inspected)) {
+      return false;
+    }
+    await disposeNamedIdentity(trash, inspected);
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+async function restoreNamedIdentity(source, destination, expected) {
+  if (!expected)
+    return;
+  const current = await inspectOpenIdentity(source);
+  if (!sameLockIdentity(current, expected))
+    return;
+  try {
+    await link(source, destination);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST")
+      throw error;
+    return;
+  }
+  const published = await inspectOpenIdentity(destination);
+  if (!sameLockIdentity(published, expected))
+    return;
+  const stillSource = await inspectOpenIdentity(source);
+  if (sameLockIdentity(stillSource, expected)) {
+    await disposeNamedIdentity(source, expected);
+  }
+}
+async function disposeNamedIdentity(path, inspected) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return true;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!sameLockIdentity(opened, inspected))
+      return false;
+    const secret = `${path}.gc-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename(path, secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return true;
+      }
+      throw error;
+    }
+    const moved = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(moved, inspected)) {
       try {
-        await link(trash, path);
+        await link(secret, path);
       } catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
         if (code !== "EEXIST")
@@ -717,11 +782,18 @@ async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
       }
       return false;
     }
-    if (hooks.afterVerified)
-      await hooks.afterVerified(trash);
-    const stillMoved = await inspectOpenIdentity(trash);
-    if (!stillMoved || stillMoved.dev !== inspected.dev || stillMoved.ino !== inspected.ino) {
+    const held = lockIdentity(await handle.stat({ bigint: true }));
+    const named = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(held, inspected) || !sameLockIdentity(named, inspected) || !held) {
       return false;
+    }
+    try {
+      await unlink(secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return true;
+      }
+      throw error;
     }
     return true;
   } finally {
@@ -840,8 +912,9 @@ async function acquireWorktreeGate(path, threadId, role, options = {}) {
   await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 448 });
   const processStartKey = options.processStartKey ?? defaultProcessStartKey;
   const startKey = processStartKey(process.pid);
-  if (!startKey)
+  if (typeof startKey !== "string" || startKey.trim() === "") {
     throw new Error("could not record process start key for worktree lease");
+  }
   const record = {
     token: token2,
     threadId,
@@ -1638,7 +1711,7 @@ var shutdown = async (exitCode) => {
     return;
   shuttingDown = true;
   await Promise.all([closeServer(gateway), closeServer(server)]);
-  await unlink(SOCKET_PATH).catch(() => {
+  await unlink2(SOCKET_PATH).catch(() => {
     return;
   });
   process.exit(exitCode);
@@ -1655,7 +1728,7 @@ var prepareSocket = async (path, isLive) => {
       throw new Error(`Refusing to replace non-socket path ${path}`);
     if (await isLive())
       throw new Error(`Daemon already running on ${path}`);
-    await unlink(path);
+    await unlink2(path);
   } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("ENOENT"))
       throw error;
@@ -1701,7 +1774,7 @@ if (gateway) {
     });
   } catch (error) {
     await Promise.all([closeServer(gateway), closeServer(server)]);
-    await unlink(SOCKET_PATH).catch(() => {
+    await unlink2(SOCKET_PATH).catch(() => {
       return;
     });
     throw error;

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { link, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -118,6 +118,10 @@ export function isLiveLeaseRecord(
 function lockIdentity(info: { dev: bigint; ino: bigint }): LockIdentity | undefined {
   if (info.dev < 0n || info.ino <= 0n) return undefined;
   return { dev: info.dev, ino: info.ino };
+}
+
+function sameLockIdentity(left: LockIdentity | undefined, right: LockIdentity | undefined): boolean {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
 }
 
 async function hasIdentity(path: string, expected: LockIdentity): Promise<boolean> {
@@ -252,22 +256,92 @@ export async function unlinkIfSameIdentity(
       }
       throw error;
     }
+    const movedAtRename = await inspectOpenIdentity(trash);
     if (hooks.afterMoved) await hooks.afterMoved(trash);
-    const moved = await inspectOpenIdentity(trash);
-    if (!moved || moved.dev !== inspected.dev || moved.ino !== inspected.ino) {
+    if (!sameLockIdentity(movedAtRename, inspected)) {
       if (hooks.afterMismatch) await hooks.afterMismatch(trash);
+      await restoreNamedIdentity(trash, path, movedAtRename);
+      return false;
+    }
+    if (hooks.afterVerified) await hooks.afterVerified(trash);
+    const stillMoved = await inspectOpenIdentity(trash);
+    if (!sameLockIdentity(stillMoved, inspected)) {
+      return false;
+    }
+    await disposeNamedIdentity(trash, inspected);
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function restoreNamedIdentity(
+  source: string,
+  destination: string,
+  expected: LockIdentity | undefined,
+): Promise<void> {
+  if (!expected) return;
+  const current = await inspectOpenIdentity(source);
+  if (!sameLockIdentity(current, expected)) return;
+  try {
+    await link(source, destination);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+    if (code !== "EEXIST") throw error;
+    return;
+  }
+  const published = await inspectOpenIdentity(destination);
+  if (!sameLockIdentity(published, expected)) return;
+  const stillSource = await inspectOpenIdentity(source);
+  if (sameLockIdentity(stillSource, expected)) {
+    await disposeNamedIdentity(source, expected);
+  }
+}
+
+async function disposeNamedIdentity(path: string, inspected: LockIdentity): Promise<boolean> {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+      return true;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!sameLockIdentity(opened, inspected)) return false;
+    const secret = `${path}.gc-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename(path, secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+        return true;
+      }
+      throw error;
+    }
+    const moved = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(moved, inspected)) {
       try {
-        await link(trash, path);
+        await link(secret, path);
       } catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
         if (code !== "EEXIST") throw error;
       }
       return false;
     }
-    if (hooks.afterVerified) await hooks.afterVerified(trash);
-    const stillMoved = await inspectOpenIdentity(trash);
-    if (!stillMoved || stillMoved.dev !== inspected.dev || stillMoved.ino !== inspected.ino) {
+    const held = lockIdentity(await handle.stat({ bigint: true }));
+    const named = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(held, inspected) || !sameLockIdentity(named, inspected) || !held) {
       return false;
+    }
+    try {
+      await unlink(secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+        return true;
+      }
+      throw error;
     }
     return true;
   } finally {
@@ -402,7 +476,9 @@ export async function acquireWorktreeGate(
   await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 0o700 });
   const processStartKey = options.processStartKey ?? defaultProcessStartKey;
   const startKey = processStartKey(process.pid);
-  if (!startKey) throw new Error("could not record process start key for worktree lease");
+  if (typeof startKey !== "string" || startKey.trim() === "") {
+    throw new Error("could not record process start key for worktree lease");
+  }
   const record: CleanLeaseRecord = {
     token,
     threadId,

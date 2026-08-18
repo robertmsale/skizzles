@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspectPathIdentity } from "../src/worktree-reaper-lease.ts";
 import {
   cleanSettledWorktrees,
   createDefaultReaperDependencies,
   discoverCleanTargets,
+  runIdentityBoundClean,
   isLivenessUnavailable,
   isCleanableLifecycle,
   isFlutterPubspec,
@@ -1127,6 +1130,51 @@ command = ["rm", "-rf", ".dart_tool"]
     expect(harness.runs).toEqual([]);
   });
 
+  test("does not clean an artifact directory replaced after planning", async () => {
+    const shared = "/repo/.t3/worktrees/repo/shared";
+    const artifact = `${shared}/target`;
+    let artifactGeneration = 10n;
+    const harness = deps({
+      tasks: [task({
+        id: "settled-A",
+        branch: "t3code/task",
+        worktreePath: shared,
+      })],
+      occupied: [{ id: "settled-A", path: shared }],
+      listGitWorktrees: async () => [
+        { path: "/repo", branch: "master", bare: false },
+        { path: shared, branch: "t3code/task", bare: false },
+      ],
+      isDirectory: async (path) => path === shared || path.endsWith("/target"),
+      readDirectoryNames: async (path) => path === shared ? ["Cargo.toml", "target"] : [],
+      statIdentity: async (path) => (
+        path === artifact ? { dev: 1n, ino: artifactGeneration } : { dev: 1n, ino: 1n }
+      ),
+      holdCleanLease: async (entry, path) => {
+        artifactGeneration = 11n;
+        const controller = new AbortController();
+        return {
+          token: "lease",
+          path,
+          threadId: entry.id,
+          role: "clean" as const,
+          signal: controller.signal,
+          abort: () => controller.abort(),
+          release: async () => undefined,
+        };
+      },
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.ok).toBe(false);
+    expect(report.cleaned).toBe(0);
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "settled-A",
+      action: "failed",
+      reason: `artifact directory ${artifact} was replaced after planning`,
+    });
+    expect(harness.runs).toEqual([]);
+  });
+
   test("does not clean a worktree path replaced after planning", async () => {
     const shared = "/repo/.t3/worktrees/repo/shared";
     let generation = 1n;
@@ -1167,5 +1215,122 @@ command = ["rm", "-rf", ".dart_tool"]
       reason: `worktree ${shared} was replaced after planning`,
     });
     expect(harness.runs).toEqual([]);
+  });
+});
+
+describe("identity-bound cleaner launch", () => {
+  test("runs the cleaner when directory and artifact inodes still match", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
+    const directory = join(root, "crate");
+    const artifactDir = join(directory, "target");
+    await mkdir(artifactDir, { recursive: true });
+    await writeFile(join(directory, "Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\n");
+    const directoryIdentity = await inspectPathIdentity(directory);
+    const artifactIdentity = await inspectPathIdentity(artifactDir);
+    expect(directoryIdentity).toBeDefined();
+    expect(artifactIdentity).toBeDefined();
+    await runIdentityBoundClean(
+      [process.execPath, "--eval", "await Bun.write('launched', 'yes')"],
+      directory,
+      {
+        directoryIdentity: directoryIdentity!,
+        artifactDir,
+        artifactName: "target",
+        artifactIdentity: artifactIdentity!,
+      },
+    );
+    expect(await Bun.file(join(directory, "launched")).text()).toBe("yes");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("refuses a cleaner when the worktree directory is replaced before spawn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
+    const directory = join(root, "crate");
+    const replacement = join(root, "replacement");
+    const artifactDir = join(directory, "target");
+    await mkdir(artifactDir, { recursive: true });
+    await mkdir(join(replacement, "target"), { recursive: true });
+    await writeFile(join(directory, "Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\n");
+    await writeFile(join(replacement, "Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\n");
+    const directoryIdentity = await inspectPathIdentity(directory);
+    const artifactIdentity = await inspectPathIdentity(artifactDir);
+    expect(directoryIdentity).toBeDefined();
+    expect(artifactIdentity).toBeDefined();
+    await rename(directory, join(root, "original-aside"));
+    await rename(replacement, directory);
+    await expect(runIdentityBoundClean(
+      [process.execPath, "--eval", "await Bun.write('launched', 'yes')"],
+      directory,
+      {
+        directoryIdentity: directoryIdentity!,
+        artifactDir,
+        artifactName: "target",
+        artifactIdentity: artifactIdentity!,
+      },
+    )).rejects.toThrow(/clean directory .* was replaced after planning/);
+    expect(await Bun.file(join(directory, "launched")).exists()).toBe(false);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("refuses a cleaner when the directory is replaced in the final check-to-launch window", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
+    const directory = join(root, "crate");
+    const replacement = join(root, "replacement");
+    const artifactDir = join(directory, "target");
+    await mkdir(artifactDir, { recursive: true });
+    await mkdir(join(replacement, "target"), { recursive: true });
+    await writeFile(join(directory, "Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\n");
+    await writeFile(join(replacement, "Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\n");
+    const directoryIdentity = await inspectPathIdentity(directory);
+    const artifactIdentity = await inspectPathIdentity(artifactDir);
+    expect(directoryIdentity).toBeDefined();
+    expect(artifactIdentity).toBeDefined();
+    await expect(runIdentityBoundClean(
+      [process.execPath, "--eval", "await Bun.write('launched', 'yes')"],
+      directory,
+      {
+        directoryIdentity: directoryIdentity!,
+        artifactDir,
+        artifactName: "target",
+        artifactIdentity: artifactIdentity!,
+      },
+      undefined,
+      {
+        afterParentBound: async () => {
+          await rename(directory, join(root, "original-aside"));
+          await rename(replacement, directory);
+        },
+      },
+    )).rejects.toThrow(/clean directory .* was replaced after planning/);
+    expect(await Bun.file(join(directory, "launched")).exists()).toBe(false);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("refuses a cleaner when the artifact directory is replaced after planning", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
+    const directory = join(root, "crate");
+    const artifactDir = join(directory, "target");
+    const replacement = join(root, "target-replacement");
+    await mkdir(artifactDir, { recursive: true });
+    await mkdir(replacement, { recursive: true });
+    await writeFile(join(directory, "Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\n");
+    const directoryIdentity = await inspectPathIdentity(directory);
+    const artifactIdentity = await inspectPathIdentity(artifactDir);
+    expect(directoryIdentity).toBeDefined();
+    expect(artifactIdentity).toBeDefined();
+    await rename(artifactDir, join(root, "target-aside"));
+    await rename(replacement, artifactDir);
+    await expect(runIdentityBoundClean(
+      [process.execPath, "--eval", "await Bun.write('launched', 'yes')"],
+      directory,
+      {
+        directoryIdentity: directoryIdentity!,
+        artifactDir,
+        artifactName: "target",
+        artifactIdentity: artifactIdentity!,
+      },
+    )).rejects.toThrow(/artifact directory .* was replaced after planning/);
+    expect(await Bun.file(join(directory, "launched")).exists()).toBe(false);
+    await rm(root, { recursive: true, force: true });
   });
 });
