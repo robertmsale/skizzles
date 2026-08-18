@@ -88,7 +88,7 @@ async function findSymlinkTarget(root: string, target: string): Promise<string |
   return walk(root);
 }
 
-async function selectedPosixPath(root: string, kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk"): Promise<string> {
+async function selectedPosixPath(root: string, kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk" | "park"): Promise<string> {
   const recorded = await readFile(
     join(root, ".local/share/skizzles", `t3-auto-guardian.posix-${kind}.selected`),
     "utf8",
@@ -1264,6 +1264,79 @@ describe("auto guardian installer", () => {
     });
     expect(recovered.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "exclusive-unlink");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("does not park a journal path swapped after unlinkOpenedInode truncate", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_PARK_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "park");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("does not park a malformed journal swapped after the truncate helper returns", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const journal = join(root, ".local/share/skizzles/t3-auto-guardian.journal");
+    await writeFile(journal, "not-json");
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_PARK_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "park");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("does not park a zero-length journal swapped after the truncate helper returns", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    await writeFile(join(root, ".local/share/skizzles/t3-auto-guardian.journal"), "");
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_PARK_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "park");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("does not park an exclusiveMove leftover swapped after unlinkOpenedInode truncate", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_PARK_SWAP: "1",
+    }, "--uninstall");
+    expect(result.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "park");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("does not park a leftover directory swapped after dispose rmdir fails", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    await writeFile(join(root, ".local/share/skizzles/t3-auto-guardian/install-receipt.json"), "");
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_PARK_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "park");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
   });
 

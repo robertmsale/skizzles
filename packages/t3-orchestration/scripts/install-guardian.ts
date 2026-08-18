@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, openSync, readlinkSync, readSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, readlinkSync, readSync, writeSync } from "node:fs";
 import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
@@ -399,11 +399,11 @@ function pathStillExpected(path: string, expected: NodeIdentity): boolean {
   return Boolean(live && live.dev === expected.dev && live.ino === expected.ino);
 }
 
-function selectedMutationSidecar(kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk"): string {
+function selectedMutationSidecar(kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk" | "park"): string {
   return join(installerStateDir, `t3-auto-guardian.posix-${kind}.selected`);
 }
 
-async function rememberSelectedMutationPath(kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk", selected: string): Promise<void> {
+async function rememberSelectedMutationPath(kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk" | "park", selected: string): Promise<void> {
   await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
   await writeFile(selectedMutationSidecar(kind), `${selected}\n`, { mode: 0o600 });
 }
@@ -845,6 +845,10 @@ async function writeJournalThroughFd(contents: string, expected: NodeIdentity): 
     if (!fdMatches(fd, expected, "file")) {
       throw new Error("Refusing to publish installer journal after identity drift");
     }
+    fsyncSync(fd);
+    if (!fdMatches(fd, expected, "file")) {
+      throw new Error("Refusing to publish installer journal after identity drift");
+    }
   } finally {
     closeSync(fd);
   }
@@ -896,20 +900,57 @@ async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity):
   return unlinkExclusiveRegularFile(path, expected);
 }
 
-async function parkIfStillBound(path: string, expected?: NodeIdentity): Promise<void> {
-  if (!expected) return;
-  const live = await liveNodeIdentity(path);
-  if (!live || !sameNode(live, expected)) return;
+async function parkOpenedInode(
+  fd: number,
+  selected: string,
+  expected: NodeIdentity,
+  kind: "file" | "dir",
+): Promise<boolean> {
+  if (!selectedPathStillBound(selected, expected, kind, fd)) {
+    return !pathStillExpected(selected, expected);
+  }
   const parked = join(installerStateDir, `parked-${randomUUID()}`);
-  if (await optionalLstat(parked)) return;
-  exclusiveRename(path, parked);
+  if (rawLstat(parked)) return false;
+  let swapped = false;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_PARK_SWAP")) {
+    swapped = true;
+    await rememberSelectedMutationPath("park", selected);
+    await plantForeignDestination(selected);
+  }
+  if (!cloneOpenedInode(fd, parked, kind)) return false;
+  if (swapped) return false;
+  if (!selectedPathStillBound(selected, expected, kind, fd)) return false;
+  const leftover = join(installerStateDir, `parked-${randomUUID()}`);
+  if (rawLstat(leftover) || !exclusiveRename(selected, leftover)) return false;
+  return Boolean(rawLstat(parked));
+}
+
+async function parkIfStillBound(path: string, expected?: NodeIdentity): Promise<boolean> {
+  if (!expected) return true;
+  loadPosixSymbols();
+  const probe = rawLstat(path);
+  if (!probe) return true;
+  const kind: "file" | "dir" = (probe.mode & S_IFMT) === S_IFDIR ? "dir" : "file";
+  let fd: number | undefined;
+  try {
+    fd = openIdentityFd(path, kind);
+  } catch {
+    return !rawLstat(path);
+  }
+  try {
+    return await parkOpenedInode(fd, path, expected, kind);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 async function clearJournalAt(path: string, identity = path === journalPath ? journalPathIdentity : undefined): Promise<void> {
   if (!await unlinkVerifiedRegularFile(path, identity)) {
     throw new Error(`Failed to clear installer journal at ${path}`);
   }
-  await parkIfStillBound(path, identity);
+  if (!await parkIfStillBound(path, identity)) {
+    throw new Error(`Failed to clear installer journal at ${path}`);
+  }
   if (path === journalPath) journalPathIdentity = undefined;
   if (path === journalPath && journalTmpPath) {
     if (!await unlinkVerifiedRegularFile(journalTmpPath, journalTmpIdentity)) {
@@ -1000,9 +1041,8 @@ async function exclusiveMoveOwned(from: string, to: string, expected: NodeIdenti
       const tree = await snapshotOwnedTree(selected).catch(() => undefined);
       if (tree) await disposeVerifiedDirectory(selected, expected, tree);
     }
-    if (selectedPathStillBound(selected, expected, kind, fd)) {
-      const parked = join(installerStateDir, `parked-${randomUUID()}`);
-      if (!rawLstat(parked)) exclusiveRename(selected, parked);
+    if (selectedPathStillBound(selected, expected, kind, fd) && !await parkOpenedInode(fd, selected, expected, kind)) {
+      return false;
     }
     return Boolean(rawLstat(to));
   } catch {
@@ -1299,10 +1339,19 @@ async function disposeVerifiedDirectory(
     await mkdir(path, { recursive: true, mode: 0o700 });
   }
   if (!await rmdirSameNode(path, identity)) {
-    const live = await liveRootIdentity(path);
-    if (!live || !sameNode(live, identity)) return false;
-    const parked = join(installerStateDir, `parked-${randomUUID()}`);
-    if (await optionalLstat(parked) || !exclusiveRename(path, parked)) return false;
+    loadPosixSymbols();
+    let fd: number | undefined;
+    try {
+      fd = openIdentityFd(path, "dir");
+    } catch {
+      return false;
+    }
+    try {
+      if (!selectedPathStillBound(path, identity, "dir", fd)) return false;
+      if (!await parkOpenedInode(fd, path, identity, "dir")) return false;
+    } finally {
+      closeSync(fd);
+    }
   }
   return true;
 }
@@ -1433,7 +1482,9 @@ async function recoverJournalAt(path: string): Promise<void> {
     if (!live || !sameNode(live, identity) || !await unlinkExclusiveRegularFile(path, identity)) {
       throw new Error(`Failed to clear malformed installer journal at ${path}`);
     }
-    await parkIfStillBound(path, identity);
+    if (!await parkIfStillBound(path, identity)) {
+      throw new Error(`Failed to clear malformed installer journal at ${path}`);
+    }
     if (path === journalPath) journalPathIdentity = undefined;
     return;
   }
