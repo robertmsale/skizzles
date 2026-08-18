@@ -860,9 +860,13 @@ async function withReclaimMutex(lockPath, fn, fns = {}, hooks = {}) {
   const token2 = crypto.randomUUID();
   const claimPath = reclaimClaimPath(lockPath);
   const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  const startKey = processStartKey(process.pid);
+  if (typeof startKey !== "string" || startKey.trim() === "") {
+    throw new Error("could not record process start key for worktree lease reclaim");
+  }
   const record = {
     pid: process.pid,
-    startKey: processStartKey(process.pid),
+    startKey,
     token: token2,
     createdAt: new Date().toISOString()
   };

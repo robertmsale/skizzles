@@ -12,6 +12,7 @@ import {
   parseLeaseRecord,
   readLiveCleanLease,
   unlinkIfSameIdentity,
+  withReclaimMutex,
   withWorktreeGate,
 } from "../src/worktree-reaper-lease.ts";
 
@@ -301,5 +302,27 @@ describe("worktree clean lease", () => {
     });
     expect(removed).toBe(false);
     expect(JSON.parse(await Bun.file(lockPath).text())).toMatchObject({ token: "newer-at-path", threadId: "newer" });
+  });
+
+  test("reclaim mutex fails closed instead of publishing a null startKey that a second claimant would treat as orphan", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    const lockPath = cleanLeaseLockPath(path, root);
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    let firstEntered = false;
+    let secondEnteredWhileFirstHeld = false;
+    await expect(withReclaimMutex(lockPath, async () => {
+      firstEntered = true;
+      await withReclaimMutex(lockPath, async () => {
+        secondEnteredWhileFirstHeld = true;
+      }, { processStartKey: () => "contender" });
+    }, { processStartKey: () => null })).rejects.toThrow(/start key/);
+    expect(firstEntered).toBe(false);
+    expect(secondEnteredWhileFirstHeld).toBe(false);
+    let recovered = false;
+    await withReclaimMutex(lockPath, async () => {
+      recovered = true;
+    }, { processStartKey: () => "live-owner" });
+    expect(recovered).toBe(true);
   });
 });
