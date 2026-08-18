@@ -491,6 +491,19 @@ function parseGuardianConfig(text) {
   if (!parsed || typeof parsed !== "object")
     throw new Error("T3 auto guardian config must be a TOML table");
   const raw = parsed;
+  const knownKeys = new Set([
+    "enabled",
+    "poll_interval_ms",
+    "model",
+    "dry_run",
+    "include_projects",
+    "exclude_projects",
+    "judge_timeout_ms"
+  ]);
+  const unknownKeys = Object.keys(raw).filter((key) => !knownKeys.has(key));
+  if (unknownKeys.length > 0) {
+    throw new Error(`T3 auto guardian config contained unknown keys: ${unknownKeys.join(", ")}`);
+  }
   const defaults = defaultGuardianConfig();
   const model = raw.model === undefined ? defaults.model : typeof raw.model === "string" && raw.model.trim() ? raw.model.trim() : (() => {
     throw new Error("model must be a non-empty string");

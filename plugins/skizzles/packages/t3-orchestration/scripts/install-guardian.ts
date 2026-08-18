@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
@@ -16,6 +17,7 @@ import {
   symlink,
   unlink,
   writeFile,
+  link,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
@@ -96,6 +98,7 @@ type InstallJournal = {
 const TRANSACTION_TOKEN_NAME = ".skizzles-transaction";
 let journalPathIdentity: NodeIdentity | undefined;
 let journalTmpIdentity: NodeIdentity | undefined;
+let journalTmpPath: string | undefined;
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
@@ -117,6 +120,16 @@ const FORBIDDEN_RUNTIME_FILES = new Set(["cli.ts", "daemon.ts"]);
 
 function isMissing(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && (error.code === "EEXIST" || error.code === "ELOOP"));
+}
+
+function consumeInstallerHook(name: string): boolean {
+  if (process.env[name] !== "1") return false;
+  delete process.env[name];
+  return true;
 }
 
 let flockSymbol: ((fd: number, operation: number) => number) | undefined;
@@ -357,6 +370,68 @@ function sameOwnedTree(left: OwnedTreeEntry[], right: OwnedTreeEntry[]): boolean
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+async function requireVerifiedDirectory(path: string): Promise<void> {
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error(`Refusing to use non-directory path ${path}`);
+  }
+}
+
+async function writeExclusiveRegularFile(path: string, contents: string, modeBits: number): Promise<NodeIdentity> {
+  const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW;
+  const handle = await open(path, flags, modeBits);
+  try {
+    await handle.writeFile(contents);
+    await handle.chmod(modeBits);
+    await handle.sync();
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`Refusing to publish through a non-regular installer file ${path}`);
+    }
+    return { dev: String(metadata.dev), ino: String(metadata.ino) };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function publishJournal(temporary: string, tmpIdentity: NodeIdentity): Promise<void> {
+  const liveTmp = await liveNodeIdentity(temporary);
+  if (!liveTmp || !sameNode(liveTmp, tmpIdentity)) {
+    throw new Error("Refusing to publish installer journal after temporary identity drift");
+  }
+  const live = await liveNodeIdentity(journalPath);
+  if (!live) {
+    try {
+      await link(temporary, journalPath);
+    } catch (error) {
+      if (isAlreadyExists(error)) throw new Error("Refusing to overwrite unverified installer journal");
+      throw error;
+    }
+    const published = await liveNodeIdentity(journalPath);
+    if (!published || !sameNode(published, tmpIdentity)) {
+      throw new Error("Refusing to publish installer journal after identity drift");
+    }
+    if (!await unlinkVerifiedRegularFile(temporary, tmpIdentity)) {
+      throw new Error(`Failed to clear exclusive journal temporary ${temporary}`);
+    }
+    journalPathIdentity = published;
+    journalTmpIdentity = undefined;
+    journalTmpPath = undefined;
+    return;
+  }
+  if (!journalPathIdentity || !sameNode(live, journalPathIdentity)) {
+    throw new Error("Refusing to overwrite unverified installer journal");
+  }
+  await rename(temporary, journalPath);
+  const published = await liveNodeIdentity(journalPath);
+  if (!published || !sameNode(published, tmpIdentity)) {
+    throw new Error("Refusing to publish installer journal after identity drift");
+  }
+  journalPathIdentity = published;
+  journalTmpIdentity = undefined;
+  journalTmpPath = undefined;
+}
+
 async function writeJournal(journal: InstallJournal): Promise<void> {
   try { journal.transactionTree = await snapshotOwnedTree(journal.transactionRoot); }
   catch { journal.transactionTree = undefined; }
@@ -365,12 +440,11 @@ async function writeJournal(journal: InstallJournal): Promise<void> {
     catch { /* keep the last successful root snapshot */ }
   }
   await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
-  const temporary = `${journalPath}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, { mode: 0o600 });
-  journalTmpIdentity = await liveNodeIdentity(temporary);
-  await rename(temporary, journalPath);
-  journalPathIdentity = await liveNodeIdentity(journalPath);
-  journalTmpIdentity = undefined;
+  await requireVerifiedDirectory(installerStateDir);
+  const temporary = join(installerStateDir, `t3-auto-guardian.journal.${randomUUID()}.tmp`);
+  journalTmpPath = temporary;
+  journalTmpIdentity = await writeExclusiveRegularFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, 0o600);
+  await publishJournal(temporary, journalTmpIdentity);
 }
 
 async function readJournalFrom(path: string): Promise<InstallJournal | undefined> {
@@ -386,23 +460,48 @@ async function readJournalFrom(path: string): Promise<InstallJournal | undefined
   }
 }
 
-async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity): Promise<void> {
-  if (!expected) return;
+async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity): Promise<boolean> {
+  if (!expected) return true;
   const live = await optionalLstat(path);
   const identity = await liveNodeIdentity(path);
-  if (!live || live.isDirectory() || live.isSymbolicLink() || !identity || !sameNode(identity, expected)) return;
+  if (!live || live.isDirectory() || live.isSymbolicLink() || !identity || !sameNode(identity, expected)) return true;
   const aside = `${path}.cleared-${randomUUID()}`;
-  if (!await relocateVerifiedNode(path, expected, aside)) return;
+  if (!await relocateVerifiedNode(path, expected, aside)) return false;
   const remaining = await optionalLstat(aside);
   const remainingId = await liveNodeIdentity(aside);
-  if (remaining && remaining.isFile() && !remaining.isSymbolicLink() && remainingId && sameNode(remainingId, expected)) {
-    await unlink(aside).catch(() => undefined);
+  if (!remaining || !remaining.isFile() || remaining.isSymbolicLink() || !remainingId || !sameNode(remainingId, expected)) {
+    return false;
   }
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_UNLINK_SWAP")) {
+    await writeFile(aside, "foreign-journal");
+  }
+  const confirmed = await liveNodeIdentity(aside);
+  const confirmedMeta = await optionalLstat(aside);
+  if (!confirmedMeta || !confirmedMeta.isFile() || confirmedMeta.isSymbolicLink() || !confirmed || !sameNode(confirmed, expected)) {
+    return false;
+  }
+  try {
+    await unlink(aside);
+  } catch {
+    return false;
+  }
+  return !await optionalLstat(aside);
 }
 
 async function clearJournalAt(path: string, identity = path === journalPath ? journalPathIdentity : undefined): Promise<void> {
-  await unlinkVerifiedRegularFile(path, identity);
-  await unlinkVerifiedRegularFile(`${path}.tmp`, path === journalPath ? journalTmpIdentity : undefined);
+  if (!await unlinkVerifiedRegularFile(path, identity)) {
+    throw new Error(`Failed to clear installer journal at ${path}`);
+  }
+  if (path === journalPath && journalTmpPath) {
+    if (!await unlinkVerifiedRegularFile(journalTmpPath, journalTmpIdentity)) {
+      throw new Error(`Failed to clear installer journal temporary ${journalTmpPath}`);
+    }
+    journalTmpPath = undefined;
+    journalTmpIdentity = undefined;
+  }
+  if (!await unlinkVerifiedRegularFile(`${path}.tmp`, path === journalPath ? journalTmpIdentity : undefined)) {
+    throw new Error(`Failed to clear installer journal temporary at ${path}.tmp`);
+  }
 }
 
 async function clearJournal(): Promise<void> {
@@ -449,6 +548,13 @@ function sameNode(left: NodeIdentity, right: NodeIdentity): boolean {
 async function relocateVerifiedNode(path: string, expected: NodeIdentity, aside = `${path}.reclaim-${randomUUID()}`): Promise<boolean> {
   const current = await liveNodeIdentity(path);
   if (!current || !sameNode(current, expected)) return false;
+  if (await optionalLstat(aside)) return false;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_RELOCATE_SWAP")) {
+    await plantForeignDestination(path);
+  }
+  const confirmed = await liveNodeIdentity(path);
+  if (!confirmed || !sameNode(confirmed, expected)) return false;
+  if (await optionalLstat(aside)) return false;
   try {
     await rename(path, aside);
   } catch {
@@ -456,7 +562,10 @@ async function relocateVerifiedNode(path: string, expected: NodeIdentity, aside 
   }
   const moved = await liveNodeIdentity(aside);
   if (moved && sameNode(moved, expected)) return true;
-  if (!await optionalLstat(path)) await rename(aside, path).catch(() => undefined);
+  if (!await optionalLstat(path)) {
+    try { await rename(aside, path); }
+    catch { return false; }
+  }
   return false;
 }
 
@@ -477,19 +586,25 @@ async function unlinkExactArtifact(path: string, artifact: DestinationArtifact |
   return relocateVerifiedNode(path, identity);
 }
 
-async function restoreDestinations(journal: Pick<InstallJournal, "kind" | "destinations">): Promise<void> {
+async function restoreDestinations(journal: Pick<InstallJournal, "kind" | "destinations">): Promise<boolean> {
+  let complete = true;
   for (const destination of [...journal.destinations].reverse()) {
     const live = await optionalLstat(destination.destination);
     if (live && !(destination.installed && await liveIsJournalArtifact(destination.destination, destination.artifact))) {
+      if (destination.backup && await optionalLstat(destination.backup)) complete = false;
       continue;
     }
     if (destination.backup && await optionalLstat(destination.backup)) {
-      if (live && !await unlinkExactArtifact(destination.destination, destination.artifact)) continue;
+      if (live && !await unlinkExactArtifact(destination.destination, destination.artifact)) {
+        complete = false;
+        continue;
+      }
       await rename(destination.backup, destination.destination);
     } else if (destination.installed) {
-      if (live) await unlinkExactArtifact(destination.destination, destination.artifact);
+      if (live && !await unlinkExactArtifact(destination.destination, destination.artifact)) complete = false;
     }
   }
+  return complete;
 }
 
 async function persistDestination(journal: InstallJournal, destinations: JournalDestination[], entry: JournalDestination): Promise<void> {
@@ -535,22 +650,24 @@ async function removeExactDirectory(
   const live = await liveRootIdentity(path);
   if (!live || live.dev !== identity.dev || live.ino !== identity.ino) return;
   if (!await liveTreeMatches(path, expectedTree)) return;
-  const trash = `${path}.reclaim-${randomUUID()}`;
-  if (process.env.T3_AUTO_GUARDIAN_RECLAIM_SWAP === "1") {
-    await rename(path, `${trash}.aside`);
-    await mkdir(trash, { recursive: true, mode: 0o700 });
-    await writeFile(join(trash, "foreign-reclaim.txt"), "keep-reclaim");
-    return;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_RECLAIM_SWAP")) {
+    await writeFile(join(path, "foreign-reclaim.txt"), "keep-reclaim");
   }
-  if (!await relocateVerifiedNode(path, identity, trash)) return;
-  if (process.env.T3_AUTO_GUARDIAN_DESCENDANT_SWAP === "1") {
-    const child = join(trash, "runtime/auto-guardian.ts");
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_DESCENDANT_SWAP")) {
+    const child = join(path, "runtime/auto-guardian.ts");
     if (await optionalLstat(child)) await writeFile(child, "foreign-child");
   }
-  if (process.env.T3_AUTO_GUARDIAN_RECLAIM_POST_FSTAT_SWAP === "1") {
-    await rename(trash, `${trash}.aside`);
-    await mkdir(trash, { recursive: true, mode: 0o700 });
-    await writeFile(join(trash, "foreign-post-fstat.txt"), "keep-post-fstat");
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_RECLAIM_POST_FSTAT_SWAP")) {
+    await rename(path, `${path}.aside-${randomUUID()}`);
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    await writeFile(join(path, "foreign-post-fstat.txt"), "keep-post-fstat");
+  }
+  const confirmed = await liveRootIdentity(path);
+  if (!confirmed || !sameNode(confirmed, identity) || !await liveTreeMatches(path, expectedTree)) {
+    throw new Error(`Refusing to dispose ${path} after identity drift`);
+  }
+  if (!await disposeVerifiedDirectory(path, identity, expectedTree)) {
+    throw new Error(`Failed to dispose verified directory ${path}`);
   }
 }
 
@@ -563,6 +680,46 @@ async function removeJournaledInstallRoot(journal: InstallJournal): Promise<void
   if (!journal.rootIdentity) return;
   if (!await journaledInstallRootIsExact(journal)) return;
   await removeExactDirectory(journal.installRoot, journal.rootIdentity, journal.rootTree);
+}
+
+async function disposeVerifiedNode(path: string, kind: "file" | "link", expected: OwnedTreeEntry): Promise<boolean> {
+  const metadata = await optionalLstat(path);
+  if (!metadata) return false;
+  if (kind === "file") {
+    if (!metadata.isFile() || metadata.isSymbolicLink() || expected.kind !== "file" || await sha256(path) !== expected.sha256) return false;
+  } else if (!metadata.isSymbolicLink() || expected.kind !== "link" || await readlink(path) !== expected.target) {
+    return false;
+  }
+  if (kind === "file" && consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_FILE_SWAP")) {
+    await writeFile(path, "foreign-dispose-file");
+  }
+  if (kind === "link" && consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_LINK_SWAP")) {
+    await unlink(path);
+    await symlink("/tmp/foreign-dispose-link", path);
+  }
+  const confirmed = await optionalLstat(path);
+  if (!confirmed) return false;
+  if (kind === "file") {
+    if (!confirmed.isFile() || confirmed.isSymbolicLink() || expected.kind !== "file" || await sha256(path) !== expected.sha256) return false;
+  } else if (!confirmed.isSymbolicLink() || expected.kind !== "link" || await readlink(path) !== expected.target) {
+    return false;
+  }
+  const identity = await liveNodeIdentity(path);
+  if (!identity) return false;
+  const aside = `${path}.dispose-${randomUUID()}`;
+  if (!await relocateVerifiedNode(path, identity, aside)) return false;
+  const asideMeta = await optionalLstat(aside);
+  const asideId = await liveNodeIdentity(aside);
+  if (!asideMeta || !asideId || !sameNode(asideId, identity)) return false;
+  if (kind === "file" && (asideMeta.isSymbolicLink() || !asideMeta.isFile() || expected.kind !== "file" || await sha256(aside) !== expected.sha256)) {
+    return false;
+  }
+  if (kind === "link" && (!asideMeta.isSymbolicLink() || expected.kind !== "link" || await readlink(aside) !== expected.target)) {
+    return false;
+  }
+  try { await unlink(aside); }
+  catch { return false; }
+  return !await optionalLstat(aside);
 }
 
 async function disposeVerifiedDirectory(
@@ -580,24 +737,36 @@ async function disposeVerifiedDirectory(
     const root = await liveRootIdentity(path);
     if (!root || !sameNode(root, identity)) return false;
     if (entry.kind === "file") {
-      const metadata = await optionalLstat(full);
-      if (!metadata || !metadata.isFile() || metadata.isSymbolicLink() || await sha256(full) !== entry.sha256) return false;
-      await unlink(full);
+      if (!await disposeVerifiedNode(full, "file", entry)) return false;
     } else if (entry.kind === "link") {
-      const metadata = await optionalLstat(full);
-      if (!metadata || !metadata.isSymbolicLink() || await readlink(full) !== entry.target) return false;
-      await unlink(full);
+      if (!await disposeVerifiedNode(full, "link", entry)) return false;
     }
   }
   for (const entry of dirs) {
     const full = join(path, entry.path);
     const root = await liveRootIdentity(path);
     if (!root || !sameNode(root, identity)) return false;
+    const children = await readdir(full).catch(() => null);
+    if (!children || children.length > 0) return false;
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_DIR_SWAP")) {
+      await writeFile(join(full, "foreign-dispose-dir"), "keep");
+    }
+    const remaining = await readdir(full).catch(() => null);
+    if (!remaining || remaining.length > 0) return false;
+    const dirIdentity = await liveRootIdentity(full);
+    if (!dirIdentity) return false;
     try { await rmdir(full); }
     catch { return false; }
   }
   const still = await liveRootIdentity(path);
   if (!still || !sameNode(still, identity)) return false;
+  const leftover = await readdir(path).catch(() => null);
+  if (!leftover || leftover.length > 0) return false;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_DIR_SWAP")) {
+    await writeFile(join(path, "foreign-dispose-dir"), "keep");
+  }
+  const leftoverAfter = await readdir(path).catch(() => null);
+  if (!leftoverAfter || leftoverAfter.length > 0) return false;
   try { await rmdir(path); }
   catch { return false; }
   return true;
@@ -605,31 +774,88 @@ async function disposeVerifiedDirectory(
 
 async function removeJournaledTransactionRoot(
   journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity" | "transactionTree">,
-  mode: "relocate" | "dispose" = "relocate",
+  mode: "relocate" | "dispose" = "dispose",
+): Promise<boolean> {
+  if (!await livePathMatchesGeneration(journal.transactionRoot, journal.transactionIdentity)) return true;
+  if (!await liveTreeMatches(journal.transactionRoot, journal.transactionTree)) return true;
+  if (mode === "relocate") {
+    await removeExactDirectory(journal.transactionRoot, journal.transactionIdentity!, journal.transactionTree);
+    return true;
+  }
+  return disposeVerifiedDirectory(journal.transactionRoot, journal.transactionIdentity!, journal.transactionTree);
+}
+
+async function requireTransactionDisposed(
+  journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity" | "transactionTree">,
+): Promise<void> {
+  if (!await removeJournaledTransactionRoot(journal, "dispose")) {
+    throw new Error(`Failed to dispose installer transaction ${journal.transactionRoot}`);
+  }
+}
+
+function pathRelativeTo(root: string, path: string): string | undefined {
+  const base = resolve(root);
+  const target = resolve(path);
+  if (target === base) return "";
+  if (target.startsWith(`${base}/`)) return target.slice(base.length + 1);
+  return undefined;
+}
+
+function treeWithoutPrefixes(tree: OwnedTreeEntry[], prefixes: string[]): OwnedTreeEntry[] {
+  return tree.filter((entry) =>
+    !prefixes.some((prefix) => prefix !== "" && (entry.path === prefix || entry.path.startsWith(`${prefix}/`))),
+  );
+}
+
+async function disposeTransactionAfterExtract(
+  journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity" | "transactionTree">,
+  extracted: Array<string | undefined>,
 ): Promise<void> {
   if (!await livePathMatchesGeneration(journal.transactionRoot, journal.transactionIdentity)) return;
-  if (!await liveTreeMatches(journal.transactionRoot, journal.transactionTree)) return;
-  if (mode === "dispose") {
-    await disposeVerifiedDirectory(journal.transactionRoot, journal.transactionIdentity!, journal.transactionTree);
-    return;
+  if (!journal.transactionTree || !journal.transactionIdentity) return;
+  const prefixes = extracted
+    .filter((path): path is string => Boolean(path))
+    .map((path) => pathRelativeTo(journal.transactionRoot, path))
+    .filter((path): path is string => Boolean(path));
+  const remaining = treeWithoutPrefixes(journal.transactionTree, prefixes);
+  const matchesRemaining = await liveTreeMatches(journal.transactionRoot, remaining);
+  const matchesFull = await liveTreeMatches(journal.transactionRoot, journal.transactionTree);
+  if (!matchesRemaining && !matchesFull) return;
+  const expected = matchesRemaining ? remaining : journal.transactionTree;
+  if (!await disposeVerifiedDirectory(journal.transactionRoot, journal.transactionIdentity, expected)) {
+    throw new Error(`Failed to dispose installer transaction ${journal.transactionRoot}`);
   }
-  await removeExactDirectory(journal.transactionRoot, journal.transactionIdentity!, journal.transactionTree);
 }
 
 async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
-  await restoreDestinations(journal);
+  const destinationsRestored = await restoreDestinations(journal);
   if (journal.previousInstall && await optionalLstat(journal.previousInstall)) {
-    if (await optionalLstat(journal.installRoot) && !await journaledInstallRootIsExact(journal)) return;
+    if (await optionalLstat(journal.installRoot) && !await journaledInstallRootIsExact(journal)) {
+      if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
+      return;
+    }
     if (await optionalLstat(journal.installRoot)) {
-      if (!journal.rootIdentity) return;
+      if (!journal.rootIdentity) {
+        if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
+        return;
+      }
       await removeExactDirectory(journal.installRoot, journal.rootIdentity, journal.rootTree);
     }
-    if (await optionalLstat(journal.installRoot)) return;
+    if (await optionalLstat(journal.installRoot)) {
+      if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
+      return;
+    }
     await rename(journal.previousInstall, journal.installRoot);
   } else {
     await removeJournaledInstallRoot(journal);
   }
-  await removeJournaledTransactionRoot(journal);
+  if (!destinationsRestored) {
+    throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
+  }
+  await disposeTransactionAfterExtract(journal, [
+    journal.previousInstall,
+    ...journal.destinations.map((destination) => destination.backup),
+  ]);
 }
 
 async function recoverJournalAt(path: string): Promise<void> {
@@ -639,7 +865,7 @@ async function recoverJournalAt(path: string): Promise<void> {
   if (journal.phase !== "complete") {
     await rollbackFromJournal(journal);
     if (journal.serviceWasLoaded) await activate();
-  } else await removeJournaledTransactionRoot(journal, "dispose");
+  } else await requireTransactionDisposed(journal);
   await clearJournalAt(path, identity);
 }
 
@@ -699,6 +925,50 @@ async function requireDestinationOwned(path: string, receipt: Receipt): Promise<
     return;
   }
   throw new Error(`Refusing to replace unowned path ${path}`);
+}
+
+async function relocateOwnedDestination(path: string, backup: string, receipt: Receipt): Promise<void> {
+  await requireDestinationOwned(path, receipt);
+  const expected = await liveNodeIdentity(path);
+  if (!expected) throw new Error(`Refusing to replace foreign destination ${path}`);
+  if (!await relocateVerifiedNode(path, expected, backup)) {
+    throw new Error(`Refusing to replace foreign destination ${path}`);
+  }
+}
+
+async function placeExclusiveLink(destination: string, target: string): Promise<void> {
+  await requireDestinationAbsent(destination);
+  try {
+    await symlink(target, destination);
+  } catch (error) {
+    if (isAlreadyExists(error)) throw new Error(`Refusing to replace foreign destination ${destination}`);
+    throw error;
+  }
+}
+
+async function placeExclusiveFile(destination: string, staged: string): Promise<void> {
+  await requireDestinationAbsent(destination);
+  try {
+    await link(staged, destination);
+  } catch (error) {
+    if (isAlreadyExists(error)) throw new Error(`Refusing to replace foreign destination ${destination}`);
+    throw error;
+  }
+  await unlink(staged);
+}
+
+async function relocateOwnedRoot(source: string, destination: string): Promise<void> {
+  const expected = await liveRootIdentity(source);
+  const tree = expected ? await snapshotOwnedTree(source).catch(() => undefined) : undefined;
+  if (!expected || !tree) throw new Error(`Refusing to replace unowned install root ${source}`);
+  await injectForeignDestination("root-commit", source);
+  const live = await liveRootIdentity(source);
+  if (!live || !sameNode(live, expected) || !await liveTreeMatches(source, tree)) {
+    throw new Error(`Refusing to replace unowned install root ${source}`);
+  }
+  if (!await relocateVerifiedNode(source, expected, destination)) {
+    throw new Error(`Refusing to replace unowned install root ${source}`);
+  }
 }
 
 function escapeXml(value: string): string {
@@ -814,30 +1084,37 @@ async function rollbackTransaction(
   transactionIdentity?: PathGeneration,
   transactionTree?: OwnedTreeEntry[],
 ): Promise<void> {
-  await restoreDestinations({ kind: "install", destinations: movedDestinations });
+  const destinationsRestored = await restoreDestinations({ kind: "install", destinations: movedDestinations });
   const placed = { installRoot, rootIdentity: placedRoot, rootTree };
   if (installedRoot && placedRoot && await journaledInstallRootIsExact(placed)) {
     await removeExactDirectory(installRoot, placedRoot, rootTree);
   }
+  const transaction = { transactionRoot, transactionIdentity, transactionTree };
   if (previousInstall && await optionalLstat(previousInstall)) {
     if (await optionalLstat(installRoot) && !(placedRoot && await journaledInstallRootIsExact(placed))) {
-      await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree });
+      if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
       return;
     }
     if (await optionalLstat(installRoot)) {
       if (!placedRoot || !await journaledInstallRootIsExact(placed)) {
-        await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree });
+        if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
         return;
       }
       await removeExactDirectory(installRoot, placedRoot, rootTree);
     }
     if (await optionalLstat(installRoot)) {
-      await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree });
+      if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
       return;
     }
     await rename(previousInstall, installRoot);
   }
-  await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree });
+  if (!destinationsRestored) {
+    throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
+  }
+  await disposeTransactionAfterExtract(transaction, [
+    previousInstall,
+    ...movedDestinations.map((destination) => destination.backup),
+  ]);
 }
 
 async function install(runtimeVersion: string, previous: Receipt | undefined): Promise<void> {
@@ -866,7 +1143,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     receipt = await stageInstall(runtimeVersion, stagedRoot);
   } catch (error) {
     const tree = await snapshotOwnedTree(transactionRoot).catch(() => undefined);
-    await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree: tree });
+    await requireTransactionDisposed({ transactionRoot, transactionIdentity, transactionTree: tree });
     throw error;
   }
   const movedDestinations: JournalDestination[] = [];
@@ -885,7 +1162,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
   };
   await writeJournal(journal);
   try {
-    if (previous && previousInstall) await rename(installRoot, previousInstall);
+    if (previous && previousInstall) await relocateOwnedRoot(installRoot, previousInstall);
     journal.phase = "root-moved";
     await writeJournal(journal);
     await crashIf("root-moved");
@@ -893,6 +1170,8 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     journal.phase = "root-installed";
     await writeJournal(journal);
     await crashIf("root-installing");
+    await injectForeignDestination("root-place-commit", installRoot);
+    if (await optionalLstat(installRoot)) throw new Error(`Refusing to replace unowned install root ${installRoot}`);
     await rename(stagedRoot, installRoot);
     placedRoot = await liveRootIdentity(installRoot);
     journal.rootIdentity = placedRoot;
@@ -910,19 +1189,20 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
         await injectForeignDestination("link-backup", destination);
         await requireDestinationOwned(destination, previous!);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
-        await rename(destination, backup);
+        await injectForeignDestination("link-backup-commit", destination);
+        await relocateOwnedDestination(destination, backup, previous!);
         await crashIf("link-backed-up");
         const artifact = await snapshotArtifact(staged);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: true, artifact });
         await injectForeignDestination("link-place", destination);
-        await requireDestinationAbsent(destination);
-        await rename(staged, destination);
+        await injectForeignDestination("link-place-commit", destination);
+        await placeExclusiveLink(destination, link.target);
       } else {
         const artifact = await snapshotArtifact(staged);
         await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
         await injectForeignDestination("link-place", destination);
-        await requireDestinationAbsent(destination);
-        await rename(staged, destination);
+        await injectForeignDestination("link-place-commit", destination);
+        await placeExclusiveLink(destination, link.target);
       }
       await writeJournal(journal);
       await crashIf("link-installed");
@@ -937,19 +1217,20 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
         await injectForeignDestination("plist-backup", destination);
         await requireDestinationOwned(destination, previous!);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
-        await rename(destination, backup);
+        await injectForeignDestination("plist-backup-commit", destination);
+        await relocateOwnedDestination(destination, backup, previous!);
         await crashIf("plist-backed-up");
         const artifact = await snapshotArtifact(staged);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: true, artifact });
         await injectForeignDestination("plist-place", destination);
-        await requireDestinationAbsent(destination);
-        await rename(staged, destination);
+        await injectForeignDestination("plist-place-commit", destination);
+        await placeExclusiveFile(destination, staged);
       } else {
         const artifact = await snapshotArtifact(staged);
         await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
         await injectForeignDestination("plist-place", destination);
-        await requireDestinationAbsent(destination);
-        await rename(staged, destination);
+        await injectForeignDestination("plist-place-commit", destination);
+        await placeExclusiveFile(destination, staged);
       }
       await writeJournal(journal);
       await crashIf("plist-installed");
@@ -997,7 +1278,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await clearJournal();
     throw error;
   }
-  await removeJournaledTransactionRoot(journal, "dispose");
+  await requireTransactionDisposed(journal);
   await clearJournal();
   console.log(JSON.stringify({
     root: sourceRoot,
@@ -1042,7 +1323,8 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
       await injectForeignDestination("uninstall-link", link.path);
       await requireDestinationOwned(link.path, previous);
       await persistDestination(journal, movedDestinations, { destination: link.path, backup, installed: false });
-      await rename(link.path, backup);
+      await injectForeignDestination("uninstall-link-commit", link.path);
+      await relocateOwnedDestination(link.path, backup, previous);
       await crashIf("uninstall-link-moved");
     }
     for (const [index, file] of previous.files.entries()) {
@@ -1051,12 +1333,13 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
       await injectForeignDestination("uninstall-plist", file.path);
       await requireDestinationOwned(file.path, previous);
       await persistDestination(journal, movedDestinations, { destination: file.path, backup, installed: false });
-      await rename(file.path, backup);
+      await injectForeignDestination("uninstall-plist-commit", file.path);
+      await relocateOwnedDestination(file.path, backup, previous);
       await crashIf("uninstall-plist-moved");
     }
     journal.previousInstall = installBackup;
     await writeJournal(journal);
-    await rename(installRoot, installBackup);
+    await relocateOwnedRoot(installRoot, installBackup);
     journal.phase = "root-moved";
     await writeJournal(journal);
     await crashIf("uninstall-root-moved");
@@ -1074,7 +1357,7 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
     await clearJournal();
     throw error;
   }
-  await removeJournaledTransactionRoot(journal, "dispose");
+  await requireTransactionDisposed(journal);
   await clearJournal();
   console.log(JSON.stringify({ ok: true, uninstalled: true, installRoot, launchAgentLabel: GUARDIAN_LAUNCH_AGENT_LABEL }));
 }

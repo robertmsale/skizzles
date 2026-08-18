@@ -39,4 +39,10 @@ exclude_projects = ["/repo/acme-app"]
     expect(() => parseGuardianConfig("poll_interval_ms = 10")).toThrow("poll_interval_ms");
     expect(() => parseGuardianConfig("model = \"\"")).toThrow("model must be a non-empty string");
   });
+
+  test("rejects unknown top-level keys instead of live unrestricted defaults", () => {
+    expect(() => parseGuardianConfig("dry_rnu = true")).toThrow("unknown keys: dry_rnu");
+    expect(() => parseGuardianConfig('include_project = ["acme"]')).toThrow("unknown keys: include_project");
+    expect(() => parseGuardianConfig("enabled = true\ndry_rnu = true\ninclude_project = [\"acme\"]")).toThrow("unknown keys");
+  });
 });

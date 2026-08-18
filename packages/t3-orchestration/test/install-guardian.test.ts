@@ -34,6 +34,60 @@ async function installWithEnvironment(
   };
 }
 
+async function findFileWithContent(root: string, content: string): Promise<string | undefined> {
+  const walk = async (directory: string): Promise<string | undefined> => {
+    let entries: string[];
+    try {
+      entries = await readdir(directory);
+    } catch {
+      return undefined;
+    }
+    for (const name of entries) {
+      const path = join(directory, name);
+      try {
+        const metadata = await lstat(path);
+        if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+          const found = await walk(path);
+          if (found) return found;
+        } else if (metadata.isFile() && !metadata.isSymbolicLink() && await readFile(path, "utf8") === content) {
+          return path;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
+  };
+  return walk(root);
+}
+
+async function findSymlinkTarget(root: string, target: string): Promise<string | undefined> {
+  const walk = async (directory: string): Promise<string | undefined> => {
+    let entries: string[];
+    try {
+      entries = await readdir(directory);
+    } catch {
+      return undefined;
+    }
+    for (const name of entries) {
+      const path = join(directory, name);
+      try {
+        const metadata = await lstat(path);
+        if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+          const found = await walk(path);
+          if (found) return found;
+        } else if (metadata.isSymbolicLink() && await readlink(path) === target) {
+          return path;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
+  };
+  return walk(root);
+}
+
 async function leftoverInstallGarbage(root: string): Promise<string[]> {
   const data = join(root, ".local/share/skizzles");
   try {
@@ -167,6 +221,7 @@ describe("auto guardian installer", () => {
     expect(recovered.stderr).toBe("");
     expect(await readlink(link)).toBe(join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"));
     await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian.journal"))).rejects.toThrow();
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
   test("recovers a first-install crash after the new root is in place", async () => {
@@ -183,6 +238,7 @@ describe("auto guardian installer", () => {
     expect(await readlink(join(root, ".local/bin/t3-auto-guardian"))).toBe(
       join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"),
     );
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
   test("refuses to unload a loaded guardian without receipt ownership", async () => {
@@ -221,6 +277,7 @@ describe("auto guardian installer", () => {
     expect(uninstalled.exitCode).toBe(0);
     await expect(lstat(link)).rejects.toThrow();
     await expect(lstat(plist)).rejects.toThrow();
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
   test("recovers a crash after uninstall moves a receipt-owned destination", async () => {
@@ -247,6 +304,7 @@ describe("auto guardian installer", () => {
     await expect(lstat(plist)).rejects.toThrow();
     await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian"))).rejects.toThrow();
     await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian.journal"))).rejects.toThrow();
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
   test("resumes --uninstall after a destination-move crash", async () => {
@@ -265,6 +323,7 @@ describe("auto guardian installer", () => {
     await expect(lstat(join(root, ".local/bin/t3-auto-guardian"))).rejects.toThrow();
     await expect(lstat(join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist"))).rejects.toThrow();
     await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian"))).rejects.toThrow();
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 
   test("serializes concurrent installer entrypoints onto one owned install", async () => {
@@ -452,12 +511,9 @@ describe("auto guardian installer", () => {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_RECLAIM_SWAP: "1",
     });
-    expect(recovered.exitCode).toBe(0);
-    const dataRoot = join(root, ".local/share/skizzles");
-    const names = await readdir(dataRoot);
-    const reclaim = names.find((name) => name.startsWith("t3-auto-guardian.reclaim-") && !name.endsWith(".aside"));
-    expect(reclaim).toBeTruthy();
-    expect(await readFile(join(dataRoot, reclaim!, "foreign-reclaim.txt"), "utf8")).toBe("keep-reclaim");
+    expect(recovered.exitCode).not.toBe(0);
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    expect(await readFile(join(installRoot, "foreign-reclaim.txt"), "utf8")).toBe("keep-reclaim");
   });
 
   test("does not recursive-rm a foreign staged-links replacement", async () => {
@@ -505,11 +561,9 @@ describe("auto guardian installer", () => {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_DESCENDANT_SWAP: "1",
     });
-    expect(recovered.exitCode).toBe(0);
-    const dataRoot = join(root, ".local/share/skizzles");
-    const reclaim = (await readdir(dataRoot)).find((name) => name.startsWith("t3-auto-guardian.reclaim-") && !name.endsWith(".aside"));
-    expect(reclaim).toBeTruthy();
-    expect(await readFile(join(dataRoot, reclaim!, "runtime/auto-guardian.ts"), "utf8")).toBe("foreign-child");
+    expect(recovered.exitCode).not.toBe(0);
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    expect(await readFile(join(installRoot, "runtime/auto-guardian.ts"), "utf8")).toBe("foreign-child");
   });
 
   test("does not rmdir a foreign reclaim root swapped after inode verification", async () => {
@@ -525,11 +579,9 @@ describe("auto guardian installer", () => {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_RECLAIM_POST_FSTAT_SWAP: "1",
     });
-    expect(recovered.exitCode).toBe(0);
-    const dataRoot = join(root, ".local/share/skizzles");
-    const reclaim = (await readdir(dataRoot)).find((name) => name.startsWith("t3-auto-guardian.reclaim-") && !name.endsWith(".aside"));
-    expect(reclaim).toBeTruthy();
-    expect(await readFile(join(dataRoot, reclaim!, "foreign-post-fstat.txt"), "utf8")).toBe("keep-post-fstat");
+    expect(recovered.exitCode).not.toBe(0);
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    expect(await readFile(join(installRoot, "foreign-post-fstat.txt"), "utf8")).toBe("keep-post-fstat");
   });
 
   test("does not delete a same-inode transaction root after foreign content is added", async () => {
@@ -747,5 +799,188 @@ describe("auto guardian installer", () => {
     }, "--uninstall");
     expect(result.exitCode).not.toBe(0);
     expect(await readFile(plist, "utf8")).toBe("foreign-plist");
+  });
+
+  test("fails closed when a foreign link appears after last first-install check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const link = join(root, ".local/bin/t3-auto-guardian");
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_FOREIGN_DEST: "link-place-commit",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(link, "utf8")).toBe("foreign-link");
+  });
+
+  test("fails closed when a foreign plist appears after last first-install check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const plist = join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist");
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_FOREIGN_DEST: "plist-place-commit",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(plist, "utf8")).toBe("foreign-plist");
+  });
+
+  test("fails closed when an owned link is replaced after last reinstall backup check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const link = join(root, ".local/bin/t3-auto-guardian");
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_FOREIGN_DEST: "link-backup-commit",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(link, "utf8")).toBe("foreign-link");
+  });
+
+  test("fails closed when an owned plist is replaced after last reinstall backup check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const plist = join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist");
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_FOREIGN_DEST: "plist-backup-commit",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(plist, "utf8")).toBe("foreign-plist");
+  });
+
+  test("fails closed when a link is replaced after last uninstall check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const link = join(root, ".local/bin/t3-auto-guardian");
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_FOREIGN_DEST: "uninstall-link-commit",
+    }, "--uninstall");
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(link, "utf8")).toBe("foreign-link");
+  });
+
+  test("fails closed when a plist is replaced after last uninstall check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const plist = join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist");
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_FOREIGN_DEST: "uninstall-plist-commit",
+    }, "--uninstall");
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(plist, "utf8")).toBe("foreign-plist");
+  });
+
+  test("does not unlink a file substituted after its final dispose hash check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_DISPOSE_FILE_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-dispose-file")).toBeTruthy();
+  });
+
+  test("does not unlink a link substituted after its final dispose readlink check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_DISPOSE_LINK_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await findSymlinkTarget(root, "/tmp/foreign-dispose-link")).toBeTruthy();
+  });
+
+  test("does not rmdir a directory substituted after its final emptiness check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_DISPOSE_DIR_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "keep")).toBeTruthy();
+  });
+
+  test("does not follow a planted journal tmp symlink", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const stateDir = join(root, ".local/share/skizzles");
+    const victim = join(root, "secret.txt");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(victim, "do-not-truncate");
+    await symlink(victim, join(stateDir, "t3-auto-guardian.journal.tmp"));
+    const result = await installWithEnvironment(root, fixture.environment);
+    expect(result.exitCode).toBe(0);
+    expect(await readFile(victim, "utf8")).toBe("do-not-truncate");
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
+  });
+
+  test("does not overwrite a planted journal symlink target", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const stateDir = join(root, ".local/share/skizzles");
+    const victim = join(root, "secret.txt");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(victim, "do-not-truncate");
+    await symlink(victim, join(stateDir, "t3-auto-guardian.journal"));
+    const result = await installWithEnvironment(root, fixture.environment);
+    expect(result.exitCode).not.toBe(0);
+    expect(await readFile(victim, "utf8")).toBe("do-not-truncate");
+  });
+
+  test("recovery of a complete staged-links journal disposes leftover trees", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "plist-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).toBe(0);
+    expect(recovered.stderr).toBe("");
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
+    const uninstalled = await installWithEnvironment(root, fixture.environment, "--uninstall");
+    expect(uninstalled.exitCode).toBe(0);
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
+  });
+
+  test("recovery of a full uninstall transaction disposes leftover trees", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "uninstall-root-moved",
+    }, "--uninstall");
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, fixture.environment, "--uninstall");
+    expect(recovered.exitCode).toBe(0);
+    expect(recovered.stderr).toBe("");
+    await expect(lstat(join(root, ".local/bin/t3-auto-guardian"))).rejects.toThrow();
+    await expect(lstat(join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist"))).rejects.toThrow();
+    expect(await leftoverInstallGarbage(root)).toEqual([]);
   });
 });
