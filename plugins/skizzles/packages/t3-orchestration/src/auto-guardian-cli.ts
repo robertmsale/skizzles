@@ -29,11 +29,17 @@ var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-
 
 // packages/t3-orchestration/src/remote-config.ts
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname, join as join2 } from "path";
+import { dirname, join as join2, resolve } from "path";
 var home2 = process.env.HOME ?? (() => {
   throw new Error("HOME is required");
 })();
-var REMOTE_CONFIG_PATH = process.env.T3_ORCHESTRATION_REMOTE_CONFIG ?? join2(home2, ".config/t3-orchestration/client.json");
+function resolveRemoteConfigPath(rawSelector = process.env.T3_ORCHESTRATION_REMOTE_CONFIG, homeDirectory = process.env.HOME ?? home2) {
+  const explicit = rawSelector?.trim();
+  if (!explicit)
+    return join2(homeDirectory, ".config/t3-orchestration/client.json");
+  return resolve(explicit);
+}
+var REMOTE_CONFIG_PATH = resolveRemoteConfigPath();
 function normalizeRemoteUrl(input) {
   let url;
   try {
@@ -58,8 +64,9 @@ async function configuredRemoteUrl() {
   const environmentUrl = process.env.T3_ORCHESTRATION_REMOTE_URL?.trim();
   if (environmentUrl)
     return normalizeRemoteUrl(environmentUrl);
+  const path = resolveRemoteConfigPath();
   try {
-    const parsed = JSON.parse(await readFile(REMOTE_CONFIG_PATH, "utf8"));
+    const parsed = JSON.parse(await readFile(path, "utf8"));
     if (typeof parsed.url !== "string")
       throw new Error("Remote orchestration config is malformed");
     return normalizeRemoteUrl(parsed.url);
@@ -174,7 +181,7 @@ function daemonRequest(payload, socketPath = SOCKET_PATH, deadlineMs = resolveCl
 }
 function localDaemonRequest(payload, socketPath, deadlineMs) {
   const deadline = createClientDeadline(deadlineMs);
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     const socket = connect(socketPath);
     let buffer = "";
     let settled = false;
@@ -202,7 +209,7 @@ function localDaemonRequest(payload, socketPath, deadlineMs) {
       finish(() => {
         socket.end();
         try {
-          resolve(JSON.parse(line));
+          resolve2(JSON.parse(line));
         } catch {
           reject(new Error("t3-orchestrationd returned malformed JSON"));
         }
@@ -305,7 +312,7 @@ async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
 // packages/t3-orchestration/src/auto-guardian-config.ts
 import { readFile as readFile2 } from "fs/promises";
 import { homedir } from "os";
-import { join as join3, resolve } from "path";
+import { join as join3, resolve as resolve2 } from "path";
 
 // packages/t3-orchestration/src/auto-guardian-policy.ts
 var OFFICIAL_AUTO_REVIEW_MODEL = "codex-auto-review";
@@ -568,7 +575,7 @@ function defaultGuardianConfig() {
   };
 }
 function defaultGuardianConfigPath(home3 = process.env.HOME || homedir()) {
-  const configRoot = resolve(process.env.XDG_CONFIG_HOME?.trim() || join3(home3, ".config"));
+  const configRoot = resolve2(process.env.XDG_CONFIG_HOME?.trim() || join3(home3, ".config"));
   return join3(configRoot, "skizzles/t3-auto-guardian.toml");
 }
 function asStringArray(value, label) {
@@ -664,7 +671,7 @@ function projectAllowed(target, config) {
 // packages/t3-orchestration/src/auto-guardian.ts
 import { mkdir as mkdir3, mkdtemp, readFile as readFile3, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
 import { homedir as homedir2, tmpdir } from "os";
-import { dirname as dirname3, join as join4, resolve as resolve2 } from "path";
+import { dirname as dirname3, join as join4, resolve as resolve3 } from "path";
 import { randomBytes } from "crypto";
 
 // packages/t3-orchestration/src/approval-projection.ts
@@ -775,7 +782,7 @@ function parseClaimAction(value) {
   };
 }
 function defaultGuardianStatePath(home3 = process.env.HOME || homedir2()) {
-  const t3Home = resolve2(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
+  const t3Home = resolve3(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
   return join4(t3Home, "t3-auto-guardian-state.json");
 }
 function emptyGuardianState() {
