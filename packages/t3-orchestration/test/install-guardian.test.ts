@@ -1151,41 +1151,38 @@ describe("auto guardian installer", () => {
     expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
   });
 
-  test("fails closed when the source is swapped after posixRenameIfInode selects the final pathname", async () => {
+  test("does not mutate a selected path swapped after posixRenameIfInode validation", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
     const fixture = await launchctlFixture(root);
-    const result = await installWithEnvironment(root, {
+    await installWithEnvironment(root, {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_POSIX_RENAME_SWAP: "1",
     });
-    expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "rename");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
   });
 
-  test("fails closed when a file is swapped after posixUnlinkIfInode selects the final pathname", async () => {
+  test("does not mutate a selected path swapped after posixUnlinkIfInode validation", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
     const fixture = await launchctlFixture(root);
-    const result = await installWithEnvironment(root, {
+    await installWithEnvironment(root, {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP: "1",
     });
-    expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "unlink");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
   });
 
-  test("fails closed when an empty directory is swapped after posixRmdirIfInode selects the final pathname", async () => {
+  test("does not mutate a selected path swapped after posixRmdirIfInode validation", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
     const fixture = await launchctlFixture(root);
-    const result = await installWithEnvironment(root, {
+    await installWithEnvironment(root, {
       ...fixture.environment,
       T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP: "1",
     });
-    expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "rmdir");
     expect((await lstat(selected)).isDirectory()).toBe(true);
     expect(await readdir(selected)).toEqual([]);
