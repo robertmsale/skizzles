@@ -154,7 +154,7 @@ export type GuardianDependencies = {
   claimRequest(input: { requestId: string; threadId: string; decision: ApprovalDecision; at: string; action?: ApprovalActionIdentity }): Promise<ClaimResult>;
   withDeliveryLock<T>(threadId: string, requestId: string, body: () => Promise<T>): Promise<T>;
   renewRequest(requestId: string, leaseId: string, threadId: string): Promise<boolean>;
-  completeRequest(requestId: string, leaseId: string, threadId: string): Promise<boolean>;
+  completeRequest(requestId: string, leaseId: string, threadId: string, decision?: ApprovalDecision): Promise<boolean>;
   releaseRequest(requestId: string, leaseId: string, threadId: string): Promise<void>;
   reconcileRequests(liveRequestIds: Iterable<string>): Promise<void>;
 };
@@ -324,7 +324,7 @@ function candidateAction(candidate: GuardianCandidate): ApprovalActionIdentity {
       ? candidate.requestKind
       : null,
     command: candidate.command,
-    cwd: candidate.cwd,
+    cwd: candidate.cwd ?? candidate.worktreePath,
     toolName: candidate.toolName,
   });
 }
@@ -378,12 +378,12 @@ async function deliverClaim(
           decision: "decline",
           reason: APPROVAL_ACTION_CHANGED,
         });
-        return dependencies.completeRequest(input.requestId, input.leaseId!, input.threadId);
+        return dependencies.completeRequest(input.requestId, input.leaseId!, input.threadId, "decline");
       }
       await dependencies.releaseRequest(input.requestId, input.leaseId!, input.threadId);
       return false;
     }
-    return dependencies.completeRequest(input.requestId, input.leaseId!, input.threadId);
+    return dependencies.completeRequest(input.requestId, input.leaseId!, input.threadId, input.decision);
   });
 }
 
@@ -447,7 +447,7 @@ export async function runGuardianCycle(
       const existing = candidate.requestId
         ? state.responded[guardianClaimKey(candidate.threadId, candidate.requestId)]
         : undefined;
-      if (existing?.status === "completed") {
+      if (existing?.status === "completed" && existing.decision !== "accept") {
         decisions.push({
           action: "skipped_duplicate",
           threadId: candidate.threadId,
@@ -792,7 +792,24 @@ export async function claimGuardianRequest(
     const state = await loadGuardianState(path);
     const key = guardianClaimKey(input.threadId, input.requestId);
     const existing = state.responded[key];
-    if (existing?.status === "completed") return { status: "duplicate", decision: existing.decision };
+    if (existing?.status === "completed" && existing.decision !== "accept") {
+      return { status: "duplicate", decision: existing.decision };
+    }
+    if (existing?.status === "completed" && existing.decision === "accept") {
+      const leaseId = newOwnershipToken();
+      const action = input.action ?? existing.action;
+      await writeGuardianStateAtomic(writeClaimState(state, key, {
+        threadId: input.threadId,
+        decision: "decline",
+        at: input.at,
+        status: "pending",
+        leaseId,
+        leaseUntil: new Date(nowMs + leaseMs).toISOString(),
+        attempt: (existing.attempt ?? 1) + 1,
+        ...(action ? { action } : {}),
+      }), path);
+      return { status: "claimed", decision: "decline", leaseId, action };
+    }
     if (existing?.status === "pending") {
       if (existing.threadId !== input.threadId) return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       if (!leaseExpired(existing, nowMs)) return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
@@ -860,6 +877,7 @@ export async function completeGuardianRequest(
   leaseId: string,
   path = defaultGuardianStatePath(),
   threadId = "",
+  decision?: ApprovalDecision,
 ): Promise<boolean> {
   return withGuardianStateLock(path, async () => {
     const state = await loadGuardianState(path);
@@ -871,6 +889,7 @@ export async function completeGuardianRequest(
     await writeGuardianStateAtomic(writeClaimState(state, guardianClaimKey(existing.threadId, requestId), {
       ...existing,
       status: "completed",
+      ...(decision ? { decision } : {}),
       leaseUntil: undefined,
     }), path);
     return true;
@@ -1018,7 +1037,7 @@ export function createDefaultGuardianDependencies(
     claimRequest: (input) => claimGuardianRequest(input),
     withDeliveryLock: (threadId, requestId, body) => withGuardianDeliveryLock(threadId, requestId, body),
     renewRequest: (requestId, leaseId, threadId) => renewGuardianLease(requestId, leaseId, defaultGuardianStatePath(), { threadId }),
-    completeRequest: (requestId, leaseId, threadId) => completeGuardianRequest(requestId, leaseId, defaultGuardianStatePath(), threadId),
+    completeRequest: (requestId, leaseId, threadId, decision) => completeGuardianRequest(requestId, leaseId, defaultGuardianStatePath(), threadId, decision),
     releaseRequest: (requestId, leaseId, threadId) => releaseGuardianRequest(requestId, leaseId, defaultGuardianStatePath(), threadId),
     reconcileRequests: (liveRequestIds) => reconcileGuardianRequests(liveRequestIds).then(() => undefined),
   };

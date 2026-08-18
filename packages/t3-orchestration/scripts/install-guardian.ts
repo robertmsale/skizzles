@@ -87,6 +87,7 @@ type InstallJournal = {
   rootIdentity?: { dev: string; ino: string };
   rootTree?: OwnedTreeEntry[];
   transactionIdentity?: PathGeneration;
+  transactionTree?: OwnedTreeEntry[];
   serviceWasLoaded?: boolean;
 };
 const TRANSACTION_TOKEN_NAME = ".skizzles-transaction";
@@ -347,7 +348,17 @@ async function validateReceipt(receipt: Receipt): Promise<void> {
   if (!sameEntries(runtime, receipt.runtime)) throw new Error(`Managed runtime drifted under ${runtimeRoot}`);
 }
 
+function sameOwnedTree(left: OwnedTreeEntry[], right: OwnedTreeEntry[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 async function writeJournal(journal: InstallJournal): Promise<void> {
+  try { journal.transactionTree = await snapshotOwnedTree(journal.transactionRoot); }
+  catch { journal.transactionTree = undefined; }
+  if (journal.installedRoot) {
+    try { journal.rootTree = await snapshotOwnedTree(journal.installRoot); }
+    catch { /* keep the last successful root snapshot */ }
+  }
   await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
   const temporary = `${journalPath}.tmp`;
   await writeFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, { mode: 0o600 });
@@ -439,19 +450,39 @@ async function liveRootIsJournaled(journal: Pick<InstallJournal, "installRoot" |
   return Boolean(live && live.dev === journal.rootIdentity.dev && live.ino === journal.rootIdentity.ino);
 }
 
-async function liveRootMatchesJournaledTree(journal: Pick<InstallJournal, "installRoot" | "rootTree">): Promise<boolean> {
-  if (!journal.rootTree) return false;
+async function liveTreeMatches(path: string, expected?: OwnedTreeEntry[]): Promise<boolean> {
+  if (!expected) return false;
   try {
-    const live = await snapshotOwnedTree(journal.installRoot);
-    const expected = new Map(journal.rootTree.map((entry) => [entry.path, entry]));
-    for (const entry of live) {
-      const prior = expected.get(entry.path);
-      if (!prior || JSON.stringify(prior) !== JSON.stringify(entry)) return false;
-    }
-    return true;
+    return sameOwnedTree(await snapshotOwnedTree(path), expected);
   } catch {
     return false;
   }
+}
+
+async function liveRootMatchesJournaledTree(journal: Pick<InstallJournal, "installRoot" | "rootTree">): Promise<boolean> {
+  return liveTreeMatches(journal.installRoot, journal.rootTree);
+}
+
+async function removeExactDirectory(
+  path: string,
+  identity: { dev: string; ino: string },
+  expectedTree?: OwnedTreeEntry[],
+): Promise<void> {
+  const live = await liveRootIdentity(path);
+  if (!live || live.dev !== identity.dev || live.ino !== identity.ino) return;
+  if (expectedTree && !await liveTreeMatches(path, expectedTree)) return;
+  const trash = `${path}.reclaim-${randomUUID()}`;
+  try {
+    await rename(path, trash);
+  } catch {
+    return;
+  }
+  const moved = await liveRootIdentity(trash);
+  if (!moved || moved.dev !== identity.dev || moved.ino !== identity.ino || (expectedTree && !await liveTreeMatches(trash, expectedTree))) {
+    if (!await optionalLstat(path)) await rename(trash, path).catch(() => undefined);
+    return;
+  }
+  await rm(trash, { force: true, recursive: true }).catch(() => undefined);
 }
 
 async function journaledInstallRootIsExact(journal: Pick<InstallJournal, "installRoot" | "rootIdentity" | "rootTree">): Promise<boolean> {
@@ -460,23 +491,28 @@ async function journaledInstallRootIsExact(journal: Pick<InstallJournal, "instal
 
 async function removeJournaledInstallRoot(journal: InstallJournal): Promise<void> {
   if (journal.kind === "uninstall" || !journal.installedRoot) return;
-  if (!await optionalLstat(journal.installRoot)) return;
+  if (!journal.rootIdentity) return;
   if (!await journaledInstallRootIsExact(journal)) return;
-  await rm(journal.installRoot, { force: true, recursive: true });
+  await removeExactDirectory(journal.installRoot, journal.rootIdentity, journal.rootTree);
 }
 
 async function removeJournaledTransactionRoot(
-  journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity">,
+  journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity" | "transactionTree">,
 ): Promise<void> {
   if (!await livePathMatchesGeneration(journal.transactionRoot, journal.transactionIdentity)) return;
-  await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  if (!await liveTreeMatches(journal.transactionRoot, journal.transactionTree)) return;
+  await removeExactDirectory(journal.transactionRoot, journal.transactionIdentity!, journal.transactionTree);
 }
 
 async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
   await restoreDestinations(journal);
   if (journal.previousInstall && await optionalLstat(journal.previousInstall)) {
     if (await optionalLstat(journal.installRoot) && !await journaledInstallRootIsExact(journal)) return;
-    if (await optionalLstat(journal.installRoot)) await rm(journal.installRoot, { force: true, recursive: true });
+    if (await optionalLstat(journal.installRoot)) {
+      if (!journal.rootIdentity) return;
+      await removeExactDirectory(journal.installRoot, journal.rootIdentity, journal.rootTree);
+    }
+    if (await optionalLstat(journal.installRoot)) return;
     await rename(journal.previousInstall, journal.installRoot);
   } else {
     await removeJournaledInstallRoot(journal);
@@ -635,27 +671,32 @@ async function rollbackTransaction(
   placedRoot?: { dev: string; ino: string },
   rootTree?: OwnedTreeEntry[],
   transactionIdentity?: PathGeneration,
+  transactionTree?: OwnedTreeEntry[],
 ): Promise<void> {
   await restoreDestinations({ kind: "install", destinations: movedDestinations });
   const placed = { installRoot, rootIdentity: placedRoot, rootTree };
   if (installedRoot && placedRoot && await journaledInstallRootIsExact(placed)) {
-    await rm(installRoot, { force: true, recursive: true });
+    await removeExactDirectory(installRoot, placedRoot, rootTree);
   }
   if (previousInstall && await optionalLstat(previousInstall)) {
     if (await optionalLstat(installRoot) && !(placedRoot && await journaledInstallRootIsExact(placed))) {
-      await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity });
+      await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree });
       return;
     }
     if (await optionalLstat(installRoot)) {
-      if (!await journaledInstallRootIsExact(placed)) {
-        await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity });
+      if (!placedRoot || !await journaledInstallRootIsExact(placed)) {
+        await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree });
         return;
       }
-      await rm(installRoot, { force: true, recursive: true });
+      await removeExactDirectory(installRoot, placedRoot, rootTree);
+    }
+    if (await optionalLstat(installRoot)) {
+      await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree });
+      return;
     }
     await rename(previousInstall, installRoot);
   }
-  await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity });
+  await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree });
 }
 
 async function install(runtimeVersion: string, previous: Receipt | undefined): Promise<void> {
@@ -683,7 +724,8 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
   try {
     receipt = await stageInstall(runtimeVersion, stagedRoot);
   } catch (error) {
-    await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity });
+    const tree = await snapshotOwnedTree(transactionRoot).catch(() => undefined);
+    await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity, transactionTree: tree });
     throw error;
   }
   const movedDestinations: JournalDestination[] = [];
@@ -735,6 +777,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
         await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
         await rename(staged, destination);
       }
+      await writeJournal(journal);
       await crashIf("link-installed");
     }
     for (const [index, file] of receipt.files.entries()) {
@@ -755,6 +798,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
         await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
         await rename(staged, destination);
       }
+      await writeJournal(journal);
       await crashIf("plist-installed");
     }
     await rm(join(installRoot, "staged-links"), { recursive: true, force: true });
@@ -769,7 +813,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       try { await deactivateIfLoaded(); }
       catch (cleanupError) { serviceRollbackError = cleanupError; }
     }
-    try { await rollbackTransaction(transactionRoot, previousInstall, movedDestinations, installedRoot, placedRoot, journal.rootTree, journal.transactionIdentity); }
+    try { await rollbackTransaction(transactionRoot, previousInstall, movedDestinations, installedRoot, placedRoot, journal.rootTree, journal.transactionIdentity, journal.transactionTree); }
     catch (rollbackError) {
       throw new AggregateError(
         serviceRollbackError ? [error, serviceRollbackError, rollbackError] : [error, rollbackError],

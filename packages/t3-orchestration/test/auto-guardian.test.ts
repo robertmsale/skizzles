@@ -94,7 +94,30 @@ function fixture(options: {
     claimRequest: async (input) => {
       const key = guardianClaimKey(input.threadId, input.requestId);
       const existing = state.responded[key];
-      if (existing?.status === "completed") return { status: "duplicate", decision: existing.decision };
+      if (existing?.status === "completed" && existing.decision !== "accept") {
+        return { status: "duplicate", decision: existing.decision };
+      }
+      if (existing?.status === "completed" && existing.decision === "accept") {
+        const leaseId = `reopen-${input.requestId}`;
+        const action = input.action ?? existing.action;
+        state = {
+          ...state,
+          responded: {
+            ...state.responded,
+            [key]: {
+              threadId: input.threadId,
+              decision: "decline",
+              at: input.at,
+              status: "pending",
+              leaseId,
+              leaseUntil: new Date(Date.now() + 30_000).toISOString(),
+              attempt: (existing.attempt ?? 1) + 1,
+              ...(action ? { action } : {}),
+            },
+          },
+        };
+        return { status: "claimed", decision: "decline", leaseId, action };
+      }
       const leaseUntil = existing?.leaseUntil ? Date.parse(existing.leaseUntil) : 0;
       if (existing?.status === "pending" && Number.isFinite(leaseUntil) && leaseUntil > Date.now()) {
         return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
@@ -160,14 +183,17 @@ function fixture(options: {
       };
       return true;
     },
-    completeRequest: async (requestId, leaseId, threadId) => {
+    completeRequest: async (requestId, leaseId, threadId, decision) => {
       const key = guardianClaimKey(threadId, requestId);
       const existing = state.responded[key];
       if (!existing || existing.leaseId !== leaseId) return false;
       if (existing.status === "completed") return true;
       state = {
         ...state,
-        responded: { ...state.responded, [key]: { ...existing, status: "completed", leaseUntil: undefined } },
+        responded: {
+          ...state.responded,
+          [key]: { ...existing, status: "completed", ...(decision ? { decision } : {}), leaseUntil: undefined },
+        },
       };
       return true;
     },
@@ -500,7 +526,7 @@ describe("guardian cycle", () => {
     const { deps, resolved } = fixture({
       state: {
         schema: 3,
-        responded: { [guardianClaimKey("cursor-task", "req-1")]: { threadId: "cursor-task", decision: "accept", at: "2026-08-17T01:00:00Z", status: "completed" } },
+        responded: { [guardianClaimKey("cursor-task", "req-1")]: { threadId: "cursor-task", decision: "decline", at: "2026-08-17T01:00:00Z", status: "completed" } },
         lastPollAt: null,
         lastError: null,
       },
@@ -508,6 +534,36 @@ describe("guardian cycle", () => {
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(report.decisions[0]).toMatchObject({ action: "skipped_duplicate", requestId: "req-1", responded: false });
     expect(resolved).toEqual([]);
+  });
+
+  test("does not let a completed stored accept suppress a current deny", async () => {
+    const { deps, resolved } = fixture({
+      list: { approvals: [approval({ command: "rm -rf /important" })], unidentifiable: [] },
+      judge: { ok: true, assessment: { outcome: "deny", rationale: "destructive and unauthorized" }, raw: "" },
+      state: {
+        schema: 4,
+        responded: {
+          [guardianClaimKey("cursor-task", "req-1")]: {
+            threadId: "cursor-task",
+            decision: "accept",
+            at: "2026-08-17T01:00:00Z",
+            status: "completed",
+            action: { requestKind: "command", command: "rm -rf /important", cwd: "/worktree", toolName: "Shell" },
+          },
+        },
+        lastPollAt: null,
+        lastError: null,
+      },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      decision: "decline",
+      reason: "destructive and unauthorized",
+      responded: true,
+    });
+    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+    expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
   });
 
   test("claims requestId before respond so concurrent cycles cannot double-reply", async () => {
@@ -577,10 +633,10 @@ describe("guardian cycle", () => {
       await mergeGuardianState(path, { lastPollAt: "2026-08-17T03:00:00Z", lastError: null });
       expect((await claimGuardianRequest(input, path)).status).toBe("duplicate");
       const claimed = await loadGuardianState(path);
-      await completeGuardianRequest(input.requestId, claimed.responded[guardianClaimKey("cursor-task", "req-1")]!.leaseId!, path, "cursor-task");
+      await completeGuardianRequest(input.requestId, claimed.responded[guardianClaimKey("cursor-task", "req-1")]!.leaseId!, path, "cursor-task", "decline");
       expect((await claimGuardianRequest(input, path)).status).toBe("duplicate");
       const persisted = await loadGuardianState(path);
-      expect(persisted.responded[guardianClaimKey("cursor-task", "req-1")]?.decision).toBe("accept");
+      expect(persisted.responded[guardianClaimKey("cursor-task", "req-1")]?.decision).toBe("decline");
       expect(persisted.responded[guardianClaimKey("cursor-task", "req-1")]?.status).toBe("completed");
       expect(persisted.lastPollAt).toBe("2026-08-17T03:00:00Z");
     } finally {
@@ -1024,16 +1080,24 @@ describe("guardian lock and multi-process claims", () => {
 
   test("judges missing explicit CWD with the inferred worktree path", async () => {
     const judged: Array<{ cwd: string | null; actionCwd: string | null }> = [];
+    const claimed: Array<string | null | undefined> = [];
     const { deps, resolved } = fixture({
       list: { approvals: [approval({ cwd: null, worktreePath: "/worktree" })], unidentifiable: [] },
     });
     const originalJudge = deps.judge;
+    const originalClaim = deps.claimRequest;
     deps.judge = async (input) => {
       judged.push({ cwd: input.cwd, actionCwd: input.action.cwd });
       return originalJudge(input);
     };
+    deps.claimRequest = async (input) => {
+      claimed.push(input.action?.cwd);
+      return originalClaim(input);
+    };
     await runGuardianCycle(deps, defaultGuardianConfig());
     expect(judged).toEqual([{ cwd: "/worktree", actionCwd: "/worktree" }]);
+    expect(claimed).toEqual(["/worktree"]);
+    expect(judged[0]?.actionCwd).toBe(claimed[0]);
     expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
     expect(resolved[0]).toMatchObject({ decision: "decline" });
   });
