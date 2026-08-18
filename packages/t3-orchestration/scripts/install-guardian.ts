@@ -53,7 +53,19 @@ const dataRoot = resolve(process.env.XDG_DATA_HOME?.trim() || join(home, ".local
 const installRoot = resolve(process.env.T3_AUTO_GUARDIAN_INSTALL_ROOT?.trim() || join(dataRoot, "skizzles/t3-auto-guardian"));
 const runtimeRoot = join(installRoot, "runtime");
 const receiptPath = join(installRoot, "install-receipt.json");
+const journalPath = join(dirname(installRoot), "t3-auto-guardian.journal");
 const cliName = "auto-guardian-cli.ts";
+type InstallPhase = "prepared" | "root-moved" | "root-installed" | "destinations-moved" | "complete";
+type JournalDestination = { destination: string; backup?: string; installed: boolean };
+type InstallJournal = {
+  version: 1;
+  phase: InstallPhase;
+  transactionRoot: string;
+  installRoot: string;
+  previousInstall?: string;
+  destinations: JournalDestination[];
+  installedRoot: boolean;
+};
 const GUARDIAN_RUNTIME_FILES = [
   "auto-guardian-cli.ts",
   "auto-guardian.ts",
@@ -216,6 +228,55 @@ async function validateReceipt(receipt: Receipt): Promise<void> {
   await Promise.all(receipt.files.map((entry) => assertFile(entry)));
   const runtime = await snapshotTree(runtimeRoot);
   if (!sameEntries(runtime, receipt.runtime)) throw new Error(`Managed runtime drifted under ${runtimeRoot}`);
+}
+
+async function writeJournal(journal: InstallJournal): Promise<void> {
+  const temporary = `${journalPath}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, journalPath);
+}
+
+async function readJournal(): Promise<InstallJournal | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(journalPath, "utf8")) as InstallJournal;
+    if (parsed.version !== 1 || typeof parsed.transactionRoot !== "string" || typeof parsed.installRoot !== "string") {
+      return undefined;
+    }
+    return parsed;
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
+}
+
+async function clearJournal(): Promise<void> {
+  await rm(journalPath, { force: true });
+  await rm(`${journalPath}.tmp`, { force: true });
+}
+
+async function crashIf(phase: InstallPhase): Promise<void> {
+  if (process.env.T3_AUTO_GUARDIAN_INSTALL_CRASH === phase) process.exit(75);
+}
+
+async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
+  for (const destination of [...journal.destinations].reverse()) {
+    if (destination.installed) await rm(destination.destination, { force: true, recursive: true });
+    if (destination.backup && await optionalLstat(destination.backup)) await rename(destination.backup, destination.destination);
+  }
+  if (journal.installedRoot) await rm(journal.installRoot, { force: true, recursive: true });
+  if (journal.previousInstall && await optionalLstat(journal.previousInstall)) {
+    if (await optionalLstat(journal.installRoot)) await rm(journal.installRoot, { force: true, recursive: true });
+    await rename(journal.previousInstall, journal.installRoot);
+  }
+  await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+}
+
+async function recoverInterruptedInstall(): Promise<void> {
+  const journal = await readJournal();
+  if (!journal) return;
+  if (journal.phase !== "complete") await rollbackFromJournal(journal);
+  else await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  await clearJournal();
 }
 
 async function readReceipt(): Promise<Receipt | undefined> {
@@ -390,10 +451,27 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
   }
   const movedDestinations: Array<{ destination: string; backup?: string; installed: boolean }> = [];
   let installedRoot = false;
+  const journal: InstallJournal = {
+    version: 1,
+    phase: "prepared",
+    transactionRoot,
+    installRoot,
+    ...(previousInstall ? { previousInstall } : {}),
+    destinations: [],
+    installedRoot: false,
+  };
+  await writeJournal(journal);
   try {
     if (previous && previousInstall) await rename(installRoot, previousInstall);
+    journal.phase = "root-moved";
+    await writeJournal(journal);
+    await crashIf("root-moved");
     await rename(stagedRoot, installRoot);
     installedRoot = true;
+    journal.installedRoot = true;
+    journal.phase = "root-installed";
+    await writeJournal(journal);
+    await crashIf("root-installed");
     for (const [index, link] of receipt.links.entries()) {
       const destination = link.path;
       const existing = await optionalLstat(destination);
@@ -416,7 +494,12 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       moved.installed = true;
     }
     await rm(join(installRoot, "staged-links"), { recursive: true, force: true });
+    journal.destinations = movedDestinations;
+    journal.phase = "destinations-moved";
+    await writeJournal(journal);
     await activate();
+    journal.phase = "complete";
+    await writeJournal(journal);
   } catch (error) {
     let serviceRollbackError: unknown;
     if (!previousLoaded) {
@@ -435,9 +518,11 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       catch (recoveryError) { throw new AggregateError([error, recoveryError], "T3 auto guardian install and service rollback both failed"); }
     }
     if (serviceRollbackError) throw new AggregateError([error, serviceRollbackError], "T3 auto guardian install and service rollback both failed");
+    await clearJournal();
     throw error;
   }
   await rm(transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  await clearJournal();
   console.log(JSON.stringify({
     root: sourceRoot,
     mode: "host",
@@ -493,6 +578,7 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
 }
 
 const runtimeVersion = await readPackageVersion();
+await recoverInterruptedInstall();
 const previous = await readReceipt();
 if (uninstall) await uninstallInstallation(previous);
 else await install(runtimeVersion, previous);

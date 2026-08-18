@@ -132,6 +132,42 @@ describe("auto guardian installer", () => {
     await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian"))).rejects.toThrow();
   });
 
+  test("recovers a crash after the previous install root is renamed", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const link = join(root, ".local/bin/t3-auto-guardian");
+    const firstTarget = await readlink(link);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-moved",
+    });
+    expect(crashed.exitCode).toBe(75);
+    expect(await readlink(link)).toBe(firstTarget);
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).toBe(0);
+    expect(recovered.stderr).toBe("");
+    expect(await readlink(link)).toBe(join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"));
+    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian.journal"))).rejects.toThrow();
+  });
+
+  test("recovers a first-install crash after the new root is in place", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).toBe(0);
+    expect(await readlink(join(root, ".local/bin/t3-auto-guardian"))).toBe(
+      join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"),
+    );
+  });
+
   test("refuses to unload a loaded guardian without receipt ownership", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);

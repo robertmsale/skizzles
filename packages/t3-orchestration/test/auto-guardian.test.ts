@@ -175,7 +175,15 @@ describe("guardian eligibility filter", () => {
     expect(isGuardianEligible({ provider: "personal", providerDriver: "codex", runtimeMode: "auto" }).eligible).toBe(false);
     expect(isGuardianEligible({ provider: "cursor", providerDriver: "cursor", runtimeMode: "auto" }).eligible).toBe(true);
     expect(isGuardianEligible({ provider: "cursor", runtimeMode: "ask" }).eligible).toBe(false);
-    expect(isGuardianEligible({ provider: "grok", runtimeMode: "auto" }).eligible).toBe(true);
+    expect(isGuardianEligible({ provider: "grok", providerDriver: "grok", runtimeMode: "auto" }).eligible).toBe(true);
+    expect(isGuardianEligible({ provider: "cursor", providerDriver: null, runtimeMode: "auto" })).toMatchObject({
+      eligible: false,
+      action: "skipped_codex",
+    });
+    expect(isGuardianEligible({ provider: "cursor", providerDriver: "codex", runtimeMode: "auto" })).toMatchObject({
+      eligible: false,
+      action: "skipped_codex",
+    });
   });
 
   test("keeps unidentifiable snapshot gaps distinct from missing commands", () => {
@@ -211,6 +219,25 @@ describe("guardian cycle", () => {
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(report.decisions[0]).toMatchObject({ action: "skipped_codex", threadId: "personal-codex", responded: false });
     expect(resolved).toEqual([]);
+  });
+
+  test("skips allowlisted instance IDs when the driver is missing or Codex", async () => {
+    const missing = fixture({
+      list: { approvals: [approval({ providerDriver: null })], unidentifiable: [] },
+    });
+    expect((await runGuardianCycle(missing.deps, defaultGuardianConfig())).decisions[0]).toMatchObject({
+      action: "skipped_codex",
+      responded: false,
+    });
+    expect(missing.resolved).toEqual([]);
+    const mismatched = fixture({
+      list: { approvals: [approval({ provider: "cursor", providerDriver: "codex" })], unidentifiable: [] },
+    });
+    expect((await runGuardianCycle(mismatched.deps, defaultGuardianConfig())).decisions[0]).toMatchObject({
+      action: "skipped_codex",
+      responded: false,
+    });
+    expect(mismatched.resolved).toEqual([]);
   });
 
   test("never judges a custom instance whose T3 driver is Codex", async () => {

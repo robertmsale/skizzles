@@ -603,12 +603,20 @@ function isAutoRuntime(runtimeMode) {
 function isCodexDriver(driver) {
   return driver?.trim().toLowerCase() === CODEX_PROVIDER_INSTANCE;
 }
+function isKnownNonCodexDriver(driver) {
+  const value = driver?.trim().toLowerCase() ?? "";
+  return NON_CODEX_PROVIDERS.includes(value);
+}
 function isGuardianEligible(target) {
-  if (isCodexDriver(target.providerDriver) || isCodexProvider(target.provider)) {
-    return { eligible: false, action: "skipped_codex", reason: "provider is Codex or not a known non-Codex Auto harness" };
-  }
   if (!isAutoRuntime(target.runtimeMode)) {
     return { eligible: false, action: "skipped_runtime", reason: `runtimeMode ${target.runtimeMode} is not auto` };
+  }
+  const driver = target.providerDriver?.trim() || null;
+  if (!driver) {
+    return { eligible: false, action: "skipped_codex", reason: "provider driver is unavailable" };
+  }
+  if (isCodexDriver(driver) || !isKnownNonCodexDriver(driver) || isCodexProvider(target.provider)) {
+    return { eligible: false, action: "skipped_codex", reason: "provider is Codex or not a known non-Codex Auto harness" };
   }
   return { eligible: true };
 }
