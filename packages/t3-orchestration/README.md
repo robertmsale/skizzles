@@ -179,9 +179,11 @@ collaboration model; task creation remains project-scoped.
 Wait for up to eight tasks with one bounded daemon-side polling loop:
 
 ```sh
-t3ctl tasks wait <id> [<id> ...] [--timeout-ms 120000]
+t3ctl tasks wait <id> [<id> ...] [--timeout-ms 58000]
 t3ctl tasks wait <id> --after <id>=<cursor>
 ```
+
+Every `t3ctl` invocation has a hard 60-second client deadline covering the local Unix socket or remote HTTPS request and the response body. `--timeout-ms` cannot extend that ceiling; values above 58000ms are clamped so the daemon can reply before the client exits. For longer coordination, call wait again with the latest `--after ID=CURSOR` instead of requesting an hour-long wait.
 
 Wait wakes only for completion, failure, archival/deletion, plan approval, approval, or user input—not progress chatter. Background subagent/workflow work and monitoring remain nonterminal. Rename, pin, archive, settle, interrupt, and pending-approval inspect/approve/deny operations are also exposed through `t3ctl tasks`; they preserve the task's existing provider/model/reasoning/runtime selection.
 

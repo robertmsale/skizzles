@@ -502,17 +502,109 @@ async function requireLocalReaperTransport() {
 }
 
 // packages/t3-orchestration/src/client.ts
-function daemonResponseTimeoutMs(payload) {
-  if (payload.op !== "tasks.wait")
-    return 240000;
-  const waitTimeoutMs = Number(payload.timeoutMs);
-  if (!Number.isInteger(waitTimeoutMs) || waitTimeoutMs < 0 || waitTimeoutMs > 3600000)
-    return 240000;
-  return waitTimeoutMs + 30000;
+var CLIENT_DEADLINE_MS = 60000;
+var WAIT_RESPONSE_BUFFER_MS = 2000;
+var CLIENT_DEADLINE_ENV = "T3_ORCHESTRATION_CLIENT_DEADLINE_MS";
+function formatClientDeadline(deadlineMs) {
+  return deadlineMs % 1000 === 0 ? `${deadlineMs / 1000}s` : `${deadlineMs}ms`;
 }
-function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = daemonResponseTimeoutMs(payload), remoteUrl) {
+function clientTimeoutMessage(op, deadlineMs) {
+  const operation = typeof op === "string" && op.trim() ? op.trim() : "request";
+  return `t3ctl ${operation} timed out after ${formatClientDeadline(deadlineMs)}`;
+}
+function clientTimeoutError(op, deadlineMs) {
+  return new Error(clientTimeoutMessage(op, deadlineMs));
+}
+function parseDeadlineMs(value) {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 1)
+    return;
+  return parsed;
+}
+function resolveClientDeadlineMs(overrideMs) {
+  const override = parseDeadlineMs(overrideMs);
+  if (override !== undefined)
+    return Math.min(override, CLIENT_DEADLINE_MS);
+  const injected = parseDeadlineMs(process.env[CLIENT_DEADLINE_ENV]);
+  if (injected !== undefined)
+    return Math.min(injected, CLIENT_DEADLINE_MS);
+  return CLIENT_DEADLINE_MS;
+}
+function maxWaitTimeoutMs(deadlineMs = CLIENT_DEADLINE_MS) {
+  return Math.max(0, deadlineMs - WAIT_RESPONSE_BUFFER_MS);
+}
+function clampWaitTimeoutMs(requestedMs, deadlineMs = CLIENT_DEADLINE_MS) {
+  if (!Number.isInteger(requestedMs) || requestedMs < 0)
+    return 0;
+  return Math.min(requestedMs, maxWaitTimeoutMs(deadlineMs));
+}
+function createClientDeadline(deadlineMs) {
+  const controller = new AbortController;
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, deadlineMs);
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer);
+    }
+  };
+}
+function abandonReader(reader) {
+  reader.cancel().catch(() => {
+    return;
+  });
+}
+function whenAborted(signal, op, deadlineMs) {
+  let onAbort;
+  const promise = new Promise((_, reject) => {
+    const fail = () => reject(clientTimeoutError(op, deadlineMs));
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    onAbort = fail;
+    signal.addEventListener("abort", fail);
+  });
+  return {
+    promise,
+    dispose: () => {
+      if (!onAbort)
+        return;
+      signal.removeEventListener("abort", onAbort);
+      onAbort = undefined;
+    }
+  };
+}
+async function withClientDeadline(promise, signal, op, deadlineMs) {
+  const timedOut = whenAborted(signal, op, deadlineMs);
+  promise.catch(() => {
+    return;
+  });
+  timedOut.promise.catch(() => {
+    return;
+  });
+  try {
+    return await Promise.race([promise, timedOut.promise]);
+  } finally {
+    timedOut.dispose();
+  }
+}
+function requestPayload(payload, deadlineMs) {
+  if (payload.op !== "tasks.wait")
+    return payload;
+  return { ...payload, timeoutMs: clampWaitTimeoutMs(Number(payload.timeoutMs), deadlineMs) };
+}
+function daemonRequest(payload, socketPath = SOCKET_PATH, deadlineMs = resolveClientDeadlineMs(), remoteUrl) {
+  const resolvedDeadlineMs = resolveClientDeadlineMs(deadlineMs);
+  const command = requestPayload(payload, resolvedDeadlineMs);
   if (remoteUrl)
-    return remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs);
+    return remoteDaemonRequest(command, remoteUrl, resolvedDeadlineMs);
+  return localDaemonRequest(command, socketPath, resolvedDeadlineMs);
+}
+function localDaemonRequest(payload, socketPath, deadlineMs) {
+  const deadline = createClientDeadline(deadlineMs);
   return new Promise((resolve2, reject) => {
     const socket = connect(socketPath);
     let buffer = "";
@@ -521,15 +613,16 @@ function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = da
       if (settled)
         return;
       settled = true;
-      clearTimeout(timeout);
+      deadline.signal.removeEventListener("abort", failWithTimeout);
+      deadline.dispose();
       callback();
     };
-    const timeout = setTimeout(() => {
+    const failWithTimeout = () => {
       finish(() => {
         socket.destroy();
-        reject(new Error(`t3-orchestrationd did not respond within ${responseTimeoutMs} milliseconds`));
+        reject(clientTimeoutError(payload.op, deadlineMs));
       });
-    }, responseTimeoutMs);
+    };
     socket.on("data", (chunk) => {
       buffer += chunk.toString();
       const newline = buffer.indexOf(`
@@ -547,31 +640,45 @@ function daemonRequest(payload, socketPath = SOCKET_PATH, responseTimeoutMs = da
       });
     });
     socket.once("error", (error) => {
+      if (deadline.signal.aborted) {
+        failWithTimeout();
+        return;
+      }
       finish(() => {
         const code = "code" in error ? String(error.code) : "";
-        if (code === "ENOENT" || code === "ECONNREFUSED")
+        if (code === "ENOENT" || code === "ECONNREFUSED") {
           reject(new Error("t3-orchestrationd is unavailable. From a full Skizzles checkout or plugin snapshot, run `bun run packages/t3-orchestration/scripts/install.ts` to install and start its LaunchAgent."));
-        else
+        } else
           reject(error);
       });
     });
-    socket.once("end", () => finish(() => reject(new Error("t3-orchestrationd closed without a complete response"))));
+    socket.once("end", () => {
+      if (deadline.signal.aborted) {
+        failWithTimeout();
+        return;
+      }
+      finish(() => reject(new Error("t3-orchestrationd closed without a complete response")));
+    });
+    if (deadline.signal.aborted) {
+      failWithTimeout();
+      return;
+    }
+    deadline.signal.addEventListener("abort", failWithTimeout, { once: true });
     socket.write(`${JSON.stringify(payload)}
 `);
   });
 }
-async function remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs) {
+async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
   const endpoint = normalizeRemoteUrl(remoteUrl);
-  const controller = new AbortController;
-  const timeout = setTimeout(() => controller.abort(), responseTimeoutMs);
+  const deadline = createClientDeadline(deadlineMs);
   try {
-    const response = await fetch(`${endpoint}/v1/request`, {
+    const response = await withClientDeadline(fetch(`${endpoint}/v1/request`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
       redirect: "error",
-      signal: controller.signal
-    });
+      signal: deadline.signal
+    }), deadline.signal, payload.op, deadlineMs);
     if (response.status >= 300 && response.status < 400) {
       throw new Error("remote t3-orchestrationd redirect rejected");
     }
@@ -583,16 +690,23 @@ async function remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs) {
       throw new Error("remote t3-orchestrationd returned an empty response");
     const chunks = [];
     let size = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done)
-        break;
-      size += value.byteLength;
-      if (size > 1048576) {
-        await reader.cancel();
-        throw new Error("remote daemon response exceeds 1 MiB");
+    try {
+      while (true) {
+        if (deadline.signal.aborted)
+          throw clientTimeoutError(payload.op, deadlineMs);
+        const { done, value } = await withClientDeadline(reader.read(), deadline.signal, payload.op, deadlineMs);
+        if (done)
+          break;
+        size += value.byteLength;
+        if (size > 1048576) {
+          abandonReader(reader);
+          throw new Error("remote daemon response exceeds 1 MiB");
+        }
+        chunks.push(value);
       }
-      chunks.push(value);
+    } catch (error) {
+      abandonReader(reader);
+      throw error;
     }
     const combined = new Uint8Array(size);
     let offset = 0;
@@ -611,12 +725,11 @@ async function remoteDaemonRequest(payload, remoteUrl, responseTimeoutMs) {
       throw new Error(body.error || `remote t3-orchestrationd failed with HTTP ${response.status}`);
     return body;
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`remote t3-orchestrationd did not respond within ${responseTimeoutMs} milliseconds`);
-    }
+    if (deadline.signal.aborted)
+      throw clientTimeoutError(payload.op, deadlineMs);
     throw error;
   } finally {
-    clearTimeout(timeout);
+    deadline.dispose();
   }
 }
 
