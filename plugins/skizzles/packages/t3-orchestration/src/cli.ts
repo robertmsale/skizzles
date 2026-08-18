@@ -272,10 +272,14 @@ function whenAborted(signal, op, deadlineMs) {
   });
 }
 async function withClientDeadline(promise, signal, op, deadlineMs) {
+  const timedOut = whenAborted(signal, op, deadlineMs);
   promise.catch(() => {
     return;
   });
-  return await Promise.race([promise, whenAborted(signal, op, deadlineMs)]);
+  timedOut.catch(() => {
+    return;
+  });
+  return await Promise.race([promise, timedOut]);
 }
 function requestPayload(payload, deadlineMs) {
   if (payload.op !== "tasks.wait")

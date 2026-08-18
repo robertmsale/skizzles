@@ -79,8 +79,10 @@ export async function withClientDeadline<T>(
   op: unknown,
   deadlineMs: number,
 ): Promise<T> {
+  const timedOut = whenAborted(signal, op, deadlineMs);
   void promise.catch(() => undefined);
-  return await Promise.race([promise, whenAborted(signal, op, deadlineMs)]);
+  void timedOut.catch(() => undefined);
+  return await Promise.race([promise, timedOut]);
 }
 
 function requestPayload(payload: Record<string, unknown>, deadlineMs: number): Record<string, unknown> {
