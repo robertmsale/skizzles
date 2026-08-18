@@ -133,7 +133,9 @@ function consumeInstallerHook(name: string): boolean {
 }
 
 const RENAME_EXCL = 0x00000004;
+const RENAME_SWAP = 0x00000002;
 const RENAME_NOREPLACE = 0x00000001;
+const RENAME_EXCHANGE = 0x00000002;
 const AT_FDCWD = -100;
 const S_IFMT = 0o170000;
 const S_IFDIR = 0o040000;
@@ -148,6 +150,7 @@ type RawStat = { dev: string; ino: string; mode: number };
 
 const AT_FDCWD_DARWIN = -2;
 let exclusiveRenameSymbol: ExclusiveRename | undefined;
+let swapRenameSymbol: ExclusiveRename | undefined;
 let cloneFdToPathSymbol: CloneFdToPath | undefined;
 let lstatSymbol: LstatFn | undefined;
 let unlinkSymbol: PathFn | undefined;
@@ -193,6 +196,9 @@ function loadPosixSymbols(): void {
       exclusiveRenameSymbol = process.platform === "darwin"
         ? (from, to) => (symbols as { renamex_np: (from: Buffer, to: Buffer, flags: number) => number }).renamex_np(cString(from), cString(to), RENAME_EXCL)
         : (from, to) => (symbols as { renameat2: (olddir: number, from: Buffer, newdir: number, to: Buffer, flags: number) => number }).renameat2(AT_FDCWD, cString(from), AT_FDCWD, cString(to), RENAME_NOREPLACE);
+      swapRenameSymbol = process.platform === "darwin"
+        ? (from, to) => (symbols as { renamex_np: (from: Buffer, to: Buffer, flags: number) => number }).renamex_np(cString(from), cString(to), RENAME_SWAP)
+        : (from, to) => (symbols as { renameat2: (olddir: number, from: Buffer, newdir: number, to: Buffer, flags: number) => number }).renameat2(AT_FDCWD, cString(from), AT_FDCWD, cString(to), RENAME_EXCHANGE);
       cloneFdToPathSymbol = process.platform === "darwin"
         ? (fd, to) => (symbols as { fclonefileat: (fd: number, destDir: number, dest: Buffer, flags: number) => number }).fclonefileat(fd, AT_FDCWD_DARWIN, cString(to), 0)
         : undefined;
@@ -210,6 +216,11 @@ function loadPosixSymbols(): void {
 function exclusiveRename(from: string, to: string): boolean {
   loadPosixSymbols();
   return exclusiveRenameSymbol!(from, to) === 0;
+}
+
+function swapRename(from: string, to: string): boolean {
+  loadPosixSymbols();
+  return Boolean(swapRenameSymbol && swapRenameSymbol(from, to) === 0);
 }
 
 function cloneOpenedInode(fd: number, to: string, kind: "file" | "dir"): boolean {
@@ -403,7 +414,7 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
     try {
       if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
     } catch {
-      /* symlink fds cannot be truncated; bind the following unlink to the opened inode */
+      /* symlink fds cannot be truncated */
     }
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
     if (unlinkSymbol!(cString(selected)) !== 0) return false;
@@ -732,14 +743,12 @@ async function publishJournal(temporary: string, tmpIdentity: NodeIdentity): Pro
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_PUBLISH_SWAP")) {
     await plantForeignDestination(journalPath);
   }
-  if (!await unlinkSameNode(journalPath, journalPathIdentity)) {
+  const confirmed = await liveNodeIdentity(journalPath);
+  if (!confirmed || !sameNode(confirmed, journalPathIdentity) || !await liveNodeIdentity(temporary)) {
     throw new Error("Refusing to overwrite unverified installer journal");
   }
-  try {
-    await link(temporary, journalPath);
-  } catch (error) {
-    if (isAlreadyExists(error)) throw new Error("Refusing to overwrite unverified installer journal");
-    throw error;
+  if (!swapRename(temporary, journalPath)) {
+    throw new Error("Refusing to overwrite unverified installer journal");
   }
   const published = await liveNodeIdentity(journalPath);
   if (!published || !sameNode(published, tmpIdentity)) {
@@ -759,40 +768,10 @@ async function writeJournal(journal: InstallJournal): Promise<void> {
   }
   await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
   await requireVerifiedDirectory(installerStateDir);
-  const payload = `${JSON.stringify(journal, null, 2)}\n`;
-  const live = await liveNodeIdentity(journalPath);
-  if (!live) {
-    journalPathIdentity = await writeExclusiveRegularFile(journalPath, payload, 0o600);
-    journalTmpIdentity = undefined;
-    journalTmpPath = undefined;
-    return;
-  }
-  if (!journalPathIdentity || !sameNode(live, journalPathIdentity)) {
-    throw new Error("Refusing to overwrite unverified installer journal");
-  }
-  if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_PUBLISH_SWAP")) {
-    await plantForeignDestination(journalPath);
-  }
-  let fd: number | undefined;
-  try {
-    fd = openIdentityFd(journalPath, "file");
-  } catch {
-    throw new Error("Refusing to overwrite unverified installer journal");
-  }
-  try {
-    if (!fdMatches(fd, journalPathIdentity, "file")) {
-      throw new Error("Refusing to overwrite unverified installer journal");
-    }
-    ftruncateSync(fd, 0);
-    writeSync(fd, payload);
-    if (!pathStillExpected(journalPath, journalPathIdentity)) {
-      throw new Error("Refusing to publish installer journal after identity drift");
-    }
-  } finally {
-    closeSync(fd);
-  }
-  journalTmpIdentity = undefined;
-  journalTmpPath = undefined;
+  const temporary = join(installerStateDir, `t3-auto-guardian.journal.${randomUUID()}.tmp`);
+  journalTmpPath = temporary;
+  journalTmpIdentity = await writeExclusiveRegularFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, 0o600);
+  await publishJournal(temporary, journalTmpIdentity);
 }
 
 async function readJournalFrom(path: string): Promise<InstallJournal | undefined> {
@@ -803,7 +782,7 @@ async function readJournalFrom(path: string): Promise<InstallJournal | undefined
     }
     return parsed;
   } catch (error) {
-    if (isMissing(error)) return undefined;
+    if (isMissing(error) || error instanceof SyntaxError) return undefined;
     throw error;
   }
 }
@@ -1237,7 +1216,13 @@ async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
 async function recoverJournalAt(path: string): Promise<void> {
   const identity = await liveNodeIdentity(path);
   const journal = await readJournalFrom(path);
-  if (!journal) return;
+  if (!journal) {
+    const leftover = await optionalLstat(path);
+    if (leftover && leftover.isFile() && !leftover.isSymbolicLink()) {
+      await unlink(path).catch(() => undefined);
+    }
+    return;
+  }
   if (journal.phase !== "complete") {
     await rollbackFromJournal(journal);
     if (journal.serviceWasLoaded) await activate();
