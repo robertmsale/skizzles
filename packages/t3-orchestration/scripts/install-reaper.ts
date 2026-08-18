@@ -320,28 +320,6 @@ async function activate(): Promise<void> {
   if (kickstart.exitCode !== 0) throw new Error(`Could not start ${REAPER_LAUNCH_AGENT_LABEL}: ${kickstart.stderr.toString().trim()}`);
 }
 
-async function preflightLocalReaperLaunch(): Promise<void> {
-  const saved = {
-    transport: process.env.T3_WORKTREE_REAPER_TRANSPORT,
-    url: process.env.T3_ORCHESTRATION_REMOTE_URL,
-    config: process.env.T3_ORCHESTRATION_REMOTE_CONFIG,
-  };
-  process.env.T3_WORKTREE_REAPER_TRANSPORT = "local";
-  delete process.env.T3_ORCHESTRATION_REMOTE_URL;
-  delete process.env.T3_ORCHESTRATION_REMOTE_CONFIG;
-  try {
-    const { requireLocalReaperTransport } = await import("../src/remote-config.ts");
-    await requireLocalReaperTransport();
-  } finally {
-    if (saved.transport === undefined) delete process.env.T3_WORKTREE_REAPER_TRANSPORT;
-    else process.env.T3_WORKTREE_REAPER_TRANSPORT = saved.transport;
-    if (saved.url === undefined) delete process.env.T3_ORCHESTRATION_REMOTE_URL;
-    else process.env.T3_ORCHESTRATION_REMOTE_URL = saved.url;
-    if (saved.config === undefined) delete process.env.T3_ORCHESTRATION_REMOTE_CONFIG;
-    else process.env.T3_ORCHESTRATION_REMOTE_CONFIG = saved.config;
-  }
-}
-
 async function stageInstall(runtimeVersion: string, temporaryRoot: string): Promise<Receipt> {
   await lstat(join(runtimeSource, cliName));
   const stageRuntime = join(temporaryRoot, "runtime");
@@ -395,7 +373,6 @@ async function rollbackTransaction(
 }
 
 async function install(runtimeVersion: string, previous: Receipt | undefined): Promise<void> {
-  await preflightLocalReaperLaunch();
   const destinationLinks = expectedLinks();
   const destinationFiles = expectedFiles();
   for (const path of [...destinationLinks.map((entry) => entry.path), ...destinationFiles]) {

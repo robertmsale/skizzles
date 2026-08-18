@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectPathIdentity } from "../src/worktree-reaper-lease.ts";
@@ -1219,6 +1219,46 @@ command = ["rm", "-rf", ".dart_tool"]
 });
 
 describe("identity-bound cleaner launch", () => {
+  test("invokes the configured flutter cleaner against the approved artifact inode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
+    const directory = join(root, "crate");
+    const artifactDir = join(directory, "build");
+    const bin = join(root, "bin");
+    await mkdir(artifactDir, { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(directory, "pubspec.yaml"), "name: app\nflutter:\n");
+    await writeFile(join(artifactDir, "sentinel.txt"), "planned-inode\n");
+    await writeFile(join(bin, "flutter"), `#!/bin/sh
+printf invoked > "${join(directory, "flutter.invoked")}"
+exit 0
+`);
+    await chmod(join(bin, "flutter"), 0o755);
+    const directoryIdentity = await inspectPathIdentity(directory);
+    const artifactIdentity = await inspectPathIdentity(artifactDir);
+    expect(directoryIdentity).toBeDefined();
+    expect(artifactIdentity).toBeDefined();
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath ?? "/usr/bin:/bin"}`;
+    try {
+      await runIdentityBoundClean(
+        ["flutter", "clean"],
+        directory,
+        {
+          directoryIdentity: directoryIdentity!,
+          artifactDir,
+          artifactName: "build",
+          artifactIdentity: artifactIdentity!,
+        },
+      );
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+    expect(await Bun.file(join(directory, "flutter.invoked")).text()).toBe("invoked");
+    expect(await Bun.file(join(artifactDir, "sentinel.txt")).text()).toBe("planned-inode\n");
+    await rm(root, { recursive: true, force: true });
+  });
+
   test("runs the cleaner when directory and artifact inodes still match", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
     const directory = join(root, "crate");

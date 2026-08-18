@@ -923,13 +923,13 @@ export function taskListEnumerationTruncated(moreRecent: unknown): boolean {
 
 const IDENTITY_BOUND_CLEAN_EVAL = `
 const spec = JSON.parse(process.env.T3_REAPER_CLEAN_SPEC ?? "null");
-if (!spec) {
+if (!spec || !Array.isArray(spec.command) || spec.command.length === 0) {
   process.stderr.write("clean refused: missing identity-bound launch spec\\n");
   process.exit(76);
 }
-const { fstatSync, lstatSync, readdirSync, rmdirSync, unlinkSync } = await import("node:fs");
+const { fstatSync, lstatSync, readdirSync } = await import("node:fs");
 const { lstat, writeFile } = await import("node:fs/promises");
-const { dlopen } = await import("bun:ffi");
+const { dlopen, ptr } = await import("bun:ffi");
 const sameIdentity = (info, dev, ino) => info && BigInt(info.dev) === BigInt(dev) && BigInt(info.ino) === BigInt(ino);
 const cwd = await lstat(".", { bigint: true });
 if (!sameIdentity(cwd, spec.directoryDev, spec.directoryIno)) {
@@ -937,13 +937,21 @@ if (!sameIdentity(cwd, spec.directoryDev, spec.directoryIno)) {
   process.exit(77);
 }
 let artifact;
-try { artifact = fstatSync(3, { bigint: true }); } catch {
+let directory;
+try {
+  artifact = fstatSync(3, { bigint: true });
+  directory = fstatSync(4, { bigint: true });
+} catch {
   process.stderr.write("artifact directory was replaced after planning\\n");
   process.exit(78);
 }
 if (!artifact.isDirectory() || !sameIdentity(artifact, spec.artifactDev, spec.artifactIno)) {
   process.stderr.write("artifact directory was replaced after planning\\n");
   process.exit(78);
+}
+if (!directory.isDirectory() || !sameIdentity(directory, spec.directoryDev, spec.directoryIno)) {
+  process.stderr.write("clean directory was replaced after planning\\n");
+  process.exit(77);
 }
 if (spec.hookReadyPath && spec.hookDonePath) {
   await writeFile(spec.hookReadyPath, "ready\\n");
@@ -954,30 +962,48 @@ if (spec.hookReadyPath && spec.hookDonePath) {
   }
 }
 const libName = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
-const libc = dlopen(libName, { fchdir: { args: ["i32"], returns: "i32" } });
-if (libc.symbols.fchdir(3) !== 0) {
-  process.stderr.write("could not bind cleaner to approved artifact inode\\n");
+const libc = dlopen(libName, {
+  fchdir: { args: ["i32"], returns: "i32" },
+  execvp: { args: ["ptr", "ptr"], returns: "i32" },
+});
+const bindFd = spec.command[0] === "flutter" ? 4 : 3;
+if (libc.symbols.fchdir(bindFd) !== 0) {
+  process.stderr.write("could not bind cleaner to approved inode\\n");
   process.exit(78);
 }
-const still = fstatSync(3, { bigint: true });
-if (!sameIdentity(still, spec.artifactDev, spec.artifactIno)) {
+const stillArtifact = fstatSync(3, { bigint: true });
+const stillDirectory = fstatSync(4, { bigint: true });
+if (!sameIdentity(stillArtifact, spec.artifactDev, spec.artifactIno)) {
   process.stderr.write("artifact directory was replaced after planning\\n");
   process.exit(78);
 }
-const remove = (rel) => {
-  const st = lstatSync(rel);
-  if (st.isDirectory() && !st.isSymbolicLink()) {
-    for (const name of readdirSync(rel)) {
-      if (name === "." || name === "..") continue;
-      remove(rel === "." ? name : rel + "/" + name);
-    }
-    if (rel !== ".") rmdirSync(rel);
-  } else {
-    unlinkSync(rel);
+if (!sameIdentity(stillDirectory, spec.directoryDev, spec.directoryIno)) {
+  process.stderr.write("clean directory was replaced after planning\\n");
+  process.exit(77);
+}
+if (spec.command[0] === "flutter") {
+  const named = lstatSync(spec.artifactName, { bigint: true });
+  if (!named.isDirectory() || !sameIdentity(named, spec.artifactDev, spec.artifactIno)) {
+    process.stderr.write("artifact directory was replaced after planning\\n");
+    process.exit(78);
   }
-};
-remove(".");
-process.exit(0);
+}
+const argv = spec.command[0] === "cargo"
+  ? ["cargo", "clean", "--target-dir", "."]
+  : spec.command[0] === "rm"
+    ? (() => {
+      const flags = spec.command.slice(1, -1);
+      const names = readdirSync(".").filter((name) => name !== "." && name !== "..");
+      return ["rm", ...flags, ...(names.length > 0 ? names : ["--"])];
+    })()
+    : spec.command;
+const bins = argv.map((value) => Buffer.from(String(value) + "\\0"));
+const argvPtrs = new BigUint64Array(bins.length + 1);
+for (let i = 0; i < bins.length; i++) argvPtrs[i] = BigInt(ptr(bins[i]));
+argvPtrs[bins.length] = 0n;
+libc.symbols.execvp(ptr(bins[0]), ptr(argvPtrs));
+process.stderr.write("could not execute " + argv[0] + "\\n");
+process.exit(127);
 `;
 
 export async function runIdentityBoundClean(
@@ -1016,6 +1042,8 @@ export async function runIdentityBoundClean(
       const env = { ...Bun.env };
       if (command[0] === "cargo") delete env.CARGO_TARGET_DIR;
       env.T3_REAPER_CLEAN_SPEC = JSON.stringify({
+        command,
+        artifactName: binding.artifactName,
         hookReadyPath,
         hookDonePath,
         directoryDev: String(binding.directoryIdentity.dev),
@@ -1026,7 +1054,7 @@ export async function runIdentityBoundClean(
       const child = spawn(process.execPath, ["--eval", IDENTITY_BOUND_CLEAN_EVAL], {
         cwd: directory,
         env,
-        stdio: ["ignore", "pipe", "pipe", artifactHandle.fd],
+        stdio: ["ignore", "pipe", "pipe", artifactHandle.fd, directoryHandle.fd],
       });
       const abort = () => {
         try { child.kill(); } catch { /* already exited */ }
