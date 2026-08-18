@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectPathIdentity } from "../src/worktree-reaper-lease.ts";
 import {
-  bindCleanerToHeldArtifact,
   cleanSettledWorktrees,
   createDefaultReaperDependencies,
   discoverCleanTargets,
@@ -1220,26 +1219,19 @@ command = ["rm", "-rf", ".dart_tool"]
 });
 
 describe("identity-bound cleaner launch", () => {
-  test("rewrites allowed cleaners onto the held artifact name", () => {
-    expect(bindCleanerToHeldArtifact(["cargo", "clean", "--target-dir", "target"], "target", ".held")).toEqual([
-      "cargo", "clean", "--target-dir", ".held",
-    ]);
-    expect(bindCleanerToHeldArtifact(["rm", "-rf", "target"], "target", ".held")).toEqual(["rm", "-rf", ".held"]);
-    expect(bindCleanerToHeldArtifact(["flutter", "clean"], "build", ".held")).toEqual(["rm", "-rf", ".held"]);
-  });
-
   test("runs the cleaner when directory and artifact inodes still match", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
     const directory = join(root, "crate");
     const artifactDir = join(directory, "target");
     await mkdir(artifactDir, { recursive: true });
     await writeFile(join(directory, "Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\n");
+    await writeFile(join(artifactDir, "approved.txt"), "planned-inode\n");
     const directoryIdentity = await inspectPathIdentity(directory);
     const artifactIdentity = await inspectPathIdentity(artifactDir);
     expect(directoryIdentity).toBeDefined();
     expect(artifactIdentity).toBeDefined();
     await runIdentityBoundClean(
-      [process.execPath, "--eval", "await Bun.write('launched', 'yes')"],
+      ["rm", "-rf", "target"],
       directory,
       {
         directoryIdentity: directoryIdentity!,
@@ -1248,7 +1240,8 @@ describe("identity-bound cleaner launch", () => {
         artifactIdentity: artifactIdentity!,
       },
     );
-    expect(await Bun.file(join(directory, "launched")).text()).toBe("yes");
+    expect(await Bun.file(join(artifactDir, "approved.txt")).exists()).toBe(false);
+    expect(await Bun.file(join(directory, "Cargo.toml")).exists()).toBe(true);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -1343,7 +1336,7 @@ describe("identity-bound cleaner launch", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  test("does not clean a replacement installed after artifact lstat and before operand resolve", async () => {
+  test("does not clean a replacement rebound onto the verified artifact name before the cleaner runs", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
     const directory = join(root, "crate");
     const artifactDir = join(directory, "target");
@@ -1354,6 +1347,7 @@ describe("identity-bound cleaner launch", () => {
     const artifactIdentity = await inspectPathIdentity(artifactDir);
     expect(directoryIdentity).toBeDefined();
     expect(artifactIdentity).toBeDefined();
+    const approvedAside = join(root, "approved-aside");
     await runIdentityBoundClean(
       ["rm", "-rf", "target"],
       directory,
@@ -1366,15 +1360,26 @@ describe("identity-bound cleaner launch", () => {
       undefined,
       {
         afterArtifactBound: async () => {
-          await mkdir(artifactDir, { recursive: true });
+          const names = await readdir(directory);
+          await rename(artifactDir, approvedAside);
+          await mkdir(artifactDir);
           await writeFile(join(artifactDir, "replacement.txt"), "unapproved-inode\n");
+          for (const name of names.filter((entry) => entry.startsWith(".t3-reaper-held-"))) {
+            const held = join(directory, name);
+            const heldAside = join(root, `held-aside-${name}`);
+            await rename(held, heldAside);
+            await mkdir(held);
+            await writeFile(join(held, "held-replacement.txt"), "unapproved-held\n");
+          }
         },
       },
     );
     expect(await Bun.file(join(artifactDir, "replacement.txt")).text()).toBe("unapproved-inode\n");
-    expect(await Bun.file(join(artifactDir, "approved.txt")).exists()).toBe(false);
+    expect(await Bun.file(join(approvedAside, "approved.txt")).exists()).toBe(false);
     const leftoverHeld = (await readdir(directory)).filter((name) => name.startsWith(".t3-reaper-held-"));
-    expect(leftoverHeld).toEqual([]);
+    for (const name of leftoverHeld) {
+      expect(await Bun.file(join(directory, name, "held-replacement.txt")).exists()).toBe(true);
+    }
     await rm(root, { recursive: true, force: true });
   });
 });

@@ -240,7 +240,6 @@ const PATH_SELECTOR_ENV = new Set([
   "T3_WORKTREE_REAPER_CONFIG",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
-  "T3_ORCHESTRATION_REMOTE_CONFIG",
 ]);
 
 export function canonicalizeLaunchSelector(name: string, value: string, cwd = process.cwd()): string {
@@ -258,8 +257,6 @@ function plistFor(cliPath: string, bunPath: string): string {
     "T3_WORKTREE_REAPER_CONFIG",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
-    "T3_ORCHESTRATION_REMOTE_URL",
-    "T3_ORCHESTRATION_REMOTE_CONFIG",
   ].flatMap((name) => {
     const value = process.env[name];
     if (!value) return [];
@@ -273,6 +270,7 @@ function plistFor(cliPath: string, bunPath: string): string {
   <key>ProgramArguments</key><array>
     <string>/usr/bin/env</string><string>-i</string>
     <string>HOME=${escapeXml(home!)}</string><string>PATH=${escapeXml(launchPath)}</string>
+    <string>T3_WORKTREE_REAPER_TRANSPORT=local</string>
     ${inheritedConfig.join("")}
     <string>${escapeXml(bunPath)}</string><string>${escapeXml(cliPath)}</string>
   </array>
@@ -322,6 +320,28 @@ async function activate(): Promise<void> {
   if (kickstart.exitCode !== 0) throw new Error(`Could not start ${REAPER_LAUNCH_AGENT_LABEL}: ${kickstart.stderr.toString().trim()}`);
 }
 
+async function preflightLocalReaperLaunch(): Promise<void> {
+  const saved = {
+    transport: process.env.T3_WORKTREE_REAPER_TRANSPORT,
+    url: process.env.T3_ORCHESTRATION_REMOTE_URL,
+    config: process.env.T3_ORCHESTRATION_REMOTE_CONFIG,
+  };
+  process.env.T3_WORKTREE_REAPER_TRANSPORT = "local";
+  delete process.env.T3_ORCHESTRATION_REMOTE_URL;
+  delete process.env.T3_ORCHESTRATION_REMOTE_CONFIG;
+  try {
+    const { requireLocalReaperTransport } = await import("../src/remote-config.ts");
+    await requireLocalReaperTransport();
+  } finally {
+    if (saved.transport === undefined) delete process.env.T3_WORKTREE_REAPER_TRANSPORT;
+    else process.env.T3_WORKTREE_REAPER_TRANSPORT = saved.transport;
+    if (saved.url === undefined) delete process.env.T3_ORCHESTRATION_REMOTE_URL;
+    else process.env.T3_ORCHESTRATION_REMOTE_URL = saved.url;
+    if (saved.config === undefined) delete process.env.T3_ORCHESTRATION_REMOTE_CONFIG;
+    else process.env.T3_ORCHESTRATION_REMOTE_CONFIG = saved.config;
+  }
+}
+
 async function stageInstall(runtimeVersion: string, temporaryRoot: string): Promise<Receipt> {
   await lstat(join(runtimeSource, cliName));
   const stageRuntime = join(temporaryRoot, "runtime");
@@ -338,6 +358,12 @@ async function stageInstall(runtimeVersion: string, temporaryRoot: string): Prom
   const plist = plistFor(join(runtimeRoot, cliName), launchPath);
   if (plist.includes(ORCHESTRATION_LAUNCH_AGENT_LABEL)) {
     throw new Error("Refusing to write a reaper plist that mentions the orchestration daemon label");
+  }
+  if (plist.includes("T3_ORCHESTRATION_REMOTE_URL=") || plist.includes("T3_ORCHESTRATION_REMOTE_CONFIG=")) {
+    throw new Error("Refusing to install a reaper LaunchAgent in remote t3ctl mode");
+  }
+  if (!plist.includes("T3_WORKTREE_REAPER_TRANSPORT=local")) {
+    throw new Error("Refusing to install a reaper LaunchAgent without an explicit local transport pin");
   }
   await writeFile(stagedLaunchAgent, plist, { mode: 0o644 });
   const receipt: Receipt = {
@@ -369,6 +395,7 @@ async function rollbackTransaction(
 }
 
 async function install(runtimeVersion: string, previous: Receipt | undefined): Promise<void> {
+  await preflightLocalReaperLaunch();
   const destinationLinks = expectedLinks();
   const destinationFiles = expectedFiles();
   for (const path of [...destinationLinks.map((entry) => entry.path), ...destinationFiles]) {

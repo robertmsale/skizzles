@@ -202,6 +202,8 @@ async function configuredRemoteUrl() {
   }
 }
 async function requireLocalReaperTransport() {
+  if (process.env.T3_WORKTREE_REAPER_TRANSPORT?.trim() === "local")
+    return;
   const explicit = process.env.T3_ORCHESTRATION_REMOTE_CONFIG?.trim();
   const path = resolveRemoteConfigPath();
   if (explicit) {
@@ -1150,10 +1152,10 @@ __export(exports_worktree_reaper, {
   defaultStatePath: () => defaultStatePath,
   createDefaultReaperDependencies: () => createDefaultReaperDependencies,
   cleanSettledWorktrees: () => cleanSettledWorktrees,
-  bindCleanerToHeldArtifact: () => bindCleanerToHeldArtifact,
   REAPER_LAUNCH_AGENT_LABEL: () => REAPER_LAUNCH_AGENT_LABEL,
   ORCHESTRATION_LAUNCH_AGENT_LABEL: () => ORCHESTRATION_LAUNCH_AGENT_LABEL
 });
+import { spawn } from "child_process";
 import { lstat as lstat2, mkdir as mkdir3, open as open2, readdir, readFile as readFile3, realpath as realpath2, rm as rm3, writeFile as writeFile3 } from "fs/promises";
 import { dirname as dirname2, join as join5, resolve as resolve3 } from "path";
 import { homedir as homedir3 } from "os";
@@ -1308,24 +1310,6 @@ function isFlutterPubspec(text) {
 }
 function sameFsIdentity(left, right) {
   return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
-}
-function bindCleanerToHeldArtifact(command, artifactName, heldName) {
-  if (!artifactName || artifactName.includes("/") || artifactName.includes("\\") || artifactName.includes("..")) {
-    throw new Error("clean refused: artifact name is not a single directory");
-  }
-  if (!heldName || heldName.includes("/") || heldName.includes("\\") || heldName.includes("..")) {
-    throw new Error("clean refused: held artifact name is not a single directory");
-  }
-  if (command[0] === "cargo") {
-    return ["cargo", "clean", "--target-dir", heldName];
-  }
-  if (command[0] === "rm") {
-    return [...command.slice(0, -1), heldName];
-  }
-  if (command[0] === "flutter") {
-    return ["rm", "-rf", heldName];
-  }
-  return command.map((argument) => argument === artifactName ? heldName : argument);
 }
 async function walkDirectories(worktree, deps) {
   const directories = [worktree];
@@ -1905,8 +1889,6 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
   if (!binding.artifactName.trim()) {
     throw new Error("clean refused: missing artifact identity binding");
   }
-  const heldName = `.t3-reaper-held-${process.pid}-${crypto.randomUUID()}`;
-  const boundCommand = bindCleanerToHeldArtifact(command, binding.artifactName, heldName);
   const directoryHandle = await open2(directory, "r");
   try {
     const directoryStat = await directoryHandle.stat({ bigint: true });
@@ -1934,9 +1916,6 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
       if (command[0] === "cargo")
         delete env.CARGO_TARGET_DIR;
       env.T3_REAPER_CLEAN_SPEC = JSON.stringify({
-        command: boundCommand,
-        artifactName: binding.artifactName,
-        heldName,
         hookReadyPath,
         hookDonePath,
         directoryDev: String(binding.directoryIdentity.dev),
@@ -1944,18 +1923,29 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
         artifactDev: String(binding.artifactIdentity.dev),
         artifactIno: String(binding.artifactIdentity.ino)
       });
-      const proc = Bun.spawn([process.execPath, "--eval", IDENTITY_BOUND_CLEAN_EVAL], {
+      const child = spawn(process.execPath, ["--eval", IDENTITY_BOUND_CLEAN_EVAL], {
         cwd: directory,
         env,
-        stdout: "pipe",
-        stderr: "pipe"
+        stdio: ["ignore", "pipe", "pipe", artifactHandle.fd]
       });
       const abort = () => {
         try {
-          proc.kill();
+          child.kill();
         } catch {}
       };
       signal?.addEventListener("abort", abort, { once: true });
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      const exited = new Promise((resolve4, reject) => {
+        child.once("error", reject);
+        child.once("close", (code) => resolve4(code ?? 1));
+      });
       try {
         if (hooks.afterArtifactBound && hookReadyPath && hookDonePath) {
           const ready = await Promise.race([
@@ -1968,7 +1958,7 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
               }
               return true;
             })(),
-            proc.exited.then(() => false)
+            exited.then(() => false)
           ]);
           if (ready) {
             await hooks.afterArtifactBound();
@@ -1976,7 +1966,7 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
 `);
           }
         }
-        const exitCode = await proc.exited;
+        const exitCode = await exited;
         if (signal?.aborted)
           throw new Error("clean aborted: task resumed");
         if (exitCode === 77)
@@ -1984,8 +1974,6 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
         if (exitCode === 78)
           throw new Error(`artifact directory ${binding.artifactDir} was replaced after planning`);
         if (exitCode !== 0) {
-          const stderr = await new Response(proc.stderr).text();
-          const stdout = await new Response(proc.stdout).text();
           throw new Error(`${command.join(" ")} failed in ${directory}: ${stderr.trim() || stdout.trim() || `exit ${exitCode}`}`);
         }
       } finally {
@@ -2137,31 +2125,25 @@ function formatReaperLogs(report) {
 }
 var REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper", ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon", SKIP_DIRECTORY_NAMES, IDENTITY_BOUND_CLEAN_EVAL = `
 const spec = JSON.parse(process.env.T3_REAPER_CLEAN_SPEC ?? "null");
-if (!spec || !Array.isArray(spec.command) || typeof spec.artifactName !== "string" || typeof spec.heldName !== "string") {
+if (!spec) {
   process.stderr.write("clean refused: missing identity-bound launch spec\\n");
   process.exit(76);
 }
-const { lstat, rename, writeFile } = await import("node:fs/promises");
-const sameIdentity = (info, dev, ino) => info && info.dev === BigInt(dev) && info.ino === BigInt(ino);
+const { fstatSync, lstatSync, readdirSync, rmdirSync, unlinkSync } = await import("node:fs");
+const { lstat, writeFile } = await import("node:fs/promises");
+const { dlopen } = await import("bun:ffi");
+const sameIdentity = (info, dev, ino) => info && BigInt(info.dev) === BigInt(dev) && BigInt(info.ino) === BigInt(ino);
 const cwd = await lstat(".", { bigint: true });
 if (!sameIdentity(cwd, spec.directoryDev, spec.directoryIno)) {
   process.stderr.write("clean directory was replaced after planning\\n");
   process.exit(77);
 }
-const artifact = await lstat(spec.artifactName, { bigint: true });
-if (!sameIdentity(artifact, spec.artifactDev, spec.artifactIno)) {
+let artifact;
+try { artifact = fstatSync(3, { bigint: true }); } catch {
   process.stderr.write("artifact directory was replaced after planning\\n");
   process.exit(78);
 }
-try {
-  await rename(spec.artifactName, spec.heldName);
-} catch {
-  process.stderr.write("artifact directory was replaced after planning\\n");
-  process.exit(78);
-}
-const held = await lstat(spec.heldName, { bigint: true }).catch(() => undefined);
-if (!sameIdentity(held, spec.artifactDev, spec.artifactIno)) {
-  try { await rename(spec.heldName, spec.artifactName); } catch { /* destination may exist */ }
+if (!artifact.isDirectory() || !sameIdentity(artifact, spec.artifactDev, spec.artifactIno)) {
   process.stderr.write("artifact directory was replaced after planning\\n");
   process.exit(78);
 }
@@ -2173,21 +2155,31 @@ if (spec.hookReadyPath && spec.hookDonePath) {
     try { await access(spec.hookDonePath); break; } catch { await Bun.sleep(5); }
   }
 }
-const env = { ...process.env };
-delete env.T3_REAPER_CLEAN_SPEC;
-let exitCode = 0;
-try {
-  const proc = Bun.spawn(spec.command, { stdout: "inherit", stderr: "inherit", env });
-  exitCode = await proc.exited;
-} finally {
-  try {
-    const leftover = await lstat(spec.heldName, { bigint: true });
-    if (sameIdentity(leftover, spec.artifactDev, spec.artifactIno)) {
-      try { await rename(spec.heldName, spec.artifactName); } catch { /* replacement occupies the public name */ }
-    }
-  } catch { /* held name already removed by the cleaner */ }
+const libName = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
+const libc = dlopen(libName, { fchdir: { args: ["i32"], returns: "i32" } });
+if (libc.symbols.fchdir(3) !== 0) {
+  process.stderr.write("could not bind cleaner to approved artifact inode\\n");
+  process.exit(78);
 }
-process.exit(exitCode);
+const still = fstatSync(3, { bigint: true });
+if (!sameIdentity(still, spec.artifactDev, spec.artifactIno)) {
+  process.stderr.write("artifact directory was replaced after planning\\n");
+  process.exit(78);
+}
+const remove = (rel) => {
+  const st = lstatSync(rel);
+  if (st.isDirectory() && !st.isSymbolicLink()) {
+    for (const name of readdirSync(rel)) {
+      if (name === "." || name === "..") continue;
+      remove(rel === "." ? name : rel + "/" + name);
+    }
+    if (rel !== ".") rmdirSync(rel);
+  } else {
+    unlinkSync(rel);
+  }
+};
+remove(".");
+process.exit(0);
 `;
 var init_worktree_reaper = __esm(() => {
   init_worktree_reaper_config();

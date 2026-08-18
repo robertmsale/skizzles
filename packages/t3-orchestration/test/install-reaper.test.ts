@@ -99,26 +99,50 @@ describe("worktree reaper installer", () => {
     await expect(lstat(join(root, ".local/share/skizzles/t3-worktree-reaper"))).rejects.toThrow();
   });
 
-  test("preserves reaper config and remote-mode selectors in the LaunchAgent", async () => {
+  test("installs an explicit local LaunchAgent even from a remote-configured t3ctl environment", async () => {
     const root = `/tmp/t3-reaper-install-${crypto.randomUUID()}`;
     roots.push(root);
     const fixture = await launchctlFixture(root);
+    const remoteConfig = join(root, "remote.json");
+    await mkdir(root, { recursive: true });
+    await writeFile(remoteConfig, `${JSON.stringify({ url: "https://host.example.ts.net" })}\n`);
     const result = await installWithEnvironment(root, {
       ...fixture.environment,
       T3_WORKTREE_REAPER_CONFIG: "/tmp/host-reaper.toml",
       XDG_CONFIG_HOME: join(root, "xdg-config"),
       T3_ORCHESTRATION_REMOTE_URL: "https://host.example.ts.net",
-      T3_ORCHESTRATION_REMOTE_CONFIG: join(root, "remote.json"),
+      T3_ORCHESTRATION_REMOTE_CONFIG: remoteConfig,
     });
     expect(result.exitCode).toBe(0);
     const plist = await readFile(join(root, "Library/LaunchAgents/io.github.skizzles.t3-worktree-reaper.plist"), "utf8");
     expect(plist).toContain("T3_WORKTREE_REAPER_CONFIG=/tmp/host-reaper.toml");
     expect(plist).toContain(`XDG_CONFIG_HOME=${join(root, "xdg-config")}`);
-    expect(plist).toContain("T3_ORCHESTRATION_REMOTE_URL=https://host.example.ts.net");
-    expect(plist).toContain(`T3_ORCHESTRATION_REMOTE_CONFIG=${join(root, "remote.json")}`);
+    expect(plist).toContain("T3_WORKTREE_REAPER_TRANSPORT=local");
+    expect(plist).not.toContain("T3_ORCHESTRATION_REMOTE_URL=");
+    expect(plist).not.toContain("T3_ORCHESTRATION_REMOTE_CONFIG=");
+    const cli = Bun.spawn(["bun", resolve(import.meta.dir, "../src/worktree-reaper-cli.ts"), "--dry-run"], {
+      env: {
+        ...Bun.env,
+        HOME: root,
+        T3_HOME: join(root, ".t3"),
+        T3_WORKTREE_REAPER_TRANSPORT: "local",
+        T3_ORCHESTRATION_REMOTE_URL: "https://host.example.ts.net",
+        T3_ORCHESTRATION_REMOTE_CONFIG: remoteConfig,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      cli.exited,
+      new Response(cli.stdout).text(),
+      new Response(cli.stderr).text(),
+    ]);
+    expect(stderr).not.toContain("refuses remote t3ctl mode");
+    expect(`${stdout}${stderr}`).not.toContain("refuses remote t3ctl mode");
+    expect(exitCode === 0 || stderr.includes("t3-orchestrationd") || stderr.includes("socket") || stdout.includes("\"ok\"")).toBe(true);
   });
 
-  test("canonicalizes relative remote-config selectors against the install cwd", async () => {
+  test("canonicalizes relative reaper-config selectors against the install cwd without copying remote mode", async () => {
     const root = `/tmp/t3-reaper-install-${crypto.randomUUID()}`;
     roots.push(root);
     const fixture = await launchctlFixture(root);
@@ -129,9 +153,10 @@ describe("worktree reaper installer", () => {
     });
     expect(result.exitCode).toBe(0);
     const plist = await readFile(join(root, "Library/LaunchAgents/io.github.skizzles.t3-worktree-reaper.plist"), "utf8");
-    expect(plist).toContain(`T3_ORCHESTRATION_REMOTE_CONFIG=${resolve("remote.json")}`);
     expect(plist).toContain(`T3_WORKTREE_REAPER_CONFIG=${resolve("reaper.toml")}`);
-    expect(plist).not.toContain("T3_ORCHESTRATION_REMOTE_CONFIG=remote.json");
+    expect(plist).toContain("T3_WORKTREE_REAPER_TRANSPORT=local");
+    expect(plist).not.toContain("T3_ORCHESTRATION_REMOTE_CONFIG=");
+    expect(plist).not.toContain("T3_ORCHESTRATION_REMOTE_URL=");
   });
 
   test("refuses --client-only and unknown flags", async () => {

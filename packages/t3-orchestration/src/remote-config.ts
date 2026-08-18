@@ -45,6 +45,7 @@ export async function configuredRemoteUrl(): Promise<string | undefined> {
 }
 
 export async function requireLocalReaperTransport(): Promise<void> {
+  if (process.env.T3_WORKTREE_REAPER_TRANSPORT?.trim() === "local") return;
   const explicit = process.env.T3_ORCHESTRATION_REMOTE_CONFIG?.trim();
   const path = resolveRemoteConfigPath();
   if (explicit) {
