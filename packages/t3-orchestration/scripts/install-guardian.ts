@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, lstatSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readlinkSync, realpathSync } from "node:fs";
 import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
@@ -262,25 +262,125 @@ function requireStatLayout(sample: Buffer, samplePath: string): StatLayout {
   return statLayout;
 }
 
-function posixRenameIfInode(from: string, to: string, expected: NodeIdentity): boolean {
-  const source = rawLstat(from);
-  if (!source || source.dev !== expected.dev || source.ino !== expected.ino) return false;
-  if (rawLstat(to)) return false;
-  return exclusiveRename(from, to);
+function isLoopError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ELOOP");
 }
 
-function posixUnlinkIfInode(path: string, expected: NodeIdentity): boolean {
-  const live = rawLstat(path);
-  if (!live || live.dev !== expected.dev || live.ino !== expected.ino) return false;
-  if ((live.mode & S_IFMT) === S_IFDIR) return false;
-  return unlinkSymbol!(cString(path)) === 0;
+function openIdentityFd(path: string, kind: "file" | "dir"): number {
+  const flags = fsConstants as Record<string, number | undefined>;
+  const cloexec = flags.O_CLOEXEC ?? 0;
+  if (kind === "dir") {
+    return openSync(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW | cloexec);
+  }
+  try {
+    return openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | cloexec);
+  } catch (error) {
+    const symlinkFlag = process.platform === "darwin" ? (flags.O_SYMLINK ?? 0x200000) : (flags.O_PATH ?? 0);
+    if (isLoopError(error) && symlinkFlag) {
+      return openSync(path, fsConstants.O_RDONLY | symlinkFlag | cloexec);
+    }
+    throw error;
+  }
 }
 
-function posixRmdirIfInode(path: string, expected: NodeIdentity): boolean {
+function fdMatches(fd: number, expected: NodeIdentity, kind: "file" | "dir"): boolean {
+  const metadata = fstatSync(fd);
+  if (String(metadata.dev) !== expected.dev || String(metadata.ino) !== expected.ino) return false;
+  if (kind === "dir") return metadata.isDirectory();
+  return !metadata.isDirectory();
+}
+
+function fdLivePath(fd: number, fallbackPath: string, expected: NodeIdentity): string | undefined {
+  try {
+    if (process.platform === "darwin") return realpathSync(`/dev/fd/${fd}`);
+    const linked = readlinkSync(`/proc/self/fd/${fd}`);
+    if (linked && !linked.includes(" (deleted)")) return linked;
+  } catch {
+    /* symlink fds cannot always be realpath'd; use the original name only while it still names this inode */
+  }
+  return pathStillExpected(fallbackPath, expected) ? fallbackPath : undefined;
+}
+
+function pathStillExpected(path: string, expected: NodeIdentity): boolean {
   const live = rawLstat(path);
-  if (!live || live.dev !== expected.dev || live.ino !== expected.ino) return false;
-  if ((live.mode & S_IFMT) !== S_IFDIR) return false;
-  return rmdirSymbol!(cString(path)) === 0;
+  return Boolean(live && live.dev === expected.dev && live.ino === expected.ino);
+}
+
+async function posixRenameIfInode(from: string, to: string, expected: NodeIdentity): Promise<boolean> {
+  loadPosixSymbols();
+  const probe = rawLstat(from);
+  const kind: "file" | "dir" = probe && (probe.mode & S_IFMT) === S_IFDIR ? "dir" : "file";
+  let fd: number | undefined;
+  try {
+    fd = openIdentityFd(from, kind);
+  } catch {
+    return false;
+  }
+  try {
+    if (!fdMatches(fd, expected, kind)) return false;
+    if (rawLstat(to)) return false;
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RENAME_SWAP")) {
+      await plantForeignDestination(from);
+    }
+    if (rawLstat(to)) return false;
+    const sourcePath = pathStillExpected(from, expected) ? from : fdLivePath(fd, from, expected);
+    if (!sourcePath || rawLstat(to)) return false;
+    if (!exclusiveRename(sourcePath, to)) return false;
+    return pathStillExpected(to, expected) && !pathStillExpected(from, expected) && !rawLstat(from);
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise<boolean> {
+  loadPosixSymbols();
+  let fd: number | undefined;
+  try {
+    fd = openIdentityFd(path, "file");
+  } catch {
+    return false;
+  }
+  try {
+    if (!fdMatches(fd, expected, "file")) return false;
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP")) {
+      await plantForeignDestination(path);
+    }
+    const target = pathStillExpected(path, expected) ? path : fdLivePath(fd, path, expected);
+    if (!target) return false;
+    if (unlinkSymbol!(cString(target)) !== 0) return false;
+    return !pathStillExpected(path, expected) && !rawLstat(path);
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+async function posixRmdirIfInode(path: string, expected: NodeIdentity): Promise<boolean> {
+  loadPosixSymbols();
+  let fd: number | undefined;
+  try {
+    fd = openIdentityFd(path, "dir");
+  } catch {
+    return false;
+  }
+  try {
+    if (!fdMatches(fd, expected, "dir")) return false;
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP")) {
+      if (rawLstat(path)) await rename(path, `${path}.aside-${randomUUID()}`).catch(() => undefined);
+      await mkdir(path, { recursive: true, mode: 0o700 });
+    }
+    const target = pathStillExpected(path, expected) ? path : fdLivePath(fd, path, expected);
+    if (!target) return false;
+    if (rmdirSymbol!(cString(target)) !== 0) return false;
+    return !pathStillExpected(path, expected) && !rawLstat(path);
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function loadFlock(): (fd: number, operation: number) => number {
@@ -710,7 +810,7 @@ async function exclusiveRenameOwned(from: string, to: string, expected: NodeIden
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_RENAME_FROM_SWAP")) {
     await plantForeignDestination(from);
   }
-  return posixRenameIfInode(from, to, expected);
+  return await posixRenameIfInode(from, to, expected);
 }
 
 async function unlinkSameNode(path: string, expected: NodeIdentity): Promise<boolean> {
@@ -720,7 +820,7 @@ async function unlinkSameNode(path: string, expected: NodeIdentity): Promise<boo
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_UNLINK_INODE_SWAP")) {
     await plantForeignDestination(path);
   }
-  return posixUnlinkIfInode(path, expected);
+  return await posixUnlinkIfInode(path, expected);
 }
 
 async function rmdirSameNode(path: string, expected: NodeIdentity): Promise<boolean> {
@@ -732,7 +832,7 @@ async function rmdirSameNode(path: string, expected: NodeIdentity): Promise<bool
     if (await optionalLstat(path)) await rename(path, `${path}.aside-${randomUUID()}`).catch(() => undefined);
     await mkdir(path, { recursive: true, mode: 0o700 });
   }
-  return posixRmdirIfInode(path, expected);
+  return await posixRmdirIfInode(path, expected);
 }
 
 async function relocateVerifiedNode(
