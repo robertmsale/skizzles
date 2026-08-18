@@ -6,6 +6,7 @@ describe("guardian host config", () => {
     expect(defaultGuardianConfig()).toMatchObject({
       enabled: true,
       model: "codex-auto-review",
+      modelReasoningEffort: "low",
       dryRun: false,
       includeProjects: [],
       excludeProjects: [],
@@ -16,11 +17,14 @@ describe("guardian host config", () => {
     const config = parseGuardianConfig(`
 enabled = true
 dry_run = true
-model = "codex-auto-review"
+model = "gpt-5.6-luna"
+model_reasoning_effort = "low"
 poll_interval_ms = 2500
 include_projects = ["acme"]
 exclude_projects = ["/repo/acme-app"]
 `);
+    expect(config.model).toBe("gpt-5.6-luna");
+    expect(config.modelReasoningEffort).toBe("low");
     expect(config.dryRun).toBe(true);
     expect(config.pollIntervalMs).toBe(2500);
     expect(projectAllowed({ projectId: "p1", projectTitle: "acme" }, config)).toEqual({ allowed: true });
@@ -38,11 +42,15 @@ exclude_projects = ["/repo/acme-app"]
     expect(() => parseGuardianConfig("enabled = \"yes\"")).toThrow("enabled must be a boolean");
     expect(() => parseGuardianConfig("poll_interval_ms = 10")).toThrow("poll_interval_ms");
     expect(() => parseGuardianConfig("model = \"\"")).toThrow("model must be a non-empty string");
+    expect(() => parseGuardianConfig('model_reasoning_effort = ""')).toThrow("model_reasoning_effort must be a non-empty string");
+    expect(() => parseGuardianConfig('model_reasoning_effort = "lowe"')).toThrow("model_reasoning_effort must be one of");
   });
 
   test("rejects unknown top-level keys instead of live unrestricted defaults", () => {
     expect(() => parseGuardianConfig("dry_rnu = true")).toThrow("unknown keys: dry_rnu");
     expect(() => parseGuardianConfig('include_project = ["acme"]')).toThrow("unknown keys: include_project");
     expect(() => parseGuardianConfig("enabled = true\ndry_rnu = true\ninclude_project = [\"acme\"]")).toThrow("unknown keys");
+    expect(() => parseGuardianConfig('effort = "low"')).toThrow("unknown keys: effort");
+    expect(() => parseGuardianConfig('model_reasoning_effrot = "low"')).toThrow("unknown keys: model_reasoning_effrot");
   });
 });

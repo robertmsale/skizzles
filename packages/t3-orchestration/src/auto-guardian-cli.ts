@@ -66,6 +66,7 @@ try {
       enabled: config.enabled,
       dryRun: config.dryRun,
       model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
       pollIntervalMs: config.pollIntervalMs,
       configPath: loaded.path ?? defaultGuardianConfigPath(),
       statePath: defaultGuardianStatePath(),

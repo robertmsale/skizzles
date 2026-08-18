@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP, UNBOUND_ACCEPT_GAP } from "../src/approval-projection.ts";
 import { defaultGuardianConfig } from "../src/auto-guardian-config.ts";
 import {
+  buildCodexJudgeCommand,
   candidatesFromApprovalList,
   claimGuardianRequest,
   completeGuardianRequest,
@@ -23,6 +24,7 @@ import {
   type ClaimResult,
   type GuardianDependencies,
   type GuardianState,
+  type JudgeInput,
   type JudgeResult,
 } from "../src/auto-guardian.ts";
 
@@ -610,6 +612,29 @@ describe("guardian cycle", () => {
     expect(resolved).toEqual([]);
   });
 
+  test("passes configured model and reasoning effort to the live judge", async () => {
+    const judged: JudgeInput[] = [];
+    const { deps } = fixture({
+      judge: { ok: true, assessment: { outcome: "deny", rationale: "pin" }, raw: "" },
+    });
+    const original = deps.judge;
+    deps.judge = async (input) => {
+      judged.push(input);
+      return original(input);
+    };
+    const report = await runGuardianCycle(deps, {
+      ...defaultGuardianConfig(),
+      model: "gpt-5.6-luna",
+      modelReasoningEffort: "low",
+    });
+    expect(report.model).toBe("gpt-5.6-luna");
+    expect(report.modelReasoningEffort).toBe("low");
+    expect(judged).toEqual([expect.objectContaining({
+      model: "gpt-5.6-luna",
+      modelReasoningEffort: "low",
+    })]);
+  });
+
   test("malformed judge output fails closed as decline", async () => {
     const { deps, resolved } = fixture({
       judge: { ok: false, reason: "guardian assessment contained unknown keys: extra" },
@@ -1100,5 +1125,34 @@ describe("guardian lock and multi-process claims", () => {
     expect(judged[0]?.actionCwd).toBe(claimed[0]);
     expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
     expect(resolved[0]).toMatchObject({ decision: "decline" });
+  });
+});
+
+describe("codex judge command", () => {
+  test("pins model and reasoning effort without reading user Codex config", () => {
+    const argv = buildCodexJudgeCommand({
+      model: "gpt-5.6-luna",
+      modelReasoningEffort: "low",
+      policyPath: "/tmp/policy.md",
+      schemaPath: "/tmp/schema.json",
+      lastMessagePath: "/tmp/last-message.txt",
+      prompt: "judge this action",
+    });
+    expect(argv.slice(0, 9)).toEqual([
+      "codex",
+      "exec",
+      "--ephemeral",
+      "--skip-git-repo-check",
+      "--sandbox",
+      "read-only",
+      "--ignore-user-config",
+      "--color",
+      "never",
+    ]);
+    expect(argv).toContain("-m");
+    expect(argv[argv.indexOf("-m") + 1]).toBe("gpt-5.6-luna");
+    expect(argv).toContain(`model_reasoning_effort=${JSON.stringify("low")}`);
+    expect(argv).toContain(`model_instructions_file=${JSON.stringify("/tmp/policy.md")}`);
+    expect(argv).not.toContain("codex-auto-review");
   });
 });

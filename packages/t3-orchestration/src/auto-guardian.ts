@@ -86,6 +86,7 @@ export type GuardianCycleReport = {
   enabled: boolean;
   dryRun: boolean;
   model: string;
+  modelReasoningEffort: string;
   scanned: number;
   decisions: GuardianDecisionRecord[];
   error?: string;
@@ -127,6 +128,7 @@ export type HistoryResult = {
 
 export type JudgeInput = {
   model: string;
+  modelReasoningEffort: string;
   timeoutMs: number;
   lastUserMessage: string | null;
   action: PlannedAction;
@@ -395,7 +397,15 @@ export async function runGuardianCycle(
   let state = await dependencies.loadState();
   if (!config.enabled) {
     await dependencies.recordPoll(now, null);
-    return { ok: true, enabled: false, dryRun: config.dryRun, model: config.model, scanned: 0, decisions: [] };
+    return {
+      ok: true,
+      enabled: false,
+      dryRun: config.dryRun,
+      model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
+      scanned: 0,
+      decisions: [],
+    };
   }
 
   try {
@@ -603,6 +613,7 @@ export async function runGuardianCycle(
       const executionCwd = candidate.cwd ?? candidate.worktreePath;
       const judged = await dependencies.judge({
         model: config.model,
+        modelReasoningEffort: config.modelReasoningEffort,
         timeoutMs: config.judgeTimeoutMs,
         lastUserMessage,
         action: {
@@ -678,6 +689,7 @@ export async function runGuardianCycle(
       enabled: true,
       dryRun: config.dryRun,
       model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
       scanned: candidates.length,
       decisions,
     };
@@ -689,6 +701,7 @@ export async function runGuardianCycle(
       enabled: true,
       dryRun: config.dryRun,
       model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
       scanned: 0,
       decisions: [],
       error: message,
@@ -940,6 +953,38 @@ export async function reconcileGuardianRequests(
   });
 }
 
+export function buildCodexJudgeCommand(input: {
+  model: string;
+  modelReasoningEffort: string;
+  policyPath: string;
+  schemaPath: string;
+  lastMessagePath: string;
+  prompt: string;
+}): string[] {
+  return [
+    "codex",
+    "exec",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+    "--ignore-user-config",
+    "--color",
+    "never",
+    "-m",
+    input.model,
+    "-c",
+    `model_reasoning_effort=${JSON.stringify(input.modelReasoningEffort)}`,
+    "-c",
+    `model_instructions_file=${JSON.stringify(input.policyPath)}`,
+    "--output-schema",
+    input.schemaPath,
+    "--output-last-message",
+    input.lastMessagePath,
+    input.prompt,
+  ];
+}
+
 export async function runCodexJudge(input: JudgeInput): Promise<JudgeResult> {
   const which = await Bun.$`command -v codex`.nothrow().quiet();
   if (which.exitCode !== 0 || !which.text().trim()) {
@@ -956,26 +1001,14 @@ export async function runCodexJudge(input: JudgeInput): Promise<JudgeResult> {
       lastUserMessage: input.lastUserMessage,
       action: input.action,
     });
-    const process = Bun.spawn([
-      "codex",
-      "exec",
-      "--ephemeral",
-      "--skip-git-repo-check",
-      "--sandbox",
-      "read-only",
-      "--ignore-user-config",
-      "--color",
-      "never",
-      "-m",
-      input.model,
-      "-c",
-      `model_instructions_file=${JSON.stringify(policyPath)}`,
-      "--output-schema",
+    const process = Bun.spawn(buildCodexJudgeCommand({
+      model: input.model,
+      modelReasoningEffort: input.modelReasoningEffort,
+      policyPath,
       schemaPath,
-      "--output-last-message",
       lastMessagePath,
       prompt,
-    ], {
+    }), {
       cwd: input.cwd && input.cwd.trim() ? input.cwd : undefined,
       stdout: "pipe",
       stderr: "pipe",
