@@ -105,8 +105,10 @@ async function leftoverInstallGarbage(root: string): Promise<string[]> {
       name.includes("reclaim") ||
       name.startsWith(".t3-auto-guardian-transaction-") ||
       name.startsWith(".t3-auto-guardian-uninstall-") ||
+      name.startsWith(".t3-auto-guardian-husk-") ||
       name.startsWith(".staged-links") ||
-      name.endsWith(".cleared")
+      name.endsWith(".cleared") ||
+      /^t3-auto-guardian\.journal\.[^.]+\.tmp$/.test(name)
     ).sort();
   } catch {
     return [];

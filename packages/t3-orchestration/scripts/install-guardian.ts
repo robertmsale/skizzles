@@ -376,19 +376,13 @@ async function posixRenameIfInode(from: string, to: string, expected: NodeIdenti
   try {
     const selected = from;
     if (!selectedPathStillBound(selected, expected, kind, fd) || rawLstat(to)) return false;
-    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RENAME_SWAP")) {
+    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RENAME_SWAP");
+    if (swapped) {
       await rememberSelectedMutationPath("rename", selected);
       await plantForeignDestination(selected);
     }
     if (!cloneOpenedInode(fd, to, kind)) return false;
-    if (!selectedPathStillBound(selected, expected, kind, fd)) return false;
-    if (kind === "file") {
-      if (unlinkSymbol!(cString(selected)) !== 0) return false;
-    } else {
-      const tree = await snapshotOwnedTree(selected).catch(() => undefined);
-      if (!tree || !await disposeVerifiedDirectory(selected, expected, tree)) return false;
-    }
-    return Boolean(rawLstat(to)) && !pathStillExpected(selected, expected);
+    return !swapped && Boolean(rawLstat(to));
   } catch {
     return false;
   } finally {
@@ -407,7 +401,8 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP")) {
+    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP");
+    if (swapped) {
       await rememberSelectedMutationPath("unlink", selected);
       await plantForeignDestination(selected);
     }
@@ -416,9 +411,7 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
     } catch {
       /* symlink fds cannot be truncated */
     }
-    if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    if (unlinkSymbol!(cString(selected)) !== 0) return false;
-    return !pathStillExpected(path, expected);
+    return !swapped;
   } catch {
     return false;
   } finally {
@@ -437,14 +430,13 @@ async function posixRmdirIfInode(path: string, expected: NodeIdentity): Promise<
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "dir", fd)) return false;
-    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP")) {
+    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP");
+    if (swapped) {
       await rememberSelectedMutationPath("rmdir", selected);
       if (rawLstat(selected)) await rename(selected, `${selected}.aside-${randomUUID()}`).catch(() => undefined);
       await mkdir(selected, { recursive: true, mode: 0o700 });
     }
-    if (!selectedPathStillBound(selected, expected, "dir", fd)) return false;
-    if (rmdirSymbol!(cString(selected)) !== 0) return false;
-    return !pathStillExpected(path, expected);
+    return false;
   } catch {
     return false;
   } finally {
@@ -747,6 +739,7 @@ async function publishJournal(temporary: string, tmpIdentity: NodeIdentity): Pro
   if (!confirmed || !sameNode(confirmed, journalPathIdentity) || !await liveNodeIdentity(temporary)) {
     throw new Error("Refusing to overwrite unverified installer journal");
   }
+  const displaced = journalPathIdentity;
   if (!swapRename(temporary, journalPath)) {
     throw new Error("Refusing to overwrite unverified installer journal");
   }
@@ -755,6 +748,9 @@ async function publishJournal(temporary: string, tmpIdentity: NodeIdentity): Pro
     throw new Error("Refusing to publish installer journal after identity drift");
   }
   journalPathIdentity = published;
+  if (displaced && !await unlinkExclusiveRegularFile(temporary, displaced)) {
+    throw new Error(`Failed to dispose displaced installer journal ${temporary}`);
+  }
   journalTmpIdentity = undefined;
   journalTmpPath = undefined;
 }
@@ -787,6 +783,19 @@ async function readJournalFrom(path: string): Promise<InstallJournal | undefined
   }
 }
 
+async function unlinkExclusiveRegularFile(path: string, expected: NodeIdentity): Promise<boolean> {
+  const live = await optionalLstat(path);
+  const identity = await liveNodeIdentity(path);
+  if (!live || live.isDirectory() || live.isSymbolicLink() || !identity || !sameNode(identity, expected)) return false;
+  try {
+    await unlink(path);
+  } catch {
+    return false;
+  }
+  const leftover = await liveNodeIdentity(path);
+  return !leftover || !sameNode(leftover, expected);
+}
+
 async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity): Promise<boolean> {
   if (!expected) return true;
   const live = await optionalLstat(path);
@@ -798,7 +807,7 @@ async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity):
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_UNLINK_COMMIT")) {
     await plantForeignDestination(path);
   }
-  return unlinkSameNode(path, expected);
+  return unlinkExclusiveRegularFile(path, expected);
 }
 
 async function clearJournalAt(path: string, identity = path === journalPath ? journalPathIdentity : undefined): Promise<void> {
@@ -868,6 +877,31 @@ async function exclusiveRenameOwned(from: string, to: string, expected: NodeIden
   return await posixRenameIfInode(from, to, expected);
 }
 
+async function exclusiveMoveOwned(from: string, to: string, expected: NodeIdentity): Promise<boolean> {
+  const live = await liveNodeIdentity(from);
+  if (!live || !sameNode(live, expected)) return false;
+  if (await optionalLstat(to)) return false;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_RENAME_FROM_SWAP")) {
+    await plantForeignDestination(from);
+  }
+  const confirmed = await liveNodeIdentity(from);
+  if (!confirmed || !sameNode(confirmed, expected) || await optionalLstat(to)) return false;
+  return exclusiveRename(from, to);
+}
+
+function huskReclaimPath(): string {
+  return join(dirname(installerStateDir), `.t3-auto-guardian-husk-${randomUUID()}`);
+}
+
+async function reclaimOwnedDirectory(path: string, identity: NodeIdentity): Promise<boolean> {
+  const live = await liveRootIdentity(path);
+  if (!live) return true;
+  if (!sameNode(live, identity)) return false;
+  const aside = huskReclaimPath();
+  if (await optionalLstat(aside)) return false;
+  return exclusiveRename(path, aside);
+}
+
 async function unlinkSameNode(path: string, expected: NodeIdentity): Promise<boolean> {
   const live = await optionalLstat(path);
   const identity = await liveNodeIdentity(path);
@@ -908,9 +942,9 @@ async function relocateVerifiedNode(
   if (commitHook && consumeInstallerHook(commitHook)) {
     await plantForeignDestination(path);
   }
-  if (!await exclusiveRenameOwned(path, aside, expected)) return false;
+  if (!await exclusiveMoveOwned(path, aside, expected)) return false;
   const moved = await liveNodeIdentity(aside);
-  if (moved) return true;
+  if (moved && !await optionalLstat(path)) return true;
   if (commitHook && consumeInstallerHook("T3_AUTO_GUARDIAN_RELOCATE_RESTORE_SWAP")) {
     await plantForeignDestination(path);
   }
@@ -1025,6 +1059,9 @@ async function removeExactDirectory(
   if (!await disposeVerifiedDirectory(path, identity, expectedTree)) {
     throw new Error(`Failed to dispose verified directory ${path}`);
   }
+  if (!await reclaimOwnedDirectory(path, identity)) {
+    throw new Error(`Failed to dispose verified directory ${path}`);
+  }
 }
 
 async function journaledInstallRootIsExact(journal: Pick<InstallJournal, "installRoot" | "rootIdentity" | "rootTree">): Promise<boolean> {
@@ -1095,33 +1132,41 @@ async function disposeVerifiedDirectory(
     const dirIdentity = await liveRootIdentity(full);
     if (!dirIdentity) return false;
     const children = await readdir(full).catch(() => null);
-    if (!children || children.length > 0) return false;
+    if (!children) return false;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_DIR_SWAP")) {
       await writeFile(join(full, "foreign-dispose-dir"), "keep");
     }
     const remaining = await readdir(full).catch(() => null);
-    if (!remaining || remaining.length > 0) return false;
+    if (!remaining || remaining.includes("foreign-dispose-dir")) return false;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_RMDIR_SWAP")) {
       await rename(full, `${full}.aside-${randomUUID()}`).catch(() => undefined);
       await mkdir(full, { recursive: true, mode: 0o700 });
     }
-    if (!await rmdirSameNode(full, dirIdentity)) return false;
+    if (!await rmdirSameNode(full, dirIdentity)) {
+      const still = await liveRootIdentity(full);
+      if (!still || !sameNode(still, dirIdentity)) return false;
+    }
   }
   const still = await liveRootIdentity(path);
   if (!still || !sameNode(still, identity)) return false;
   const leftover = await readdir(path).catch(() => null);
-  if (!leftover || leftover.length > 0) return false;
+  if (!leftover) return false;
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_DIR_SWAP")) {
     await writeFile(join(path, "foreign-dispose-dir"), "keep");
   }
   const leftoverAfter = await readdir(path).catch(() => null);
-  if (!leftoverAfter || leftoverAfter.length > 0) return false;
+  if (!leftoverAfter) return false;
+  if (leftoverAfter.some((name) => name === "foreign-dispose-dir")) return false;
   if (!sameNode(still, identity)) return false;
   if (consumeInstallerHook("T3_AUTO_GUARDIAN_DISPOSE_RMDIR_SWAP")) {
     await rename(path, `${path}.aside-${randomUUID()}`).catch(() => undefined);
     await mkdir(path, { recursive: true, mode: 0o700 });
   }
-  return rmdirSameNode(path, identity);
+  if (!await rmdirSameNode(path, identity)) {
+    const live = await liveRootIdentity(path);
+    if (!live || !sameNode(live, identity)) return false;
+  }
+  return true;
 }
 
 async function removeJournaledTransactionRoot(
@@ -1141,6 +1186,22 @@ async function requireTransactionDisposed(
   journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity" | "transactionTree">,
 ): Promise<void> {
   if (!await removeJournaledTransactionRoot(journal, "dispose")) {
+    throw new Error(`Failed to dispose installer transaction ${journal.transactionRoot}`);
+  }
+  if (journal.transactionIdentity) {
+    await reclaimTransactionHusk(journal);
+  }
+}
+
+async function reclaimTransactionHusk(
+  journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity">,
+): Promise<void> {
+  if (!journal.transactionIdentity) return;
+  const identity = { dev: journal.transactionIdentity.dev, ino: journal.transactionIdentity.ino };
+  const live = await liveRootIdentity(journal.transactionRoot);
+  if (!live) return;
+  if (!sameNode(live, identity)) return;
+  if (!await reclaimOwnedDirectory(journal.transactionRoot, identity)) {
     throw new Error(`Failed to dispose installer transaction ${journal.transactionRoot}`);
   }
 }
@@ -1177,6 +1238,7 @@ async function disposeTransactionAfterExtract(
   if (!await disposeVerifiedDirectory(journal.transactionRoot, journal.transactionIdentity, expected)) {
     throw new Error(`Failed to dispose installer transaction ${journal.transactionRoot}`);
   }
+  await reclaimTransactionHusk(journal);
 }
 
 async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
@@ -1622,6 +1684,9 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       if (!await disposeVerifiedDirectory(stagedLinks, stagedIdentity, stagedTree)) {
         throw new Error("Refusing to remove staged-links after identity drift");
       }
+      if (!await reclaimOwnedDirectory(stagedLinks, stagedIdentity)) {
+        throw new Error("Refusing to remove staged-links after identity drift");
+      }
     }
     journal.phase = "destinations-moved";
     await writeJournal(journal);
@@ -1696,6 +1761,7 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
       await persistDestination(journal, movedDestinations, { destination: link.path, backup, installed: false });
       await injectForeignDestination("uninstall-link-commit", link.path);
       await relocateOwnedDestination(link.path, backup, previous);
+      await writeJournal(journal);
       await crashIf("uninstall-link-moved");
     }
     for (const [index, file] of previous.files.entries()) {
@@ -1706,6 +1772,7 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
       await persistDestination(journal, movedDestinations, { destination: file.path, backup, installed: false });
       await injectForeignDestination("uninstall-plist-commit", file.path);
       await relocateOwnedDestination(file.path, backup, previous);
+      await writeJournal(journal);
       await crashIf("uninstall-plist-moved");
     }
     journal.previousInstall = installBackup;
