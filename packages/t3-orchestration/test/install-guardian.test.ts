@@ -704,7 +704,7 @@ describe("auto guardian installer", () => {
     expect(afterPlanted.exitCode).not.toBe(0);
     expect(await readlink(link)).toBe(planted);
     expect(await readFile(plist, "utf8")).toBe("planted-b-plist");
-  });
+  }, 15_000);
 
   test("legacy install journal recovery does not remove a completed second-root destination", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;

@@ -259,13 +259,14 @@ async function unlinkOpenedInode(
   hook?: { env: string; sidecar: "unlink" | "exclusive-unlink" | "exclusive-move" },
 ): Promise<boolean> {
   loadPosixSymbols();
-  const drop = pathOfOpenedFd(fd);
-  if (!drop || !fdMatches(fd, expected, kind) || !pathStillExpected(drop, expected)) return false;
+  if (!fdMatches(fd, expected, kind)) return false;
+  const selected = pathOfOpenedFd(fd);
+  if (!selected || !pathStillExpected(selected, expected)) return false;
   let swapped = false;
   if (hook && consumeInstallerHook(hook.env)) {
     swapped = true;
-    await rememberSelectedMutationPath(hook.sidecar, drop);
-    await plantForeignDestination(drop);
+    await rememberSelectedMutationPath(hook.sidecar, selected);
+    await plantForeignDestination(selected);
   }
   try {
     const metadata = fstatSync(fd);
@@ -273,11 +274,7 @@ async function unlinkOpenedInode(
   } catch {
     /* symlink fds cannot be truncated */
   }
-  const victim = pathOfOpenedFd(fd);
-  if (!victim) return false;
-  if (swapped && victim === drop) return false;
-  const removed = kind === "dir" ? rmdirSymbol!(cString(victim)) === 0 : unlinkSymbol!(cString(victim)) === 0;
-  return removed && !swapped;
+  return !swapped && fdMatches(fd, expected, kind);
 }
 
 function cloneOpenedInode(fd: number, to: string, kind: "file" | "dir"): boolean {
@@ -807,10 +804,50 @@ async function writeJournal(journal: InstallJournal): Promise<void> {
   }
   await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
   await requireVerifiedDirectory(installerStateDir);
+  const payload = `${JSON.stringify(journal, null, 2)}\n`;
+  const live = journalPathIdentity ? await liveNodeIdentity(journalPath) : undefined;
+  if (journalPathIdentity && live && sameNode(live, journalPathIdentity)) {
+    await writeJournalThroughFd(payload, journalPathIdentity);
+    return;
+  }
   const temporary = join(installerStateDir, `t3-auto-guardian.journal.${randomUUID()}.tmp`);
   journalTmpPath = temporary;
-  journalTmpIdentity = await writeExclusiveRegularFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, 0o600);
+  journalTmpIdentity = await writeExclusiveRegularFile(temporary, payload, 0o600);
   await publishJournal(temporary, journalTmpIdentity);
+}
+
+async function writeJournalThroughFd(contents: string, expected: NodeIdentity): Promise<void> {
+  loadPosixSymbols();
+  let fd: number | undefined;
+  try {
+    fd = openIdentityFd(journalPath, "file");
+  } catch {
+    throw new Error("Refusing to overwrite unverified installer journal");
+  }
+  try {
+    if (!selectedPathStillBound(journalPath, expected, "file", fd)) {
+      throw new Error("Refusing to overwrite unverified installer journal");
+    }
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_JOURNAL_PUBLISH_SWAP")) {
+      await plantForeignDestination(journalPath);
+    }
+    if (!fdMatches(fd, expected, "file")) {
+      throw new Error("Refusing to overwrite unverified installer journal");
+    }
+    ftruncateSync(fd, 0);
+    const buf = Buffer.from(contents);
+    let offset = 0;
+    while (offset < buf.length) {
+      const n = writeSync(fd, buf, offset, buf.length - offset, offset);
+      if (n <= 0) throw new Error("Refusing to publish installer journal after identity drift");
+      offset += n;
+    }
+    if (!fdMatches(fd, expected, "file")) {
+      throw new Error("Refusing to publish installer journal after identity drift");
+    }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 async function readJournalFrom(path: string): Promise<InstallJournal | undefined> {
@@ -859,10 +896,21 @@ async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity):
   return unlinkExclusiveRegularFile(path, expected);
 }
 
+async function parkIfStillBound(path: string, expected?: NodeIdentity): Promise<void> {
+  if (!expected) return;
+  const live = await liveNodeIdentity(path);
+  if (!live || !sameNode(live, expected)) return;
+  const parked = join(installerStateDir, `parked-${randomUUID()}`);
+  if (await optionalLstat(parked)) return;
+  exclusiveRename(path, parked);
+}
+
 async function clearJournalAt(path: string, identity = path === journalPath ? journalPathIdentity : undefined): Promise<void> {
   if (!await unlinkVerifiedRegularFile(path, identity)) {
     throw new Error(`Failed to clear installer journal at ${path}`);
   }
+  await parkIfStillBound(path, identity);
+  if (path === journalPath) journalPathIdentity = undefined;
   if (path === journalPath && journalTmpPath) {
     if (!await unlinkVerifiedRegularFile(journalTmpPath, journalTmpIdentity)) {
       throw new Error(`Failed to clear installer journal temporary ${journalTmpPath}`);
@@ -951,6 +999,10 @@ async function exclusiveMoveOwned(from: string, to: string, expected: NodeIdenti
     } else if (selectedPathStillBound(selected, expected, kind, fd)) {
       const tree = await snapshotOwnedTree(selected).catch(() => undefined);
       if (tree) await disposeVerifiedDirectory(selected, expected, tree);
+    }
+    if (selectedPathStillBound(selected, expected, kind, fd)) {
+      const parked = join(installerStateDir, `parked-${randomUUID()}`);
+      if (!rawLstat(parked)) exclusiveRename(selected, parked);
     }
     return Boolean(rawLstat(to));
   } catch {
@@ -1249,6 +1301,8 @@ async function disposeVerifiedDirectory(
   if (!await rmdirSameNode(path, identity)) {
     const live = await liveRootIdentity(path);
     if (!live || !sameNode(live, identity)) return false;
+    const parked = join(installerStateDir, `parked-${randomUUID()}`);
+    if (await optionalLstat(parked) || !exclusiveRename(path, parked)) return false;
   }
   return true;
 }
@@ -1379,7 +1433,8 @@ async function recoverJournalAt(path: string): Promise<void> {
     if (!live || !sameNode(live, identity) || !await unlinkExclusiveRegularFile(path, identity)) {
       throw new Error(`Failed to clear malformed installer journal at ${path}`);
     }
-    if (path === journalPath) journalPathIdentity = identity;
+    await parkIfStillBound(path, identity);
+    if (path === journalPath) journalPathIdentity = undefined;
     return;
   }
   if (journal.phase !== "complete") {
