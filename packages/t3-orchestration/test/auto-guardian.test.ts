@@ -612,6 +612,26 @@ describe("guardian cycle", () => {
     expect(resolved).toEqual([]);
   });
 
+  test("default live path pins gpt-5.6-luna instead of the auto-review alias", async () => {
+    const judged: JudgeInput[] = [];
+    const { deps } = fixture({
+      judge: { ok: true, assessment: { outcome: "deny", rationale: "pin" }, raw: "" },
+    });
+    const original = deps.judge;
+    deps.judge = async (input) => {
+      judged.push(input);
+      return original(input);
+    };
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.model).toBe("gpt-5.6-luna");
+    expect(report.modelReasoningEffort).toBe("low");
+    expect(judged).toEqual([expect.objectContaining({
+      model: "gpt-5.6-luna",
+      modelReasoningEffort: "low",
+    })]);
+    expect(judged[0]?.model).not.toBe("codex-auto-review");
+  });
+
   test("passes configured model and reasoning effort to the live judge", async () => {
     const judged: JudgeInput[] = [];
     const { deps } = fixture({
@@ -1129,6 +1149,21 @@ describe("guardian lock and multi-process claims", () => {
 });
 
 describe("codex judge command", () => {
+  test("default config builds -m gpt-5.6-luna instead of the auto-review alias", () => {
+    const config = defaultGuardianConfig();
+    const argv = buildCodexJudgeCommand({
+      model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
+      policyPath: "/tmp/policy.md",
+      schemaPath: "/tmp/schema.json",
+      lastMessagePath: "/tmp/last-message.txt",
+      prompt: "judge this action",
+    });
+    expect(argv[argv.indexOf("-m") + 1]).toBe("gpt-5.6-luna");
+    expect(argv).toContain(`model_reasoning_effort=${JSON.stringify("low")}`);
+    expect(argv).not.toContain("codex-auto-review");
+  });
+
   test("pins model and reasoning effort without reading user Codex config", () => {
     const argv = buildCodexJudgeCommand({
       model: "gpt-5.6-luna",

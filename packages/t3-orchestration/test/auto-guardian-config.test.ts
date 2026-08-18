@@ -2,14 +2,22 @@ import { describe, expect, test } from "bun:test";
 import { defaultGuardianConfig, parseGuardianConfig, projectAllowed } from "../src/auto-guardian-config.ts";
 
 describe("guardian host config", () => {
-  test("defaults to official auto-review model and empty project filters", () => {
+  test("defaults to the concrete luna pin and empty project filters", () => {
     expect(defaultGuardianConfig()).toMatchObject({
       enabled: true,
-      model: "codex-auto-review",
+      model: "gpt-5.6-luna",
       modelReasoningEffort: "low",
       dryRun: false,
       includeProjects: [],
       excludeProjects: [],
+    });
+    expect(defaultGuardianConfig().model).not.toBe("codex-auto-review");
+  });
+
+  test("effort-only host config still pins the concrete model", () => {
+    expect(parseGuardianConfig('model_reasoning_effort = "medium"')).toMatchObject({
+      model: "gpt-5.6-luna",
+      modelReasoningEffort: "medium",
     });
   });
 

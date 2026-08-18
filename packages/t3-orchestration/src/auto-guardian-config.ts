@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { OFFICIAL_AUTO_REVIEW_MODEL } from "./auto-guardian-policy.ts";
+import { PINNED_AUTO_REVIEW_MODEL } from "./auto-guardian-policy.ts";
 
 export const MODEL_REASONING_EFFORTS = [
   "none",
@@ -39,7 +39,7 @@ export function defaultGuardianConfig(): GuardianConfig {
   return {
     enabled: true,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
-    model: OFFICIAL_AUTO_REVIEW_MODEL,
+    model: PINNED_AUTO_REVIEW_MODEL,
     modelReasoningEffort: DEFAULT_MODEL_REASONING_EFFORT,
     dryRun: false,
     includeProjects: [],
