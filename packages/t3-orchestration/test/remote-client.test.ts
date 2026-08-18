@@ -68,4 +68,112 @@ describe("remote daemon client", () => {
     }), { status: 200 })) as typeof fetch;
     await expect(daemonRequest({ op: "projects.list" }, undefined, 1_000, "https://host.tailnet.ts.net")).rejects.toThrow("response exceeds 1 MiB");
   });
+
+  test("aborts a never-responding HTTP endpoint at the injected deadline", async () => {
+    globalThis.fetch = ((input, init) => {
+      expect(String(input)).toBe("https://host.tailnet.ts.net/v1/request");
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" }));
+        }, { once: true });
+      });
+    }) as typeof fetch;
+    const started = Date.now();
+    await expect(daemonRequest({ op: "tasks.list" }, undefined, 80, "https://host.tailnet.ts.net")).rejects.toThrow(
+      "t3ctl tasks.list timed out after 80ms",
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  test("aborts a slow remote body at the injected deadline", async () => {
+    globalThis.fetch = (async (_input, init) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(new ReadableStream({
+        start() {
+          // Keep the response open without ever delivering a complete body.
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const rejections: unknown[] = [];
+    const onRejection = (error: unknown) => rejections.push(error);
+    process.on("unhandledRejection", onRejection);
+    const started = Date.now();
+    try {
+      await expect(daemonRequest({ op: "projects.list" }, undefined, 80, "https://host.tailnet.ts.net")).rejects.toThrow(
+        "t3ctl projects.list timed out after 80ms",
+      );
+      await Bun.sleep(20);
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  test("does not treat an unrelated AbortError as the owned deadline", async () => {
+    globalThis.fetch = (async () => {
+      throw Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
+    }) as typeof fetch;
+    try {
+      await daemonRequest({ op: "tasks.list" }, undefined, 1_000, "https://host.tailnet.ts.net");
+      throw new Error("expected rejection");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).name).toBe("AbortError");
+      expect((error as Error).message).toBe("The operation was aborted.");
+    }
+  });
+
+  test("settles when a stalled body cancel never returns", async () => {
+    globalThis.fetch = (async () => new Response(new ReadableStream({
+      start() {
+        // Stall the body, then refuse to settle cancel().
+      },
+      cancel() {
+        return new Promise(() => undefined);
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+    const started = Date.now();
+    const settled = daemonRequest({ op: "projects.list" }, undefined, 50, "https://host.tailnet.ts.net")
+      .then(() => "resolved" as const, (error) => {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe("t3ctl projects.list timed out after 50ms");
+        return "rejected" as const;
+      });
+    expect(await Promise.race([settled, Bun.sleep(250).then(() => "pending" as const)])).toBe("rejected");
+    expect(Date.now() - started).toBeLessThan(250);
+  });
+
+  test("rejects an oversized body even when cancel never settles", async () => {
+    globalThis.fetch = (async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(600_000));
+        controller.enqueue(new Uint8Array(600_000));
+        controller.close();
+      },
+      cancel() {
+        return new Promise(() => undefined);
+      },
+    }), { status: 200 })) as typeof fetch;
+    const started = Date.now();
+    const settled = daemonRequest({ op: "projects.list" }, undefined, 50, "https://host.tailnet.ts.net")
+      .then(() => "resolved" as const, (error) => {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe("remote daemon response exceeds 1 MiB");
+        return "rejected" as const;
+      });
+    expect(await Promise.race([settled, Bun.sleep(250).then(() => "pending" as const)])).toBe("rejected");
+    expect(Date.now() - started).toBeLessThan(250);
+  });
+
+  test("returns a remote daemon error before the client deadline", async () => {
+    globalThis.fetch = (async () => new Response('{"ok":false,"error":"T3 task not found: missing"}\n', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch;
+    expect(await daemonRequest({ op: "tasks.status" }, undefined, 250, "https://host.tailnet.ts.net")).toEqual({
+      ok: false,
+      error: "T3 task not found: missing",
+    });
+  });
 });

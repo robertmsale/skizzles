@@ -34,7 +34,7 @@ t3ctl tasks list [--project <t3-project-id>] [--limit 1..200] [--include-settled
 t3ctl tasks status <t3-thread-id>
 t3ctl tasks send <t3-thread-id> --message <text>
 t3ctl tasks read <t3-thread-id> [--turns 1..10] [--before <cursor>]
-t3ctl tasks wait <id> [<id> ...] [--timeout-ms 0..3600000] [--after <id>=<cursor>]
+t3ctl tasks wait <id> [<id> ...] [--timeout-ms 0..58000] [--after <id>=<cursor>]
 t3ctl tasks title <id> --title <title>
 t3ctl tasks archive <id>
 t3ctl tasks unarchive <id>
@@ -60,7 +60,7 @@ All task read, wait, message, and management commands may target any known T3 ta
 
 Use `tasks read` to inspect only the bounded conversation window needed to coordinate work. Start with the default three turns; paginate or raise the limit only when necessary. `tasks history` remains a compatibility alias. The command returns messages rather than raw tool/activity payloads and caps message and total text size.
 
-`tasks wait` accepts one through eight task IDs. It returns when the first task completes, fails, is archived/deleted, presents a plan for approval, requests approval, or requests user input. Background subagent/workflow work and monitoring keep the task nonterminal. `--timeout-ms 0` is an immediate compact snapshot. Pass each previously returned task cursor with a repeatable `--after ID=CURSOR` to suppress an already-delivered terminal state. The daemon uses one bounded shell-snapshot polling loop for all targets; progress chatter does not wake it.
+`tasks wait` accepts one through eight task IDs. It returns when the first task completes, fails, is archived/deleted, presents a plan for approval, requests approval, or requests user input. Background subagent/workflow work and monitoring keep the task nonterminal. `--timeout-ms 0` is an immediate compact snapshot. Pass each previously returned task cursor with a repeatable `--after ID=CURSOR` to suppress an already-delivered terminal state. The daemon uses one bounded shell-snapshot polling loop for all targets; progress chatter does not wake it. Every `t3ctl` invocation has a hard 60s client deadline covering the local socket or remote HTTPS request and the response body. `tasks wait --timeout-ms` cannot extend that ceiling; values above 58000ms are clamped so the daemon can reply before the client exits. For longer coordination, call wait again with the latest `--after ID=CURSOR` instead of requesting an hour-long wait. If the client hits the 60s wall, it exits nonzero with `t3ctl tasks.wait timed out after 60s`.
 
 `tasks archive` and `tasks settle` go through T3's WebSocket dispatcher so T3 performs its native provider-session cleanup. `tasks interrupt` requests interruption of the active turn; it does not kill an idle provider session. None of the management commands change provider, model, reasoning, runtime, or interaction settings.
 
