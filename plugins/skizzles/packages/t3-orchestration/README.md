@@ -62,6 +62,9 @@ It will not:
 - write `io.github.t3-orchestration.daemon`
 - `git worktree remove` or delete a worktree directory, source, or `.git`
 - clean the project's primary checkout
+- clean a claimed worktree whose registered Git branch does not match the task
+- clean a worktree owned by another live task
+- proceed when the settled/archived task list is truncated
 - clean a task whose session, latest turn, or phase is running or starting
 - guess when two worktrees match the same branch
 

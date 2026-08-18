@@ -12,6 +12,9 @@ import {
   type CleanStrategy,
   type ReaperConfig,
 } from "./worktree-reaper-config.ts";
+import type { OccupiedWorktree } from "./task-projection.ts";
+
+export type { OccupiedWorktree };
 
 export const REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper";
 export const ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon";
@@ -88,8 +91,14 @@ export type ReaperReport = {
   tasks: ReaperTaskResult[];
 };
 
+export type CleanableTaskListing = {
+  tasks: CleanableTask[];
+  truncated: boolean;
+  occupied: OccupiedWorktree[];
+};
+
 export type ReaperDependencies = {
-  listCleanableTasks(): Promise<CleanableTask[]>;
+  listCleanableTasks(): Promise<CleanableTaskListing>;
   readTask(threadId: string): Promise<CleanableTask>;
   listGitWorktrees(workspaceRoot: string): Promise<GitWorktree[]>;
   realpath(path: string): Promise<string>;
@@ -162,10 +171,45 @@ export function taskTargetIdentityChanged(before: CleanableTask, after: Cleanabl
     || (before.branch ?? "") !== (after.branch ?? "");
 }
 
+export function otherTaskOccupyingPath(
+  taskId: string,
+  path: string,
+  occupied: OccupiedWorktree[],
+): OccupiedWorktree | undefined {
+  return occupied.find((entry) => entry.id !== taskId && entry.path === path);
+}
+
+export async function resolveOccupiedWorktrees(
+  occupied: OccupiedWorktree[],
+  realpathFn: (path: string) => Promise<string>,
+): Promise<OccupiedWorktree[]> {
+  const resolved: OccupiedWorktree[] = [];
+  const seen = new Set<string>();
+  const add = (id: string, path: string) => {
+    const key = `${id}\0${path}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    resolved.push({ id, path });
+  };
+  for (const entry of occupied) {
+    const id = entry.id?.trim();
+    const raw = entry.path?.trim();
+    if (!id || !raw) continue;
+    add(id, raw);
+    try {
+      add(id, await realpathFn(raw));
+    } catch {
+      // Keep the unresolved claim so a matching raw path still fails closed.
+    }
+  }
+  return resolved;
+}
+
 export function resolveRegisteredWorktree(
   task: Pick<CleanableTask, "id" | "branch" | "worktreePath" | "workspaceRoot">,
   worktrees: GitWorktree[],
   resolvedPaths: Map<string, string>,
+  occupied: Array<{ id: string; path: string }> = [],
 ): ResolvedWorktree {
   if (worktrees.length === 0) return { ok: false, reason: "project has no git worktrees", failClosed: true };
   const primary = worktrees[0];
@@ -194,6 +238,19 @@ export function resolveRegisteredWorktree(
     if (resolvedClaim === primaryPath || resolvedClaim === workspacePath) {
       return { ok: false, reason: `refusing to clean project primary checkout ${resolvedClaim}`, failClosed: true };
     }
+    const taskBranch = normalizeBranch(task.branch);
+    const claimedBranch = normalizeBranch(match.branch);
+    if (!taskBranch || !claimedBranch || taskBranch !== claimedBranch) {
+      return {
+        ok: false,
+        reason: `claimed worktreePath branch ${claimedBranch ?? "(none)"} does not match task branch ${taskBranch ?? "(none)"}`,
+        failClosed: true,
+      };
+    }
+    const owner = otherTaskOccupyingPath(task.id, resolvedClaim, occupied);
+    if (owner) {
+      return { ok: false, reason: `worktree ${resolvedClaim} is owned by another task ${owner.id}`, failClosed: true };
+    }
     return { ok: true, path: resolvedClaim };
   }
 
@@ -212,7 +269,12 @@ export function resolveRegisteredWorktree(
       failClosed: true,
     };
   }
-  return { ok: true, path: matches[0]!.path };
+  const matchedPath = matches[0]!.path;
+  const owner = otherTaskOccupyingPath(task.id, matchedPath, occupied);
+  if (owner) {
+    return { ok: false, reason: `worktree ${matchedPath} is owned by another task ${owner.id}`, failClosed: true };
+  }
+  return { ok: true, path: matchedPath };
 }
 
 export function shouldSkipUnchanged(state: ReaperState, threadId: string, path: string, currentBytes: number): boolean {
@@ -304,6 +366,7 @@ async function planClean(
   config: ReaperConfig,
   deps: ReaperDependencies,
   worktreesByRoot: Map<string, GitWorktree[]>,
+  occupied: OccupiedWorktree[],
 ): Promise<CleanPlan> {
   const policy = resolveProjectPolicy(task, config);
   if (!policy.enabled) return { ok: false, action: "skipped", reason: policy.reason ?? "project disabled by host config" };
@@ -338,7 +401,7 @@ async function planClean(
       // Stale git worktree entries must not fail a settled task that still has a live path.
     }
   }
-  const resolved = resolveRegisteredWorktree(task, worktrees, resolvedPaths);
+  const resolved = resolveRegisteredWorktree(task, worktrees, resolvedPaths, occupied);
   if (!resolved.ok) return { ok: false, action: resolved.failClosed ? "failed" : "skipped", reason: resolved.reason };
   const denyPaths = await resolveDenyPaths(policy.denyPaths, resolved.path, deps.realpath);
   if (isDeniedPath(resolved.path, denyPaths)) {
@@ -378,8 +441,20 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     return report;
   }
   const state = await deps.readState();
-  const tasks = await deps.listCleanableTasks();
-  report.scanned = tasks.length;
+  const listing = await deps.listCleanableTasks();
+  report.scanned = listing.tasks.length;
+  if (listing.truncated) {
+    report.ok = false;
+    report.failed = 1;
+    report.tasks.push({
+      threadId: "enumeration",
+      action: "failed",
+      reason: `cleanable-task enumeration truncated at ${listing.tasks.length}; refusing incomplete cleanup`,
+    });
+    return report;
+  }
+  const tasks = listing.tasks;
+  const occupied = await resolveOccupiedWorktrees(listing.occupied, deps.realpath);
   const worktreesByRoot = new Map<string, GitWorktree[]>();
 
   const record = (result: ReaperTaskResult) => {
@@ -408,7 +483,7 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
       });
       continue;
     }
-    let plan = await planClean(task, config, deps, worktreesByRoot);
+    let plan = await planClean(task, config, deps, worktreesByRoot, occupied);
     if (!plan.ok) {
       record({ threadId: task.id, action: plan.action, path: plan.path, reason: plan.reason });
       continue;
@@ -466,7 +541,7 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
       continue;
     }
     if (taskTargetIdentityChanged(task, current)) {
-      plan = await planClean(current, config, deps, worktreesByRoot);
+      plan = await planClean(current, config, deps, worktreesByRoot, occupied);
       if (!plan.ok) {
         record({ threadId: task.id, action: "failed", path: plan.path, reason: `task identity changed: ${plan.reason}` });
         continue;
@@ -597,13 +672,21 @@ export function isUnknownOperationError(error: string | undefined): boolean {
 export function createDefaultReaperDependencies(
   request: (payload: Record<string, unknown>) => Promise<{ ok: boolean; result?: unknown; error?: string }>,
 ): ReaperDependencies {
-  const listFromTasks = async (): Promise<CleanableTask[]> => {
+  const occupiedFromTasks = (tasks: CleanableTask[]): OccupiedWorktree[] =>
+    tasks.flatMap((task) => {
+      const path = task.worktreePath?.trim();
+      if (task.deleted || !path) return [];
+      return [{ id: task.id, path }];
+    });
+
+  const listFromTasks = async (): Promise<CleanableTaskListing> => {
     const projectsResponse = await request({ op: "projects.list" });
     if (!projectsResponse.ok) throw new Error(projectsResponse.error ?? "projects.list failed");
     const projects = (projectsResponse.result as { projects?: Array<{ id: string; workspaceRoot: string }> }).projects ?? [];
     const roots = new Map(projects.map((project) => [project.id, project.workspaceRoot]));
     const seen = new Set<string>();
     const tasks: CleanableTask[] = [];
+    let truncated = false;
     const projectIds = projects.length ? projects.map((project) => project.id) : [undefined];
     for (const projectId of projectIds) {
       const response = await request({
@@ -614,8 +697,9 @@ export function createDefaultReaperDependencies(
         ...(projectId ? { projectId } : {}),
       });
       if (!response.ok) throw new Error(response.error ?? "tasks.list failed");
-      const listed = (response.result as { tasks?: CleanableTask[] }).tasks ?? [];
-      for (const task of listed) {
+      const listed = response.result as { tasks?: CleanableTask[]; moreRecent?: number };
+      if ((listed.moreRecent ?? 0) > 0) truncated = true;
+      for (const task of listed.tasks ?? []) {
         if (seen.has(task.id)) continue;
         seen.add(task.id);
         tasks.push({
@@ -624,14 +708,28 @@ export function createDefaultReaperDependencies(
         });
       }
     }
-    return tasks.filter((task) => isCleanableLifecycle(task));
+    return {
+      tasks: tasks.filter((task) => isCleanableLifecycle(task)),
+      truncated,
+      occupied: occupiedFromTasks(tasks),
+    };
   };
 
   return {
     async listCleanableTasks() {
       const dedicated = await request({ op: "worktrees.listCleanable" });
       if (dedicated.ok) {
-        return ((dedicated.result as { tasks?: CleanableTask[] }).tasks ?? []).filter((task) => isCleanableLifecycle(task));
+        const result = dedicated.result as {
+          tasks?: CleanableTask[];
+          truncated?: boolean;
+          occupied?: OccupiedWorktree[];
+        };
+        const tasks = (result.tasks ?? []).filter((task) => isCleanableLifecycle(task));
+        return {
+          tasks,
+          truncated: result.truncated === true,
+          occupied: Array.isArray(result.occupied) ? result.occupied : occupiedFromTasks(tasks),
+        };
       }
       if (!isUnknownOperationError(dedicated.error)) {
         throw new Error(dedicated.error ?? "worktrees.listCleanable failed");

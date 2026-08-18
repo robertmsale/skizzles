@@ -15,11 +15,12 @@ import {
   taskTargetIdentityChanged,
   type CleanableTask,
   type GitWorktree,
+  type OccupiedWorktree,
   type ReaperDependencies,
   type ReaperState,
 } from "../src/worktree-reaper.ts";
 import { defaultReaperConfig, parseReaperConfig } from "../src/worktree-reaper-config.ts";
-import { mergeArchivedTasks, projectCleanableWorktrees, projectTask } from "../src/task-projection.ts";
+import { CLEANABLE_TASK_CAP, mergeArchivedTasks, projectCleanableWorktrees, projectTask } from "../src/task-projection.ts";
 import type { T3Thread } from "../src/protocol.ts";
 
 const porcelain = `worktree /repo
@@ -124,6 +125,32 @@ describe("git worktree matching", () => {
     });
     expect(resolveRegisteredWorktree(task({ worktreePath: null }), duplicate, paths).reason).toContain("ambiguous worktree match");
   });
+
+  test("fails closed when the claimed path is registered on another task branch", () => {
+    const resolved = resolveRegisteredWorktree(task({
+      branch: "t3code/settled-A",
+      worktreePath: "/repo/.t3/worktrees/repo/other",
+    }), worktrees(), pathMap());
+    expect(resolved).toEqual({
+      ok: false,
+      reason: "claimed worktreePath branch t3code/other does not match task branch t3code/settled-A",
+      failClosed: true,
+    });
+  });
+
+  test("fails closed when another live task already owns the claimed path", () => {
+    const resolved = resolveRegisteredWorktree(
+      task(),
+      worktrees(),
+      pathMap(),
+      [{ id: "running-B", path: "/repo/.t3/worktrees/repo/t3code-task" }],
+    );
+    expect(resolved).toEqual({
+      ok: false,
+      reason: "worktree /repo/.t3/worktrees/repo/t3code-task is owned by another task running-B",
+      failClosed: true,
+    });
+  });
 });
 
 describe("lifecycle gates", () => {
@@ -194,12 +221,20 @@ describe("artifact discovery", () => {
 });
 
 describe("cleanSettledWorktrees", () => {
-  function deps(overrides: Partial<ReaperDependencies> & { tasks?: CleanableTask[] } = {}): ReaperDependencies & { runs: Array<{ command: string[]; directory: string }>; states: ReaperState[] } {
+  function deps(overrides: Partial<ReaperDependencies> & {
+    tasks?: CleanableTask[];
+    truncated?: boolean;
+    occupied?: OccupiedWorktree[];
+  } = {}): ReaperDependencies & { runs: Array<{ command: string[]; directory: string }>; states: ReaperState[] } {
     const runs: Array<{ command: string[]; directory: string }> = [];
     const states: ReaperState[] = [];
     let state: ReaperState = { version: 1, threads: {} };
     const base: ReaperDependencies = {
-      listCleanableTasks: async () => overrides.tasks ?? [task()],
+      listCleanableTasks: async () => ({
+        tasks: overrides.tasks ?? [task()],
+        truncated: overrides.truncated ?? false,
+        occupied: overrides.occupied ?? [],
+      }),
       listGitWorktrees: async () => worktrees(),
       realpath: async (path) => path,
       pathExists: async (path) => path.endsWith("/target") || path.endsWith("/build") || !path.split("/").pop()?.includes("."),
@@ -535,8 +570,149 @@ command = ["rm", "-rf", ".dart_tool"]
     });
     const listed = await listedDeps.listCleanableTasks();
     expect(ops).toEqual(["worktrees.listCleanable", "projects.list", "tasks.list"]);
-    expect(listed.map((entry) => ({ id: entry.id, workspaceRoot: entry.workspaceRoot }))).toEqual([
+    expect(listed.truncated).toBe(false);
+    expect(listed.occupied).toEqual([
+      { id: "settled", path: "/repo/.t3/worktrees/repo/t3code-task" },
+      { id: "active", path: "/repo/.t3/worktrees/repo/t3code-task" },
+    ]);
+    expect(listed.tasks.map((entry) => ({ id: entry.id, workspaceRoot: entry.workspaceRoot }))).toEqual([
       { id: "settled", workspaceRoot: "/repo" },
     ]);
+  });
+
+  test("treats a truncated tasks.list fallback as an incomplete enumeration", async () => {
+    const listedDeps = createDefaultReaperDependencies(async (payload) => {
+      if (payload.op === "worktrees.listCleanable") return { ok: false, error: "Unknown operation: worktrees.listCleanable" };
+      if (payload.op === "projects.list") return { ok: true, result: { projects: [{ id: "project", workspaceRoot: "/repo" }] } };
+      if (payload.op === "tasks.list") {
+        return {
+          ok: true,
+          result: {
+            tasks: [task({ id: "settled" })],
+            moreRecent: 1,
+          },
+        };
+      }
+      return { ok: false, error: `unexpected ${String(payload.op)}` };
+    });
+    const listed = await listedDeps.listCleanableTasks();
+    expect(listed.truncated).toBe(true);
+    expect(listed.tasks.map((entry) => entry.id)).toEqual(["settled"]);
+  });
+
+  test("does not clean another task's registered worktree when a settled task claims it", async () => {
+    const runningPath = "/repo/.t3/worktrees/repo/running-B";
+    const harness = deps({
+      tasks: [task({
+        id: "settled-A",
+        branch: "t3code/settled-A",
+        worktreePath: runningPath,
+      })],
+      occupied: [{ id: "running-B", path: runningPath }],
+      listGitWorktrees: async () => [
+        ...worktrees(),
+        { path: runningPath, branch: "t3code/running-B", bare: false },
+      ],
+      realpath: async (path) => path,
+      isDirectory: async (path) => path === runningPath || path.endsWith("/target"),
+      readDirectoryNames: async (path) => path === runningPath ? ["Cargo.toml", "target"] : [],
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.ok).toBe(false);
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "settled-A",
+      action: "failed",
+      reason: "claimed worktreePath branch t3code/running-B does not match task branch t3code/settled-A",
+    });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("does not clean a matching-branch claim already owned by another live task", async () => {
+    const runningPath = "/repo/.t3/worktrees/repo/running-B";
+    const harness = deps({
+      tasks: [task({
+        id: "settled-A",
+        branch: "t3code/running-B",
+        worktreePath: runningPath,
+      })],
+      occupied: [{ id: "running-B", path: runningPath }],
+      listGitWorktrees: async () => [
+        ...worktrees(),
+        { path: runningPath, branch: "t3code/running-B", bare: false },
+      ],
+      realpath: async (path) => path,
+      isDirectory: async (path) => path === runningPath || path.endsWith("/target"),
+      readDirectoryNames: async (path) => path === runningPath ? ["Cargo.toml", "target"] : [],
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.ok).toBe(false);
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "settled-A",
+      action: "failed",
+      reason: `worktree ${runningPath} is owned by another task running-B`,
+    });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("fails closed at the cleanable-task cap instead of omitting the oldest worktree", async () => {
+    const snapshot = {
+      snapshotSequence: 1,
+      projects: [{ id: "project", title: "acme", workspaceRoot: "/repo" }],
+      threads: Array.from({ length: CLEANABLE_TASK_CAP + 1 }, (_, index) => ({
+        id: `settled-${index}`,
+        projectId: "project",
+        title: `Settled ${index}`,
+        modelSelection: { instanceId: "codex", model: "model", options: [{ id: "reasoningEffort", value: "high" }] },
+        runtimeMode: "auto" as const,
+        interactionMode: "default" as const,
+        worktreePath: `/repo/.t3/worktrees/repo/t3code-${index}`,
+        branch: `t3code/${index}`,
+        settledOverride: "settled" as const,
+        archivedAt: null,
+        deletedAt: null,
+        backgroundLiveness: null,
+        session: { status: "ready" as const },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, index)).toISOString(),
+      })),
+    };
+    const listed = projectCleanableWorktrees(snapshot);
+    expect(listed.truncated).toBe(true);
+    expect(listed.count).toBe(CLEANABLE_TASK_CAP);
+    expect(listed.tasks).toHaveLength(CLEANABLE_TASK_CAP);
+    expect(listed.tasks.some((entry) => entry.id === "settled-0")).toBe(false);
+    expect(listed.occupied).toHaveLength(CLEANABLE_TASK_CAP + 1);
+    const harness = deps({
+      tasks: listed.tasks.map((entry) => ({
+        id: entry.id,
+        projectId: entry.projectId,
+        projectTitle: entry.projectTitle,
+        phase: entry.phase,
+        sessionStatus: entry.sessionStatus,
+        latestTurnState: entry.latestTurnState,
+        backgroundLiveness: entry.backgroundLiveness,
+        archived: entry.archived,
+        deleted: entry.deleted,
+        settled: entry.settled,
+        branch: entry.branch,
+        worktreePath: entry.worktreePath,
+        workspaceRoot: entry.workspaceRoot,
+      })),
+      truncated: listed.truncated,
+      occupied: listed.occupied,
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report).toMatchObject({
+      ok: false,
+      scanned: CLEANABLE_TASK_CAP,
+      cleaned: 0,
+      failed: 1,
+    });
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "enumeration",
+      action: "failed",
+      reason: `cleanable-task enumeration truncated at ${CLEANABLE_TASK_CAP}; refusing incomplete cleanup`,
+    });
+    expect(harness.runs).toEqual([]);
   });
 });

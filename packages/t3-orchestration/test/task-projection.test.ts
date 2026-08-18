@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mergeArchivedTasks, projectCleanableWorktrees, projectedBackgroundLiveness, projectProjects, projectTask, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
+import { CLEANABLE_TASK_CAP, mergeArchivedTasks, projectCleanableWorktrees, projectedBackgroundLiveness, projectProjects, projectTask, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
 import type { ShellSnapshot, Snapshot, T3Thread, T3ThreadShell } from "../src/protocol.ts";
 
 const project = { id: "project", title: "Project", workspaceRoot: "/repo", deletedAt: null };
@@ -140,10 +140,38 @@ describe("task list projection", () => {
         thread({ id: "deleted", deletedAt: "now", settledOverride: "settled" }),
       ],
     };
-    expect(projectCleanableWorktrees(snapshot).tasks.map(({ id, worktreePath, workspaceRoot }) => ({ id, worktreePath, workspaceRoot }))).toEqual([
+    const listed = projectCleanableWorktrees(snapshot);
+    expect(listed.tasks.map(({ id, worktreePath, workspaceRoot }) => ({ id, worktreePath, workspaceRoot }))).toEqual([
       { id: "settled", worktreePath: "/worktree", workspaceRoot: "/repo" },
       { id: "archived", worktreePath: "/worktree", workspaceRoot: "/repo" },
     ]);
+    expect(listed.truncated).toBe(false);
+    expect(listed.occupied).toEqual([
+      { id: "active", path: "/worktree" },
+      { id: "settled", path: "/worktree" },
+      { id: "archived", path: "/worktree" },
+    ]);
+  });
+
+  test("marks cleanable-task enumeration truncated at the 5000-task cap and omits the oldest", () => {
+    const snapshot: Snapshot = {
+      snapshotSequence: 10,
+      projects: [project],
+      threads: Array.from({ length: CLEANABLE_TASK_CAP + 1 }, (_, index) => thread({
+        id: `settled-${index}`,
+        settledOverride: "settled",
+        session: { status: "ready" },
+        worktreePath: `/worktree-${index}`,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, index)).toISOString(),
+      })),
+    };
+    const listed = projectCleanableWorktrees(snapshot);
+    expect(listed.truncated).toBe(true);
+    expect(listed.count).toBe(CLEANABLE_TASK_CAP);
+    expect(listed.tasks).toHaveLength(CLEANABLE_TASK_CAP);
+    expect(listed.tasks.some((entry) => entry.id === "settled-0")).toBe(false);
+    expect(listed.tasks[0]?.id).toBe(`settled-${CLEANABLE_TASK_CAP}`);
+    expect(listed.occupied).toHaveLength(CLEANABLE_TASK_CAP + 1);
   });
 });
 

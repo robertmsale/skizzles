@@ -103,7 +103,20 @@ export function projectTask(thread: T3Thread | T3ThreadShell, projects: Map<stri
   };
 }
 
-const CLEANABLE_TASK_CAP = 5_000;
+export const CLEANABLE_TASK_CAP = 5_000;
+
+export type OccupiedWorktree = {
+  id: string;
+  path: string;
+};
+
+export function projectOccupiedWorktrees(snapshot: Snapshot): OccupiedWorktree[] {
+  return snapshot.threads.flatMap((thread) => {
+    const path = thread.worktreePath?.trim();
+    if (thread.deletedAt || !path) return [];
+    return [{ id: thread.id, path }];
+  });
+}
 
 export function projectCleanableWorktrees(snapshot: Snapshot) {
   const projects = new Map(snapshot.projects.filter((project) => !project.deletedAt).map((project) => [project.id, project]));
@@ -116,6 +129,7 @@ export function projectCleanableWorktrees(snapshot: Snapshot) {
     tasks: visible.slice(0, CLEANABLE_TASK_CAP).map((thread) => projectTask(thread, projects)),
     count: Math.min(visible.length, CLEANABLE_TASK_CAP),
     truncated,
+    occupied: projectOccupiedWorktrees(snapshot),
   };
 }
 
