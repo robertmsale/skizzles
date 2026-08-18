@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { dlopen, FFIType, suffix } from "bun:ffi";
+import { constants as fsConstants, fstatSync } from "node:fs";
+import { dlopen, FFIType, ptr, suffix } from "bun:ffi";
 import {
   chmod,
   copyFile,
@@ -13,9 +14,10 @@ import {
   rename,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const GUARDIAN_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-auto-guardian";
 const ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon";
@@ -94,6 +96,13 @@ const TRANSACTION_TOKEN_NAME = ".skizzles-transaction";
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
+const AT_FDCWD = process.platform === "linux" ? -100 : -2;
+const AT_REMOVEDIR = process.platform === "linux" ? 0x200 : 0x80;
+const OPENAT_CLOEXEC = process.platform === "linux" ? 0x80000 : 0x1000000;
+const OPENAT_DIRECTORY_FLAGS = fsConstants.O_RDONLY
+  | (fsConstants.O_DIRECTORY ?? 0)
+  | OPENAT_CLOEXEC
+  | (fsConstants.O_NOFOLLOW ?? 0);
 const INSTALLER_LOCK_ATTEMPTS = 600;
 const INSTALLER_LOCK_RETRY_MS = 50;
 const GUARDIAN_RUNTIME_FILES = [
@@ -133,6 +142,72 @@ function loadFlock(): (fd: number, operation: number) => number {
     }
   }
   throw new Error(`flock is unavailable (${last instanceof Error ? last.message : String(last)})`);
+}
+
+type LibcFs = {
+  openat: (dirfd: number, path: string, flags: number) => number;
+  unlinkat: (dirfd: number, path: string, flags: number) => number;
+  close: (fd: number) => number;
+};
+
+let libcFs: LibcFs | undefined;
+
+function cString(value: string): Uint8Array {
+  return new TextEncoder().encode(`${value}\0`);
+}
+
+function loadLibcFs(): LibcFs {
+  if (libcFs) return libcFs;
+  const candidates = process.platform === "darwin"
+    ? ["libSystem.B.dylib", "libc.dylib"]
+    : [`libc.${suffix}`, "libc.so.6", "libc.so"];
+  let last: unknown;
+  for (const candidate of candidates) {
+    try {
+      const symbols = dlopen(candidate, {
+        openat: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+        unlinkat: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+        close: { args: [FFIType.i32], returns: FFIType.i32 },
+      }).symbols;
+      libcFs = {
+        openat: (dirfd, path, flags) => symbols.openat(dirfd, ptr(cString(path)), flags),
+        unlinkat: (dirfd, path, flags) => symbols.unlinkat(dirfd, ptr(cString(path)), flags),
+        close: (fd) => symbols.close(fd),
+      };
+      return libcFs;
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw new Error(`openat/unlinkat is unavailable (${last instanceof Error ? last.message : String(last)})`);
+}
+
+function openatPath(libc: LibcFs, rootFd: number, relative: string): number {
+  const parts = relative.split("/").filter(Boolean);
+  let fd = rootFd;
+  const opened: number[] = [];
+  for (const part of parts) {
+    const next = libc.openat(fd, part, OPENAT_DIRECTORY_FLAGS);
+    if (fd !== rootFd) opened.push(fd);
+    if (next < 0) {
+      for (const handle of opened) libc.close(handle);
+      return -1;
+    }
+    fd = next;
+  }
+  for (const handle of opened) libc.close(handle);
+  return fd;
+}
+
+function unlinkatRelative(libc: LibcFs, rootFd: number, relative: string, flags: number): boolean {
+  const parts = relative.split("/").filter(Boolean);
+  if (parts.length === 0) return false;
+  if (parts.length === 1) return libc.unlinkat(rootFd, parts[0]!, flags) === 0;
+  const parentFd = openatPath(libc, rootFd, parts.slice(0, -1).join("/"));
+  if (parentFd < 0) return false;
+  const ok = libc.unlinkat(parentFd, parts.at(-1)!, flags) === 0;
+  libc.close(parentFd);
+  return ok;
 }
 
 async function withInstallerLock<T>(body: () => Promise<T>): Promise<T> {
@@ -414,6 +489,21 @@ async function liveIsJournalArtifact(path: string, artifact: DestinationArtifact
   return Boolean(live && sameArtifact(live, artifact));
 }
 
+async function unlinkExactArtifact(path: string, artifact: DestinationArtifact | undefined): Promise<boolean> {
+  if (!artifact) return false;
+  const live = await optionalLstat(path);
+  if (!live) return true;
+  if (live.isDirectory() || live.isSymbolicLink() && artifact.kind !== "link") return false;
+  if (live.isFile() && artifact.kind !== "file") return false;
+  if (!(await liveIsJournalArtifact(path, artifact))) return false;
+  try {
+    await unlink(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function restoreDestinations(journal: Pick<InstallJournal, "kind" | "destinations">): Promise<void> {
   for (const destination of [...journal.destinations].reverse()) {
     const live = await optionalLstat(destination.destination);
@@ -421,10 +511,10 @@ async function restoreDestinations(journal: Pick<InstallJournal, "kind" | "desti
       continue;
     }
     if (destination.backup && await optionalLstat(destination.backup)) {
-      await rm(destination.destination, { force: true, recursive: true });
+      if (live && !await unlinkExactArtifact(destination.destination, destination.artifact)) continue;
       await rename(destination.backup, destination.destination);
     } else if (destination.installed) {
-      await rm(destination.destination, { force: true, recursive: true });
+      if (live) await unlinkExactArtifact(destination.destination, destination.artifact);
     }
   }
 }
@@ -468,21 +558,51 @@ async function removeExactDirectory(
   identity: { dev: string; ino: string },
   expectedTree?: OwnedTreeEntry[],
 ): Promise<void> {
+  if (!expectedTree) return;
   const live = await liveRootIdentity(path);
   if (!live || live.dev !== identity.dev || live.ino !== identity.ino) return;
-  if (expectedTree && !await liveTreeMatches(path, expectedTree)) return;
+  if (!await liveTreeMatches(path, expectedTree)) return;
   const trash = `${path}.reclaim-${randomUUID()}`;
   try {
     await rename(path, trash);
   } catch {
     return;
   }
-  const moved = await liveRootIdentity(trash);
-  if (!moved || moved.dev !== identity.dev || moved.ino !== identity.ino || (expectedTree && !await liveTreeMatches(trash, expectedTree))) {
-    if (!await optionalLstat(path)) await rename(trash, path).catch(() => undefined);
-    return;
+  if (process.env.T3_AUTO_GUARDIAN_RECLAIM_SWAP === "1") {
+    await rename(trash, `${trash}.aside`);
+    await mkdir(trash, { recursive: true, mode: 0o700 });
+    await writeFile(join(trash, "foreign-reclaim.txt"), "keep-reclaim");
   }
-  await rm(trash, { force: true, recursive: true }).catch(() => undefined);
+  const libc = loadLibcFs();
+  let rootFd = -1;
+  try {
+    rootFd = libc.openat(AT_FDCWD, trash, OPENAT_DIRECTORY_FLAGS);
+    if (rootFd < 0) return;
+    const opened = fstatSync(rootFd);
+    if (String(opened.dev) !== identity.dev || String(opened.ino) !== identity.ino || !opened.isDirectory()) return;
+    const files = expectedTree
+      .filter((entry) => entry.kind !== "dir")
+      .sort((left, right) => right.path.length - left.path.length);
+    const dirs = expectedTree
+      .filter((entry) => entry.kind === "dir")
+      .sort((left, right) => right.path.split("/").length - left.path.split("/").length || right.path.length - left.path.length);
+    for (const entry of files) unlinkatRelative(libc, rootFd, entry.path, 0);
+    for (const entry of dirs) unlinkatRelative(libc, rootFd, entry.path, AT_REMOVEDIR);
+  } finally {
+    if (rootFd >= 0) libc.close(rootFd);
+  }
+  const parentFd = libc.openat(AT_FDCWD, dirname(trash), OPENAT_DIRECTORY_FLAGS);
+  if (parentFd < 0) return;
+  try {
+    const probe = libc.openat(parentFd, basename(trash), OPENAT_DIRECTORY_FLAGS);
+    if (probe < 0) return;
+    const current = fstatSync(probe);
+    libc.close(probe);
+    if (String(current.dev) !== identity.dev || String(current.ino) !== identity.ino) return;
+    libc.unlinkat(parentFd, basename(trash), AT_REMOVEDIR);
+  } finally {
+    libc.close(parentFd);
+  }
 }
 
 async function journaledInstallRootIsExact(journal: Pick<InstallJournal, "installRoot" | "rootIdentity" | "rootTree">): Promise<boolean> {

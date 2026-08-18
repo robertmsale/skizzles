@@ -422,6 +422,27 @@ describe("auto guardian installer", () => {
     await expect(lstat(join(installRoot, "runtime"))).resolves.toBeTruthy();
   });
 
+  test("does not pathname-rm a foreign directory swapped onto the reclaim path", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_RECLAIM_SWAP: "1",
+    });
+    expect(recovered.exitCode).toBe(0);
+    const dataRoot = join(root, ".local/share/skizzles");
+    const names = await readdir(dataRoot);
+    const reclaim = names.find((name) => name.includes(".reclaim-") && !name.endsWith(".aside"));
+    expect(reclaim).toBeTruthy();
+    expect(await readFile(join(dataRoot, reclaim!, "foreign-reclaim.txt"), "utf8")).toBe("keep-reclaim");
+  });
+
   test("does not delete a same-inode transaction root after foreign content is added", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);
