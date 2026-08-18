@@ -252,6 +252,7 @@ describe("cleanSettledWorktrees", () => {
       },
       readText: async (path) => path.endsWith("pubspec.yaml") ? "name: app\nflutter:\n" : "[package]\n",
       measureBytes: async (path) => path.endsWith("target") || path.endsWith("build") || path.endsWith(".dart_tool") ? 1_000 : 0,
+      statIdentity: async () => ({ dev: 1n, ino: 1n }),
       runClean: async (command, directory) => { runs.push({ command, directory }); },
       holdCleanLease: async (entry, path) => {
         const controller = new AbortController();
@@ -1122,6 +1123,48 @@ command = ["rm", "-rf", ".dart_tool"]
       threadId: "settled-A",
       action: "failed",
       reason: "clean aborted: task resumed",
+    });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("does not clean a worktree path replaced after planning", async () => {
+    const shared = "/repo/.t3/worktrees/repo/shared";
+    let generation = 1n;
+    const harness = deps({
+      tasks: [task({
+        id: "settled-A",
+        branch: "t3code/task",
+        worktreePath: shared,
+      })],
+      occupied: [{ id: "settled-A", path: shared }],
+      listGitWorktrees: async () => [
+        { path: "/repo", branch: "master", bare: false },
+        { path: shared, branch: "t3code/task", bare: false },
+      ],
+      isDirectory: async (path) => path === shared || path.endsWith("/target"),
+      readDirectoryNames: async (path) => path === shared ? ["Cargo.toml", "target"] : [],
+      statIdentity: async () => ({ dev: 1n, ino: generation }),
+      holdCleanLease: async (entry, path) => {
+        generation = 2n;
+        const controller = new AbortController();
+        return {
+          token: "lease",
+          path,
+          threadId: entry.id,
+          role: "clean" as const,
+          signal: controller.signal,
+          abort: () => controller.abort(),
+          release: async () => undefined,
+        };
+      },
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.ok).toBe(false);
+    expect(report.cleaned).toBe(0);
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "settled-A",
+      action: "failed",
+      reason: `worktree ${shared} was replaced after planning`,
     });
     expect(harness.runs).toEqual([]);
   });

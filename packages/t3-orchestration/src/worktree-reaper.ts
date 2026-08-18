@@ -15,7 +15,9 @@ import {
 import type { OccupiedWorktree } from "./task-projection.ts";
 import {
   holdExclusiveCleanLease,
+  inspectPathIdentity,
   type CleanLease,
+  type LockIdentity,
 } from "./worktree-reaper-lease.ts";
 
 export type { OccupiedWorktree, CleanLease };
@@ -111,6 +113,7 @@ export type ReaperDependencies = {
   readDirectoryNames(path: string): Promise<string[]>;
   readText(path: string): Promise<string>;
   measureBytes(path: string): Promise<number>;
+  statIdentity(path: string): Promise<LockIdentity | undefined>;
   runClean(command: string[], directory: string, signal?: AbortSignal): Promise<void>;
   holdCleanLease(task: CleanableTask, path: string): Promise<CleanLease>;
   readState(): Promise<ReaperState>;
@@ -299,6 +302,10 @@ export type CleanTarget = {
   command: string[];
 };
 
+export function sameFsIdentity(left: LockIdentity | undefined, right: LockIdentity | undefined): boolean {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+
 async function walkDirectories(
   worktree: string,
   deps: Pick<ReaperDependencies, "isDirectory" | "readDirectoryNames">,
@@ -362,8 +369,10 @@ export async function discoverCleanTargets(
   return targets;
 }
 
+type IdentifiedCleanTarget = CleanTarget & { directoryIdentity: LockIdentity };
+
 type CleanPlan =
-  | { ok: true; path: string; targets: CleanTarget[]; artifactDirs: string[]; bytesBefore: number }
+  | { ok: true; path: string; pathIdentity: LockIdentity; targets: IdentifiedCleanTarget[]; artifactDirs: string[]; bytesBefore: number }
   | { ok: false; action: ReaperAction; reason: string; path?: string };
 
 async function planClean(
@@ -419,10 +428,39 @@ async function planClean(
   } catch (error) {
     return { ok: false, action: "failed", path: resolved.path, reason: error instanceof Error ? error.message : String(error) };
   }
-  const artifactDirs = targets.map((target) => target.artifactDir);
+  const pathIdentity = await deps.statIdentity(resolved.path);
+  if (!pathIdentity) {
+    return { ok: false, action: "failed", path: resolved.path, reason: "could not identify registered worktree inode" };
+  }
+  const identified: IdentifiedCleanTarget[] = [];
+  for (const target of targets) {
+    const directoryIdentity = await deps.statIdentity(target.directory);
+    if (!directoryIdentity) {
+      return { ok: false, action: "failed", path: resolved.path, reason: `could not identify clean directory inode ${target.directory}` };
+    }
+    identified.push({ ...target, directoryIdentity });
+  }
+  const artifactDirs = identified.map((target) => target.artifactDir);
   let bytesBefore = 0;
   for (const directory of artifactDirs) bytesBefore += await deps.measureBytes(directory);
-  return { ok: true, path: resolved.path, targets, artifactDirs, bytesBefore };
+  return { ok: true, path: resolved.path, pathIdentity, targets: identified, artifactDirs, bytesBefore };
+}
+
+async function assertPlanIdentities(
+  plan: Extract<CleanPlan, { ok: true }>,
+  deps: ReaperDependencies,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const pathIdentity = await deps.statIdentity(plan.path);
+  if (!sameFsIdentity(pathIdentity, plan.pathIdentity)) {
+    return { ok: false, reason: `worktree ${plan.path} was replaced after planning` };
+  }
+  for (const target of plan.targets) {
+    const directoryIdentity = await deps.statIdentity(target.directory);
+    if (!sameFsIdentity(directoryIdentity, target.directoryIdentity)) {
+      return { ok: false, reason: `clean directory ${target.directory} was replaced after planning` };
+    }
+  }
+  return { ok: true };
 }
 
 export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
@@ -665,6 +703,11 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
         continue;
       }
       occupied = refreshed.occupied;
+      const bound = await assertPlanIdentities(plan, deps);
+      if (!bound.ok) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: bound.reason });
+        continue;
+      }
       if (options.dryRun) {
         record({
           threadId: task.id,
@@ -683,6 +726,11 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
         for (const target of plan.targets) {
           if (lease.signal.aborted) {
             aborted = { ok: false, action: "failed", path: plan.path, reason: "task resumed during clean lease" };
+            break;
+          }
+          const stillBound = await assertPlanIdentities(plan, deps);
+          if (!stillBound.ok) {
+            aborted = { ok: false, action: "failed", path: plan.path, reason: stillBound.reason };
             break;
           }
           await deps.runClean(target.command, target.directory, lease.signal);
@@ -950,6 +998,7 @@ export function createDefaultReaperDependencies(
     },
     readText: (path) => readFile(path, "utf8"),
     measureBytes: directorySize,
+    statIdentity: inspectPathIdentity,
     async runClean(command, directory, signal) {
       if (signal?.aborted) throw new Error("clean aborted: task resumed");
       const env = { ...Bun.env };
