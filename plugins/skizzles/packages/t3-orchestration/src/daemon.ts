@@ -136,6 +136,7 @@ var {$: $2 } = globalThis.Bun;
 
 // packages/t3-orchestration/src/approval-projection.ts
 var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
+var CONFLICTING_COMMAND_GAP = "T3 approval payload has conflicting command or path representations. Refusing to approve blindly.";
 var MISSING_SNAPSHOT_GAP = "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
 function asRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -194,14 +195,36 @@ function compareActivitiesByOrder(left, right) {
     return createdAt;
   return (left.id ?? "").localeCompare(right.id ?? "");
 }
-function extractCommand(payload) {
-  if (!payload)
-    return null;
+function uniqueTypedActions(payload) {
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
   const input = asRecord(data?.input) ?? asRecord(item?.input);
   const result = asRecord(item?.result) ?? asRecord(data?.result);
-  return asTrimmedString(payload.detail) ?? asTrimmedString(data?.command) ?? asTrimmedString(item?.command) ?? asTrimmedString(input?.command) ?? asTrimmedString(result?.command) ?? asTrimmedString(payload.path) ?? asTrimmedString(data?.path) ?? asTrimmedString(item?.path) ?? asTrimmedString(input?.path);
+  const values = [
+    asTrimmedString(data?.command),
+    asTrimmedString(item?.command),
+    asTrimmedString(input?.command),
+    asTrimmedString(result?.command),
+    asTrimmedString(payload.path),
+    asTrimmedString(data?.path),
+    asTrimmedString(item?.path),
+    asTrimmedString(input?.path)
+  ].filter((value) => value !== null);
+  return [...new Set(values)];
+}
+function extractTypedAction(payload) {
+  if (!payload)
+    return { command: null, reason: MISSING_COMMAND_GAP };
+  const typed = uniqueTypedActions(payload);
+  const detail = asTrimmedString(payload.detail);
+  if (typed.length > 1)
+    return { command: null, reason: CONFLICTING_COMMAND_GAP };
+  if (typed.length === 1) {
+    if (detail && detail !== typed[0])
+      return { command: null, reason: CONFLICTING_COMMAND_GAP };
+    return { command: typed[0] };
+  }
+  return { command: null, reason: MISSING_COMMAND_GAP };
 }
 function extractCwd(payload) {
   if (!payload)
@@ -227,15 +250,16 @@ function derivePendingApprovals(activities) {
       continue;
     const detail = asTrimmedString(payload?.detail);
     if (activity.kind === "approval.requested") {
-      const command = extractCommand(payload);
+      const extracted = extractTypedAction(payload);
       openByRequestId.set(requestId, {
         requestId,
         requestKind: requestKindFromPayload(payload),
         createdAt: activity.createdAt,
-        command,
+        command: extracted.command,
         toolName: extractToolName(activity, payload),
         cwd: extractCwd(payload),
-        identifiable: command !== null
+        identifiable: extracted.command !== null,
+        ...extracted.reason ? { reason: extracted.reason } : {}
       });
       continue;
     }
@@ -268,7 +292,7 @@ function selectPendingApproval(pending, requestId) {
 function requireIdentifiableApproval(approval) {
   if (approval.identifiable && approval.command)
     return;
-  throw new Error(MISSING_COMMAND_GAP);
+  throw new Error(approval.reason ?? MISSING_COMMAND_GAP);
 }
 function threadProvider(thread) {
   return thread.modelSelection.instanceId;
@@ -353,7 +377,7 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
         providerDriver,
         runtimeMode: thread.runtimeMode,
         requestId: approval.requestId,
-        reason: MISSING_COMMAND_GAP,
+        reason: approval.reason ?? MISSING_COMMAND_GAP,
         createdAt: approval.createdAt,
         worktreePath: thread.worktreePath
       });
