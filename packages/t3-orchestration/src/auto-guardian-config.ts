@@ -3,10 +3,24 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { OFFICIAL_AUTO_REVIEW_MODEL } from "./auto-guardian-policy.ts";
 
+export const MODEL_REASONING_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
+
+export type ModelReasoningEffort = (typeof MODEL_REASONING_EFFORTS)[number];
+
 export type GuardianConfig = {
   enabled: boolean;
   pollIntervalMs: number;
   model: string;
+  modelReasoningEffort: ModelReasoningEffort;
   dryRun: boolean;
   includeProjects: string[];
   excludeProjects: string[];
@@ -15,6 +29,7 @@ export type GuardianConfig = {
 
 export const DEFAULT_POLL_INTERVAL_MS = 5_000;
 export const DEFAULT_JUDGE_TIMEOUT_MS = 120_000;
+export const DEFAULT_MODEL_REASONING_EFFORT: ModelReasoningEffort = "low";
 export const MIN_POLL_INTERVAL_MS = 1_000;
 export const MAX_POLL_INTERVAL_MS = 3_600_000;
 export const MIN_JUDGE_TIMEOUT_MS = 5_000;
@@ -25,6 +40,7 @@ export function defaultGuardianConfig(): GuardianConfig {
     enabled: true,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
     model: OFFICIAL_AUTO_REVIEW_MODEL,
+    modelReasoningEffort: DEFAULT_MODEL_REASONING_EFFORT,
     dryRun: false,
     includeProjects: [],
     excludeProjects: [],
@@ -49,6 +65,18 @@ function asBoolean(value: unknown, label: string, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
   return value;
+}
+
+function asModelReasoningEffort(value: unknown, fallback: ModelReasoningEffort): ModelReasoningEffort {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("model_reasoning_effort must be a non-empty string");
+  }
+  const effort = value.trim();
+  if (!(MODEL_REASONING_EFFORTS as readonly string[]).includes(effort)) {
+    throw new Error(`model_reasoning_effort must be one of ${MODEL_REASONING_EFFORTS.join(", ")}`);
+  }
+  return effort as ModelReasoningEffort;
 }
 
 function asBoundedInteger(
@@ -78,6 +106,7 @@ export function parseGuardianConfig(text: string): GuardianConfig {
     "enabled",
     "poll_interval_ms",
     "model",
+    "model_reasoning_effort",
     "dry_run",
     "include_projects",
     "exclude_projects",
@@ -97,6 +126,7 @@ export function parseGuardianConfig(text: string): GuardianConfig {
     enabled: asBoolean(raw.enabled, "enabled", defaults.enabled),
     pollIntervalMs: asBoundedInteger(raw.poll_interval_ms, "poll_interval_ms", defaults.pollIntervalMs, MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS),
     model,
+    modelReasoningEffort: asModelReasoningEffort(raw.model_reasoning_effort, defaults.modelReasoningEffort),
     dryRun: asBoolean(raw.dry_run, "dry_run", defaults.dryRun),
     includeProjects: asStringArray(raw.include_projects, "include_projects"),
     excludeProjects: asStringArray(raw.exclude_projects, "exclude_projects"),

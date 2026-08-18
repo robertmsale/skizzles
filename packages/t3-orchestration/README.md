@@ -217,7 +217,8 @@ must not be committed. Example:
 # ~/.config/skizzles/t3-auto-guardian.toml
 enabled = true
 dry_run = false
-model = "codex-auto-review"
+model = "gpt-5.6-luna"
+model_reasoning_effort = "low"
 poll_interval_ms = 5000
 include_projects = ["acme"]
 exclude_projects = ["acme/app"]
@@ -225,9 +226,15 @@ exclude_projects = ["acme/app"]
 
 `include_projects` and `exclude_projects` match a T3 project title, project id,
 or workspace root. The default model is official Codex `codex-auto-review`,
-not `luna-low`. Policy text is the extracted official guardian template and
-tenant policy from `openai/codex` `codex-rs/core/src/guardian/`; the judge
-prompt is the last T3 user message plus the identifiable command or path.
+not `luna-low`. There is no `luna-low` model slug; pin `gpt-5.6-luna` plus
+`model_reasoning_effort = "low"` instead of the `codex-auto-review` alias,
+which can retarget. The default reasoning effort is `low`. The live judge
+passes it as `codex exec --ignore-user-config -m <model> -c model_reasoning_effort=<effort>`;
+`codex exec` has no dedicated effort flag. Unknown keys, including typos such
+as `effort` or `model_reasoning_effrot`, are rejected. Policy text is the
+extracted official guardian template and tenant policy from `openai/codex`
+`codex-rs/core/src/guardian/`; the judge prompt is the last T3 user message
+plus the identifiable command or path.
 
 The guardian installer copies only the guardian CLI and its imported modules into
 `~/.local/share/skizzles/t3-auto-guardian`. It does not copy `cli.ts` or
