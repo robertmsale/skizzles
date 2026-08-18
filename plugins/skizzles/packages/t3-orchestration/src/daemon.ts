@@ -4,7 +4,7 @@
 // packages/t3-orchestration/src/daemon.ts
 import { connect, createServer as createServer2 } from "net";
 import { chmodSync } from "fs";
-import { lstat, mkdir as mkdir2, unlink } from "fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, unlink } from "fs/promises";
 import { dirname } from "path";
 
 // packages/t3-orchestration/src/config.ts
@@ -545,7 +545,7 @@ async function waitForTasks(input, loadSnapshot, sleep = Bun.sleep, clock = Date
 
 // packages/t3-orchestration/src/worktree-reaper-lease.ts
 import { createHash } from "crypto";
-import { link, mkdir, rm, writeFile } from "fs/promises";
+import { link, lstat, mkdir, rm, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join as join2 } from "path";
 function cleanLeaseHome(home2 = process.env.T3_HOME?.trim() || join2(process.env.HOME || homedir(), ".t3")) {
@@ -555,26 +555,131 @@ function cleanLeaseLockPath(worktreePath, home2) {
   const digest = createHash("sha256").update(worktreePath).digest("hex");
   return join2(cleanLeaseHome(home2), digest);
 }
-function isLivePid(pid) {
+function defaultProcessProbe(pid) {
+  process.kill(pid, 0);
+}
+function defaultProcessStartKey(pid) {
+  const result = Bun.spawnSync(["ps", "-p", String(pid), "-o", "lstart="], {
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  if (result.exitCode !== 0)
+    return null;
+  const text = result.stdout.toString().trim();
+  return text || null;
+}
+function isLivePid(pid, processProbe) {
   try {
-    process.kill(pid, 0);
+    processProbe(pid);
     return true;
   } catch {
     return false;
   }
 }
-async function readLiveCleanLease(worktreePath, home2) {
+function parseLeaseRecord(value) {
+  if (!value || typeof value !== "object")
+    return null;
+  const raw = value;
+  if (typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.threadId !== "string" || raw.threadId.trim() === "" || typeof raw.path !== "string" || raw.path.trim() === "" || raw.role !== "clean" && raw.role !== "turn-start" || !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0) {
+    return null;
+  }
+  return {
+    token: raw.token,
+    threadId: raw.threadId,
+    path: raw.path,
+    role: raw.role,
+    pid: raw.pid,
+    startKey: typeof raw.startKey === "string" || raw.startKey === null ? raw.startKey : null,
+    acquiredAt: typeof raw.acquiredAt === "string" ? raw.acquiredAt : ""
+  };
+}
+function isLiveLeaseRecord(record, fns = {}) {
+  const processProbe = fns.processProbe ?? defaultProcessProbe;
+  const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  if (!isLivePid(record.pid, processProbe))
+    return false;
+  const currentStart = processStartKey(record.pid);
+  if (currentStart === null)
+    return false;
+  if (record.startKey && record.startKey !== currentStart)
+    return false;
+  return true;
+}
+function lockIdentity(info) {
+  if (info.dev < 0n || info.ino <= 0n)
+    return;
+  return { dev: info.dev, ino: info.ino };
+}
+async function hasIdentity(path, expected) {
+  try {
+    const current = lockIdentity(await lstat(path, { bigint: true }));
+    return Boolean(current && current.dev === expected.dev && current.ino === expected.ino);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+async function readLiveCleanLease(worktreePath, home2, fns = {}) {
   const path = cleanLeaseLockPath(worktreePath, home2);
   try {
-    const raw = JSON.parse(await Bun.file(path).text());
-    if (typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.threadId !== "string" || raw.threadId.trim() === "" || typeof raw.path !== "string" || raw.path.trim() === "" || raw.role !== "clean" && raw.role !== "turn-start" || !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0) {
+    const record = parseLeaseRecord(JSON.parse(await Bun.file(path).text()));
+    if (!record || !isLiveLeaseRecord(record, fns))
       return null;
-    }
-    if (!isLivePid(raw.pid))
-      return null;
-    return raw;
+    return record;
   } catch {
     return null;
+  }
+}
+async function inspectLock(lockPath, fns) {
+  try {
+    const identity = lockIdentity(await lstat(lockPath, { bigint: true }));
+    let record = null;
+    try {
+      record = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
+    } catch {
+      record = null;
+    }
+    return { identity, record, live: Boolean(record && isLiveLeaseRecord(record, fns)) };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return { identity: undefined, record: null, live: false };
+    }
+    throw error;
+  }
+}
+async function reclaimStaleLock(lockPath, inspected) {
+  const token2 = crypto.randomUUID();
+  const candidate = `${lockPath}.reclaim-candidate-${process.pid}-${token2}`;
+  const claimPath = `${lockPath}.reclaim`;
+  await writeFile(candidate, `${JSON.stringify({ pid: process.pid, token: token2 })}
+`, { mode: 384, flag: "wx" });
+  const candidateIdentity = lockIdentity(await lstat(candidate, { bigint: true }));
+  let claimed = false;
+  try {
+    if (!candidateIdentity)
+      return false;
+    try {
+      await link(candidate, claimPath);
+      claimed = true;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (code === "EEXIST" || code === "ENOTEMPTY")
+        return false;
+      throw error;
+    }
+    if (!await hasIdentity(claimPath, candidateIdentity) || !await hasIdentity(lockPath, inspected)) {
+      return false;
+    }
+    await rm(lockPath, { force: true });
+    return !await hasIdentity(lockPath, inspected);
+  } finally {
+    await rm(candidate, { force: true });
+    if (claimed && candidateIdentity) {
+      if (await hasIdentity(claimPath, candidateIdentity))
+        await rm(claimPath, { force: true });
+    }
   }
 }
 function reservationError(path, existing, requested) {
@@ -590,27 +695,51 @@ async function acquireWorktreeGate(path, threadId, role, options = {}) {
   const token2 = crypto.randomUUID();
   const lockPath = cleanLeaseLockPath(path, options.home);
   await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 448 });
+  const processStartKey = options.processStartKey ?? defaultProcessStartKey;
   const record = {
     token: token2,
     threadId,
     path,
     role,
     pid: process.pid,
+    startKey: processStartKey(process.pid),
     acquiredAt: (options.now ?? (() => new Date().toISOString()))()
   };
-  const candidate = `${lockPath}.candidate-${process.pid}-${token2}`;
-  await writeFile(candidate, `${JSON.stringify(record)}
+  const fns = {
+    processProbe: options.processProbe,
+    processStartKey: options.processStartKey
+  };
+  let acquiredIdentity;
+  for (let attempt = 0;attempt < 3; attempt++) {
+    const candidate = `${lockPath}.candidate-${process.pid}-${token2}-${attempt}`;
+    await writeFile(candidate, `${JSON.stringify(record)}
 `, { mode: 384, flag: "wx" });
-  try {
-    await link(candidate, lockPath);
-  } catch (error) {
-    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
-    if (code === "EEXIST")
-      throw reservationError(path, await readLiveCleanLease(path, options.home), role);
-    throw error;
-  } finally {
-    await rm(candidate, { force: true });
+    try {
+      await link(candidate, lockPath);
+      acquiredIdentity = lockIdentity(await lstat(lockPath, { bigint: true }));
+      break;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (code !== "EEXIST")
+        throw error;
+      const inspected = await inspectLock(lockPath, fns);
+      if (inspected.live)
+        throw reservationError(path, inspected.record, role);
+      if (!inspected.identity) {
+        if (attempt === 2)
+          throw reservationError(path, inspected.record, role);
+        continue;
+      }
+      const reclaimed = await reclaimStaleLock(lockPath, inspected.identity);
+      if (!reclaimed && attempt === 2)
+        throw reservationError(path, await readLiveCleanLease(path, options.home, fns), role);
+    } finally {
+      await rm(candidate, { force: true });
+    }
   }
+  if (!acquiredIdentity)
+    throw reservationError(path, await readLiveCleanLease(path, options.home, fns), role);
+  const heldIdentity = acquiredIdentity;
   const controller = new AbortController;
   return {
     token: token2,
@@ -625,7 +754,19 @@ async function acquireWorktreeGate(path, threadId, role, options = {}) {
     async release() {
       if (!controller.signal.aborted)
         controller.abort();
-      await rm(lockPath, { force: true });
+      try {
+        const current = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
+        if (!current || current.token !== token2)
+          return;
+        if (!await hasIdentity(lockPath, heldIdentity))
+          return;
+        await rm(lockPath, { force: true });
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+          return;
+        if (error instanceof SyntaxError)
+          return;
+      }
     }
   };
 }
@@ -1355,7 +1496,7 @@ process.umask(63);
 await mkdir2(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
 var prepareSocket = async (path, isLive) => {
   try {
-    const existing = await lstat(path);
+    const existing = await lstat2(path);
     if (!existing.isSocket())
       throw new Error(`Refusing to replace non-socket path ${path}`);
     if (await isLive())
