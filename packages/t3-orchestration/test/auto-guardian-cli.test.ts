@@ -26,6 +26,32 @@ describe("auto guardian CLI", () => {
     expect(help.help).not.toContain("Provider-agnostic");
   });
 
+  test("status reports the concrete luna pin when host config is missing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-auto-guardian-status-default-"));
+    const child = Bun.spawn(["bun", CLI, "status"], {
+      cwd: root,
+      env: {
+        ...process.env,
+        HOME: root,
+        T3_HOME: join(root, ".t3"),
+        XDG_CONFIG_HOME: join(root, ".config"),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    const status = JSON.parse(stdout) as { model: string; modelReasoningEffort: string };
+    expect(status.model).toBe("gpt-5.6-luna");
+    expect(status.modelReasoningEffort).toBe("low");
+    expect(status.model).not.toBe("codex-auto-review");
+  });
+
   test("status reports the configured model and reasoning effort", async () => {
     const root = await mkdtemp(join(tmpdir(), "t3-auto-guardian-status-"));
     const configPath = join(root, "t3-auto-guardian.toml");

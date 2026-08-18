@@ -315,7 +315,7 @@ import { homedir } from "os";
 import { join as join3, resolve as resolve2 } from "path";
 
 // packages/t3-orchestration/src/auto-guardian-policy.ts
-var OFFICIAL_AUTO_REVIEW_MODEL = "codex-auto-review";
+var PINNED_AUTO_REVIEW_MODEL = "gpt-5.6-luna";
 var GUARDIAN_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -454,7 +454,7 @@ var POLICY_SOURCE = "openai/codex codex-rs/core/src/guardian/{policy_template.md
 var POLICY_DELTAS = [
   "Official auto-review is an in-session reviewer swap. This sidecar reconstructs it as one-shot `codex exec --ephemeral`.",
   "Official Config.base_instructions is supplied through `codex exec -c model_instructions_file=...` because `codex exec` has no `model_base_instructions` flag.",
-  "Official preferred model id is `codex-auto-review`, not `luna-low`. Host config may override `model`. Judge effort is an explicit `model_reasoning_effort` pin (default `low`) passed as `codex exec -c model_reasoning_effort=...` because `codex exec` has no dedicated effort flag.",
+  "Official preferred model id is `codex-auto-review`, not `luna-low`. This sidecar defaults to the concrete `gpt-5.6-luna` pin plus `model_reasoning_effort` (default `low`) instead of that retargetable alias. Host config may override `model`. Judge effort is passed as `codex exec -c model_reasoning_effort=...` because `codex exec` has no dedicated effort flag.",
   "JSON decode is fail-closed on extra keys, missing outcome, and any non-JSON wrapper. Official serde parse ignores unknown fields and extracts a JSON object from surrounding prose; this sidecar does not.",
   "Transcript is the last T3 user message plus the identifiable command/path, not the full Codex agent history.",
   "This client never calls acceptForSession. It only judges known non-Codex Auto harnesses (grok, cursor, opencode) and skips every other instance ID, including custom Codex drivers."
@@ -578,7 +578,7 @@ function defaultGuardianConfig() {
   return {
     enabled: true,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
-    model: OFFICIAL_AUTO_REVIEW_MODEL,
+    model: PINNED_AUTO_REVIEW_MODEL,
     modelReasoningEffort: DEFAULT_MODEL_REASONING_EFFORT,
     dryRun: false,
     includeProjects: [],

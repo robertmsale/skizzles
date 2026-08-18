@@ -5,6 +5,7 @@ import {
   lastUserMessageText,
   officialGuardianPolicyPrompt,
   OFFICIAL_AUTO_REVIEW_MODEL,
+  PINNED_AUTO_REVIEW_MODEL,
 } from "../src/auto-guardian-policy.ts";
 
 describe("guardian assessment decode", () => {
@@ -34,6 +35,7 @@ describe("guardian assessment decode", () => {
 describe("guardian prompt", () => {
   test("uses the official auto-review model id and extracted policy", () => {
     expect(OFFICIAL_AUTO_REVIEW_MODEL).toBe("codex-auto-review");
+    expect(PINNED_AUTO_REVIEW_MODEL).toBe("gpt-5.6-luna");
     expect(officialGuardianPolicyPrompt()).toContain("You are judging one planned coding-agent action.");
     expect(officialGuardianPolicyPrompt()).toContain('"outcome": "allow" | "deny"');
     expect(officialGuardianPolicyPrompt()).toContain("default generic tenant");

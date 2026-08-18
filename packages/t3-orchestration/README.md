@@ -225,11 +225,13 @@ exclude_projects = ["acme/app"]
 ```
 
 `include_projects` and `exclude_projects` match a T3 project title, project id,
-or workspace root. The default model is official Codex `codex-auto-review`,
-not `luna-low`. There is no `luna-low` model slug; pin `gpt-5.6-luna` plus
-`model_reasoning_effort = "low"` instead of the `codex-auto-review` alias,
-which can retarget. The default reasoning effort is `low`. The live judge
-passes it as `codex exec --ignore-user-config -m <model> -c model_reasoning_effort=<effort>`;
+or workspace root. The default model is the concrete `gpt-5.6-luna` pin, not
+official Codex `codex-auto-review` and not `luna-low`. There is no `luna-low`
+model slug. The live path pins `gpt-5.6-luna` plus
+`model_reasoning_effort = "low"` instead of the retargetable
+`codex-auto-review` alias. Host config may override `model`. The default
+reasoning effort is `low`. The live judge passes those values as
+`codex exec --ignore-user-config -m <model> -c model_reasoning_effort=<effort>`;
 `codex exec` has no dedicated effort flag. Unknown keys, including typos such
 as `effort` or `model_reasoning_effrot`, are rejected. Policy text is the
 extracted official guardian template and tenant policy from `openai/codex`
