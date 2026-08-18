@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readlinkSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync } from "node:fs";
 import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
@@ -290,20 +290,27 @@ function fdMatches(fd: number, expected: NodeIdentity, kind: "file" | "dir"): bo
   return !metadata.isDirectory();
 }
 
-function fdLivePath(fd: number, fallbackPath: string, expected: NodeIdentity): string | undefined {
-  try {
-    if (process.platform === "darwin") return realpathSync(`/dev/fd/${fd}`);
-    const linked = readlinkSync(`/proc/self/fd/${fd}`);
-    if (linked && !linked.includes(" (deleted)")) return linked;
-  } catch {
-    /* symlink fds cannot always be realpath'd; use the original name only while it still names this inode */
-  }
-  return pathStillExpected(fallbackPath, expected) ? fallbackPath : undefined;
-}
-
 function pathStillExpected(path: string, expected: NodeIdentity): boolean {
   const live = rawLstat(path);
   return Boolean(live && live.dev === expected.dev && live.ino === expected.ino);
+}
+
+function selectedMutationSidecar(kind: "rename" | "unlink" | "rmdir"): string {
+  return join(installerStateDir, `t3-auto-guardian.posix-${kind}.selected`);
+}
+
+async function rememberSelectedMutationPath(kind: "rename" | "unlink" | "rmdir", selected: string): Promise<void> {
+  await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
+  await writeFile(selectedMutationSidecar(kind), `${selected}\n`, { mode: 0o600 });
+}
+
+function selectedPathStillBound(
+  selected: string,
+  expected: NodeIdentity,
+  kind: "file" | "dir",
+  fd: number,
+): boolean {
+  return pathStillExpected(selected, expected) && fdMatches(fd, expected, kind);
 }
 
 async function posixRenameIfInode(from: string, to: string, expected: NodeIdentity): Promise<boolean> {
@@ -319,13 +326,13 @@ async function posixRenameIfInode(from: string, to: string, expected: NodeIdenti
   try {
     if (!fdMatches(fd, expected, kind)) return false;
     if (rawLstat(to)) return false;
+    const selected = from;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RENAME_SWAP")) {
-      await plantForeignDestination(from);
+      await rememberSelectedMutationPath("rename", selected);
+      await plantForeignDestination(selected);
     }
-    if (rawLstat(to)) return false;
-    const sourcePath = pathStillExpected(from, expected) ? from : fdLivePath(fd, from, expected);
-    if (!sourcePath || rawLstat(to)) return false;
-    if (!exclusiveRename(sourcePath, to)) return false;
+    if (!selectedPathStillBound(selected, expected, kind, fd) || rawLstat(to)) return false;
+    if (!exclusiveRename(selected, to)) return false;
     return pathStillExpected(to, expected) && !pathStillExpected(from, expected) && !rawLstat(from);
   } catch {
     return false;
@@ -344,12 +351,13 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
   }
   try {
     if (!fdMatches(fd, expected, "file")) return false;
+    const selected = path;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP")) {
-      await plantForeignDestination(path);
+      await rememberSelectedMutationPath("unlink", selected);
+      await plantForeignDestination(selected);
     }
-    const target = pathStillExpected(path, expected) ? path : fdLivePath(fd, path, expected);
-    if (!target) return false;
-    if (unlinkSymbol!(cString(target)) !== 0) return false;
+    if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
+    if (unlinkSymbol!(cString(selected)) !== 0) return false;
     return !pathStillExpected(path, expected) && !rawLstat(path);
   } catch {
     return false;
@@ -368,13 +376,14 @@ async function posixRmdirIfInode(path: string, expected: NodeIdentity): Promise<
   }
   try {
     if (!fdMatches(fd, expected, "dir")) return false;
+    const selected = path;
     if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP")) {
-      if (rawLstat(path)) await rename(path, `${path}.aside-${randomUUID()}`).catch(() => undefined);
-      await mkdir(path, { recursive: true, mode: 0o700 });
+      await rememberSelectedMutationPath("rmdir", selected);
+      if (rawLstat(selected)) await rename(selected, `${selected}.aside-${randomUUID()}`).catch(() => undefined);
+      await mkdir(selected, { recursive: true, mode: 0o700 });
     }
-    const target = pathStillExpected(path, expected) ? path : fdLivePath(fd, path, expected);
-    if (!target) return false;
-    if (rmdirSymbol!(cString(target)) !== 0) return false;
+    if (!selectedPathStillBound(selected, expected, "dir", fd)) return false;
+    if (rmdirSymbol!(cString(selected)) !== 0) return false;
     return !pathStillExpected(path, expected) && !rawLstat(path);
   } catch {
     return false;
