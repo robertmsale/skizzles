@@ -260,4 +260,46 @@ describe("worktree clean lease", () => {
     expect(removed).toBe(false);
     expect(JSON.parse(await Bun.file(claimPath).text())).toMatchObject({ token: "live-claimant", pid: process.pid });
   });
+
+  test("does not delete a replacement installed at the trash name after the move is verified", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    const lockPath = cleanLeaseLockPath(path, root);
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    await writeFile(lockPath, `${JSON.stringify({ token: "stale", threadId: "dead", path, role: "clean", pid: 1, startKey: "x", acquiredAt: "now" })}\n`);
+    const identity = await inspectPathIdentity(lockPath);
+    expect(identity).toBeDefined();
+    let trashPath = "";
+    const removed = await unlinkIfSameIdentity(lockPath, identity!, {
+      afterVerified: async (trash) => {
+        trashPath = trash;
+        await rm(trash, { force: true });
+        await writeFile(trash, `${JSON.stringify({ token: "live-trash", threadId: "live", path, role: "clean", pid: process.pid, startKey: defaultProcessStartKey(process.pid), acquiredAt: "now" })}\n`);
+      },
+    });
+    expect(removed).toBe(false);
+    expect(trashPath).not.toBe("");
+    expect(JSON.parse(await Bun.file(trashPath).text())).toMatchObject({ token: "live-trash", threadId: "live" });
+  });
+
+  test("does not restore a mismatched move over a newer file at the original path", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    const lockPath = cleanLeaseLockPath(path, root);
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    await writeFile(lockPath, `${JSON.stringify({ token: "original", threadId: "old", path, role: "clean", pid: 1, startKey: "x", acquiredAt: "now" })}\n`);
+    const identity = await inspectPathIdentity(lockPath);
+    expect(identity).toBeDefined();
+    const removed = await unlinkIfSameIdentity(lockPath, identity!, {
+      afterStat: async () => {
+        await rm(lockPath, { force: true });
+        await writeFile(lockPath, `${JSON.stringify({ token: "older-replacement", threadId: "older", path, role: "clean", pid: 1, startKey: "y", acquiredAt: "now" })}\n`);
+      },
+      afterMismatch: async () => {
+        await writeFile(lockPath, `${JSON.stringify({ token: "newer-at-path", threadId: "newer", path, role: "clean", pid: process.pid, startKey: defaultProcessStartKey(process.pid), acquiredAt: "now" })}\n`);
+      },
+    });
+    expect(removed).toBe(false);
+    expect(JSON.parse(await Bun.file(lockPath).text())).toMatchObject({ token: "newer-at-path", threadId: "newer" });
+  });
 });

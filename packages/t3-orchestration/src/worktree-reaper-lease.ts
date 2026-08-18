@@ -223,7 +223,12 @@ export async function inspectPathIdentity(path: string): Promise<LockIdentity | 
 export async function unlinkIfSameIdentity(
   path: string,
   inspected: LockIdentity,
-  hooks: { afterStat?: () => Promise<void> } = {},
+  hooks: {
+    afterStat?: () => Promise<void>;
+    afterMoved?: (trash: string) => Promise<void>;
+    afterVerified?: (trash: string) => Promise<void>;
+    afterMismatch?: (trash: string) => Promise<void>;
+  } = {},
 ): Promise<boolean> {
   let handle;
   try {
@@ -247,17 +252,41 @@ export async function unlinkIfSameIdentity(
       }
       throw error;
     }
-    const moved = await inspectPathIdentity(trash);
+    if (hooks.afterMoved) await hooks.afterMoved(trash);
+    const moved = await inspectOpenIdentity(trash);
     if (!moved || moved.dev !== inspected.dev || moved.ino !== inspected.ino) {
+      if (hooks.afterMismatch) await hooks.afterMismatch(trash);
       try {
-        await rename(trash, path);
-      } catch {
-        // Path may already hold a newer replacement; leave the moved name for diagnosis.
+        await link(trash, path);
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+        if (code !== "EEXIST") throw error;
       }
       return false;
     }
-    await rm(trash, { force: true });
+    if (hooks.afterVerified) await hooks.afterVerified(trash);
+    const stillMoved = await inspectOpenIdentity(trash);
+    if (!stillMoved || stillMoved.dev !== inspected.dev || stillMoved.ino !== inspected.ino) {
+      return false;
+    }
     return true;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function inspectOpenIdentity(path: string): Promise<LockIdentity | undefined> {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    return lockIdentity(await handle.stat({ bigint: true }));
   } finally {
     await handle.close();
   }

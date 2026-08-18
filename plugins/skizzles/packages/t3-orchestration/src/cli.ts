@@ -767,16 +767,6 @@ function isLiveReclaimClaim(record, fns) {
     acquiredAt: record.createdAt
   }, fns);
 }
-async function inspectPathIdentity(path) {
-  try {
-    return lockIdentity(await lstat(path, { bigint: true }));
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return;
-    }
-    throw error;
-  }
-}
 async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
   let handle;
   try {
@@ -802,15 +792,44 @@ async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
       }
       throw error;
     }
-    const moved = await inspectPathIdentity(trash);
+    if (hooks.afterMoved)
+      await hooks.afterMoved(trash);
+    const moved = await inspectOpenIdentity(trash);
     if (!moved || moved.dev !== inspected.dev || moved.ino !== inspected.ino) {
+      if (hooks.afterMismatch)
+        await hooks.afterMismatch(trash);
       try {
-        await rename2(trash, path);
-      } catch {}
+        await link(trash, path);
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (code !== "EEXIST")
+          throw error;
+      }
       return false;
     }
-    await rm2(trash, { force: true });
+    if (hooks.afterVerified)
+      await hooks.afterVerified(trash);
+    const stillMoved = await inspectOpenIdentity(trash);
+    if (!stillMoved || stillMoved.dev !== inspected.dev || stillMoved.ino !== inspected.ino) {
+      return false;
+    }
     return true;
+  } finally {
+    await handle.close();
+  }
+}
+async function inspectOpenIdentity(path) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  try {
+    return lockIdentity(await handle.stat({ bigint: true }));
   } finally {
     await handle.close();
   }
