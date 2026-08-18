@@ -844,6 +844,21 @@ function normalizeClaims(value) {
 function isAutoRuntime(runtimeMode) {
   return runtimeMode?.trim().toLowerCase() === AUTO_RUNTIME_MODE;
 }
+function normalizeRuntimeMode(value) {
+  if (typeof value !== "string")
+    return;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+function resolveGuardianRuntimeMode(eventRuntimeMode, threadRuntimeMode) {
+  const fromEvent = normalizeRuntimeMode(eventRuntimeMode);
+  if (fromEvent)
+    return { runtimeMode: fromEvent, source: "event" };
+  const fromThread = normalizeRuntimeMode(threadRuntimeMode);
+  if (fromThread)
+    return { runtimeMode: fromThread, source: "thread" };
+  return { runtimeMode: undefined, source: "missing" };
+}
 function isCodexDriver(driver) {
   return driver?.trim().toLowerCase() === CODEX_PROVIDER_INSTANCE;
 }
@@ -914,6 +929,24 @@ function candidateAction(candidate) {
     toolName: candidate.toolName
   });
 }
+async function resolveCandidateRuntimeMode(dependencies, candidate, cache) {
+  const fromEvent = resolveGuardianRuntimeMode(candidate.runtimeMode);
+  if (fromEvent.source !== "missing")
+    return fromEvent;
+  if (!dependencies.threadRuntimeMode)
+    return fromEvent;
+  if (!cache.has(candidate.threadId)) {
+    try {
+      cache.set(candidate.threadId, normalizeRuntimeMode(await dependencies.threadRuntimeMode(candidate.threadId)));
+    } catch {
+      cache.set(candidate.threadId, undefined);
+    }
+  }
+  return resolveGuardianRuntimeMode(candidate.runtimeMode, cache.get(candidate.threadId));
+}
+function skippedRuntimeReason(resolved) {
+  return `runtimeMode ${resolved.runtimeMode ?? "undefined"} (${resolved.source}) is not auto`;
+}
 async function claimOrSkip(dependencies, input, dryRun) {
   if (dryRun)
     return { status: "claimed" };
@@ -983,18 +1016,23 @@ async function runGuardianCycle(dependencies, config) {
       await dependencies.reconcileRequests(liveRequestIds);
     state = await dependencies.loadState();
     const decisions = [];
+    const threadModes = new Map;
     for (const candidate of candidates) {
-      const eligibility = isGuardianEligible(candidate);
+      const resolved = await resolveCandidateRuntimeMode(dependencies, candidate, threadModes);
+      const runtimeMode = resolved.runtimeMode ?? "undefined";
+      const runtimeModeSource = resolved.source;
+      const eligibility = isGuardianEligible({ ...candidate, runtimeMode: resolved.runtimeMode });
       if (!eligibility.eligible) {
         decisions.push({
           action: eligibility.action,
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           provider: candidate.provider,
-          runtimeMode: candidate.runtimeMode,
+          runtimeMode,
+          runtimeModeSource,
           command: candidate.command,
           decision: null,
-          reason: eligibility.reason,
+          reason: eligibility.action === "skipped_runtime" ? skippedRuntimeReason(resolved) : eligibility.reason,
           dryRun: config.dryRun,
           responded: false
         });
@@ -1007,7 +1045,8 @@ async function runGuardianCycle(dependencies, config) {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           provider: candidate.provider,
-          runtimeMode: candidate.runtimeMode,
+          runtimeMode,
+          runtimeModeSource,
           command: candidate.command,
           decision: null,
           reason: project.reason,
@@ -1023,7 +1062,8 @@ async function runGuardianCycle(dependencies, config) {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           provider: candidate.provider,
-          runtimeMode: candidate.runtimeMode,
+          runtimeMode,
+          runtimeModeSource,
           command: candidate.command,
           decision: existing.decision,
           reason: "already responded to this requestId",
@@ -1052,7 +1092,8 @@ async function runGuardianCycle(dependencies, config) {
             threadId: candidate.threadId,
             requestId: candidate.requestId,
             provider: candidate.provider,
-            runtimeMode: candidate.runtimeMode,
+            runtimeMode,
+            runtimeModeSource,
             command: candidate.command,
             decision: existing.decision,
             reason: "already responded to this requestId",
@@ -1077,7 +1118,8 @@ async function runGuardianCycle(dependencies, config) {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           provider: candidate.provider,
-          runtimeMode: candidate.runtimeMode,
+          runtimeMode,
+          runtimeModeSource,
           command: candidate.command,
           decision: decision2,
           reason: reason2,
@@ -1092,7 +1134,8 @@ async function runGuardianCycle(dependencies, config) {
           threadId: candidate.threadId,
           requestId: null,
           provider: candidate.provider,
-          runtimeMode: candidate.runtimeMode,
+          runtimeMode,
+          runtimeModeSource,
           command: null,
           decision: null,
           reason: MISSING_SNAPSHOT_GAP,
@@ -1115,7 +1158,8 @@ async function runGuardianCycle(dependencies, config) {
             threadId: candidate.threadId,
             requestId: candidate.requestId,
             provider: candidate.provider,
-            runtimeMode: candidate.runtimeMode,
+            runtimeMode,
+            runtimeModeSource,
             command: null,
             decision: "decline",
             reason: "already responded to this requestId",
@@ -1140,7 +1184,8 @@ async function runGuardianCycle(dependencies, config) {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           provider: candidate.provider,
-          runtimeMode: candidate.runtimeMode,
+          runtimeMode,
+          runtimeModeSource,
           command: null,
           decision: "decline",
           reason: denyReason,
@@ -1189,7 +1234,8 @@ async function runGuardianCycle(dependencies, config) {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           provider: candidate.provider,
-          runtimeMode: candidate.runtimeMode,
+          runtimeMode,
+          runtimeModeSource,
           command: candidate.command,
           decision: judgedDecision,
           reason: "already responded to this requestId",
@@ -1219,7 +1265,8 @@ async function runGuardianCycle(dependencies, config) {
         threadId: candidate.threadId,
         requestId: candidate.requestId,
         provider: candidate.provider,
-        runtimeMode: candidate.runtimeMode,
+        runtimeMode,
+        runtimeModeSource,
         command: candidate.command,
         decision,
         reason,
@@ -1541,6 +1588,14 @@ function createDefaultGuardianDependencies(request) {
       op: "tasks.approvals",
       ...projectId ? { projectId } : {}
     }),
+    threadRuntimeMode: async (threadId) => {
+      const history = await call({
+        op: "tasks.history",
+        threadId,
+        turns: 1
+      });
+      return typeof history.thread?.runtimeMode === "string" ? history.thread.runtimeMode : undefined;
+    },
     resolveTaskApproval: async (input) => call({
       op: input.decision === "accept" ? "tasks.approve" : "tasks.deny",
       threadId: input.threadId,

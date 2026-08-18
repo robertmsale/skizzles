@@ -27,7 +27,7 @@ export type ProjectedApproval = {
   workspaceRoot: string | null;
   provider: string;
   providerDriver: string | null;
-  runtimeMode: string;
+  runtimeMode: string | null;
   requestId: string;
   requestKind: ApprovalRequestKind | null;
   toolName: string | null;
@@ -45,7 +45,7 @@ export type UnidentifiableApproval = {
   workspaceRoot: string | null;
   provider: string;
   providerDriver: string | null;
-  runtimeMode: string;
+  runtimeMode: string | null;
   requestId: string | null;
   reason: string;
   createdAt: string | null;
@@ -343,6 +343,13 @@ function projectContext(
   };
 }
 
+export function resolveProjectedRuntimeMode(
+  thread: Pick<T3ThreadShell, "runtimeMode">,
+  snapshot?: Pick<ThreadSnapshot, "thread">,
+): string | null {
+  return asTrimmedString(thread.runtimeMode) ?? asTrimmedString(snapshot?.thread.runtimeMode);
+}
+
 export function projectPendingApprovalList(
   threads: readonly T3ThreadShell[],
   snapshots: ReadonlyMap<string, ThreadSnapshot>,
@@ -358,6 +365,7 @@ export function projectPendingApprovalList(
     const context = projectContext(thread, projects);
     const provider = threadProvider(thread);
     const providerDriver = drivers?.get(provider)?.trim() || null;
+    const runtimeMode = resolveProjectedRuntimeMode(thread, snapshot);
     if (pending.length === 0) {
       unidentifiable.push({
         threadId: thread.id,
@@ -366,7 +374,7 @@ export function projectPendingApprovalList(
         ...context,
         provider,
         providerDriver,
-        runtimeMode: thread.runtimeMode,
+        runtimeMode,
         requestId: null,
         reason: MISSING_SNAPSHOT_GAP,
         createdAt: thread.updatedAt ?? null,
@@ -383,7 +391,7 @@ export function projectPendingApprovalList(
           ...context,
           provider,
           providerDriver,
-          runtimeMode: thread.runtimeMode,
+          runtimeMode,
           requestId: approval.requestId,
           requestKind: approval.requestKind,
           toolName: approval.toolName,
@@ -401,7 +409,7 @@ export function projectPendingApprovalList(
         ...context,
         provider,
         providerDriver,
-        runtimeMode: thread.runtimeMode,
+        runtimeMode,
         requestId: approval.requestId,
         reason: approval.reason ?? MISSING_COMMAND_GAP,
         createdAt: approval.createdAt,

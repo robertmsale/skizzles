@@ -19,6 +19,7 @@ import {
   withGuardianDeliveryLock,
   isCodexProvider,
   isGuardianEligible,
+  resolveGuardianRuntimeMode,
   runGuardianCycle,
   type ApprovalList,
   type ClaimResult,
@@ -72,12 +73,20 @@ function fixture(options: {
   history?: Array<{ role: string; text: string }>;
   judge?: JudgeResult;
   state?: GuardianState;
-} = {}): { deps: GuardianDependencies; resolved: Array<Record<string, unknown>>; judged: number } {
+  threadRuntimeMode?: Record<string, string | undefined> | ((threadId: string) => string | undefined | Promise<string | undefined>);
+} = {}): { deps: GuardianDependencies; resolved: Array<Record<string, unknown>>; judged: number; threadLookups: string[] } {
   const resolved: Array<Record<string, unknown>> = [];
+  const threadLookups: string[] = [];
   let judged = 0;
   let state = options.state ?? emptyGuardianState();
   const deps: GuardianDependencies = {
     listTaskApprovals: async () => options.list ?? { approvals: [approval()], unidentifiable: [] },
+    threadRuntimeMode: async (threadId) => {
+      threadLookups.push(threadId);
+      if (typeof options.threadRuntimeMode === "function") return options.threadRuntimeMode(threadId);
+      if (options.threadRuntimeMode) return options.threadRuntimeMode[threadId];
+      return undefined;
+    },
     resolveTaskApproval: async (input) => {
       resolved.push(input);
       return { sequence: resolved.length, ...input };
@@ -219,7 +228,7 @@ function fixture(options: {
       state = { ...state, responded };
     },
   };
-  return { deps, resolved, get judged() { return judged; } };
+  return { deps, resolved, threadLookups, get judged() { return judged; } };
 }
 
 describe("guardian eligibility filter", () => {
@@ -253,6 +262,20 @@ describe("guardian eligibility filter", () => {
     expect(isGuardianEligible({ provider: "codex_personal", providerDriver: "codex", runtimeMode: "auto" }).eligible).toBe(false);
   });
 
+  test("resolves Auto from the thread when the approval event omits runtimeMode", () => {
+    expect(resolveGuardianRuntimeMode(undefined, "auto")).toEqual({ runtimeMode: "auto", source: "thread" });
+    expect(resolveGuardianRuntimeMode(null, "auto")).toEqual({ runtimeMode: "auto", source: "thread" });
+    expect(resolveGuardianRuntimeMode("", "auto")).toEqual({ runtimeMode: "auto", source: "thread" });
+    expect(resolveGuardianRuntimeMode("  ", "full-access")).toEqual({ runtimeMode: "full-access", source: "thread" });
+    expect(resolveGuardianRuntimeMode(undefined, "full-access")).toEqual({ runtimeMode: "full-access", source: "thread" });
+    expect(resolveGuardianRuntimeMode(undefined, "plan")).toEqual({ runtimeMode: "plan", source: "thread" });
+    expect(resolveGuardianRuntimeMode(undefined, "ask")).toEqual({ runtimeMode: "ask", source: "thread" });
+    expect(resolveGuardianRuntimeMode("auto", "full-access")).toEqual({ runtimeMode: "auto", source: "event" });
+    expect(resolveGuardianRuntimeMode("full-access", "auto")).toEqual({ runtimeMode: "full-access", source: "event" });
+    expect(resolveGuardianRuntimeMode("plan", "auto")).toEqual({ runtimeMode: "plan", source: "event" });
+    expect(resolveGuardianRuntimeMode(undefined, undefined)).toEqual({ runtimeMode: undefined, source: "missing" });
+  });
+
   test("keeps unidentifiable snapshot gaps distinct from missing commands", () => {
     const candidates = candidatesFromApprovalList({
       approvals: [approval()],
@@ -270,6 +293,95 @@ describe("guardian eligibility filter", () => {
 });
 
 describe("guardian cycle", () => {
+  test("judges when the approval event omits runtimeMode and the thread is auto", async () => {
+    const { deps, resolved, threadLookups, judged } = fixture({
+      list: { approvals: [approval({ runtimeMode: undefined })], unidentifiable: [] },
+      threadRuntimeMode: { "cursor-task": "auto" },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(threadLookups).toEqual(["cursor-task"]);
+    expect(judged).toBe(1);
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      threadId: "cursor-task",
+      runtimeMode: "auto",
+      runtimeModeSource: "thread",
+      responded: true,
+    });
+    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+  });
+
+  test("skips when the approval event omits runtimeMode and the thread is not auto", async () => {
+    for (const runtimeMode of ["full-access", "plan", "ask"] as const) {
+      const { deps, resolved, threadLookups, judged } = fixture({
+        list: { approvals: [approval({ runtimeMode: undefined })], unidentifiable: [] },
+        threadRuntimeMode: { "cursor-task": runtimeMode },
+      });
+      const report = await runGuardianCycle(deps, defaultGuardianConfig());
+      expect(threadLookups).toEqual(["cursor-task"]);
+      expect(judged).toBe(0);
+      expect(report.decisions[0]).toMatchObject({
+        action: "skipped_runtime",
+        runtimeMode,
+        runtimeModeSource: "thread",
+        responded: false,
+        reason: `runtimeMode ${runtimeMode} (thread) is not auto`,
+      });
+      expect(resolved).toEqual([]);
+    }
+  });
+
+  test("judges an explicit auto runtimeMode on the approval event without a thread lookup", async () => {
+    const { deps, resolved, threadLookups, judged } = fixture({
+      threadRuntimeMode: { "cursor-task": "full-access" },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(threadLookups).toEqual([]);
+    expect(judged).toBe(1);
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      runtimeMode: "auto",
+      runtimeModeSource: "event",
+      responded: true,
+    });
+    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+  });
+
+  test("skips an explicit non-auto runtimeMode on the approval event even when the thread is auto", async () => {
+    const { deps, resolved, threadLookups, judged } = fixture({
+      list: { approvals: [approval({ runtimeMode: "full-access" })], unidentifiable: [] },
+      threadRuntimeMode: { "cursor-task": "auto" },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(threadLookups).toEqual([]);
+    expect(judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_runtime",
+      runtimeMode: "full-access",
+      runtimeModeSource: "event",
+      responded: false,
+      reason: "runtimeMode full-access (event) is not auto",
+    });
+    expect(resolved).toEqual([]);
+  });
+
+  test("still skips Codex when the approval event omits runtimeMode and the thread is auto", async () => {
+    const { deps, resolved, judged } = fixture({
+      list: { approvals: [approval({ threadId: "codex-task", provider: "codex", providerDriver: "codex", runtimeMode: undefined })], unidentifiable: [] },
+      threadRuntimeMode: { "codex-task": "auto" },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_codex",
+      threadId: "codex-task",
+      runtimeMode: "auto",
+      runtimeModeSource: "thread",
+      responded: false,
+    });
+    expect(resolved).toEqual([]);
+  });
+
   test("never touches Codex auto threads", async () => {
     const { deps, resolved } = fixture({
       list: { approvals: [approval({ threadId: "codex-task", provider: "codex", providerDriver: "codex" })], unidentifiable: [] },

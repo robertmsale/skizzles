@@ -362,6 +362,9 @@ function projectContext(thread, projects) {
     workspaceRoot: project?.workspaceRoot?.trim() || null
   };
 }
+function resolveProjectedRuntimeMode(thread, snapshot) {
+  return asTrimmedString(thread.runtimeMode) ?? asTrimmedString(snapshot?.thread.runtimeMode);
+}
 function projectPendingApprovalList(threads, snapshots, projects, drivers) {
   const approvals = [];
   const unidentifiable = [];
@@ -373,6 +376,7 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
     const context = projectContext(thread, projects);
     const provider = threadProvider(thread);
     const providerDriver = drivers?.get(provider)?.trim() || null;
+    const runtimeMode = resolveProjectedRuntimeMode(thread, snapshot);
     if (pending.length === 0) {
       unidentifiable.push({
         threadId: thread.id,
@@ -381,7 +385,7 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
         ...context,
         provider,
         providerDriver,
-        runtimeMode: thread.runtimeMode,
+        runtimeMode,
         requestId: null,
         reason: MISSING_SNAPSHOT_GAP,
         createdAt: thread.updatedAt ?? null,
@@ -398,7 +402,7 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
           ...context,
           provider,
           providerDriver,
-          runtimeMode: thread.runtimeMode,
+          runtimeMode,
           requestId: approval.requestId,
           requestKind: approval.requestKind,
           toolName: approval.toolName,
@@ -416,7 +420,7 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
         ...context,
         provider,
         providerDriver,
-        runtimeMode: thread.runtimeMode,
+        runtimeMode,
         requestId: approval.requestId,
         reason: approval.reason ?? MISSING_COMMAND_GAP,
         createdAt: approval.createdAt,
@@ -1227,7 +1231,8 @@ function projectTaskHistory(result) {
       id: result.thread.id,
       projectId: result.thread.projectId,
       title: result.thread.title,
-      sessionStatus: result.thread.session?.status ?? null
+      sessionStatus: result.thread.session?.status ?? null,
+      runtimeMode: result.thread.runtimeMode
     },
     page: result.page ?? null,
     messages,
