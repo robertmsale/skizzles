@@ -428,13 +428,22 @@ function projectTask(thread, projects, pinnedIndex) {
   };
 }
 var CLEANABLE_TASK_CAP = 5000;
-function projectOccupiedWorktrees(snapshot) {
-  return snapshot.threads.flatMap((thread) => {
-    const path = thread.worktreePath?.trim();
-    if (thread.deletedAt || !path)
-      return [];
-    return [{ id: thread.id, path }];
-  });
+function projectOccupiedWorktrees(...snapshots) {
+  const occupied = [];
+  const seen = new Set;
+  for (const snapshot of snapshots) {
+    for (const thread of snapshot.threads) {
+      const path = thread.worktreePath?.trim();
+      if (thread.deletedAt || !path)
+        continue;
+      const key = `${thread.id}\x00${path}`;
+      if (seen.has(key))
+        continue;
+      seen.add(key);
+      occupied.push({ id: thread.id, path });
+    }
+  }
+  return occupied;
 }
 function projectCleanableWorktrees(snapshot) {
   const projects = new Map(snapshot.projects.filter((project) => !project.deletedAt).map((project) => [project.id, project]));
@@ -485,14 +494,14 @@ function projectProjects(snapshot) {
 }
 function mergeArchivedTasks(shell, full) {
   const activeIds = new Set(shell.threads.map((thread) => thread.id));
-  const archived = full.threads.filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt && thread.archivedAt).map((thread) => ({
+  const extras = full.threads.filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt).map((thread) => ({
     ...thread,
     backgroundLiveness: Object.hasOwn(thread, "backgroundLiveness") ? thread.backgroundLiveness ?? null : "unknown"
   }));
   return {
     snapshotSequence: Math.max(shell.snapshotSequence, full.snapshotSequence),
     projects: full.projects,
-    threads: [...shell.threads, ...archived],
+    threads: [...shell.threads, ...extras],
     updatedAt: shell.updatedAt
   };
 }
@@ -622,7 +631,11 @@ var taskStatus = async (id) => {
 };
 var listCleanableWorktrees = async () => {
   const [shell, full] = await Promise.all([shellSnapshot(), snapshot()]);
-  return projectCleanableWorktrees(mergeArchivedTasks(shell, full));
+  const merged = mergeArchivedTasks(shell, full);
+  return {
+    ...projectCleanableWorktrees(merged),
+    occupied: projectOccupiedWorktrees(shell, full)
+  };
 };
 var HISTORY_MESSAGE_CHAR_LIMIT = 8000;
 var HISTORY_TOTAL_CHAR_LIMIT = 32000;

@@ -149,7 +149,7 @@ describe("cross-project collaboration CLI", () => {
     const payload = new Promise<Record<string, unknown>>((resolveValue) => { resolvePayload = resolveValue; });
     server = createServer((socket) => socket.once("data", (chunk) => {
       resolvePayload(JSON.parse(chunk.toString()) as Record<string, unknown>);
-      socket.end('{"ok":true,"result":{"tasks":[],"count":0,"truncated":false}}\n');
+      socket.end('{"ok":true,"result":{"tasks":[],"count":0,"truncated":false,"occupied":[]}}\n');
     }));
     await new Promise<void>((resolveListen) => server!.listen(socketPath, resolveListen));
     const process = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "worktrees", "clean-settled", "--dry-run"], {

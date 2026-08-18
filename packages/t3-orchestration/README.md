@@ -64,6 +64,7 @@ It will not:
 - clean the project's primary checkout
 - clean a claimed worktree whose registered Git branch does not match the task
 - clean a worktree owned by another live task
+- proceed without an explicit occupancy list or boolean truncation proof from the daemon
 - proceed when the settled/archived task list is truncated
 - clean a task whose session, latest turn, or phase is running or starting
 - guess when two worktrees match the same branch

@@ -110,12 +110,22 @@ export type OccupiedWorktree = {
   path: string;
 };
 
-export function projectOccupiedWorktrees(snapshot: Snapshot): OccupiedWorktree[] {
-  return snapshot.threads.flatMap((thread) => {
-    const path = thread.worktreePath?.trim();
-    if (thread.deletedAt || !path) return [];
-    return [{ id: thread.id, path }];
-  });
+export function projectOccupiedWorktrees(
+  ...snapshots: Array<Pick<Snapshot, "threads">>
+): OccupiedWorktree[] {
+  const occupied: OccupiedWorktree[] = [];
+  const seen = new Set<string>();
+  for (const snapshot of snapshots) {
+    for (const thread of snapshot.threads) {
+      const path = thread.worktreePath?.trim();
+      if (thread.deletedAt || !path) continue;
+      const key = `${thread.id}\0${path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      occupied.push({ id: thread.id, path });
+    }
+  }
+  return occupied;
 }
 
 export function projectCleanableWorktrees(snapshot: Snapshot) {
@@ -179,8 +189,8 @@ export function projectProjects(snapshot: Snapshot) {
 
 export function mergeArchivedTasks(shell: ShellSnapshot, full: Snapshot): Snapshot {
   const activeIds = new Set(shell.threads.map((thread) => thread.id));
-  const archived = full.threads
-    .filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt && thread.archivedAt)
+  const extras = full.threads
+    .filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt)
     .map((thread) => ({
       ...thread,
       backgroundLiveness: Object.hasOwn(thread, "backgroundLiveness")
@@ -190,7 +200,7 @@ export function mergeArchivedTasks(shell: ShellSnapshot, full: Snapshot): Snapsh
   return {
     snapshotSequence: Math.max(shell.snapshotSequence, full.snapshotSequence),
     projects: full.projects,
-    threads: [...shell.threads, ...archived],
+    threads: [...shell.threads, ...extras],
     updatedAt: shell.updatedAt,
   };
 }

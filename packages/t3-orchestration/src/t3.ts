@@ -11,7 +11,7 @@ import {
   threadActivities,
   type ApprovalDecision,
 } from "./approval-projection.ts";
-import { mergeArchivedTasks, projectCleanableWorktrees, projectProjects, projectTaskList, projectTask, waitForTasks, type TaskListOptions, type TaskWaitInput } from "./task-projection.ts";
+import { mergeArchivedTasks, projectCleanableWorktrees, projectOccupiedWorktrees, projectProjects, projectTaskList, projectTask, waitForTasks, type TaskListOptions, type TaskWaitInput } from "./task-projection.ts";
 import { requireSelection, type ModelSelection, type ShellSnapshot, type Snapshot, type T3Thread, type ThreadSnapshot } from "./protocol.ts";
 
 async function request(path: string, init: RequestInit = {}, maxBodyBytes = 2_000_000): Promise<any> {
@@ -103,7 +103,11 @@ export const taskStatus = async (id: string) => {
 };
 export const listCleanableWorktrees = async () => {
   const [shell, full] = await Promise.all([shellSnapshot(), snapshot()]);
-  return projectCleanableWorktrees(mergeArchivedTasks(shell, full));
+  const merged = mergeArchivedTasks(shell, full);
+  return {
+    ...projectCleanableWorktrees(merged),
+    occupied: projectOccupiedWorktrees(shell, full),
+  };
 };
 
 const HISTORY_MESSAGE_CHAR_LIMIT = 8_000;

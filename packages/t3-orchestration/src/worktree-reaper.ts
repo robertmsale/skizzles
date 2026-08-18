@@ -441,7 +441,23 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     return report;
   }
   const state = await deps.readState();
-  const listing = await deps.listCleanableTasks();
+  let listing: CleanableTaskListing;
+  try {
+    listing = await deps.listCleanableTasks();
+    if (typeof listing.truncated !== "boolean") {
+      throw new Error("cleanable-task listing omitted or malformed truncated; refusing incomplete cleanup");
+    }
+    listing = { ...listing, occupied: parseOccupiedWorktrees(listing.occupied) };
+  } catch (error) {
+    report.ok = false;
+    report.failed = 1;
+    report.tasks.push({
+      threadId: "enumeration",
+      action: "failed",
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return report;
+  }
   report.scanned = listing.tasks.length;
   if (listing.truncated) {
     report.ok = false;
@@ -454,8 +470,43 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
     return report;
   }
   const tasks = listing.tasks;
-  const occupied = await resolveOccupiedWorktrees(listing.occupied, deps.realpath);
+  let occupied = await resolveOccupiedWorktrees(listing.occupied, deps.realpath);
   const worktreesByRoot = new Map<string, GitWorktree[]>();
+
+  const refreshOccupancy = async (
+    task: CleanableTask,
+    path: string,
+  ): Promise<{ ok: true; occupied: OccupiedWorktree[] } | { ok: false; action: ReaperAction; path: string; reason: string }> => {
+    let fresh: CleanableTaskListing;
+    try {
+      fresh = await deps.listCleanableTasks();
+      if (typeof fresh.truncated !== "boolean") {
+        throw new Error("cleanable-task listing omitted or malformed truncated; refusing incomplete cleanup");
+      }
+      fresh = { ...fresh, occupied: parseOccupiedWorktrees(fresh.occupied) };
+    } catch (error) {
+      return {
+        ok: false,
+        action: "failed",
+        path,
+        reason: `could not revalidate occupancy: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (fresh.truncated) {
+      return {
+        ok: false,
+        action: "failed",
+        path,
+        reason: `cleanable-task enumeration truncated at ${fresh.tasks.length}; refusing incomplete cleanup`,
+      };
+    }
+    const nextOccupied = await resolveOccupiedWorktrees(fresh.occupied, deps.realpath);
+    const owner = otherTaskOccupyingPath(task.id, path, nextOccupied);
+    if (owner) {
+      return { ok: false, action: "failed", path, reason: `worktree ${path} is owned by another task ${owner.id}` };
+    }
+    return { ok: true, occupied: nextOccupied };
+  };
 
   const record = (result: ReaperTaskResult) => {
     report.tasks.push(result);
@@ -559,6 +610,12 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
         continue;
       }
     }
+    const refreshed = await refreshOccupancy(current, plan.path);
+    if (!refreshed.ok) {
+      record({ threadId: task.id, action: refreshed.action, path: refreshed.path, reason: refreshed.reason });
+      continue;
+    }
+    occupied = refreshed.occupied;
     if (options.dryRun) {
       record({
         threadId: task.id,
@@ -669,6 +726,40 @@ export function isUnknownOperationError(error: string | undefined): boolean {
   return Boolean(error && error.startsWith("Unknown operation:"));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function parseOccupiedWorktrees(value: unknown): OccupiedWorktree[] {
+  if (!Array.isArray(value)) {
+    throw new Error("worktrees.listCleanable omitted occupied; refusing mixed-version occupancy");
+  }
+  return value.map((entry, index) => {
+    if (!isRecord(entry)) throw new Error(`worktrees.listCleanable occupied[${index}] is malformed`);
+    const id = typeof entry.id === "string" ? entry.id.trim() : "";
+    const path = typeof entry.path === "string" ? entry.path.trim() : "";
+    if (!id || !path) throw new Error(`worktrees.listCleanable occupied[${index}] is malformed`);
+    return { id, path };
+  });
+}
+
+export function parseListCleanableResult(result: unknown): CleanableTaskListing {
+  if (!isRecord(result)) throw new Error("worktrees.listCleanable result is malformed");
+  if (typeof result.truncated !== "boolean") {
+    throw new Error("worktrees.listCleanable omitted or malformed truncated; refusing incomplete cleanup");
+  }
+  if (!Array.isArray(result.tasks)) throw new Error("worktrees.listCleanable omitted tasks");
+  return {
+    tasks: (result.tasks as CleanableTask[]).filter((task) => isCleanableLifecycle(task)),
+    truncated: result.truncated,
+    occupied: parseOccupiedWorktrees(result.occupied),
+  };
+}
+
+export function taskListEnumerationTruncated(moreRecent: unknown): boolean {
+  return !Number.isInteger(moreRecent) || (moreRecent as number) < 0 || (moreRecent as number) > 0;
+}
+
 export function createDefaultReaperDependencies(
   request: (payload: Record<string, unknown>) => Promise<{ ok: boolean; result?: unknown; error?: string }>,
 ): ReaperDependencies {
@@ -697,9 +788,11 @@ export function createDefaultReaperDependencies(
         ...(projectId ? { projectId } : {}),
       });
       if (!response.ok) throw new Error(response.error ?? "tasks.list failed");
-      const listed = response.result as { tasks?: CleanableTask[]; moreRecent?: number };
-      if ((listed.moreRecent ?? 0) > 0) truncated = true;
-      for (const task of listed.tasks ?? []) {
+      if (!isRecord(response.result) || !Array.isArray(response.result.tasks)) {
+        throw new Error("tasks.list omitted tasks; refusing incomplete cleanup");
+      }
+      if (taskListEnumerationTruncated(response.result.moreRecent)) truncated = true;
+      for (const task of response.result.tasks as CleanableTask[]) {
         if (seen.has(task.id)) continue;
         seen.add(task.id);
         tasks.push({
@@ -719,17 +812,7 @@ export function createDefaultReaperDependencies(
     async listCleanableTasks() {
       const dedicated = await request({ op: "worktrees.listCleanable" });
       if (dedicated.ok) {
-        const result = dedicated.result as {
-          tasks?: CleanableTask[];
-          truncated?: boolean;
-          occupied?: OccupiedWorktree[];
-        };
-        const tasks = (result.tasks ?? []).filter((task) => isCleanableLifecycle(task));
-        return {
-          tasks,
-          truncated: result.truncated === true,
-          occupied: Array.isArray(result.occupied) ? result.occupied : occupiedFromTasks(tasks),
-        };
+        return parseListCleanableResult(dedicated.result);
       }
       if (!isUnknownOperationError(dedicated.error)) {
         throw new Error(dedicated.error ?? "worktrees.listCleanable failed");

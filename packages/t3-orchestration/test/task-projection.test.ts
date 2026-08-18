@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CLEANABLE_TASK_CAP, mergeArchivedTasks, projectCleanableWorktrees, projectedBackgroundLiveness, projectProjects, projectTask, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
+import { CLEANABLE_TASK_CAP, mergeArchivedTasks, projectCleanableWorktrees, projectOccupiedWorktrees, projectedBackgroundLiveness, projectProjects, projectTask, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
 import type { ShellSnapshot, Snapshot, T3Thread, T3ThreadShell } from "../src/protocol.ts";
 
 const project = { id: "project", title: "Project", workspaceRoot: "/repo", deletedAt: null };
@@ -172,6 +172,39 @@ describe("task list projection", () => {
     expect(listed.tasks.some((entry) => entry.id === "settled-0")).toBe(false);
     expect(listed.tasks[0]?.id).toBe(`settled-${CLEANABLE_TASK_CAP}`);
     expect(listed.occupied).toHaveLength(CLEANABLE_TASK_CAP + 1);
+  });
+
+  test("keeps a newly active full-only thread so occupancy cannot drop a live owner", () => {
+    const settled = thread({
+      id: "settled-A",
+      settledOverride: "settled",
+      session: { status: "ready" },
+      worktreePath: "/repo/.t3/worktrees/repo/shared",
+      branch: "t3code/shared",
+    });
+    const activeB = thread({
+      id: "running-B",
+      session: { status: "running" },
+      worktreePath: "/repo/.t3/worktrees/repo/shared",
+      branch: "t3code/shared",
+      updatedAt: "2026-08-17T00:00:01Z",
+    });
+    const shellOnly = shell([settled]);
+    const newerFull = {
+      snapshotSequence: 12,
+      projects: [project],
+      threads: [settled, activeB],
+    };
+    const merged = mergeArchivedTasks(shellOnly, newerFull);
+    expect(merged.threads.map((entry) => entry.id)).toEqual(["settled-A", "running-B"]);
+    expect(projectOccupiedWorktrees(shellOnly, newerFull)).toEqual([
+      { id: "settled-A", path: "/repo/.t3/worktrees/repo/shared" },
+      { id: "running-B", path: "/repo/.t3/worktrees/repo/shared" },
+    ]);
+    expect(projectCleanableWorktrees(merged).occupied).toEqual([
+      { id: "settled-A", path: "/repo/.t3/worktrees/repo/shared" },
+      { id: "running-B", path: "/repo/.t3/worktrees/repo/shared" },
+    ]);
   });
 });
 
