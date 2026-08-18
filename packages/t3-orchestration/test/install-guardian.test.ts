@@ -1066,4 +1066,78 @@ describe("auto guardian installer", () => {
     expect((await lstat(installRoot)).isDirectory()).toBe(true);
     expect(await readdir(installRoot)).toEqual([]);
   });
+
+  test("fails closed when exclusiveRenameOwned source is replaced after its final identity check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_RENAME_FROM_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+  });
+
+  test("fails closed when unlinkSameNode target is replaced after its final identity check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_UNLINK_INODE_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+  });
+
+  test("fails closed when rmdirSameNode target is replaced after its final emptiness check", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_RMDIR_INODE_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    const staged = join(root, ".local/share/skizzles/t3-auto-guardian/staged-links");
+    expect((await lstat(staged)).isDirectory()).toBe(true);
+    expect(await readdir(staged)).toEqual([]);
+  });
+
+  test("fails closed when a restore source is replaced after its identity is bound", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-moved",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_RENAME_FROM_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+  });
+
+  test("fails closed when a destination-backup restore source is replaced after identity bind", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "link-backed-up",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_RENAME_FROM_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "foreign-link")).toBeTruthy();
+  });
 });

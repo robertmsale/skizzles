@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, lstatSync } from "node:fs";
 import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
@@ -135,9 +135,21 @@ function consumeInstallerHook(name: string): boolean {
 const RENAME_EXCL = 0x00000004;
 const RENAME_NOREPLACE = 0x00000001;
 const AT_FDCWD = -100;
+const S_IFMT = 0o170000;
+const S_IFDIR = 0o040000;
+const STAT_BUF_SIZE = 256;
 
 type ExclusiveRename = (from: string, to: string) => number;
+type LstatFn = (path: Buffer, buf: Buffer) => number;
+type PathFn = (path: Buffer) => number;
+type StatLayout = { dev: number; ino: number; mode: number; devSize: 4 | 8; inoSize: 4 | 8; modeSize: 2 | 4 };
+type RawStat = { dev: string; ino: string; mode: number };
+
 let exclusiveRenameSymbol: ExclusiveRename | undefined;
+let lstatSymbol: LstatFn | undefined;
+let unlinkSymbol: PathFn | undefined;
+let rmdirSymbol: PathFn | undefined;
+let statLayout: StatLayout | undefined;
 let flockSymbol: ((fd: number, operation: number) => number) | undefined;
 
 function libcCandidates(): string[] {
@@ -150,32 +162,125 @@ function cString(value: string): Buffer {
   return Buffer.from(`${value}\0`);
 }
 
-function loadExclusiveRename(): ExclusiveRename {
-  if (exclusiveRenameSymbol) return exclusiveRenameSymbol;
+function readUnsigned(buf: Buffer, offset: number, size: 2 | 4 | 8): bigint {
+  if (size === 2) return BigInt(buf.readUInt16LE(offset));
+  if (size === 4) return BigInt(buf.readUInt32LE(offset));
+  return buf.readBigUInt64LE(offset);
+}
+
+function loadPosixSymbols(): void {
+  if (exclusiveRenameSymbol && lstatSymbol && unlinkSymbol && rmdirSymbol) return;
   let last: unknown;
   for (const candidate of libcCandidates()) {
     try {
-      if (process.platform === "darwin") {
-        const symbol = dlopen(candidate, {
+      const symbols = process.platform === "darwin"
+        ? dlopen(candidate, {
           renamex_np: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
-        }).symbols.renamex_np;
-        exclusiveRenameSymbol = (from, to) => symbol(cString(from), cString(to), RENAME_EXCL);
-      } else {
-        const symbol = dlopen(candidate, {
+          lstat: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+          unlink: { args: [FFIType.ptr], returns: FFIType.i32 },
+          rmdir: { args: [FFIType.ptr], returns: FFIType.i32 },
+        }).symbols
+        : dlopen(candidate, {
           renameat2: { args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
-        }).symbols.renameat2;
-        exclusiveRenameSymbol = (from, to) => symbol(AT_FDCWD, cString(from), AT_FDCWD, cString(to), RENAME_NOREPLACE);
-      }
-      return exclusiveRenameSymbol;
+          lstat: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+          unlink: { args: [FFIType.ptr], returns: FFIType.i32 },
+          rmdir: { args: [FFIType.ptr], returns: FFIType.i32 },
+        }).symbols;
+      exclusiveRenameSymbol = process.platform === "darwin"
+        ? (from, to) => (symbols as { renamex_np: (from: Buffer, to: Buffer, flags: number) => number }).renamex_np(cString(from), cString(to), RENAME_EXCL)
+        : (from, to) => (symbols as { renameat2: (olddir: number, from: Buffer, newdir: number, to: Buffer, flags: number) => number }).renameat2(AT_FDCWD, cString(from), AT_FDCWD, cString(to), RENAME_NOREPLACE);
+      lstatSymbol = symbols.lstat;
+      unlinkSymbol = symbols.unlink;
+      rmdirSymbol = symbols.rmdir;
+      return;
     } catch (error) {
       last = error;
     }
   }
-  throw new Error(`exclusive rename is unavailable (${last instanceof Error ? last.message : String(last)})`);
+  throw new Error(`posix identity-bound mutations are unavailable (${last instanceof Error ? last.message : String(last)})`);
 }
 
 function exclusiveRename(from: string, to: string): boolean {
-  return loadExclusiveRename()(from, to) === 0;
+  loadPosixSymbols();
+  return exclusiveRenameSymbol!(from, to) === 0;
+}
+
+function rawLstat(path: string): RawStat | undefined {
+  loadPosixSymbols();
+  const buf = Buffer.alloc(STAT_BUF_SIZE);
+  if (lstatSymbol!(cString(path), buf) !== 0) return undefined;
+  const layout = requireStatLayout(buf, path);
+  return {
+    dev: readUnsigned(buf, layout.dev, layout.devSize).toString(),
+    ino: readUnsigned(buf, layout.ino, layout.inoSize).toString(),
+    mode: Number(readUnsigned(buf, layout.mode, layout.modeSize)),
+  };
+}
+
+function requireStatLayout(sample: Buffer, samplePath: string): StatLayout {
+  if (statLayout) return statLayout;
+  const metadata = lstatSync(samplePath);
+  const wantedDev = BigInt(metadata.dev);
+  const wantedIno = BigInt(metadata.ino);
+  const wantedMode = BigInt(Number(metadata.mode) & 0xffff);
+  let dev: StatLayout["dev"] | undefined;
+  let ino: StatLayout["ino"] | undefined;
+  let mode: StatLayout["mode"] | undefined;
+  let devSize: StatLayout["devSize"] | undefined;
+  let inoSize: StatLayout["inoSize"] | undefined;
+  let modeSize: StatLayout["modeSize"] | undefined;
+  for (let offset = 0; offset <= 128; offset++) {
+    if (dev === undefined && offset + 4 <= sample.length && readUnsigned(sample, offset, 4) === wantedDev) {
+      dev = offset;
+      devSize = 4;
+    }
+    if (dev === undefined && offset + 8 <= sample.length && readUnsigned(sample, offset, 8) === wantedDev) {
+      dev = offset;
+      devSize = 8;
+    }
+    if (ino === undefined && offset + 8 <= sample.length && readUnsigned(sample, offset, 8) === wantedIno) {
+      ino = offset;
+      inoSize = 8;
+    }
+    if (ino === undefined && offset + 4 <= sample.length && readUnsigned(sample, offset, 4) === wantedIno) {
+      ino = offset;
+      inoSize = 4;
+    }
+    if (mode === undefined && offset + 2 <= sample.length && readUnsigned(sample, offset, 2) === wantedMode) {
+      mode = offset;
+      modeSize = 2;
+    }
+    if (mode === undefined && offset + 4 <= sample.length && (readUnsigned(sample, offset, 4) & 0xffffn) === wantedMode) {
+      mode = offset;
+      modeSize = 4;
+    }
+  }
+  if (dev === undefined || ino === undefined || mode === undefined || !devSize || !inoSize || !modeSize) {
+    throw new Error("Could not bind libc lstat layout to inode identity");
+  }
+  statLayout = { dev, ino, mode, devSize, inoSize, modeSize };
+  return statLayout;
+}
+
+function posixRenameIfInode(from: string, to: string, expected: NodeIdentity): boolean {
+  const source = rawLstat(from);
+  if (!source || source.dev !== expected.dev || source.ino !== expected.ino) return false;
+  if (rawLstat(to)) return false;
+  return exclusiveRename(from, to);
+}
+
+function posixUnlinkIfInode(path: string, expected: NodeIdentity): boolean {
+  const live = rawLstat(path);
+  if (!live || live.dev !== expected.dev || live.ino !== expected.ino) return false;
+  if ((live.mode & S_IFMT) === S_IFDIR) return false;
+  return unlinkSymbol!(cString(path)) === 0;
+}
+
+function posixRmdirIfInode(path: string, expected: NodeIdentity): boolean {
+  const live = rawLstat(path);
+  if (!live || live.dev !== expected.dev || live.ino !== expected.ino) return false;
+  if ((live.mode & S_IFMT) !== S_IFDIR) return false;
+  return rmdirSymbol!(cString(path)) === 0;
 }
 
 function loadFlock(): (fd: number, operation: number) => number {
@@ -602,16 +707,20 @@ async function exclusiveRenameOwned(from: string, to: string, expected: NodeIden
   const live = await liveNodeIdentity(from);
   if (!live || !sameNode(live, expected)) return false;
   if (await optionalLstat(to)) return false;
-  return exclusiveRename(from, to);
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_RENAME_FROM_SWAP")) {
+    await plantForeignDestination(from);
+  }
+  return posixRenameIfInode(from, to, expected);
 }
 
 async function unlinkSameNode(path: string, expected: NodeIdentity): Promise<boolean> {
   const live = await optionalLstat(path);
   const identity = await liveNodeIdentity(path);
   if (!live || live.isDirectory() || !identity || !sameNode(identity, expected)) return false;
-  try { await unlink(path); }
-  catch { return false; }
-  return true;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_UNLINK_INODE_SWAP")) {
+    await plantForeignDestination(path);
+  }
+  return posixUnlinkIfInode(path, expected);
 }
 
 async function rmdirSameNode(path: string, expected: NodeIdentity): Promise<boolean> {
@@ -619,9 +728,11 @@ async function rmdirSameNode(path: string, expected: NodeIdentity): Promise<bool
   if (!live || !sameNode(live, expected)) return false;
   const children = await readdir(path).catch(() => null);
   if (!children || children.length > 0) return false;
-  try { await rmdir(path); }
-  catch { return false; }
-  return true;
+  if (consumeInstallerHook("T3_AUTO_GUARDIAN_RMDIR_INODE_SWAP")) {
+    if (await optionalLstat(path)) await rename(path, `${path}.aside-${randomUUID()}`).catch(() => undefined);
+    await mkdir(path, { recursive: true, mode: 0o700 });
+  }
+  return posixRmdirIfInode(path, expected);
 }
 
 async function relocateVerifiedNode(
@@ -648,8 +759,9 @@ async function relocateVerifiedNode(
   if (commitHook && consumeInstallerHook("T3_AUTO_GUARDIAN_RELOCATE_RESTORE_SWAP")) {
     await plantForeignDestination(path);
   }
-  if (!await optionalLstat(path)) {
-    if (!exclusiveRename(aside, path)) return false;
+  const asideIdentity = await liveNodeIdentity(aside);
+  if (asideIdentity && sameNode(asideIdentity, expected) && !await optionalLstat(path)) {
+    if (!await exclusiveRenameOwned(aside, path, expected)) return false;
   }
   return false;
 }
@@ -684,7 +796,8 @@ async function restoreDestinations(journal: Pick<InstallJournal, "kind" | "desti
         complete = false;
         continue;
       }
-      if (!exclusiveRename(destination.backup, destination.destination)) {
+      const backupIdentity = await liveNodeIdentity(destination.backup);
+      if (!backupIdentity || !await exclusiveRenameOwned(destination.backup, destination.destination, backupIdentity)) {
         complete = false;
         continue;
       }
@@ -940,7 +1053,8 @@ async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
       if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
       return;
     }
-    if (!exclusiveRename(journal.previousInstall, journal.installRoot)) {
+    const previousIdentity = await liveRootIdentity(journal.previousInstall);
+    if (!previousIdentity || !await exclusiveRenameOwned(journal.previousInstall, journal.installRoot, previousIdentity)) {
       throw new Error(`Refusing to replace unowned install root ${journal.installRoot}`);
     }
   } else {
@@ -1203,7 +1317,8 @@ async function rollbackTransaction(
       if (!destinationsRestored) throw new Error("Refusing to dispose transaction while destination backups remain unrestored");
       return;
     }
-    if (!exclusiveRename(previousInstall, installRoot)) {
+    const previousIdentity = await liveRootIdentity(previousInstall);
+    if (!previousIdentity || !await exclusiveRenameOwned(previousInstall, installRoot, previousIdentity)) {
       throw new Error(`Refusing to replace unowned install root ${installRoot}`);
     }
   }
