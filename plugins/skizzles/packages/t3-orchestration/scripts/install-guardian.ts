@@ -56,7 +56,7 @@ const installRoot = resolve(process.env.T3_AUTO_GUARDIAN_INSTALL_ROOT?.trim() ||
 const runtimeRoot = join(installRoot, "runtime");
 const receiptPath = join(installRoot, "install-receipt.json");
 const journalPath = join(dirname(installRoot), "t3-auto-guardian.journal");
-const installerLockPath = join(dirname(installRoot), "t3-auto-guardian.lock");
+const installerLockPath = join(home, ".local/share/skizzles/t3-auto-guardian.installer.lock");
 const cliName = "auto-guardian-cli.ts";
 type JournalKind = "install" | "uninstall";
 type JournalDestination = { destination: string; backup?: string; installed: boolean };
@@ -69,6 +69,7 @@ type InstallJournal = {
   previousInstall?: string;
   destinations: JournalDestination[];
   installedRoot: boolean;
+  serviceWasLoaded?: boolean;
 };
 const LOCK_EX = 2;
 const LOCK_NB = 4;
@@ -343,8 +344,10 @@ async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
 async function recoverInterruptedInstall(): Promise<void> {
   const journal = await readJournal();
   if (!journal) return;
-  if (journal.phase !== "complete") await rollbackFromJournal(journal);
-  else await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  if (journal.phase !== "complete") {
+    await rollbackFromJournal(journal);
+    if (journal.serviceWasLoaded) await activate();
+  } else await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
   await clearJournal();
 }
 
@@ -533,11 +536,12 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     journal.phase = "root-moved";
     await writeJournal(journal);
     await crashIf("root-moved");
-    await rename(stagedRoot, installRoot);
-    installedRoot = true;
     journal.installedRoot = true;
     journal.phase = "root-installed";
     await writeJournal(journal);
+    await crashIf("root-installing");
+    await rename(stagedRoot, installRoot);
+    installedRoot = true;
     await crashIf("root-installed");
     for (const [index, link] of receipt.links.entries()) {
       const destination = link.path;
@@ -618,10 +622,6 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
   await validateReceipt(previous);
   const domain = await launchctlDomain();
   const serviceWasLoaded = await launchctlLoaded(domain);
-  if (serviceWasLoaded) {
-    const bootout = await Bun.$`launchctl bootout ${domain}/${GUARDIAN_LAUNCH_AGENT_LABEL}`.nothrow().quiet();
-    if (bootout.exitCode !== 0) throw new Error(`Could not stop ${GUARDIAN_LAUNCH_AGENT_LABEL}: ${bootout.stderr.toString().trim()}`);
-  }
   const transactionRoot = await mkdtemp(join(dirname(installRoot), ".t3-auto-guardian-uninstall-"));
   const installBackup = join(transactionRoot, "install");
   const movedDestinations: JournalDestination[] = [];
@@ -633,8 +633,15 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
     installRoot,
     destinations: [],
     installedRoot: false,
+    serviceWasLoaded,
   };
   await writeJournal(journal);
+  await crashIf("uninstall-prepared");
+  if (serviceWasLoaded) {
+    const bootout = await Bun.$`launchctl bootout ${domain}/${GUARDIAN_LAUNCH_AGENT_LABEL}`.nothrow().quiet();
+    if (bootout.exitCode !== 0) throw new Error(`Could not stop ${GUARDIAN_LAUNCH_AGENT_LABEL}: ${bootout.stderr.toString().trim()}`);
+  }
+  await crashIf("uninstall-bootout");
   try {
     for (const [index, link] of previous.links.entries()) {
       const backup = join(transactionRoot, `link-${index}`);

@@ -577,27 +577,32 @@ function loadFlock() {
   }
   throw new Error(`flock is unavailable (${last instanceof Error ? last.message : String(last)})`);
 }
-async function withExclusiveFileLock(lockPath, body, options = {}) {
-  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
-  const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
+async function tryExclusiveFileLock(lockPath, body) {
   await mkdir2(dirname2(lockPath), { recursive: true, mode: 448 });
   const handle = await open(lockPath, "a", 384);
   try {
     const flock = loadFlock();
-    for (let attempt = 0;attempt < attempts; attempt++) {
-      if (flock(handle.fd, LOCK_EX | LOCK_NB) === 0) {
-        try {
-          return await body();
-        } finally {
-          flock(handle.fd, LOCK_UN);
-        }
-      }
-      await Bun.sleep(retryMs);
+    if (flock(handle.fd, LOCK_EX | LOCK_NB) !== 0)
+      return { ok: false };
+    try {
+      return { ok: true, value: await body() };
+    } finally {
+      flock(handle.fd, LOCK_UN);
     }
-    throw new Error(`Timed out waiting for exclusive lock ${lockPath}`);
   } finally {
     await handle.close();
   }
+}
+async function withExclusiveFileLock(lockPath, body, options = {}) {
+  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
+  const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
+  for (let attempt = 0;attempt < attempts; attempt++) {
+    const acquired = await tryExclusiveFileLock(lockPath, body);
+    if (acquired.ok)
+      return acquired.value;
+    await Bun.sleep(retryMs);
+  }
+  throw new Error(`Timed out waiting for exclusive lock ${lockPath}`);
 }
 
 // packages/t3-orchestration/src/auto-guardian.ts
@@ -718,20 +723,22 @@ async function deliverClaim(dependencies, input, dryRun) {
     return false;
   if (!input.leaseId)
     return false;
-  if (!await dependencies.renewRequest(input.requestId, input.leaseId))
-    return false;
-  try {
-    await dependencies.resolveTaskApproval({
-      threadId: input.threadId,
-      requestId: input.requestId,
-      decision: input.decision,
-      reason: input.reason
-    });
-  } catch {
-    await dependencies.releaseRequest(input.requestId, input.leaseId);
-    return false;
-  }
-  return dependencies.completeRequest(input.requestId, input.leaseId);
+  return dependencies.withDeliveryLock(input.requestId, async () => {
+    if (!await dependencies.renewRequest(input.requestId, input.leaseId))
+      return false;
+    try {
+      await dependencies.resolveTaskApproval({
+        threadId: input.threadId,
+        requestId: input.requestId,
+        decision: input.decision,
+        reason: input.reason
+      });
+    } catch {
+      await dependencies.releaseRequest(input.requestId, input.leaseId);
+      return false;
+    }
+    return dependencies.completeRequest(input.requestId, input.leaseId);
+  });
 }
 async function runGuardianCycle(dependencies, config) {
   const now = dependencies.now();
@@ -1022,8 +1029,15 @@ async function writeGuardianStateAtomic(state, path) {
 function newOwnershipToken() {
   return `${Date.now().toString(16)}.${randomBytes(8).toString("hex")}`;
 }
+function guardianDeliveryLockPath(statePath, requestId) {
+  const safe = requestId.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120) || "request";
+  return `${statePath}.delivery.${safe}.lock`;
+}
 async function withGuardianStateLock(path, body) {
   return withExclusiveFileLock(`${path}.lock`, body);
+}
+async function withGuardianDeliveryLock(requestId, body, path = defaultGuardianStatePath()) {
+  return withExclusiveFileLock(guardianDeliveryLockPath(path, requestId), body);
 }
 async function mergeGuardianState(path, patch) {
   return withGuardianStateLock(path, async () => {
@@ -1061,6 +1075,11 @@ async function claimGuardianRequest(input, path = defaultGuardianStatePath(), op
       return { status: "duplicate", decision: existing.decision };
     if (existing?.status === "pending") {
       if (!leaseExpired(existing, nowMs))
+        return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
+      const liveHolder = await tryExclusiveFileLock(guardianDeliveryLockPath(path, input.requestId), async () => {
+        return;
+      });
+      if (!liveHolder.ok)
         return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       const leaseId2 = newOwnershipToken();
       await writeGuardianStateAtomic(writeClaimState(state, input.requestId, {
@@ -1246,6 +1265,7 @@ function createDefaultGuardianDependencies(request) {
       return;
     }),
     claimRequest: (input) => claimGuardianRequest(input),
+    withDeliveryLock: (requestId, body) => withGuardianDeliveryLock(requestId, body),
     renewRequest: (requestId, leaseId) => renewGuardianLease(requestId, leaseId),
     completeRequest: (requestId, leaseId) => completeGuardianRequest(requestId, leaseId),
     releaseRequest: (requestId, leaseId) => releaseGuardianRequest(requestId, leaseId),

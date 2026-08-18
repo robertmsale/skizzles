@@ -10,7 +10,7 @@ import {
   type ProjectedApproval,
   type UnidentifiableApproval,
 } from "./approval-projection.ts";
-import { withExclusiveFileLock } from "./exclusive-lock.ts";
+import { tryExclusiveFileLock, withExclusiveFileLock } from "./exclusive-lock.ts";
 import {
   projectAllowed,
   type GuardianConfig,
@@ -143,6 +143,7 @@ export type GuardianDependencies = {
   loadState(): Promise<GuardianState>;
   recordPoll(at: string, error: string | null): Promise<void>;
   claimRequest(input: { requestId: string; threadId: string; decision: ApprovalDecision; at: string }): Promise<ClaimResult>;
+  withDeliveryLock<T>(requestId: string, body: () => Promise<T>): Promise<T>;
   renewRequest(requestId: string, leaseId: string): Promise<boolean>;
   completeRequest(requestId: string, leaseId: string): Promise<boolean>;
   releaseRequest(requestId: string, leaseId: string): Promise<void>;
@@ -282,19 +283,21 @@ async function deliverClaim(
 ): Promise<boolean> {
   if (dryRun) return false;
   if (!input.leaseId) return false;
-  if (!await dependencies.renewRequest(input.requestId, input.leaseId)) return false;
-  try {
-    await dependencies.resolveTaskApproval({
-      threadId: input.threadId,
-      requestId: input.requestId,
-      decision: input.decision,
-      reason: input.reason,
-    });
-  } catch {
-    await dependencies.releaseRequest(input.requestId, input.leaseId);
-    return false;
-  }
-  return dependencies.completeRequest(input.requestId, input.leaseId);
+  return dependencies.withDeliveryLock(input.requestId, async () => {
+    if (!await dependencies.renewRequest(input.requestId, input.leaseId!)) return false;
+    try {
+      await dependencies.resolveTaskApproval({
+        threadId: input.threadId,
+        requestId: input.requestId,
+        decision: input.decision,
+        reason: input.reason,
+      });
+    } catch {
+      await dependencies.releaseRequest(input.requestId, input.leaseId!);
+      return false;
+    }
+    return dependencies.completeRequest(input.requestId, input.leaseId!);
+  });
 }
 
 export async function runGuardianCycle(
@@ -600,11 +603,24 @@ function newOwnershipToken(): string {
   return `${Date.now().toString(16)}.${randomBytes(8).toString("hex")}`;
 }
 
+export function guardianDeliveryLockPath(statePath: string, requestId: string): string {
+  const safe = requestId.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120) || "request";
+  return `${statePath}.delivery.${safe}.lock`;
+}
+
 export async function withGuardianStateLock<T>(
   path: string,
   body: () => Promise<T>,
 ): Promise<T> {
   return withExclusiveFileLock(`${path}.lock`, body);
+}
+
+export async function withGuardianDeliveryLock<T>(
+  requestId: string,
+  body: () => Promise<T>,
+  path = defaultGuardianStatePath(),
+): Promise<T> {
+  return withExclusiveFileLock(guardianDeliveryLockPath(path, requestId), body);
 }
 
 export async function mergeGuardianState(
@@ -655,6 +671,8 @@ export async function claimGuardianRequest(
     if (existing?.status === "completed") return { status: "duplicate", decision: existing.decision };
     if (existing?.status === "pending") {
       if (!leaseExpired(existing, nowMs)) return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
+      const liveHolder = await tryExclusiveFileLock(guardianDeliveryLockPath(path, input.requestId), async () => undefined);
+      if (!liveHolder.ok) return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       const leaseId = newOwnershipToken();
       await writeGuardianStateAtomic(writeClaimState(state, input.requestId, {
         ...existing,
@@ -852,6 +870,7 @@ export function createDefaultGuardianDependencies(
     loadState: () => loadGuardianState(),
     recordPoll: (at, error) => mergeGuardianState(defaultGuardianStatePath(), { lastPollAt: at, lastError: error }).then(() => undefined),
     claimRequest: (input) => claimGuardianRequest(input),
+    withDeliveryLock: (requestId, body) => withGuardianDeliveryLock(requestId, body),
     renewRequest: (requestId, leaseId) => renewGuardianLease(requestId, leaseId),
     completeRequest: (requestId, leaseId) => completeGuardianRequest(requestId, leaseId),
     releaseRequest: (requestId, leaseId) => releaseGuardianRequest(requestId, leaseId),

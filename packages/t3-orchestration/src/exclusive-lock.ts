@@ -29,6 +29,25 @@ function loadFlock(): (fd: number, operation: number) => number {
   throw new Error(`flock is unavailable (${last instanceof Error ? last.message : String(last)})`);
 }
 
+export async function tryExclusiveFileLock<T>(
+  lockPath: string,
+  body: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false }> {
+  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const handle = await open(lockPath, "a", 0o600);
+  try {
+    const flock = loadFlock();
+    if (flock(handle.fd, LOCK_EX | LOCK_NB) !== 0) return { ok: false };
+    try {
+      return { ok: true, value: await body() };
+    } finally {
+      flock(handle.fd, LOCK_UN);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function withExclusiveFileLock<T>(
   lockPath: string,
   body: () => Promise<T>,
@@ -36,22 +55,10 @@ export async function withExclusiveFileLock<T>(
 ): Promise<T> {
   const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
-  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-  const handle = await open(lockPath, "a", 0o600);
-  try {
-    const flock = loadFlock();
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      if (flock(handle.fd, LOCK_EX | LOCK_NB) === 0) {
-        try {
-          return await body();
-        } finally {
-          flock(handle.fd, LOCK_UN);
-        }
-      }
-      await Bun.sleep(retryMs);
-    }
-    throw new Error(`Timed out waiting for exclusive lock ${lockPath}`);
-  } finally {
-    await handle.close();
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const acquired = await tryExclusiveFileLock(lockPath, body);
+    if (acquired.ok) return acquired.value;
+    await Bun.sleep(retryMs);
   }
+  throw new Error(`Timed out waiting for exclusive lock ${lockPath}`);
 }

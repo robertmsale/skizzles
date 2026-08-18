@@ -270,4 +270,76 @@ describe("auto guardian installer", () => {
     const uninstalled = await installWithEnvironment(root, fixture.environment, "--uninstall");
     expect(uninstalled.exitCode).toBe(0);
   });
+
+  test("serializes concurrent installers that share HOME destinations but not installRoot", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const firstRoot = join(root, "roots/a");
+    const secondRoot = join(root, "roots/b");
+    const [first, second] = await Promise.all([
+      installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: firstRoot }),
+      installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: secondRoot }),
+    ]);
+    const outcomes = [first, second];
+    const succeeded = outcomes.filter((result) => result.exitCode === 0);
+    const failed = outcomes.filter((result) => result.exitCode !== 0);
+    expect(succeeded).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.stderr).toContain("Refusing to replace unowned path");
+    const winnerRoot = first.exitCode === 0 ? firstRoot : secondRoot;
+    const link = join(root, ".local/bin/t3-auto-guardian");
+    const receipt = JSON.parse(await readFile(join(winnerRoot, "install-receipt.json"), "utf8")) as { runtimeRoot: string };
+    expect(await readlink(link)).toBe(join(winnerRoot, "runtime/auto-guardian-cli.ts"));
+    expect(receipt.runtimeRoot).toBe(join(winnerRoot, "runtime"));
+    const loserRoot = first.exitCode === 0 ? secondRoot : firstRoot;
+    await expect(lstat(join(loserRoot, "install-receipt.json"))).rejects.toThrow();
+    const uninstalled = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_ROOT: winnerRoot,
+    }, "--uninstall");
+    expect(uninstalled.exitCode).toBe(0);
+    await expect(lstat(link)).rejects.toThrow();
+  });
+
+  test("restores a loaded LaunchAgent after an uninstall bootout crash", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    expect(await readFile(fixture.state, "utf8")).toBe("loaded");
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "uninstall-bootout",
+    }, "--uninstall");
+    expect(crashed.exitCode).toBe(75);
+    expect(await lstat(fixture.state).then(() => "loaded").catch(() => "missing")).toBe("missing");
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).toBe(0);
+    expect(recovered.stderr).toBe("");
+    expect(await readFile(fixture.state, "utf8")).toBe("loaded");
+    expect(await readlink(join(root, ".local/bin/t3-auto-guardian"))).toBe(
+      join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"),
+    );
+  });
+
+  test("recovers a first-install crash after the new root is journaled but not placed", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installing",
+    });
+    expect(crashed.exitCode).toBe(75);
+    await expect(lstat(join(root, ".local/share/skizzles/t3-auto-guardian"))).rejects.toThrow();
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).toBe(0);
+    expect(recovered.stderr).toBe("");
+    expect(await readlink(join(root, ".local/bin/t3-auto-guardian"))).toBe(
+      join(root, ".local/share/skizzles/t3-auto-guardian/runtime/auto-guardian-cli.ts"),
+    );
+    const uninstalled = await installWithEnvironment(root, fixture.environment, "--uninstall");
+    expect(uninstalled.exitCode).toBe(0);
+  });
 });

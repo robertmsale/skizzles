@@ -8,11 +8,13 @@ import {
   claimGuardianRequest,
   completeGuardianRequest,
   emptyGuardianState,
+  guardianDeliveryLockPath,
   loadGuardianState,
   mergeGuardianState,
   reconcileGuardianRequests,
   releaseGuardianRequest,
   renewGuardianLease,
+  withGuardianDeliveryLock,
   isCodexProvider,
   isGuardianEligible,
   runGuardianCycle,
@@ -87,6 +89,7 @@ function fixture(options: {
     recordPoll: async (at, error) => {
       state = { ...state, lastPollAt: at, lastError: error };
     },
+    withDeliveryLock: async (_requestId, body) => body(),
     claimRequest: async (input) => {
       const existing = state.responded[input.requestId];
       if (existing?.status === "completed") return { status: "duplicate", decision: existing.decision };
@@ -338,6 +341,7 @@ describe("guardian cycle", () => {
         loadState: first.deps.loadState,
         recordPoll: first.deps.recordPoll,
         claimRequest: first.deps.claimRequest,
+        withDeliveryLock: first.deps.withDeliveryLock,
         renewRequest: first.deps.renewRequest,
         completeRequest: first.deps.completeRequest,
         releaseRequest: first.deps.releaseRequest,
@@ -716,6 +720,7 @@ describe("guardian lock and multi-process claims", () => {
         loadState: () => loadGuardianState(path),
         recordPoll: async () => undefined,
         claimRequest: async () => ({ status: "retry", decision: "accept", leaseId: first.leaseId }),
+        withDeliveryLock: (requestId, body) => withGuardianDeliveryLock(requestId, body, path),
         renewRequest: (requestId, leaseId) => renewGuardianLease(requestId, leaseId, path),
         completeRequest: (requestId, leaseId) => completeGuardianRequest(requestId, leaseId, path),
         releaseRequest: (requestId, leaseId) => releaseGuardianRequest(requestId, leaseId, path),
@@ -726,6 +731,63 @@ describe("guardian lock and multi-process claims", () => {
       expect(await renewGuardianLease("req-1", second.leaseId!, path)).toBe(true);
       expect(await completeGuardianRequest("req-1", second.leaseId!, path)).toBe(true);
       expect((await loadGuardianState(path)).responded["req-1"]?.status).toBe("completed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("in-flight delivery is not taken over after lease expiry", async () => {
+    const root = await mkdtemp("/tmp/t3-guardian-live-delivery-");
+    try {
+      const path = join(root, "state.json");
+      let releaseResolve!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseResolve = resolve;
+      });
+      let enteredResolve!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enteredResolve = resolve;
+      });
+      const deliveries: string[] = [];
+      const depsFor = (owner: "A" | "B", clock: number): GuardianDependencies => ({
+        listTaskApprovals: async () => ({ approvals: [approval()], unidentifiable: [] }),
+        resolveTaskApproval: async (input) => {
+          deliveries.push(owner);
+          enteredResolve();
+          if (owner === "A") await gate;
+          return input;
+        },
+        taskHistory: async () => ({ messages: [] }),
+        judge: async () => ({ ok: true, assessment: { outcome: "allow", rationale: "unused" }, raw: "" }),
+        now: () => "2026-08-17T02:00:02Z",
+        loadState: () => loadGuardianState(path),
+        recordPoll: async () => undefined,
+        claimRequest: (input) => claimGuardianRequest(input, path, { now: () => clock, leaseMs: 10 }),
+        withDeliveryLock: (requestId, body) => withGuardianDeliveryLock(requestId, body, path),
+        renewRequest: (requestId, leaseId) => renewGuardianLease(requestId, leaseId, path, { now: () => clock, leaseMs: 10 }),
+        completeRequest: (requestId, leaseId) => completeGuardianRequest(requestId, leaseId, path),
+        releaseRequest: (requestId, leaseId) => releaseGuardianRequest(requestId, leaseId, path),
+        reconcileRequests: async () => undefined,
+      });
+      const firstCycle = runGuardianCycle(depsFor("A", 1_000), defaultGuardianConfig());
+      await entered;
+      const second = await runGuardianCycle(depsFor("B", 2_000), defaultGuardianConfig());
+      expect(second.decisions[0]).toMatchObject({ action: "skipped_duplicate", responded: false });
+      const ownerLease = (await loadGuardianState(path)).responded["req-1"]?.leaseId;
+      expect(ownerLease).toBeTruthy();
+      expect(await claimGuardianRequest({
+        requestId: "req-1",
+        threadId: "cursor-task",
+        decision: "decline",
+        at: "2026-08-17T02:00:03Z",
+      }, path, { now: () => 3_000, leaseMs: 10 })).toMatchObject({ status: "duplicate", leaseId: ownerLease });
+      releaseResolve();
+      const first = await firstCycle;
+      expect(first.decisions[0]?.responded).toBe(true);
+      expect(deliveries).toEqual(["A"]);
+      expect((await loadGuardianState(path)).responded["req-1"]?.status).toBe("completed");
+      expect((await loadGuardianState(path)).responded["req-1"]?.leaseId).toBe(ownerLease);
+      await expect(Bun.file(guardianDeliveryLockPath(path, "req-1")).exists()).resolves.toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
