@@ -411,7 +411,9 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
     } catch {
       /* symlink fds cannot be truncated */
     }
-    return !swapped;
+    if (swapped) return false;
+    if (selectedPathStillBound(selected, expected, "file", fd) && unlinkSymbol!(cString(selected)) !== 0) return false;
+    return !pathStillExpected(selected, expected);
   } catch {
     return false;
   } finally {
@@ -436,7 +438,9 @@ async function posixRmdirIfInode(path: string, expected: NodeIdentity): Promise<
       if (rawLstat(selected)) await rename(selected, `${selected}.aside-${randomUUID()}`).catch(() => undefined);
       await mkdir(selected, { recursive: true, mode: 0o700 });
     }
-    return false;
+    if (swapped) return false;
+    if (selectedPathStillBound(selected, expected, "dir", fd) && rmdirSymbol!(cString(selected)) !== 0) return false;
+    return !pathStillExpected(selected, expected);
   } catch {
     return false;
   } finally {
@@ -804,7 +808,9 @@ async function unlinkExclusiveRegularFile(path: string, expected: NodeIdentity):
     } catch {
       /* symlink fds cannot be truncated */
     }
-    return !swapped;
+    if (swapped) return false;
+    if (selectedPathStillBound(selected, expected, "file", fd) && unlinkSymbol!(cString(selected)) !== 0) return false;
+    return !pathStillExpected(selected, expected);
   } catch {
     return false;
   } finally {
@@ -917,11 +923,17 @@ async function exclusiveMoveOwned(from: string, to: string, expected: NodeIdenti
     }
     const renamed = consumeInstallerHook("T3_AUTO_GUARDIAN_RENAME_FROM_SWAP");
     if (renamed) await plantForeignDestination(selected);
-    if (exclusiveSwap || renamed) {
-      cloneOpenedInode(fd, to, kind);
-      return false;
+    if (!cloneOpenedInode(fd, to, kind)) return false;
+    if (exclusiveSwap || renamed) return false;
+    if (selectedPathStillBound(selected, expected, kind, fd)) {
+      if (kind === "file") {
+        if (unlinkSymbol!(cString(selected)) !== 0) return Boolean(rawLstat(to));
+      } else {
+        const tree = await snapshotOwnedTree(selected).catch(() => undefined);
+        if (tree) await disposeVerifiedDirectory(selected, expected, tree);
+      }
     }
-    return exclusiveRename(from, to);
+    return Boolean(rawLstat(to));
   } catch {
     return false;
   } finally {
@@ -1111,9 +1123,6 @@ async function removeExactDirectory(
   const confirmed = await liveRootIdentity(path);
   if (!confirmed || !sameNode(confirmed, identity) || !await liveTreeMatches(path, expectedTree)) {
     throw new Error(`Refusing to dispose ${path} after identity drift`);
-  }
-  if (!await disposeVerifiedDirectory(path, identity, expectedTree)) {
-    throw new Error(`Failed to dispose verified directory ${path}`);
   }
   if (!await reclaimOwnedDirectory(path, identity)) {
     throw new Error(`Failed to dispose verified directory ${path}`);
@@ -1361,12 +1370,17 @@ async function clearLeftoverDisposedInstallRoot(): Promise<void> {
   const live = await liveRootIdentity(installRoot);
   if (!live) return;
   const husk = join(installerStateDir, `.t3-auto-guardian-husk-${randomUUID()}`);
-  if (await optionalLstat(husk)) return;
-  if (!exclusiveRename(installRoot, husk)) return;
-  const tree = await snapshotOwnedTree(husk).catch(() => undefined);
+  if (await optionalLstat(husk)) {
+    throw new Error(`Refusing to reclaim leftover install root ${installRoot}`);
+  }
+  if (!exclusiveRename(installRoot, husk)) {
+    throw new Error(`Refusing to reclaim leftover install root ${installRoot}`);
+  }
   const identity = await liveRootIdentity(husk);
-  if (tree && identity) await disposeVerifiedDirectory(husk, identity, tree);
-  await rm(husk, { recursive: true, force: true }).catch(() => undefined);
+  const tree = identity ? await snapshotOwnedTree(husk).catch(() => undefined) : undefined;
+  if (!identity || !tree || !await disposeVerifiedDirectory(husk, identity, tree)) {
+    throw new Error(`Refusing to dispose leftover install root after identity drift`);
+  }
 }
 
 async function readReceipt(): Promise<Receipt | undefined> {
@@ -1761,10 +1775,6 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       }
       const liveStaged = await liveRootIdentity(stagedLinks);
       if (!liveStaged || !sameNode(liveStaged, stagedIdentity)) {
-        throw new Error("Refusing to remove staged-links after identity drift");
-      }
-      const stagedTree = await snapshotOwnedTree(stagedLinks);
-      if (!await disposeVerifiedDirectory(stagedLinks, stagedIdentity, stagedTree)) {
         throw new Error("Refusing to remove staged-links after identity drift");
       }
       if (!await reclaimOwnedDirectory(stagedLinks, stagedIdentity)) {

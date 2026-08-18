@@ -114,8 +114,11 @@ async function leftoverInstallGarbage(root: string): Promise<string[]> {
       if (dir !== data) continue;
       if (
         name.includes("reclaim") ||
+        name.startsWith(".t3-auto-guardian-transaction-") ||
+        name.startsWith(".t3-auto-guardian-uninstall-") ||
         name.startsWith(".staged-links") ||
-        name.endsWith(".cleared")
+        name.endsWith(".cleared") ||
+        /^t3-auto-guardian\.journal\.[^.]+\.tmp$/.test(name)
       ) found.push(name);
     }
   }
@@ -1218,6 +1221,23 @@ describe("auto guardian installer", () => {
     expect(result.exitCode).not.toBe(0);
     const selected = await selectedPosixPath(root, "exclusive-move");
     expect(await readFile(selected, "utf8")).toBe("foreign-link");
+  });
+
+  test("fails closed when leftover husk dispose is swapped", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_DISPOSE_DIR_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await findFileWithContent(root, "keep")).toBeTruthy();
   });
 
   test("does not mutate a selected path swapped after reclaimOwnedDirectory validation", async () => {
