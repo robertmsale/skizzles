@@ -383,4 +383,38 @@ describe("auto guardian installer", () => {
     expect(await readlink(link)).toBe(planted);
     expect(await readFile(plist, "utf8")).toBe("planted-b-plist");
   });
+
+  test("legacy install journal recovery does not remove a completed second-root destination", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const rootA = join(root, "roots/a");
+    const rootB = join(root, "roots/b");
+    expect((await installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: rootB })).exitCode).toBe(0);
+    const link = join(root, ".local/bin/t3-auto-guardian");
+    const plist = join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist");
+    const bTarget = await readlink(link);
+    const bPlist = await readFile(plist, "utf8");
+    const transactionRoot = join(root, "legacy-a-transaction");
+    await mkdir(transactionRoot, { recursive: true });
+    await writeFile(join(dirname(rootA), "t3-auto-guardian.journal"), `${JSON.stringify({
+      version: 1,
+      kind: "install",
+      phase: "destinations-moved",
+      transactionRoot,
+      installRoot: rootA,
+      destinations: [
+        { destination: link, installed: true },
+        { destination: plist, installed: true },
+      ],
+      installedRoot: true,
+    }, null, 2)}\n`);
+    const recovered = await installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: rootA });
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await readlink(link)).toBe(bTarget);
+    expect(await readFile(plist, "utf8")).toBe(bPlist);
+    expect(JSON.parse(await readFile(join(rootB, "install-receipt.json"), "utf8"))).toMatchObject({
+      runtimeRoot: join(rootB, "runtime"),
+    });
+  });
 });

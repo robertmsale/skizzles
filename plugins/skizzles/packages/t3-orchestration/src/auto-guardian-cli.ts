@@ -543,11 +543,20 @@ import { randomBytes } from "crypto";
 
 // packages/t3-orchestration/src/approval-projection.ts
 var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
+var APPROVAL_ACTION_CHANGED = "Pending approval action changed after judgment. Refusing to approve blindly.";
 var MISSING_SNAPSHOT_GAP = "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
 function requireIdentifiableApproval(approval) {
   if (approval.identifiable && approval.command)
     return;
   throw new Error(approval.reason ?? MISSING_COMMAND_GAP);
+}
+function approvalActionIdentity(approval) {
+  return {
+    requestKind: approval.requestKind,
+    command: approval.command,
+    cwd: approval.cwd,
+    toolName: approval.toolName
+  };
 }
 
 // packages/t3-orchestration/src/exclusive-lock.ts
@@ -609,9 +618,29 @@ async function withExclusiveFileLock(lockPath, body, options = {}) {
 var CODEX_PROVIDER_INSTANCE = "codex";
 var NON_CODEX_PROVIDERS = ["grok", "cursor", "opencode"];
 var AUTO_RUNTIME_MODE = "auto";
-var STATE_SCHEMA = 3;
+var STATE_SCHEMA = 4;
 var HISTORY_TURNS = 10;
 var GUARDIAN_CLAIM_LEASE_MS = 30000;
+function guardianClaimKey(threadId, requestId) {
+  return `${threadId}\x00${requestId}`;
+}
+function parseGuardianClaimKey(key, fallbackThreadId) {
+  const split = key.indexOf("\x00");
+  if (split >= 0)
+    return { threadId: key.slice(0, split), requestId: key.slice(split + 1) };
+  return { threadId: fallbackThreadId, requestId: key };
+}
+function parseClaimAction(value) {
+  if (!value || typeof value !== "object")
+    return;
+  const action = value;
+  return {
+    requestKind: action.requestKind === "command" || action.requestKind === "file-read" || action.requestKind === "file-change" ? action.requestKind : null,
+    command: typeof action.command === "string" ? action.command : null,
+    cwd: typeof action.cwd === "string" ? action.cwd : null,
+    toolName: typeof action.toolName === "string" ? action.toolName : null
+  };
+}
 function defaultGuardianStatePath(home3 = process.env.HOME || homedir2()) {
   const t3Home = resolve2(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
   return join4(t3Home, "t3-auto-guardian-state.json");
@@ -623,7 +652,7 @@ function normalizeClaims(value) {
   if (!value || typeof value !== "object")
     return {};
   const claims = {};
-  for (const [requestId, entry] of Object.entries(value)) {
+  for (const [rawKey, entry] of Object.entries(value)) {
     if (!entry || typeof entry !== "object")
       continue;
     const claim = entry;
@@ -631,14 +660,17 @@ function normalizeClaims(value) {
       continue;
     if (typeof claim.at !== "string")
       continue;
-    claims[requestId] = {
-      threadId: claim.threadId,
+    const parsed = parseGuardianClaimKey(rawKey, claim.threadId);
+    const action = parseClaimAction(claim.action);
+    claims[guardianClaimKey(parsed.threadId, parsed.requestId)] = {
+      threadId: parsed.threadId,
       decision: claim.decision,
       at: claim.at,
       status: claim.status === "pending" ? "pending" : "completed",
       ...typeof claim.leaseId === "string" ? { leaseId: claim.leaseId } : {},
       ...typeof claim.leaseUntil === "string" ? { leaseUntil: claim.leaseUntil } : {},
-      ...typeof claim.attempt === "number" ? { attempt: claim.attempt } : {}
+      ...typeof claim.attempt === "number" ? { attempt: claim.attempt } : {},
+      ...action ? { action } : {}
     };
   }
   return claims;
@@ -708,6 +740,14 @@ function candidatesFromApprovalList(list) {
   }));
   return [...identifiable, ...unidentifiable].sort((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.threadId.localeCompare(right.threadId) || (left.requestId ?? "").localeCompare(right.requestId ?? ""));
 }
+function candidateAction(candidate) {
+  return approvalActionIdentity({
+    requestKind: candidate.requestKind === "file-read" || candidate.requestKind === "file-change" || candidate.requestKind === "command" ? candidate.requestKind : null,
+    command: candidate.command,
+    cwd: candidate.cwd,
+    toolName: candidate.toolName
+  });
+}
 async function claimOrSkip(dependencies, input, dryRun) {
   if (dryRun)
     return { status: "claimed" };
@@ -718,21 +758,32 @@ async function deliverClaim(dependencies, input, dryRun) {
     return false;
   if (!input.leaseId)
     return false;
-  return dependencies.withDeliveryLock(input.requestId, async () => {
-    if (!await dependencies.renewRequest(input.requestId, input.leaseId))
+  return dependencies.withDeliveryLock(input.threadId, input.requestId, async () => {
+    if (!await dependencies.renewRequest(input.requestId, input.leaseId, input.threadId))
       return false;
     try {
       await dependencies.resolveTaskApproval({
         threadId: input.threadId,
         requestId: input.requestId,
         decision: input.decision,
-        reason: input.reason
+        reason: input.reason,
+        ...input.decision === "accept" && input.action ? { expected: input.action } : {}
       });
-    } catch {
-      await dependencies.releaseRequest(input.requestId, input.leaseId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (input.decision === "accept" && message === APPROVAL_ACTION_CHANGED) {
+        await dependencies.resolveTaskApproval({
+          threadId: input.threadId,
+          requestId: input.requestId,
+          decision: "decline",
+          reason: APPROVAL_ACTION_CHANGED
+        });
+        return dependencies.completeRequest(input.requestId, input.leaseId, input.threadId);
+      }
+      await dependencies.releaseRequest(input.requestId, input.leaseId, input.threadId);
       return false;
     }
-    return dependencies.completeRequest(input.requestId, input.leaseId);
+    return dependencies.completeRequest(input.requestId, input.leaseId, input.threadId);
   });
 }
 async function runGuardianCycle(dependencies, config) {
@@ -745,7 +796,7 @@ async function runGuardianCycle(dependencies, config) {
   try {
     const list = await dependencies.listTaskApprovals();
     const candidates = candidatesFromApprovalList(list);
-    const liveRequestIds = candidates.flatMap((candidate) => candidate.requestId ? [candidate.requestId] : []);
+    const liveRequestIds = candidates.flatMap((candidate) => candidate.requestId ? [guardianClaimKey(candidate.threadId, candidate.requestId)] : []);
     const snapshotIncomplete = candidates.some((candidate) => candidate.snapshotGap);
     if (!snapshotIncomplete)
       await dependencies.reconcileRequests(liveRequestIds);
@@ -784,7 +835,7 @@ async function runGuardianCycle(dependencies, config) {
         });
         continue;
       }
-      const existing = candidate.requestId ? state.responded[candidate.requestId] : undefined;
+      const existing = candidate.requestId ? state.responded[guardianClaimKey(candidate.threadId, candidate.requestId)] : undefined;
       if (existing?.status === "completed") {
         decisions.push({
           action: "skipped_duplicate",
@@ -805,7 +856,8 @@ async function runGuardianCycle(dependencies, config) {
           requestId: candidate.requestId,
           threadId: candidate.threadId,
           decision: existing.decision,
-          at: now
+          at: now,
+          action: existing.action
         }, config.dryRun);
         if (!config.dryRun && claim2.status === "duplicate") {
           decisions.push({
@@ -827,7 +879,8 @@ async function runGuardianCycle(dependencies, config) {
           requestId: candidate.requestId,
           decision: existing.decision,
           reason: "retrying incomplete guardian claim",
-          leaseId: claim2.leaseId
+          leaseId: claim2.leaseId,
+          action: existing.action
         }, config.dryRun);
         state = await dependencies.loadState();
         decisions.push({
@@ -864,7 +917,8 @@ async function runGuardianCycle(dependencies, config) {
           requestId: candidate.requestId,
           threadId: candidate.threadId,
           decision: "decline",
-          at: now
+          at: now,
+          action: candidateAction(candidate)
         }, config.dryRun);
         if (!config.dryRun && claim2.status === "duplicate") {
           decisions.push({
@@ -887,7 +941,8 @@ async function runGuardianCycle(dependencies, config) {
           requestId: candidate.requestId,
           decision: "decline",
           reason: denyReason,
-          leaseId: claim2.leaseId
+          leaseId: claim2.leaseId,
+          action: candidateAction(candidate)
         }, config.dryRun);
         if (claim2.status !== "duplicate")
           state = await dependencies.loadState();
@@ -934,7 +989,8 @@ async function runGuardianCycle(dependencies, config) {
         requestId: candidate.requestId,
         threadId: candidate.threadId,
         decision: judgedDecision,
-        at: now
+        at: now,
+        action: candidateAction(candidate)
       }, config.dryRun);
       if (!config.dryRun && claim.status === "duplicate") {
         decisions.push({
@@ -957,7 +1013,8 @@ async function runGuardianCycle(dependencies, config) {
         requestId: candidate.requestId,
         decision,
         reason: failClosed.rationale,
-        leaseId: claim.leaseId
+        leaseId: claim.leaseId,
+        action: candidateAction(candidate)
       }, config.dryRun);
       if (claim.status !== "duplicate")
         state = await dependencies.loadState();
@@ -1000,7 +1057,7 @@ async function runGuardianCycle(dependencies, config) {
 async function loadGuardianState(path = defaultGuardianStatePath()) {
   try {
     const parsed = JSON.parse(await readFile3(path, "utf8"));
-    if (parsed.schema !== 1 && parsed.schema !== 2 && parsed.schema !== 3 || !parsed.responded || typeof parsed.responded !== "object") {
+    if (parsed.schema !== 1 && parsed.schema !== 2 && parsed.schema !== 3 && parsed.schema !== 4 || !parsed.responded || typeof parsed.responded !== "object") {
       return emptyGuardianState();
     }
     return {
@@ -1025,15 +1082,15 @@ async function writeGuardianStateAtomic(state, path) {
 function newOwnershipToken() {
   return `${Date.now().toString(16)}.${randomBytes(8).toString("hex")}`;
 }
-function guardianDeliveryLockPath(statePath, requestId) {
-  const safe = requestId.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120) || "request";
+function guardianDeliveryLockPath(statePath, threadId, requestId) {
+  const safe = `${encodeURIComponent(threadId)}.${encodeURIComponent(requestId)}`.replace(/[^A-Za-z0-9._%-]+/g, "_").slice(0, 180) || "request";
   return `${statePath}.delivery.${safe}.lock`;
 }
 async function withGuardianStateLock(path, body) {
   return withExclusiveFileLock(`${path}.lock`, body);
 }
-async function withGuardianDeliveryLock(requestId, body, path = defaultGuardianStatePath()) {
-  return withExclusiveFileLock(guardianDeliveryLockPath(path, requestId), body);
+async function withGuardianDeliveryLock(threadId, requestId, body, path = defaultGuardianStatePath()) {
+  return withExclusiveFileLock(guardianDeliveryLockPath(path, threadId, requestId), body);
 }
 async function mergeGuardianState(path, patch) {
   return withGuardianStateLock(path, async () => {
@@ -1053,12 +1110,12 @@ function leaseExpired(claim, nowMs) {
   const until = Date.parse(claim.leaseUntil);
   return !Number.isFinite(until) || until <= nowMs;
 }
-function writeClaimState(state, requestId, claim) {
+function writeClaimState(state, key, claim) {
   return {
     schema: STATE_SCHEMA,
     lastPollAt: state.lastPollAt,
     lastError: state.lastError,
-    responded: { ...state.responded, [requestId]: claim }
+    responded: { ...state.responded, [key]: claim }
   };
 }
 async function claimGuardianRequest(input, path = defaultGuardianStatePath(), options = {}) {
@@ -1066,19 +1123,22 @@ async function claimGuardianRequest(input, path = defaultGuardianStatePath(), op
     const nowMs = options.now?.() ?? Date.now();
     const leaseMs = options.leaseMs ?? GUARDIAN_CLAIM_LEASE_MS;
     const state = await loadGuardianState(path);
-    const existing = state.responded[input.requestId];
+    const key = guardianClaimKey(input.threadId, input.requestId);
+    const existing = state.responded[key];
     if (existing?.status === "completed")
       return { status: "duplicate", decision: existing.decision };
     if (existing?.status === "pending") {
+      if (existing.threadId !== input.threadId)
+        return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       if (!leaseExpired(existing, nowMs))
         return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
-      const liveHolder = await tryExclusiveFileLock(guardianDeliveryLockPath(path, input.requestId), async () => {
+      const liveHolder = await tryExclusiveFileLock(guardianDeliveryLockPath(path, input.threadId, input.requestId), async () => {
         return;
       });
       if (!liveHolder.ok)
         return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
       const leaseId2 = newOwnershipToken();
-      await writeGuardianStateAtomic(writeClaimState(state, input.requestId, {
+      await writeGuardianStateAtomic(writeClaimState(state, key, {
         ...existing,
         leaseId: leaseId2,
         leaseUntil: new Date(nowMs + leaseMs).toISOString(),
@@ -1087,42 +1147,44 @@ async function claimGuardianRequest(input, path = defaultGuardianStatePath(), op
       return { status: "retry", decision: existing.decision, leaseId: leaseId2 };
     }
     const leaseId = newOwnershipToken();
-    await writeGuardianStateAtomic(writeClaimState(state, input.requestId, {
+    await writeGuardianStateAtomic(writeClaimState(state, key, {
       threadId: input.threadId,
       decision: input.decision,
       at: input.at,
       status: "pending",
       leaseId,
       leaseUntil: new Date(nowMs + leaseMs).toISOString(),
-      attempt: 1
+      attempt: 1,
+      ...input.action ? { action: input.action } : {}
     }), path);
     return { status: "claimed", decision: input.decision, leaseId };
   });
 }
-async function renewGuardianLease(requestId, leaseId, path = defaultGuardianStatePath(), options = {}) {
+async function renewGuardianLease(requestId, leaseId, path = defaultGuardianStatePath(), options) {
   return withGuardianStateLock(path, async () => {
     const nowMs = options.now?.() ?? Date.now();
     const leaseMs = options.leaseMs ?? GUARDIAN_CLAIM_LEASE_MS;
     const state = await loadGuardianState(path);
-    const existing = state.responded[requestId];
+    const key = guardianClaimKey(options.threadId, requestId);
+    const existing = state.responded[key];
     if (!existing || existing.status !== "pending" || existing.leaseId !== leaseId)
       return false;
-    await writeGuardianStateAtomic(writeClaimState(state, requestId, {
+    await writeGuardianStateAtomic(writeClaimState(state, key, {
       ...existing,
       leaseUntil: new Date(nowMs + leaseMs).toISOString()
     }), path);
     return true;
   });
 }
-async function completeGuardianRequest(requestId, leaseId, path = defaultGuardianStatePath()) {
+async function completeGuardianRequest(requestId, leaseId, path = defaultGuardianStatePath(), threadId = "") {
   return withGuardianStateLock(path, async () => {
     const state = await loadGuardianState(path);
-    const existing = state.responded[requestId];
+    const existing = threadId ? state.responded[guardianClaimKey(threadId, requestId)] : undefined;
     if (!existing || existing.leaseId !== leaseId)
       return false;
     if (existing.status === "completed")
       return true;
-    await writeGuardianStateAtomic(writeClaimState(state, requestId, {
+    await writeGuardianStateAtomic(writeClaimState(state, guardianClaimKey(existing.threadId, requestId), {
       ...existing,
       status: "completed",
       leaseUntil: undefined
@@ -1130,13 +1192,13 @@ async function completeGuardianRequest(requestId, leaseId, path = defaultGuardia
     return true;
   });
 }
-async function releaseGuardianRequest(requestId, leaseId, path = defaultGuardianStatePath()) {
+async function releaseGuardianRequest(requestId, leaseId, path = defaultGuardianStatePath(), threadId = "") {
   await withGuardianStateLock(path, async () => {
     const state = await loadGuardianState(path);
-    const existing = state.responded[requestId];
+    const existing = threadId ? state.responded[guardianClaimKey(threadId, requestId)] : undefined;
     if (!existing || existing.status !== "pending" || existing.leaseId !== leaseId)
       return;
-    await writeGuardianStateAtomic(writeClaimState(state, requestId, {
+    await writeGuardianStateAtomic(writeClaimState(state, guardianClaimKey(existing.threadId, requestId), {
       ...existing,
       leaseUntil: new Date(0).toISOString()
     }), path);
@@ -1247,7 +1309,8 @@ function createDefaultGuardianDependencies(request) {
       op: input.decision === "accept" ? "tasks.approve" : "tasks.deny",
       threadId: input.threadId,
       requestId: input.requestId,
-      ...input.reason ? { reason: input.reason } : {}
+      ...input.reason ? { reason: input.reason } : {},
+      ...input.expected ? { expected: input.expected } : {}
     }),
     taskHistory: async (threadId, turns) => call({
       op: "tasks.history",
@@ -1261,10 +1324,10 @@ function createDefaultGuardianDependencies(request) {
       return;
     }),
     claimRequest: (input) => claimGuardianRequest(input),
-    withDeliveryLock: (requestId, body) => withGuardianDeliveryLock(requestId, body),
-    renewRequest: (requestId, leaseId) => renewGuardianLease(requestId, leaseId),
-    completeRequest: (requestId, leaseId) => completeGuardianRequest(requestId, leaseId),
-    releaseRequest: (requestId, leaseId) => releaseGuardianRequest(requestId, leaseId),
+    withDeliveryLock: (threadId, requestId, body) => withGuardianDeliveryLock(threadId, requestId, body),
+    renewRequest: (requestId, leaseId, threadId) => renewGuardianLease(requestId, leaseId, defaultGuardianStatePath(), { threadId }),
+    completeRequest: (requestId, leaseId, threadId) => completeGuardianRequest(requestId, leaseId, defaultGuardianStatePath(), threadId),
+    releaseRequest: (requestId, leaseId, threadId) => releaseGuardianRequest(requestId, leaseId, defaultGuardianStatePath(), threadId),
     reconcileRequests: (liveRequestIds) => reconcileGuardianRequests(liveRequestIds).then(() => {
       return;
     })

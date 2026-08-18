@@ -3,13 +3,17 @@ import { realpath } from "node:fs/promises";
 import { $ } from "bun";
 import { origin, token, taskProviderDefaults } from "./config.ts";
 import {
+  APPROVAL_ACTION_CHANGED,
+  approvalActionIdentity,
   approvalRespondCommand,
   derivePendingApprovals,
   projectPendingApprovalList,
   providerDriversFromConfig,
   requireIdentifiableApproval,
+  sameApprovalAction,
   selectPendingApproval,
   threadActivities,
+  type ApprovalActionIdentity,
   type ApprovalDecision,
 } from "./approval-projection.ts";
 import { mergeArchivedTasks, projectProjects, projectTaskList, projectTask, waitForTasks, type TaskListOptions, type TaskWaitInput } from "./task-projection.ts";
@@ -449,11 +453,17 @@ export async function resolveTaskApproval(input: {
   requestId?: string;
   decision: ApprovalDecision;
   reason?: string;
+  expected?: ApprovalActionIdentity;
 }): Promise<{ sequence: number; threadId: string; requestId: string; decision: ApprovalDecision; command: string | null; reason?: string }> {
   const snapshot = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
   const pending = derivePendingApprovals(threadActivities(snapshot));
   const selected = selectPendingApproval(pending, input.requestId);
-  if (input.decision === "accept") requireIdentifiableApproval(selected);
+  if (input.decision === "accept") {
+    requireIdentifiableApproval(selected);
+    if (input.expected && !sameApprovalAction(approvalActionIdentity(selected), input.expected)) {
+      throw new Error(APPROVAL_ACTION_CHANGED);
+    }
+  }
   const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision));
   return {
     sequence: result.sequence,

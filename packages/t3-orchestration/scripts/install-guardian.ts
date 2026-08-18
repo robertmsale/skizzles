@@ -61,7 +61,15 @@ const legacyJournalPath = join(dirname(installRoot), "t3-auto-guardian.journal")
 const installerLockPath = join(installerStateDir, "t3-auto-guardian.installer.lock");
 const cliName = "auto-guardian-cli.ts";
 type JournalKind = "install" | "uninstall";
-type JournalDestination = { destination: string; backup?: string; installed: boolean };
+type DestinationArtifact =
+  | { kind: "link"; target: string }
+  | { kind: "file"; sha256: string; mode: number };
+type JournalDestination = {
+  destination: string;
+  backup?: string;
+  installed: boolean;
+  artifact?: DestinationArtifact;
+};
 type InstallJournal = {
   version: 1;
   kind?: JournalKind;
@@ -319,18 +327,34 @@ async function crashIf(phase: string): Promise<void> {
   if (process.env.T3_AUTO_GUARDIAN_INSTALL_CRASH === phase) process.exit(75);
 }
 
-function destinationClaimedByOther(
-  journal: Pick<InstallJournal, "kind">,
-  destination: JournalDestination,
-  live: Awaited<ReturnType<typeof optionalLstat>>,
-): boolean {
-  return Boolean(live) && (journal.kind === "uninstall" || !destination.installed);
+async function snapshotArtifact(path: string): Promise<DestinationArtifact | undefined> {
+  const metadata = await optionalLstat(path);
+  if (!metadata) return undefined;
+  if (metadata.isSymbolicLink()) return { kind: "link", target: await readlink(path) };
+  if (metadata.isFile() && !metadata.isSymbolicLink()) {
+    return { kind: "file", sha256: await sha256(path), mode: Number(metadata.mode) & 0o777 };
+  }
+  return undefined;
+}
+
+function sameArtifact(left: DestinationArtifact, right: DestinationArtifact): boolean {
+  if (left.kind === "link" && right.kind === "link") return left.target === right.target;
+  if (left.kind === "file" && right.kind === "file") return left.sha256 === right.sha256 && left.mode === right.mode;
+  return false;
+}
+
+async function liveIsJournalArtifact(path: string, artifact: DestinationArtifact | undefined): Promise<boolean> {
+  if (!artifact) return false;
+  const live = await snapshotArtifact(path);
+  return Boolean(live && sameArtifact(live, artifact));
 }
 
 async function restoreDestinations(journal: Pick<InstallJournal, "kind" | "destinations">): Promise<void> {
   for (const destination of [...journal.destinations].reverse()) {
     const live = await optionalLstat(destination.destination);
-    if (destinationClaimedByOther(journal, destination, live)) continue;
+    if (live && !(destination.installed && await liveIsJournalArtifact(destination.destination, destination.artifact))) {
+      continue;
+    }
     if (destination.backup && await optionalLstat(destination.backup)) {
       await rm(destination.destination, { force: true, recursive: true });
       await rename(destination.backup, destination.destination);
@@ -575,10 +599,12 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
         await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
         await rename(destination, backup);
         await crashIf("link-backed-up");
+        const artifact = await snapshotArtifact(staged);
+        await persistDestination(journal, movedDestinations, { destination, backup, installed: true, artifact });
         await rename(staged, destination);
-        await persistDestination(journal, movedDestinations, { destination, backup, installed: true });
       } else {
-        await persistDestination(journal, movedDestinations, { destination, installed: true });
+        const artifact = await snapshotArtifact(staged);
+        await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
         await rename(staged, destination);
       }
       await crashIf("link-installed");
@@ -593,10 +619,12 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
         await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
         await rename(destination, backup);
         await crashIf("plist-backed-up");
+        const artifact = await snapshotArtifact(staged);
+        await persistDestination(journal, movedDestinations, { destination, backup, installed: true, artifact });
         await rename(staged, destination);
-        await persistDestination(journal, movedDestinations, { destination, backup, installed: true });
       } else {
-        await persistDestination(journal, movedDestinations, { destination, installed: true });
+        const artifact = await snapshotArtifact(staged);
+        await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
         await rename(staged, destination);
       }
       await crashIf("plist-installed");

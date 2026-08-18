@@ -56,8 +56,17 @@ export const MISSING_COMMAND_GAP =
   "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
 export const CONFLICTING_COMMAND_GAP =
   "T3 approval payload has conflicting command or path representations. Refusing to approve blindly.";
+export const APPROVAL_ACTION_CHANGED =
+  "Pending approval action changed after judgment. Refusing to approve blindly.";
 export const MISSING_SNAPSHOT_GAP =
   "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
+
+export type ApprovalActionIdentity = {
+  requestKind: ApprovalRequestKind | null;
+  command: string | null;
+  cwd: string | null;
+  toolName: string | null;
+};
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -127,17 +136,24 @@ function compareActivitiesByOrder(left: T3ThreadActivity, right: T3ThreadActivit
 function uniqueTypedActions(payload: Record<string, unknown>): string[] {
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  const input = asRecord(data?.input) ?? asRecord(item?.input);
-  const result = asRecord(item?.result) ?? asRecord(data?.result);
+  const dataInput = asRecord(data?.input);
+  const itemInput = asRecord(item?.input);
+  const itemResult = asRecord(item?.result);
+  const dataResult = asRecord(data?.result);
   const values = [
     asTrimmedString(data?.command),
     asTrimmedString(item?.command),
-    asTrimmedString(input?.command),
-    asTrimmedString(result?.command),
+    asTrimmedString(dataInput?.command),
+    asTrimmedString(itemInput?.command),
+    asTrimmedString(itemResult?.command),
+    asTrimmedString(dataResult?.command),
     asTrimmedString(payload.path),
     asTrimmedString(data?.path),
     asTrimmedString(item?.path),
-    asTrimmedString(input?.path),
+    asTrimmedString(dataInput?.path),
+    asTrimmedString(itemInput?.path),
+    asTrimmedString(itemResult?.path),
+    asTrimmedString(dataResult?.path),
   ].filter((value): value is string => value !== null);
   return [...new Set(values)];
 }
@@ -229,6 +245,22 @@ export function selectPendingApproval(pending: readonly PendingApproval[], reque
 export function requireIdentifiableApproval(approval: PendingApproval): void {
   if (approval.identifiable && approval.command) return;
   throw new Error(approval.reason ?? MISSING_COMMAND_GAP);
+}
+
+export function approvalActionIdentity(approval: Pick<PendingApproval, "requestKind" | "command" | "cwd" | "toolName">): ApprovalActionIdentity {
+  return {
+    requestKind: approval.requestKind,
+    command: approval.command,
+    cwd: approval.cwd,
+    toolName: approval.toolName,
+  };
+}
+
+export function sameApprovalAction(left: ApprovalActionIdentity, right: ApprovalActionIdentity): boolean {
+  return left.requestKind === right.requestKind &&
+    left.command === right.command &&
+    left.cwd === right.cwd &&
+    left.toolName === right.toolName;
 }
 
 function threadProvider(thread: T3Thread): string {
