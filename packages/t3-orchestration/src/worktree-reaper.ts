@@ -13,8 +13,12 @@ import {
   type ReaperConfig,
 } from "./worktree-reaper-config.ts";
 import type { OccupiedWorktree } from "./task-projection.ts";
+import {
+  holdExclusiveCleanLease,
+  type CleanLease,
+} from "./worktree-reaper-lease.ts";
 
-export type { OccupiedWorktree };
+export type { OccupiedWorktree, CleanLease };
 
 export const REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper";
 export const ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon";
@@ -107,7 +111,8 @@ export type ReaperDependencies = {
   readDirectoryNames(path: string): Promise<string[]>;
   readText(path: string): Promise<string>;
   measureBytes(path: string): Promise<number>;
-  runClean(command: string[], directory: string): Promise<void>;
+  runClean(command: string[], directory: string, signal?: AbortSignal): Promise<void>;
+  holdCleanLease(task: CleanableTask, path: string): Promise<CleanLease>;
   readState(): Promise<ReaperState>;
   writeState(state: ReaperState): Promise<void>;
   now(): string;
@@ -628,64 +633,115 @@ export async function cleanSettledWorktrees(deps: ReaperDependencies, options: {
         continue;
       }
     }
-    if (options.dryRun) {
-      const refreshed = await refreshOccupancy(current, plan.path);
-      if (!refreshed.ok) {
-        record({ threadId: task.id, action: refreshed.action, path: refreshed.path, reason: refreshed.reason });
-        continue;
-      }
-      occupied = refreshed.occupied;
-      record({
-        threadId: task.id,
-        action: "would-clean",
-        path: plan.path,
-        bytesBefore: plan.bytesBefore,
-        bytesAfter: 0,
-        bytesFreed: plan.bytesBefore,
-      });
-      continue;
-    }
-    let aborted:
-      | { ok: false; action: ReaperAction; path: string; reason: string }
-      | undefined;
+    let lease: CleanLease;
     try {
-      for (const target of plan.targets) {
-        const refreshed = await refreshOccupancy(current, plan.path);
-        if (!refreshed.ok) {
-          aborted = refreshed;
-          break;
-        }
-        occupied = refreshed.occupied;
-        await deps.runClean(target.command, target.directory);
-      }
+      lease = await deps.holdCleanLease(current, plan.path);
     } catch (error) {
       record({
         threadId: task.id,
         action: "failed",
         path: plan.path,
-        bytesBefore: plan.bytesBefore,
-        reason: error instanceof Error ? error.message : String(error),
+        reason: `could not acquire clean lease: ${error instanceof Error ? error.message : String(error)}`,
       });
       continue;
     }
-    if (aborted) {
-      record({ threadId: task.id, action: aborted.action, path: aborted.path, reason: aborted.reason });
-      continue;
+    try {
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      const refreshed = await refreshOccupancy(current, plan.path);
+      if (!refreshed.ok) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: refreshed.path ?? plan.path,
+          reason: refreshed.reason,
+        });
+        continue;
+      }
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      occupied = refreshed.occupied;
+      if (options.dryRun) {
+        record({
+          threadId: task.id,
+          action: "would-clean",
+          path: plan.path,
+          bytesBefore: plan.bytesBefore,
+          bytesAfter: 0,
+          bytesFreed: plan.bytesBefore,
+        });
+        continue;
+      }
+      let aborted:
+        | { ok: false; action: ReaperAction; path: string; reason: string }
+        | undefined;
+      try {
+        for (const target of plan.targets) {
+          if (lease.signal.aborted) {
+            aborted = { ok: false, action: "failed", path: plan.path, reason: "task resumed during clean lease" };
+            break;
+          }
+          await deps.runClean(target.command, target.directory, lease.signal);
+        }
+      } catch (error) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: plan.path,
+          bytesBefore: plan.bytesBefore,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+      if (aborted) {
+        record({ threadId: task.id, action: aborted.action, path: aborted.path, reason: aborted.reason });
+        continue;
+      }
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      try {
+        const after = await deps.readTask(current.id);
+        if (isRunningTask(after) || isLivenessUnavailable(after) || !isCleanableLifecycle(after) || taskTargetIdentityChanged(current, after)) {
+          record({
+            threadId: task.id,
+            action: "failed",
+            path: plan.path,
+            reason: "task resumed during cleanup",
+          });
+          continue;
+        }
+      } catch (error) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: plan.path,
+          reason: `could not confirm task after cleanup: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        continue;
+      }
+      let bytesAfter = 0;
+      for (const directory of plan.artifactDirs) {
+        if (await deps.pathExists(directory)) bytesAfter += await deps.measureBytes(directory);
+      }
+      const bytesFreed = Math.max(0, plan.bytesBefore - bytesAfter);
+      state.threads[task.id] = { path: plan.path, bytesAfter, cleanedAt: deps.now() };
+      record({
+        threadId: task.id,
+        action: "cleaned",
+        path: plan.path,
+        bytesBefore: plan.bytesBefore,
+        bytesAfter,
+        bytesFreed,
+      });
+    } finally {
+      await lease.release();
     }
-    let bytesAfter = 0;
-    for (const directory of plan.artifactDirs) {
-      if (await deps.pathExists(directory)) bytesAfter += await deps.measureBytes(directory);
-    }
-    const bytesFreed = Math.max(0, plan.bytesBefore - bytesAfter);
-    state.threads[task.id] = { path: plan.path, bytesAfter, cleanedAt: deps.now() };
-    record({
-      threadId: task.id,
-      action: "cleaned",
-      path: plan.path,
-      bytesBefore: plan.bytesBefore,
-      bytesAfter,
-      bytesFreed,
-    });
   }
 
   if (!options.dryRun) await deps.writeState(state);
@@ -894,13 +950,43 @@ export function createDefaultReaperDependencies(
     },
     readText: (path) => readFile(path, "utf8"),
     measureBytes: directorySize,
-    async runClean(command, directory) {
+    async runClean(command, directory, signal) {
+      if (signal?.aborted) throw new Error("clean aborted: task resumed");
       const env = { ...Bun.env };
       if (command[0] === "cargo") delete env.CARGO_TARGET_DIR;
-      const result = await Bun.$`${command}`.cwd(directory).env(env).nothrow().quiet();
-      if (result.exitCode !== 0) {
-        throw new Error(`${command.join(" ")} failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
+      const proc = Bun.spawn(command, {
+        cwd: directory,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const abort = () => {
+        try { proc.kill(); } catch { /* already exited */ }
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        const exitCode = await proc.exited;
+        if (signal?.aborted) throw new Error("clean aborted: task resumed");
+        if (exitCode !== 0) {
+          const stderr = await new Response(proc.stderr).text();
+          const stdout = await new Response(proc.stdout).text();
+          throw new Error(`${command.join(" ")} failed in ${directory}: ${stderr.trim() || stdout.trim() || `exit ${exitCode}`}`);
+        }
+      } finally {
+        signal?.removeEventListener("abort", abort);
       }
+    },
+    holdCleanLease(task, path) {
+      return holdExclusiveCleanLease(task, path, async (threadId) => {
+        const response = await request({ op: "tasks.status", threadId });
+        if (!response.ok) throw new Error(response.error ?? `tasks.status failed for ${threadId}`);
+        return response.result as CleanableTask;
+      }, (current) => (
+        isRunningTask(current as CleanableTask)
+        || isLivenessUnavailable(current as CleanableTask)
+        || !isCleanableLifecycle(current as CleanableTask)
+        || taskTargetIdentityChanged(task, current as CleanableTask)
+      ));
     },
     readState: readReaperState,
     writeState: writeReaperState,

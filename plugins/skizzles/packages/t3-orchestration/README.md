@@ -67,6 +67,7 @@ It will not:
 - proceed without an explicit occupancy list or boolean truncation proof from the daemon
 - proceed when the settled/archived task list is truncated
 - clean after a refresh listing drops the task or shows it running, even if it still occupies the path
+- start `t3ctl tasks send` into a worktree that holds a live clean lease
 - clean a task whose session, latest turn, or phase is running or starting
 - guess when two worktrees match the same branch
 

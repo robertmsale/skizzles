@@ -633,6 +633,78 @@ var init_worktree_reaper_config = __esm(() => {
   GENERATED_ARTIFACT_DIRS = new Set(["target", "build", ".dart_tool"]);
 });
 
+// packages/t3-orchestration/src/worktree-reaper-lease.ts
+import { createHash } from "crypto";
+import { link, mkdir as mkdir2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
+import { homedir as homedir2 } from "os";
+import { join as join4 } from "path";
+function cleanLeaseHome(home3 = process.env.T3_HOME?.trim() || join4(process.env.HOME || homedir2(), ".t3")) {
+  return join4(home3, "worktree-reaper-leases");
+}
+function cleanLeaseLockPath(worktreePath, home3) {
+  const digest = createHash("sha256").update(worktreePath).digest("hex");
+  return join4(cleanLeaseHome(home3), digest);
+}
+async function holdExclusiveCleanLease(task, path, readTask, isViolated, options = {}) {
+  const token2 = crypto.randomUUID();
+  const lockPath = cleanLeaseLockPath(path, options.home);
+  await mkdir2(cleanLeaseHome(options.home), { recursive: true, mode: 448 });
+  const record = {
+    token: token2,
+    threadId: task.id,
+    path,
+    pid: process.pid,
+    acquiredAt: (options.now ?? (() => new Date().toISOString()))()
+  };
+  const candidate = `${lockPath}.candidate-${process.pid}-${token2}`;
+  await writeFile2(candidate, `${JSON.stringify(record)}
+`, { mode: 384, flag: "wx" });
+  try {
+    await link(candidate, lockPath);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code === "EEXIST")
+      throw new Error(`worktree ${path} already has a clean lease`);
+    throw error;
+  } finally {
+    await rm2(candidate, { force: true });
+  }
+  const controller = new AbortController;
+  let stopped = false;
+  const pollMs = options.pollMs ?? 25;
+  const watch = (async () => {
+    while (!stopped && !controller.signal.aborted) {
+      try {
+        const current = await readTask(task.id);
+        if (isViolated(current)) {
+          controller.abort();
+          return;
+        }
+      } catch {
+        controller.abort();
+        return;
+      }
+      await Bun.sleep(pollMs);
+    }
+  })();
+  return {
+    token: token2,
+    path,
+    threadId: task.id,
+    signal: controller.signal,
+    async release() {
+      stopped = true;
+      if (!controller.signal.aborted)
+        controller.abort();
+      await watch.catch(() => {
+        return;
+      });
+      await rm2(lockPath, { force: true });
+    }
+  };
+}
+var init_worktree_reaper_lease = () => {};
+
 // packages/t3-orchestration/src/worktree-reaper.ts
 var exports_worktree_reaper = {};
 __export(exports_worktree_reaper, {
@@ -661,9 +733,9 @@ __export(exports_worktree_reaper, {
   REAPER_LAUNCH_AGENT_LABEL: () => REAPER_LAUNCH_AGENT_LABEL,
   ORCHESTRATION_LAUNCH_AGENT_LABEL: () => ORCHESTRATION_LAUNCH_AGENT_LABEL
 });
-import { lstat, mkdir as mkdir2, readdir, readFile as readFile3, realpath as realpath2, writeFile as writeFile2 } from "fs/promises";
-import { dirname as dirname2, join as join4, resolve as resolve3 } from "path";
-import { homedir as homedir2 } from "os";
+import { lstat, mkdir as mkdir3, readdir, readFile as readFile3, realpath as realpath2, writeFile as writeFile3 } from "fs/promises";
+import { dirname as dirname2, join as join5, resolve as resolve3 } from "path";
+import { homedir as homedir3 } from "os";
 function parseGitWorktreePorcelain(text) {
   const worktrees = [];
   let current;
@@ -822,7 +894,7 @@ async function walkDirectories(worktree, deps) {
     for (const name of await deps.readDirectoryNames(directory)) {
       if (SKIP_DIRECTORY_NAMES.has(name))
         continue;
-      const child = join4(directory, name);
+      const child = join5(directory, name);
       if (seen.has(child) || !await deps.isDirectory(child))
         continue;
       seen.add(child);
@@ -840,12 +912,12 @@ async function strategyMatchesDirectory(strategy, worktree, directory, names, de
     return false;
   if (!strategy.markers.every((marker) => names.includes(marker)))
     return false;
-  if (!await deps.isDirectory(join4(directory, strategy.artifactDir)))
+  if (!await deps.isDirectory(join5(directory, strategy.artifactDir)))
     return false;
   if (!strategy.requireText)
     return true;
   try {
-    return new RegExp(strategy.requireText.pattern).test(await deps.readText(join4(directory, strategy.requireText.file)));
+    return new RegExp(strategy.requireText.pattern).test(await deps.readText(join5(directory, strategy.requireText.file)));
   } catch {
     return false;
   }
@@ -860,7 +932,7 @@ async function discoverCleanTargets(worktree, strategies, deps) {
       targets.push({
         strategy: strategy.name,
         directory,
-        artifactDir: join4(directory, strategy.artifactDir),
+        artifactDir: join5(directory, strategy.artifactDir),
         artifactName: strategy.artifactDir,
         command: strategy.command
       });
@@ -1120,63 +1192,114 @@ async function cleanSettledWorktrees(deps, options) {
         continue;
       }
     }
-    if (options.dryRun) {
-      const refreshed = await refreshOccupancy(current, plan.path);
-      if (!refreshed.ok) {
-        record({ threadId: task.id, action: refreshed.action, path: refreshed.path, reason: refreshed.reason });
-        continue;
-      }
-      occupied = refreshed.occupied;
-      record({
-        threadId: task.id,
-        action: "would-clean",
-        path: plan.path,
-        bytesBefore: plan.bytesBefore,
-        bytesAfter: 0,
-        bytesFreed: plan.bytesBefore
-      });
-      continue;
-    }
-    let aborted;
+    let lease;
     try {
-      for (const target of plan.targets) {
-        const refreshed = await refreshOccupancy(current, plan.path);
-        if (!refreshed.ok) {
-          aborted = refreshed;
-          break;
-        }
-        occupied = refreshed.occupied;
-        await deps.runClean(target.command, target.directory);
-      }
+      lease = await deps.holdCleanLease(current, plan.path);
     } catch (error) {
       record({
         threadId: task.id,
         action: "failed",
         path: plan.path,
-        bytesBefore: plan.bytesBefore,
-        reason: error instanceof Error ? error.message : String(error)
+        reason: `could not acquire clean lease: ${error instanceof Error ? error.message : String(error)}`
       });
       continue;
     }
-    if (aborted) {
-      record({ threadId: task.id, action: aborted.action, path: aborted.path, reason: aborted.reason });
-      continue;
+    try {
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      const refreshed = await refreshOccupancy(current, plan.path);
+      if (!refreshed.ok) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: refreshed.path ?? plan.path,
+          reason: refreshed.reason
+        });
+        continue;
+      }
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      occupied = refreshed.occupied;
+      if (options.dryRun) {
+        record({
+          threadId: task.id,
+          action: "would-clean",
+          path: plan.path,
+          bytesBefore: plan.bytesBefore,
+          bytesAfter: 0,
+          bytesFreed: plan.bytesBefore
+        });
+        continue;
+      }
+      let aborted;
+      try {
+        for (const target of plan.targets) {
+          if (lease.signal.aborted) {
+            aborted = { ok: false, action: "failed", path: plan.path, reason: "task resumed during clean lease" };
+            break;
+          }
+          await deps.runClean(target.command, target.directory, lease.signal);
+        }
+      } catch (error) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: plan.path,
+          bytesBefore: plan.bytesBefore,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+        continue;
+      }
+      if (aborted) {
+        record({ threadId: task.id, action: aborted.action, path: aborted.path, reason: aborted.reason });
+        continue;
+      }
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      try {
+        const after = await deps.readTask(current.id);
+        if (isRunningTask(after) || isLivenessUnavailable(after) || !isCleanableLifecycle(after) || taskTargetIdentityChanged(current, after)) {
+          record({
+            threadId: task.id,
+            action: "failed",
+            path: plan.path,
+            reason: "task resumed during cleanup"
+          });
+          continue;
+        }
+      } catch (error) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: plan.path,
+          reason: `could not confirm task after cleanup: ${error instanceof Error ? error.message : String(error)}`
+        });
+        continue;
+      }
+      let bytesAfter = 0;
+      for (const directory of plan.artifactDirs) {
+        if (await deps.pathExists(directory))
+          bytesAfter += await deps.measureBytes(directory);
+      }
+      const bytesFreed = Math.max(0, plan.bytesBefore - bytesAfter);
+      state.threads[task.id] = { path: plan.path, bytesAfter, cleanedAt: deps.now() };
+      record({
+        threadId: task.id,
+        action: "cleaned",
+        path: plan.path,
+        bytesBefore: plan.bytesBefore,
+        bytesAfter,
+        bytesFreed
+      });
+    } finally {
+      await lease.release();
     }
-    let bytesAfter = 0;
-    for (const directory of plan.artifactDirs) {
-      if (await deps.pathExists(directory))
-        bytesAfter += await deps.measureBytes(directory);
-    }
-    const bytesFreed = Math.max(0, plan.bytesBefore - bytesAfter);
-    state.threads[task.id] = { path: plan.path, bytesAfter, cleanedAt: deps.now() };
-    record({
-      threadId: task.id,
-      action: "cleaned",
-      path: plan.path,
-      bytesBefore: plan.bytesBefore,
-      bytesAfter,
-      bytesFreed
-    });
   }
   if (!options.dryRun)
     await deps.writeState(state);
@@ -1211,7 +1334,7 @@ async function directorySize(path) {
   const entries = await readdir(path, { withFileTypes: true });
   let total = 0;
   for (const entry of entries) {
-    const child = join4(path, entry.name);
+    const child = join5(path, entry.name);
     if (entry.isSymbolicLink())
       continue;
     if (entry.isDirectory())
@@ -1227,9 +1350,9 @@ async function directorySize(path) {
   }
   return total;
 }
-function defaultStatePath(home3 = process.env.HOME || homedir2()) {
-  const t3Home = resolve3(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
-  return join4(t3Home, "worktree-reaper-state.json");
+function defaultStatePath(home3 = process.env.HOME || homedir3()) {
+  const t3Home = resolve3(process.env.T3_HOME?.trim() || join5(home3, ".t3"));
+  return join5(t3Home, "worktree-reaper-state.json");
 }
 async function readReaperState(path = defaultStatePath()) {
   try {
@@ -1245,8 +1368,8 @@ async function readReaperState(path = defaultStatePath()) {
   }
 }
 async function writeReaperState(state, path = defaultStatePath()) {
-  await mkdir2(dirname2(path), { recursive: true, mode: 448 });
-  await writeFile2(path, `${JSON.stringify(state, null, 2)}
+  await mkdir3(dirname2(path), { recursive: true, mode: 448 });
+  await writeFile3(path, `${JSON.stringify(state, null, 2)}
 `, { mode: 384 });
 }
 function isUnknownOperationError(error) {
@@ -1391,14 +1514,44 @@ function createDefaultReaperDependencies(request) {
     },
     readText: (path) => readFile3(path, "utf8"),
     measureBytes: directorySize,
-    async runClean(command, directory) {
+    async runClean(command, directory, signal) {
+      if (signal?.aborted)
+        throw new Error("clean aborted: task resumed");
       const env = { ...Bun.env };
       if (command[0] === "cargo")
         delete env.CARGO_TARGET_DIR;
-      const result = await Bun.$`${command}`.cwd(directory).env(env).nothrow().quiet();
-      if (result.exitCode !== 0) {
-        throw new Error(`${command.join(" ")} failed in ${directory}: ${result.stderr.toString().trim() || result.stdout.toString().trim() || `exit ${result.exitCode}`}`);
+      const proc = Bun.spawn(command, {
+        cwd: directory,
+        env,
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+      const abort = () => {
+        try {
+          proc.kill();
+        } catch {}
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      try {
+        const exitCode = await proc.exited;
+        if (signal?.aborted)
+          throw new Error("clean aborted: task resumed");
+        if (exitCode !== 0) {
+          const stderr = await new Response(proc.stderr).text();
+          const stdout = await new Response(proc.stdout).text();
+          throw new Error(`${command.join(" ")} failed in ${directory}: ${stderr.trim() || stdout.trim() || `exit ${exitCode}`}`);
+        }
+      } finally {
+        signal?.removeEventListener("abort", abort);
       }
+    },
+    holdCleanLease(task, path) {
+      return holdExclusiveCleanLease(task, path, async (threadId) => {
+        const response = await request({ op: "tasks.status", threadId });
+        if (!response.ok)
+          throw new Error(response.error ?? `tasks.status failed for ${threadId}`);
+        return response.result;
+      }, (current) => isRunningTask(current) || isLivenessUnavailable(current) || !isCleanableLifecycle(current) || taskTargetIdentityChanged(task, current));
     },
     readState: readReaperState,
     writeState: writeReaperState,
@@ -1417,6 +1570,7 @@ function formatReaperLogs(report) {
 var REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper", ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon", SKIP_DIRECTORY_NAMES;
 var init_worktree_reaper = __esm(() => {
   init_worktree_reaper_config();
+  init_worktree_reaper_lease();
   SKIP_DIRECTORY_NAMES = new Set([
     ".git",
     ".dart_tool",

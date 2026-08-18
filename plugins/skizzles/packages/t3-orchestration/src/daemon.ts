@@ -543,6 +543,49 @@ async function waitForTasks(input, loadSnapshot, sleep = Bun.sleep, clock = Date
   }
 }
 
+// packages/t3-orchestration/src/worktree-reaper-lease.ts
+import { createHash } from "crypto";
+import { homedir } from "os";
+import { join as join2 } from "path";
+function cleanLeaseHome(home2 = process.env.T3_HOME?.trim() || join2(process.env.HOME || homedir(), ".t3")) {
+  return join2(home2, "worktree-reaper-leases");
+}
+function cleanLeaseLockPath(worktreePath, home2) {
+  const digest = createHash("sha256").update(worktreePath).digest("hex");
+  return join2(cleanLeaseHome(home2), digest);
+}
+function isLivePid(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function readLiveCleanLease(worktreePath, home2) {
+  const path = cleanLeaseLockPath(worktreePath, home2);
+  try {
+    const raw = JSON.parse(await Bun.file(path).text());
+    if (typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.threadId !== "string" || raw.threadId.trim() === "" || typeof raw.path !== "string" || raw.path.trim() === "" || !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0) {
+      return null;
+    }
+    if (!isLivePid(raw.pid))
+      return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+async function assertWorktreeNotLeased(worktreePath, home2) {
+  const path = worktreePath?.trim();
+  if (!path)
+    return;
+  const lease = await readLiveCleanLease(path, home2);
+  if (lease) {
+    throw new Error(`worktree ${path} is reserved for artifact cleanup by task ${lease.threadId}`);
+  }
+}
+
 // packages/t3-orchestration/src/t3.ts
 async function request(path, init = {}, maxBodyBytes = 2000000) {
   const response = await fetch(`${await origin()}${path}`, {
@@ -883,6 +926,15 @@ function taskTurnCommand(target, message, commandId = id(), messageId = id(), cr
 }
 async function sendTask(threadId, message) {
   const target = await thread(threadId);
+  const claimed = target.worktreePath?.trim();
+  if (claimed) {
+    await assertWorktreeNotLeased(claimed);
+    try {
+      const resolved = await realpath(claimed);
+      if (resolved !== claimed)
+        await assertWorktreeNotLeased(resolved);
+    } catch {}
+  }
   const selection = requireSelection(target.modelSelection);
   const providerDriver = await preflightProviderSelection(selection);
   return dispatch(taskTurnCommand(target, message, id(), id(), now(), providerDriver));
@@ -955,7 +1007,7 @@ async function resolveTaskApproval(input) {
 
 // packages/t3-orchestration/src/identity.ts
 import { Database } from "bun:sqlite";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 function rootProviderId(id2, db) {
   const edges = db.query("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges").all();
   const parentByChild = new Map(edges.map((edge) => [edge.child_thread_id, edge.parent_thread_id]));
@@ -972,10 +1024,10 @@ function resolveCallerThread(correlationId) {
   const codexThreadId = typeof correlationId === "string" ? correlationId.trim() : "";
   if (!codexThreadId)
     throw new Error("CODEX_THREAD_ID is required for task-to-task orchestration");
-  const codexDb = new Database(join2(CODEX_HOME, "state_5.sqlite"), { readonly: true });
+  const codexDb = new Database(join3(CODEX_HOME, "state_5.sqlite"), { readonly: true });
   const root = rootProviderId(codexThreadId, codexDb);
   codexDb.close();
-  const t3Db = new Database(join2(T3_HOME, "userdata/state.sqlite"), { readonly: true });
+  const t3Db = new Database(join3(T3_HOME, "userdata/state.sqlite"), { readonly: true });
   const rows = t3Db.query("SELECT thread_id, project_id FROM projection_threads WHERE json_extract((SELECT resume_cursor_json FROM provider_session_runtime WHERE thread_id = projection_threads.thread_id), '$.threadId') = ? AND deleted_at IS NULL").all(root);
   t3Db.close();
   if (rows.length !== 1)

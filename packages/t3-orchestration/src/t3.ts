@@ -12,6 +12,7 @@ import {
   type ApprovalDecision,
 } from "./approval-projection.ts";
 import { mergeArchivedTasks, projectCleanableWorktrees, projectOccupiedWorktrees, projectProjects, projectTaskList, projectTask, waitForTasks, type TaskListOptions, type TaskWaitInput } from "./task-projection.ts";
+import { assertWorktreeNotLeased } from "./worktree-reaper-lease.ts";
 import { requireSelection, type ModelSelection, type ShellSnapshot, type Snapshot, type T3Thread, type ThreadSnapshot } from "./protocol.ts";
 
 async function request(path: string, init: RequestInit = {}, maxBodyBytes = 2_000_000): Promise<any> {
@@ -371,6 +372,16 @@ export function taskTurnCommand(target: T3Thread, message: string, commandId = i
 
 export async function sendTask(threadId: string, message: string): Promise<{ sequence: number }> {
   const target = await thread(threadId);
+  const claimed = target.worktreePath?.trim();
+  if (claimed) {
+    await assertWorktreeNotLeased(claimed);
+    try {
+      const resolved = await realpath(claimed);
+      if (resolved !== claimed) await assertWorktreeNotLeased(resolved);
+    } catch {
+      // Unresolvable paths still fail closed on the claimed selector above.
+    }
+  }
   const selection = requireSelection(target.modelSelection);
   const providerDriver = await preflightProviderSelection(selection);
   return dispatch(taskTurnCommand(target, message, id(), id(), now(), providerDriver));

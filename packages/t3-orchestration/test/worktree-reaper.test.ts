@@ -253,6 +253,16 @@ describe("cleanSettledWorktrees", () => {
       readText: async (path) => path.endsWith("pubspec.yaml") ? "name: app\nflutter:\n" : "[package]\n",
       measureBytes: async (path) => path.endsWith("target") || path.endsWith("build") || path.endsWith(".dart_tool") ? 1_000 : 0,
       runClean: async (command, directory) => { runs.push({ command, directory }); },
+      holdCleanLease: async (entry, path) => {
+        const controller = new AbortController();
+        return {
+          token: "test-lease",
+          path,
+          threadId: entry.id,
+          signal: controller.signal,
+          release: async () => undefined,
+        };
+      },
       readTask: async (threadId) => (overrides.tasks ?? [task()]).find((entry) => entry.id === threadId) ?? task({ id: threadId }),
       readState: async () => state,
       writeState: async (next) => { state = next; states.push(next); },
@@ -998,11 +1008,113 @@ command = ["rm", "-rf", ".dart_tool"]
     });
     const report = await cleanSettledWorktrees(harness, { dryRun: false });
     expect(listings).toBeGreaterThan(1);
+    expect(report.ok).toBe(false);
     expect(report.cleaned).toBe(0);
     expect(report.tasks[0]).toMatchObject({
       threadId: "settled-A",
-      action: "skipped",
+      action: "failed",
       reason: "task is running",
+    });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("does not clean when the task resumes after the lease is held and before the cleaner", async () => {
+    const shared = "/repo/.t3/worktrees/repo/shared";
+    const settledA = task({
+      id: "settled-A",
+      branch: "t3code/task",
+      worktreePath: shared,
+    });
+    const runningA = task({
+      id: "settled-A",
+      branch: "t3code/task",
+      worktreePath: shared,
+      sessionStatus: "running",
+      latestTurnState: "running",
+      phase: "running",
+    });
+    let leased = false;
+    const order: string[] = [];
+    const harness = deps({
+      listCleanableTasks: async () => {
+        order.push("list");
+        return {
+          tasks: [leased ? runningA : settledA],
+          truncated: false,
+          occupied: [{ id: "settled-A", path: shared }],
+        };
+      },
+      listGitWorktrees: async () => [
+        { path: "/repo", branch: "master", bare: false },
+        { path: shared, branch: "t3code/task", bare: false },
+      ],
+      isDirectory: async (path) => path === shared || path.endsWith("/target"),
+      readDirectoryNames: async (path) => path === shared ? ["Cargo.toml", "target"] : [],
+      readTask: async () => leased ? runningA : settledA,
+      holdCleanLease: async (entry, path) => {
+        order.push("lease");
+        leased = true;
+        return {
+          token: "lease",
+          path,
+          threadId: entry.id,
+          signal: new AbortController().signal,
+          release: async () => { order.push("release"); },
+        };
+      },
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(order[0]).toBe("list");
+    expect(order).toContain("lease");
+    expect(order.indexOf("lease")).toBeLessThan(order.lastIndexOf("list"));
+    expect(order).toContain("release");
+    expect(report.ok).toBe(false);
+    expect(report.cleaned).toBe(0);
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "settled-A",
+      action: "failed",
+      reason: "task is running",
+    });
+    expect(harness.runs).toEqual([]);
+  });
+
+  test("does not report cleaned when the lease aborts while a cleaner would run", async () => {
+    const shared = "/repo/.t3/worktrees/repo/shared";
+    const settledA = task({
+      id: "settled-A",
+      branch: "t3code/task",
+      worktreePath: shared,
+    });
+    const controller = new AbortController();
+    const harness = deps({
+      tasks: [settledA],
+      occupied: [{ id: "settled-A", path: shared }],
+      listGitWorktrees: async () => [
+        { path: "/repo", branch: "master", bare: false },
+        { path: shared, branch: "t3code/task", bare: false },
+      ],
+      isDirectory: async (path) => path === shared || path.endsWith("/target"),
+      readDirectoryNames: async (path) => path === shared ? ["Cargo.toml", "target"] : [],
+      holdCleanLease: async (entry, path) => ({
+        token: "lease",
+        path,
+        threadId: entry.id,
+        signal: controller.signal,
+        release: async () => undefined,
+      }),
+      runClean: async (_command, _directory, signal) => {
+        controller.abort();
+        if (signal?.aborted) throw new Error("clean aborted: task resumed");
+        throw new Error("runClean continued after lease abort");
+      },
+    });
+    const report = await cleanSettledWorktrees(harness, { dryRun: false });
+    expect(report.ok).toBe(false);
+    expect(report.cleaned).toBe(0);
+    expect(report.tasks[0]).toMatchObject({
+      threadId: "settled-A",
+      action: "failed",
+      reason: "clean aborted: task resumed",
     });
     expect(harness.runs).toEqual([]);
   });
