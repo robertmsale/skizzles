@@ -58,6 +58,8 @@ export const CONFLICTING_COMMAND_GAP =
   "T3 approval payload has conflicting command or path representations. Refusing to approve blindly.";
 export const APPROVAL_ACTION_CHANGED =
   "Pending approval action changed after judgment. Refusing to approve blindly.";
+export const UNBOUND_ACCEPT_GAP =
+  "T3 cannot bind accept to the judged action. Refusing to approve blindly.";
 export const MISSING_SNAPSHOT_GAP =
   "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
 
@@ -421,21 +423,7 @@ export function approvalRespondCommand(
   expected?: ApprovalActionIdentity,
 ) {
   if (decision === "accept") {
-    if (!hasBindableApprovalAction(expected)) {
-      throw new Error(MISSING_COMMAND_GAP);
-    }
-    return {
-      type: "thread.approval.respond",
-      commandId,
-      threadId,
-      requestId,
-      decision,
-      createdAt,
-      command: expected.command,
-      cwd: expected.cwd,
-      requestKind: expected.requestKind,
-      toolName: expected.toolName,
-    };
+    throw new Error(UNBOUND_ACCEPT_GAP);
   }
   return {
     type: "thread.approval.respond",

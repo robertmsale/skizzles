@@ -544,6 +544,7 @@ import { randomBytes } from "crypto";
 // packages/t3-orchestration/src/approval-projection.ts
 var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
 var APPROVAL_ACTION_CHANGED = "Pending approval action changed after judgment. Refusing to approve blindly.";
+var UNBOUND_ACCEPT_GAP = "T3 cannot bind accept to the judged action. Refusing to approve blindly.";
 var MISSING_SNAPSHOT_GAP = "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
 function requireIdentifiableApproval(approval) {
   if (approval.identifiable && approval.command)
@@ -764,8 +765,12 @@ async function deliverClaim(dependencies, input, dryRun) {
     return false;
   if (!input.leaseId)
     return false;
-  if (input.decision === "accept" && !hasCompleteActionIdentity(input.action)) {
-    input = { ...input, decision: "decline", reason: "legacy claim has no action identity" };
+  if (input.decision === "accept") {
+    input = {
+      ...input,
+      decision: "decline",
+      reason: hasCompleteActionIdentity(input.action) ? UNBOUND_ACCEPT_GAP : "legacy claim has no action identity"
+    };
   }
   return dependencies.withDeliveryLock(input.threadId, input.requestId, async () => {
     if (!await dependencies.renewRequest(input.requestId, input.leaseId, input.threadId))
@@ -863,10 +868,10 @@ async function runGuardianCycle(dependencies, config) {
       if (existing?.status === "pending" && candidate.requestId) {
         const currentAction2 = candidateAction(candidate);
         const actionlessAccept = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action);
-        const identityMismatch = existing.decision === "accept" && hasCompleteActionIdentity(existing.action) && !sameApprovalAction(existing.action, currentAction2);
-        const retryDecision = actionlessAccept || identityMismatch ? "decline" : existing.decision;
-        const retryAction = actionlessAccept || identityMismatch ? currentAction2 : existing.action;
-        const retryReason = actionlessAccept ? "legacy claim has no action identity" : identityMismatch ? "stored accept identity does not match the current action" : "retrying incomplete guardian claim";
+        const identityMismatch2 = existing.decision === "accept" && hasCompleteActionIdentity(existing.action) && !sameApprovalAction(existing.action, currentAction2);
+        const retryDecision = actionlessAccept || identityMismatch2 ? "decline" : existing.decision;
+        const retryAction = actionlessAccept || identityMismatch2 ? currentAction2 : existing.action;
+        const retryReason = actionlessAccept ? "legacy claim has no action identity" : identityMismatch2 ? "stored accept identity does not match the current action" : "retrying incomplete guardian claim";
         const claim2 = await claimOrSkip(dependencies, {
           requestId: candidate.requestId,
           threadId: candidate.threadId,
@@ -889,12 +894,13 @@ async function runGuardianCycle(dependencies, config) {
           });
           continue;
         }
-        const decision2 = claim2.decision ?? retryDecision;
+        const decision2 = (claim2.decision ?? retryDecision) === "accept" ? "decline" : claim2.decision ?? retryDecision;
+        const reason2 = (claim2.decision ?? retryDecision) === "accept" ? UNBOUND_ACCEPT_GAP : retryReason;
         const responded2 = await deliverClaim(dependencies, {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           decision: decision2,
-          reason: retryReason,
+          reason: reason2,
           leaseId: claim2.leaseId,
           action: retryAction
         }, config.dryRun);
@@ -907,7 +913,7 @@ async function runGuardianCycle(dependencies, config) {
           runtimeMode: candidate.runtimeMode,
           command: candidate.command,
           decision: decision2,
-          reason: retryReason,
+          reason: reason2,
           dryRun: config.dryRun,
           responded: responded2
         });
@@ -987,6 +993,7 @@ async function runGuardianCycle(dependencies, config) {
       });
       const history = await dependencies.taskHistory(candidate.threadId, HISTORY_TURNS);
       const lastUserMessage = lastUserMessageText(history.messages ?? []);
+      const executionCwd = candidate.cwd ?? candidate.worktreePath;
       const judged = await dependencies.judge({
         model: config.model,
         timeoutMs: config.judgeTimeoutMs,
@@ -994,10 +1001,10 @@ async function runGuardianCycle(dependencies, config) {
         action: {
           requestKind: candidate.requestKind,
           command: candidate.command,
-          cwd: candidate.cwd,
+          cwd: executionCwd,
           toolName: candidate.toolName
         },
-        cwd: candidate.cwd ?? candidate.worktreePath
+        cwd: executionCwd
       });
       const failClosed = judged.ok ? judged.assessment : { outcome: "deny", rationale: judged.reason };
       const judgedDecision = failClosed.outcome === "allow" ? "accept" : "decline";
@@ -1024,10 +1031,11 @@ async function runGuardianCycle(dependencies, config) {
         continue;
       }
       const currentAction = candidateAction(candidate);
-      const staleRetry = claim.status === "retry" && claim.decision === "accept" && (!claim.action || !sameApprovalAction(claim.action, currentAction));
-      const decision = staleRetry ? "decline" : claim.status === "retry" && claim.decision ? claim.decision : judgedDecision;
-      const deliverAction = claim.status === "retry" && claim.action && !staleRetry ? claim.action : currentAction;
-      const reason = staleRetry ? "stored accept identity does not match the current action" : failClosed.rationale;
+      const storedAccept = claim.status === "retry" && claim.decision === "accept";
+      const identityMismatch = Boolean(storedAccept && (!claim.action || !sameApprovalAction(claim.action, currentAction)));
+      const decision = "decline";
+      const deliverAction = storedAccept && claim.action && !identityMismatch ? claim.action : currentAction;
+      const reason = identityMismatch ? "stored accept identity does not match the current action" : judgedDecision === "accept" ? UNBOUND_ACCEPT_GAP : failClosed.rationale;
       const responded = await deliverClaim(dependencies, {
         threadId: candidate.threadId,
         requestId: candidate.requestId,
@@ -1157,9 +1165,12 @@ async function claimGuardianRequest(input, path = defaultGuardianStatePath(), op
       });
       if (!liveHolder.ok)
         return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId, action: existing.action };
-      const identityMismatch = existing.decision === "accept" && hasCompleteActionIdentity(existing.action) && Boolean(input.action) && !sameApprovalAction(existing.action, input.action);
+      const storedAction = existing.action;
+      const requestedAction = input.action;
+      const identityMismatch = existing.decision === "accept" && hasCompleteActionIdentity(storedAction) && requestedAction !== undefined && !sameApprovalAction(storedAction, requestedAction);
       const actionlessAccept = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action);
-      const decision = actionlessAccept || identityMismatch ? "decline" : existing.decision;
+      const currentDeny = input.decision === "decline" && existing.decision === "accept";
+      const decision = actionlessAccept || identityMismatch || currentDeny ? "decline" : existing.decision;
       const action = actionlessAccept || identityMismatch ? input.action : existing.action;
       const leaseId2 = newOwnershipToken();
       await writeGuardianStateAtomic(writeClaimState(state, key, {

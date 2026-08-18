@@ -137,7 +137,7 @@ var {$: $2 } = globalThis.Bun;
 // packages/t3-orchestration/src/approval-projection.ts
 var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
 var CONFLICTING_COMMAND_GAP = "T3 approval payload has conflicting command or path representations. Refusing to approve blindly.";
-var APPROVAL_ACTION_CHANGED = "Pending approval action changed after judgment. Refusing to approve blindly.";
+var UNBOUND_ACCEPT_GAP = "T3 cannot bind accept to the judged action. Refusing to approve blindly.";
 var MISSING_SNAPSHOT_GAP = "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
 function asRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -335,25 +335,6 @@ function selectPendingApproval(pending, requestId) {
   }
   return pending[0];
 }
-function requireIdentifiableApproval(approval) {
-  if (approval.identifiable && approval.command)
-    return;
-  throw new Error(approval.reason ?? MISSING_COMMAND_GAP);
-}
-function approvalActionIdentity(approval) {
-  return {
-    requestKind: approval.requestKind,
-    command: approval.command,
-    cwd: approval.cwd,
-    toolName: approval.toolName
-  };
-}
-function sameApprovalAction(left, right) {
-  return left.requestKind === right.requestKind && left.command === right.command && left.cwd === right.cwd && left.toolName === right.toolName;
-}
-function hasBindableApprovalAction(action) {
-  return Boolean(action && typeof action.command === "string" && action.command.trim() !== "");
-}
 function threadProvider(thread) {
   return thread.modelSelection.instanceId;
 }
@@ -449,21 +430,7 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
 }
 function approvalRespondCommand(threadId, requestId, decision, commandId, createdAt, expected) {
   if (decision === "accept") {
-    if (!hasBindableApprovalAction(expected)) {
-      throw new Error(MISSING_COMMAND_GAP);
-    }
-    return {
-      type: "thread.approval.respond",
-      commandId,
-      threadId,
-      requestId,
-      decision,
-      createdAt,
-      command: expected.command,
-      cwd: expected.cwd,
-      requestKind: expected.requestKind,
-      toolName: expected.toolName
-    };
+    throw new Error(UNBOUND_ACCEPT_GAP);
   }
   return {
     type: "thread.approval.respond",
@@ -1028,24 +995,15 @@ async function listTaskApprovals(projectId) {
   return projectPendingApprovalList(candidates, snapshots, projects, drivers);
 }
 async function resolveTaskApproval(input) {
+  if (input.decision === "accept") {
+    throw new Error(UNBOUND_ACCEPT_GAP);
+  }
   const selectFresh = async () => {
     const snapshot2 = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
     return selectPendingApproval(derivePendingApprovals(threadActivities(snapshot2)), input.requestId);
   };
   const selected = await selectFresh();
-  const bound = input.decision === "accept" ? input.expected ?? approvalActionIdentity(selected) : undefined;
-  if (input.decision === "accept") {
-    requireIdentifiableApproval(selected);
-    if (!hasBindableApprovalAction(bound) || !sameApprovalAction(approvalActionIdentity(selected), bound)) {
-      throw new Error(APPROVAL_ACTION_CHANGED);
-    }
-    const confirmed = await selectFresh();
-    requireIdentifiableApproval(confirmed);
-    if (!sameApprovalAction(approvalActionIdentity(confirmed), bound) || confirmed.requestId !== selected.requestId) {
-      throw new Error(APPROVAL_ACTION_CHANGED);
-    }
-  }
-  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision, undefined, undefined, bound));
+  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision, undefined, undefined));
   return {
     sequence: result.sequence,
     threadId: input.threadId,

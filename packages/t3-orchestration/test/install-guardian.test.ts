@@ -387,6 +387,43 @@ describe("auto guardian installer", () => {
     expect(await readFile(join(installRoot, "runtime", "foreign-marker.txt"), "utf8")).toBe("keep-replaced");
   });
 
+  test("does not delete a same-inode install root after foreign content is added", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    await writeFile(join(installRoot, "foreign-marker.txt"), "keep-same-inode");
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await readFile(join(installRoot, "foreign-marker.txt"), "utf8")).toBe("keep-same-inode");
+  });
+
+  test("does not delete a replaced transaction root during recovery", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installing",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const journal = JSON.parse(await readFile(join(root, ".local/share/skizzles/t3-auto-guardian.journal"), "utf8")) as {
+      transactionRoot: string;
+    };
+    await rm(journal.transactionRoot, { recursive: true, force: true });
+    await mkdir(journal.transactionRoot, { recursive: true });
+    await writeFile(join(journal.transactionRoot, "foreign-keep.txt"), "keep-tx");
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(await readFile(join(journal.transactionRoot, "foreign-keep.txt"), "utf8")).toBe("keep-tx");
+    expect(recovered.exitCode).toBe(0);
+  });
+
   test("does not delete a replacement root that replays the staged receipt hash", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);

@@ -3,15 +3,11 @@ import { realpath } from "node:fs/promises";
 import { $ } from "bun";
 import { origin, token, taskProviderDefaults } from "./config.ts";
 import {
-  APPROVAL_ACTION_CHANGED,
-  approvalActionIdentity,
+  UNBOUND_ACCEPT_GAP,
   approvalRespondCommand,
   derivePendingApprovals,
-  hasBindableApprovalAction,
   projectPendingApprovalList,
   providerDriversFromConfig,
-  requireIdentifiableApproval,
-  sameApprovalAction,
   selectPendingApproval,
   threadActivities,
   type ApprovalActionIdentity,
@@ -457,32 +453,20 @@ export async function resolveTaskApproval(input: {
   reason?: string;
   expected?: ApprovalActionIdentity;
 }): Promise<{ sequence: number; threadId: string; requestId: string; decision: ApprovalDecision; command: string | null; reason?: string }> {
+  if (input.decision === "accept") {
+    throw new Error(UNBOUND_ACCEPT_GAP);
+  }
   const selectFresh = async () => {
     const snapshot = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
     return selectPendingApproval(derivePendingApprovals(threadActivities(snapshot)), input.requestId);
   };
   const selected = await selectFresh();
-  const bound = input.decision === "accept"
-    ? (input.expected ?? approvalActionIdentity(selected))
-    : undefined;
-  if (input.decision === "accept") {
-    requireIdentifiableApproval(selected);
-    if (!hasBindableApprovalAction(bound) || !sameApprovalAction(approvalActionIdentity(selected), bound)) {
-      throw new Error(APPROVAL_ACTION_CHANGED);
-    }
-    const confirmed = await selectFresh();
-    requireIdentifiableApproval(confirmed);
-    if (!sameApprovalAction(approvalActionIdentity(confirmed), bound) || confirmed.requestId !== selected.requestId) {
-      throw new Error(APPROVAL_ACTION_CHANGED);
-    }
-  }
   const result = await dispatch(taskApprovalRespondCommand(
     input.threadId,
     selected.requestId,
     input.decision,
     undefined,
     undefined,
-    bound,
   ));
   return {
     sequence: result.sequence,

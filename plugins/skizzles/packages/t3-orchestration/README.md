@@ -88,7 +88,7 @@ t3ctl tasks wait <id> --after <id>=<cursor>
 
 Wait wakes only for completion, failure, archival/deletion, plan approval, approval, or user input—not progress chatter. Background subagent/workflow work and monitoring remain nonterminal. Rename, pin, archive, settle, interrupt, and pending-approval inspect/approve/deny operations are also exposed through `t3ctl tasks`; they preserve the task's existing provider/model/reasoning/runtime selection.
 
-Coordinator approval commands wrap T3's existing `thread.approval.respond` command. `t3ctl tasks approvals` lists live `hasPendingApprovals` threads and projects `approval.requested` activity payloads from the thread snapshot. `t3ctl tasks approve ID [REQUEST_ID]` and `t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]` never auto-approve; approve refuses when T3 does not expose the command or path. Codex auto-guardian is unchanged.
+Coordinator approval commands wrap T3's existing `thread.approval.respond` command. `t3ctl tasks approvals` lists live `hasPendingApprovals` threads and projects `approval.requested` activity payloads from the thread snapshot. `t3ctl tasks approve ID [REQUEST_ID]` and `t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]` never auto-approve; approve refuses when T3 does not expose the command or path, and refuses accept because T3 cannot bind the decision to the judged action. Codex auto-guardian is unchanged.
 
 ### T3 Auto guardian sidecar
 

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dlopen, FFIType, suffix } from "bun:ffi";
 import {
   chmod,
@@ -22,6 +22,11 @@ const ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon";
 const REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper";
 
 type TreeEntry = { path: string; sha256: string; mode: number };
+type OwnedTreeEntry =
+  | { path: string; kind: "file"; sha256: string; mode: number }
+  | { path: string; kind: "link"; target: string }
+  | { path: string; kind: "dir" };
+type PathGeneration = { dev: string; ino: string; token: string };
 type LinkEntry = { path: string; target: string };
 type FileEntry = { path: string; sha256: string; mode: number };
 type Receipt = {
@@ -80,8 +85,11 @@ type InstallJournal = {
   destinations: JournalDestination[];
   installedRoot: boolean;
   rootIdentity?: { dev: string; ino: string };
+  rootTree?: OwnedTreeEntry[];
+  transactionIdentity?: PathGeneration;
   serviceWasLoaded?: boolean;
 };
+const TRANSACTION_TOKEN_NAME = ".skizzles-transaction";
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
@@ -248,6 +256,51 @@ function sameEntries(left: TreeEntry[], right: TreeEntry[]): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+async function snapshotOwnedTree(root: string): Promise<OwnedTreeEntry[]> {
+  const metadata = await lstat(root);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(`Owned tree root is not a directory: ${root}`);
+  const output: OwnedTreeEntry[] = [];
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const path = join(directory, entry.name);
+      const entryMetadata = await lstat(path);
+      if (entryMetadata.isDirectory() && !entryMetadata.isSymbolicLink()) {
+        output.push({ path: relativePath, kind: "dir" });
+        await visit(path, relativePath);
+      } else if (entryMetadata.isSymbolicLink()) {
+        output.push({ path: relativePath, kind: "link", target: await readlink(path) });
+      } else if (entryMetadata.isFile()) {
+        output.push({ path: relativePath, kind: "file", sha256: await sha256(path), mode: entryMetadata.mode & 0o777 });
+      } else {
+        throw new Error(`Owned tree contains an unsupported entry ${path}`);
+      }
+    }
+  };
+  await visit(root, "");
+  return output;
+}
+
+async function writeTransactionIdentity(path: string): Promise<PathGeneration | undefined> {
+  const token = randomUUID();
+  await writeFile(join(path, TRANSACTION_TOKEN_NAME), `${token}\n`, { mode: 0o600 });
+  const identity = await liveRootIdentity(path);
+  return identity ? { ...identity, token } : undefined;
+}
+
+async function livePathMatchesGeneration(path: string, generation?: PathGeneration): Promise<boolean> {
+  if (!generation) return false;
+  const live = await liveRootIdentity(path);
+  if (!live || live.dev !== generation.dev || live.ino !== generation.ino) return false;
+  try {
+    return (await readFile(join(path, TRANSACTION_TOKEN_NAME), "utf8")).trim() === generation.token;
+  } catch {
+    return false;
+  }
+}
+
 async function assertLink(entry: LinkEntry): Promise<void> {
   const metadata = await optionalLstat(entry.path);
   if (!metadata) throw new Error(`Managed link is missing: ${entry.path}`);
@@ -386,23 +439,49 @@ async function liveRootIsJournaled(journal: Pick<InstallJournal, "installRoot" |
   return Boolean(live && live.dev === journal.rootIdentity.dev && live.ino === journal.rootIdentity.ino);
 }
 
+async function liveRootMatchesJournaledTree(journal: Pick<InstallJournal, "installRoot" | "rootTree">): Promise<boolean> {
+  if (!journal.rootTree) return false;
+  try {
+    const live = await snapshotOwnedTree(journal.installRoot);
+    const expected = new Map(journal.rootTree.map((entry) => [entry.path, entry]));
+    for (const entry of live) {
+      const prior = expected.get(entry.path);
+      if (!prior || JSON.stringify(prior) !== JSON.stringify(entry)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function journaledInstallRootIsExact(journal: Pick<InstallJournal, "installRoot" | "rootIdentity" | "rootTree">): Promise<boolean> {
+  return await liveRootIsJournaled(journal) && await liveRootMatchesJournaledTree(journal);
+}
+
 async function removeJournaledInstallRoot(journal: InstallJournal): Promise<void> {
   if (journal.kind === "uninstall" || !journal.installedRoot) return;
   if (!await optionalLstat(journal.installRoot)) return;
-  if (!await liveRootIsJournaled(journal)) return;
+  if (!await journaledInstallRootIsExact(journal)) return;
   await rm(journal.installRoot, { force: true, recursive: true });
+}
+
+async function removeJournaledTransactionRoot(
+  journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity">,
+): Promise<void> {
+  if (!await livePathMatchesGeneration(journal.transactionRoot, journal.transactionIdentity)) return;
+  await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
 }
 
 async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
   await restoreDestinations(journal);
   if (journal.previousInstall && await optionalLstat(journal.previousInstall)) {
-    if (await optionalLstat(journal.installRoot) && !await liveRootIsJournaled(journal)) return;
+    if (await optionalLstat(journal.installRoot) && !await journaledInstallRootIsExact(journal)) return;
     if (await optionalLstat(journal.installRoot)) await rm(journal.installRoot, { force: true, recursive: true });
     await rename(journal.previousInstall, journal.installRoot);
   } else {
     await removeJournaledInstallRoot(journal);
   }
-  await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  await removeJournaledTransactionRoot(journal);
 }
 
 async function recoverJournalAt(path: string): Promise<void> {
@@ -411,7 +490,7 @@ async function recoverJournalAt(path: string): Promise<void> {
   if (journal.phase !== "complete") {
     await rollbackFromJournal(journal);
     if (journal.serviceWasLoaded) await activate();
-  } else await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  } else await removeJournaledTransactionRoot(journal);
   await clearJournalAt(path);
 }
 
@@ -554,20 +633,29 @@ async function rollbackTransaction(
   movedDestinations: JournalDestination[],
   installedRoot: boolean,
   placedRoot?: { dev: string; ino: string },
+  rootTree?: OwnedTreeEntry[],
+  transactionIdentity?: PathGeneration,
 ): Promise<void> {
   await restoreDestinations({ kind: "install", destinations: movedDestinations });
-  if (installedRoot && placedRoot && await liveRootIsJournaled({ installRoot, rootIdentity: placedRoot })) {
+  const placed = { installRoot, rootIdentity: placedRoot, rootTree };
+  if (installedRoot && placedRoot && await journaledInstallRootIsExact(placed)) {
     await rm(installRoot, { force: true, recursive: true });
   }
   if (previousInstall && await optionalLstat(previousInstall)) {
-    if (await optionalLstat(installRoot) && !(placedRoot && await liveRootIsJournaled({ installRoot, rootIdentity: placedRoot }))) {
-      await rm(transactionRoot, { force: true, recursive: true });
+    if (await optionalLstat(installRoot) && !(placedRoot && await journaledInstallRootIsExact(placed))) {
+      await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity });
       return;
     }
-    if (await optionalLstat(installRoot)) await rm(installRoot, { force: true, recursive: true });
+    if (await optionalLstat(installRoot)) {
+      if (!await journaledInstallRootIsExact(placed)) {
+        await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity });
+        return;
+      }
+      await rm(installRoot, { force: true, recursive: true });
+    }
     await rename(previousInstall, installRoot);
   }
-  await rm(transactionRoot, { force: true, recursive: true });
+  await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity });
 }
 
 async function install(runtimeVersion: string, previous: Receipt | undefined): Promise<void> {
@@ -585,6 +673,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
   const previousLoaded = Boolean(previous) && loaded;
 
   const transactionRoot = await mkdtemp(join(dirname(installRoot), ".t3-auto-guardian-transaction-"));
+  const transactionIdentity = await writeTransactionIdentity(transactionRoot);
   const stagedRoot = join(transactionRoot, "new-install");
   const previousInstall = previous ? join(transactionRoot, "old-install") : undefined;
   const backupsRoot = join(transactionRoot, "backups");
@@ -594,7 +683,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
   try {
     receipt = await stageInstall(runtimeVersion, stagedRoot);
   } catch (error) {
-    await rm(transactionRoot, { recursive: true, force: true });
+    await removeJournaledTransactionRoot({ transactionRoot, transactionIdentity });
     throw error;
   }
   const movedDestinations: JournalDestination[] = [];
@@ -609,6 +698,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     ...(previousInstall ? { previousInstall } : {}),
     destinations: [],
     installedRoot: false,
+    ...(transactionIdentity ? { transactionIdentity } : {}),
   };
   await writeJournal(journal);
   try {
@@ -623,6 +713,8 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await rename(stagedRoot, installRoot);
     placedRoot = await liveRootIdentity(installRoot);
     journal.rootIdentity = placedRoot;
+    try { journal.rootTree = await snapshotOwnedTree(installRoot); }
+    catch { journal.rootTree = undefined; }
     await writeJournal(journal);
     installedRoot = true;
     await crashIf("root-installed");
@@ -677,7 +769,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       try { await deactivateIfLoaded(); }
       catch (cleanupError) { serviceRollbackError = cleanupError; }
     }
-    try { await rollbackTransaction(transactionRoot, previousInstall, movedDestinations, installedRoot, placedRoot); }
+    try { await rollbackTransaction(transactionRoot, previousInstall, movedDestinations, installedRoot, placedRoot, journal.rootTree, journal.transactionIdentity); }
     catch (rollbackError) {
       throw new AggregateError(
         serviceRollbackError ? [error, serviceRollbackError, rollbackError] : [error, rollbackError],
@@ -692,7 +784,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await clearJournal();
     throw error;
   }
-  await rm(transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  await removeJournaledTransactionRoot(journal);
   await clearJournal();
   console.log(JSON.stringify({
     root: sourceRoot,
@@ -710,6 +802,7 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
   const domain = await launchctlDomain();
   const serviceWasLoaded = await launchctlLoaded(domain);
   const transactionRoot = await mkdtemp(join(dirname(installRoot), ".t3-auto-guardian-uninstall-"));
+  const transactionIdentity = await writeTransactionIdentity(transactionRoot);
   const installBackup = join(transactionRoot, "install");
   const movedDestinations: JournalDestination[] = [];
   const journal: InstallJournal = {
@@ -721,6 +814,7 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
     destinations: [],
     installedRoot: false,
     serviceWasLoaded,
+    ...(transactionIdentity ? { transactionIdentity } : {}),
   };
   await writeJournal(journal);
   await crashIf("uninstall-prepared");
@@ -763,7 +857,7 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
     await clearJournal();
     throw error;
   }
-  await rm(transactionRoot, { force: true, recursive: true }).catch(() => undefined);
+  await removeJournaledTransactionRoot(journal);
   await clearJournal();
   console.log(JSON.stringify({ ok: true, uninstalled: true, installRoot, launchAgentLabel: GUARDIAN_LAUNCH_AGENT_LABEL }));
 }

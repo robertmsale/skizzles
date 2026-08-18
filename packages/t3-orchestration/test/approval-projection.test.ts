@@ -4,6 +4,7 @@ import {
   CONFLICTING_COMMAND_GAP,
   derivePendingApprovals,
   MISSING_COMMAND_GAP,
+  UNBOUND_ACCEPT_GAP,
   projectPendingApprovalList,
   providerDriversFromConfig,
   requireIdentifiableApproval,
@@ -379,23 +380,12 @@ describe("pending approval projection", () => {
       decision: "decline",
       createdAt: "now",
     });
-    expect(approvalRespondCommand("task", "req-1", "accept", "command", "now", {
+    expect(() => approvalRespondCommand("task", "req-1", "accept", "command", "now", {
       requestKind: "command",
       command: "git status",
       cwd: null,
       toolName: "Shell",
-    })).toEqual({
-      type: "thread.approval.respond",
-      commandId: "command",
-      threadId: "task",
-      requestId: "req-1",
-      decision: "accept",
-      createdAt: "now",
-      command: "git status",
-      cwd: null,
-      requestKind: "command",
-      toolName: "Shell",
-    });
-    expect(() => approvalRespondCommand("task", "req-1", "accept", "command", "now")).toThrow(MISSING_COMMAND_GAP);
+    })).toThrow(UNBOUND_ACCEPT_GAP);
+    expect(() => approvalRespondCommand("task", "req-1", "accept", "command", "now")).toThrow(UNBOUND_ACCEPT_GAP);
   });
 });
