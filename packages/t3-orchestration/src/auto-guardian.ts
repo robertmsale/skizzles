@@ -50,6 +50,7 @@ export type GuardianCandidate = {
   createdAt: string | null;
   identifiable: boolean;
   snapshotGap: boolean;
+  gapReason?: string;
 };
 
 export type GuardianAction =
@@ -215,7 +216,7 @@ export function isGuardianEligible(target: { provider: string; providerDriver?: 
   if (!driver) {
     return { eligible: false, action: "skipped_codex", reason: "provider driver is unavailable" };
   }
-  if (isCodexDriver(driver) || !isKnownNonCodexDriver(driver) || isCodexProvider(target.provider)) {
+  if (isCodexDriver(driver) || !isKnownNonCodexDriver(driver)) {
     return { eligible: false, action: "skipped_codex", reason: "provider is Codex or not a known non-Codex Auto harness" };
   }
   return { eligible: true };
@@ -259,6 +260,7 @@ export function candidatesFromApprovalList(list: ApprovalList): GuardianCandidat
     createdAt: approval.createdAt,
     identifiable: false,
     snapshotGap: approval.requestId == null,
+    gapReason: approval.reason,
   }));
   return [...identifiable, ...unidentifiable].sort((left, right) =>
     (left.createdAt ?? "").localeCompare(right.createdAt ?? "") ||
@@ -455,11 +457,12 @@ export async function runGuardianCycle(
           });
           continue;
         }
+        const denyReason = candidate.gapReason ?? MISSING_COMMAND_GAP;
         const responded = await deliverClaim(dependencies, {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           decision: "decline",
-          reason: MISSING_COMMAND_GAP,
+          reason: denyReason,
           leaseId: claim.leaseId,
         }, config.dryRun);
         if (claim.status !== "duplicate") state = await dependencies.loadState();
@@ -471,7 +474,7 @@ export async function runGuardianCycle(
           runtimeMode: candidate.runtimeMode,
           command: null,
           decision: "decline",
-          reason: MISSING_COMMAND_GAP,
+          reason: denyReason,
           dryRun: config.dryRun,
           responded,
         });

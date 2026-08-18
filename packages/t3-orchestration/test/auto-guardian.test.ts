@@ -201,6 +201,9 @@ describe("guardian eligibility filter", () => {
       eligible: false,
       action: "skipped_codex",
     });
+    expect(isGuardianEligible({ provider: "grok-prod", providerDriver: "grok", runtimeMode: "auto" }).eligible).toBe(true);
+    expect(isGuardianEligible({ provider: "cursor-work", providerDriver: "cursor", runtimeMode: "auto" }).eligible).toBe(true);
+    expect(isGuardianEligible({ provider: "codex_personal", providerDriver: "codex", runtimeMode: "auto" }).eligible).toBe(false);
   });
 
   test("keeps unidentifiable snapshot gaps distinct from missing commands", () => {
@@ -222,20 +225,34 @@ describe("guardian eligibility filter", () => {
 describe("guardian cycle", () => {
   test("never touches Codex auto threads", async () => {
     const { deps, resolved } = fixture({
-      list: { approvals: [approval({ threadId: "codex-task", provider: "codex" })], unidentifiable: [] },
+      list: { approvals: [approval({ threadId: "codex-task", provider: "codex", providerDriver: "codex" })], unidentifiable: [] },
     });
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(report.decisions).toEqual([expect.objectContaining({ action: "skipped_codex", threadId: "codex-task", responded: false })]);
     expect(resolved).toEqual([]);
   });
 
-  test("never touches custom Codex instance IDs identified by a codex_ prefix", async () => {
+  test("never touches custom Codex instances identified by a Codex driver", async () => {
     const { deps, resolved } = fixture({
-      list: { approvals: [approval({ threadId: "personal-codex", provider: "codex_personal" })], unidentifiable: [] },
+      list: { approvals: [approval({ threadId: "personal-codex", provider: "codex_personal", providerDriver: "codex" })], unidentifiable: [] },
     });
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(report.decisions[0]).toMatchObject({ action: "skipped_codex", threadId: "personal-codex", responded: false });
     expect(resolved).toEqual([]);
+  });
+
+  test("judges custom non-Codex instance IDs when the resolved driver is known", async () => {
+    const { deps, resolved } = fixture({
+      list: { approvals: [approval({ threadId: "grok-prod-task", provider: "grok-prod", providerDriver: "grok" })], unidentifiable: [] },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      threadId: "grok-prod-task",
+      requestId: "req-1",
+      responded: true,
+    });
+    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "accept" })]);
   });
 
   test("skips allowlisted instance IDs when the driver is missing or Codex", async () => {

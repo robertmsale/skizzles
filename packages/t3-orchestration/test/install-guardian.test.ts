@@ -342,4 +342,45 @@ describe("auto guardian installer", () => {
     const uninstalled = await installWithEnvironment(root, fixture.environment, "--uninstall");
     expect(uninstalled.exitCode).toBe(0);
   });
+
+  test("A-crash then B-install then A-recovery cannot clobber a completed B install", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const rootA = join(root, "roots/a");
+    const rootB = join(root, "roots/b");
+    expect((await installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: rootA })).exitCode).toBe(0);
+    const link = join(root, ".local/bin/t3-auto-guardian");
+    const plist = join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist");
+    const aTarget = await readlink(link);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_ROOT: rootA,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "uninstall-plist-moved",
+    }, "--uninstall");
+    expect(crashed.exitCode).toBe(75);
+    const bInstall = await installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: rootB });
+    expect(bInstall.exitCode).not.toBe(0);
+    expect(await readlink(link)).toBe(aTarget);
+    await expect(lstat(join(rootB, "install-receipt.json"))).rejects.toThrow();
+    const aRecovered = await installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: rootA });
+    expect(aRecovered.exitCode).toBe(0);
+    expect(await readlink(link)).toBe(aTarget);
+    const planted = join(root, "planted-b/auto-guardian-cli.ts");
+    await mkdir(join(root, "planted-b"), { recursive: true });
+    await writeFile(planted, "#!/usr/bin/env bun\n");
+    const crashedAgain = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_ROOT: rootA,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "uninstall-plist-moved",
+    }, "--uninstall");
+    expect(crashedAgain.exitCode).toBe(75);
+    await mkdir(join(link, ".."), { recursive: true });
+    await symlink(planted, link);
+    await writeFile(plist, "planted-b-plist");
+    const afterPlanted = await installWithEnvironment(root, { ...fixture.environment, T3_AUTO_GUARDIAN_INSTALL_ROOT: rootA });
+    expect(afterPlanted.exitCode).not.toBe(0);
+    expect(await readlink(link)).toBe(planted);
+    expect(await readFile(plist, "utf8")).toBe("planted-b-plist");
+  });
 });

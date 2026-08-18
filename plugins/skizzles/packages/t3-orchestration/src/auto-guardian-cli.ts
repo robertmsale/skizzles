@@ -547,7 +547,7 @@ var MISSING_SNAPSHOT_GAP = "T3 reports hasPendingApprovals, but the thread snaps
 function requireIdentifiableApproval(approval) {
   if (approval.identifiable && approval.command)
     return;
-  throw new Error(MISSING_COMMAND_GAP);
+  throw new Error(approval.reason ?? MISSING_COMMAND_GAP);
 }
 
 // packages/t3-orchestration/src/exclusive-lock.ts
@@ -643,12 +643,6 @@ function normalizeClaims(value) {
   }
   return claims;
 }
-function isCodexProvider(instanceId) {
-  const value = instanceId?.trim().toLowerCase() ?? "";
-  if (!value)
-    return true;
-  return !NON_CODEX_PROVIDERS.includes(value);
-}
 function isAutoRuntime(runtimeMode) {
   return runtimeMode?.trim().toLowerCase() === AUTO_RUNTIME_MODE;
 }
@@ -667,7 +661,7 @@ function isGuardianEligible(target) {
   if (!driver) {
     return { eligible: false, action: "skipped_codex", reason: "provider driver is unavailable" };
   }
-  if (isCodexDriver(driver) || !isKnownNonCodexDriver(driver) || isCodexProvider(target.provider)) {
+  if (isCodexDriver(driver) || !isKnownNonCodexDriver(driver)) {
     return { eligible: false, action: "skipped_codex", reason: "provider is Codex or not a known non-Codex Auto harness" };
   }
   return { eligible: true };
@@ -709,7 +703,8 @@ function candidatesFromApprovalList(list) {
     worktreePath: approval.worktreePath,
     createdAt: approval.createdAt,
     identifiable: false,
-    snapshotGap: approval.requestId == null
+    snapshotGap: approval.requestId == null,
+    gapReason: approval.reason
   }));
   return [...identifiable, ...unidentifiable].sort((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.threadId.localeCompare(right.threadId) || (left.requestId ?? "").localeCompare(right.requestId ?? ""));
 }
@@ -886,11 +881,12 @@ async function runGuardianCycle(dependencies, config) {
           });
           continue;
         }
+        const denyReason = candidate.gapReason ?? MISSING_COMMAND_GAP;
         const responded2 = await deliverClaim(dependencies, {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           decision: "decline",
-          reason: MISSING_COMMAND_GAP,
+          reason: denyReason,
           leaseId: claim2.leaseId
         }, config.dryRun);
         if (claim2.status !== "duplicate")
@@ -903,7 +899,7 @@ async function runGuardianCycle(dependencies, config) {
           runtimeMode: candidate.runtimeMode,
           command: null,
           decision: "decline",
-          reason: MISSING_COMMAND_GAP,
+          reason: denyReason,
           dryRun: config.dryRun,
           responded: responded2
         });
