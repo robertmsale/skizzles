@@ -220,27 +220,62 @@ function uniqueTypedActions(payload) {
   ].filter((value) => value !== null);
   return [...new Set(values)];
 }
-function extractTypedAction(payload) {
-  if (!payload)
-    return { command: null, reason: MISSING_COMMAND_GAP };
-  const typed = uniqueTypedActions(payload);
-  const detail = asTrimmedString(payload.detail);
-  if (typed.length > 1)
-    return { command: null, reason: CONFLICTING_COMMAND_GAP };
-  if (typed.length === 1) {
-    if (detail && detail !== typed[0])
-      return { command: null, reason: CONFLICTING_COMMAND_GAP };
-    return { command: typed[0] };
-  }
-  return { command: null, reason: MISSING_COMMAND_GAP };
+function uniqueNonEmpty(values) {
+  return [...new Set(values.filter((value) => value !== null))];
 }
-function extractCwd(payload) {
-  if (!payload)
-    return null;
+function uniqueTypedCwds(payload) {
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  const input = asRecord(data?.input) ?? asRecord(item?.input);
-  return asTrimmedString(payload.cwd) ?? asTrimmedString(payload.workingDirectory) ?? asTrimmedString(data?.cwd) ?? asTrimmedString(data?.workingDirectory) ?? asTrimmedString(item?.cwd) ?? asTrimmedString(input?.cwd);
+  const dataInput = asRecord(data?.input);
+  const itemInput = asRecord(item?.input);
+  const itemResult = asRecord(item?.result);
+  const dataResult = asRecord(data?.result);
+  return uniqueNonEmpty([
+    asTrimmedString(payload.cwd),
+    asTrimmedString(payload.workingDirectory),
+    asTrimmedString(data?.cwd),
+    asTrimmedString(data?.workingDirectory),
+    asTrimmedString(item?.cwd),
+    asTrimmedString(item?.workingDirectory),
+    asTrimmedString(dataInput?.cwd),
+    asTrimmedString(dataInput?.workingDirectory),
+    asTrimmedString(itemInput?.cwd),
+    asTrimmedString(itemInput?.workingDirectory),
+    asTrimmedString(itemResult?.cwd),
+    asTrimmedString(itemResult?.workingDirectory),
+    asTrimmedString(dataResult?.cwd),
+    asTrimmedString(dataResult?.workingDirectory)
+  ]);
+}
+function uniqueTypedTools(payload) {
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  const dataInput = asRecord(data?.input);
+  const itemInput = asRecord(item?.input);
+  return uniqueNonEmpty([
+    asTrimmedString(data?.toolName),
+    asTrimmedString(item?.tool),
+    asTrimmedString(item?.toolName),
+    asTrimmedString(dataInput?.toolName),
+    asTrimmedString(itemInput?.toolName)
+  ]);
+}
+function extractTypedAction(payload) {
+  if (!payload)
+    return { command: null, cwd: null, toolName: null, reason: MISSING_COMMAND_GAP };
+  const typed = uniqueTypedActions(payload);
+  const cwds = uniqueTypedCwds(payload);
+  const tools = uniqueTypedTools(payload);
+  const detail = asTrimmedString(payload.detail);
+  if (typed.length > 1 || cwds.length > 1 || tools.length > 1) {
+    return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+  }
+  if (typed.length === 1) {
+    if (detail && detail !== typed[0])
+      return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+    return { command: typed[0], cwd: cwds[0] ?? null, toolName: tools[0] ?? null };
+  }
+  return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, reason: MISSING_COMMAND_GAP };
 }
 function extractToolName(activity, payload) {
   if (!payload)
@@ -264,8 +299,8 @@ function derivePendingApprovals(activities) {
         requestKind: requestKindFromPayload(payload),
         createdAt: activity.createdAt,
         command: extracted.command,
-        toolName: extractToolName(activity, payload),
-        cwd: extractCwd(payload),
+        toolName: extracted.toolName ?? extractToolName(activity, payload),
+        cwd: extracted.cwd,
         identifiable: extracted.command !== null,
         ...extracted.reason ? { reason: extracted.reason } : {}
       });

@@ -79,6 +79,7 @@ type InstallJournal = {
   previousInstall?: string;
   destinations: JournalDestination[];
   installedRoot: boolean;
+  rootReceiptSha256?: string;
   serviceWasLoaded?: boolean;
 };
 const LOCK_EX = 2;
@@ -373,12 +374,33 @@ async function persistDestination(journal: InstallJournal, destinations: Journal
   await writeJournal(journal);
 }
 
+async function journaledRootReceiptSha256(root: string): Promise<string | undefined> {
+  const receipt = join(root, "install-receipt.json");
+  if (!await optionalLstat(receipt)) return undefined;
+  return sha256(receipt);
+}
+
+async function liveRootIsJournaled(journal: InstallJournal): Promise<boolean> {
+  if (!journal.rootReceiptSha256) return false;
+  const live = await journaledRootReceiptSha256(journal.installRoot);
+  return live === journal.rootReceiptSha256;
+}
+
+async function removeJournaledInstallRoot(journal: InstallJournal): Promise<void> {
+  if (journal.kind === "uninstall" || !journal.installedRoot) return;
+  if (!await optionalLstat(journal.installRoot)) return;
+  if (!await liveRootIsJournaled(journal)) return;
+  await rm(journal.installRoot, { force: true, recursive: true });
+}
+
 async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
   await restoreDestinations(journal);
-  if (journal.kind !== "uninstall" && journal.installedRoot) await rm(journal.installRoot, { force: true, recursive: true });
   if (journal.previousInstall && await optionalLstat(journal.previousInstall)) {
+    if (await optionalLstat(journal.installRoot) && !await liveRootIsJournaled(journal)) return;
     if (await optionalLstat(journal.installRoot)) await rm(journal.installRoot, { force: true, recursive: true });
     await rename(journal.previousInstall, journal.installRoot);
+  } else {
+    await removeJournaledInstallRoot(journal);
   }
   await rm(journal.transactionRoot, { force: true, recursive: true }).catch(() => undefined);
 }
@@ -584,6 +606,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await writeJournal(journal);
     await crashIf("root-moved");
     journal.installedRoot = true;
+    journal.rootReceiptSha256 = await sha256(join(stagedRoot, "install-receipt.json"));
     journal.phase = "root-installed";
     await writeJournal(journal);
     await crashIf("root-installing");

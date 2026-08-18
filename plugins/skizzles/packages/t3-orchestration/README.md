@@ -92,7 +92,7 @@ Coordinator approval commands wrap T3's existing `thread.approval.respond` comma
 
 ### T3 Auto guardian sidecar
 
-T3 `runtimeMode: "auto"` is a thread label. Codex already maps Auto to `approvalsReviewer: "auto_review"`. Cursor, Grok, and other providers fall through to ask. The optional host-only sidecar `t3-auto-guardian` is a T3 client, not a harness hook: it polls the existing `t3-orchestrationd` socket, skips Codex threads, and judges remaining Auto pending approvals with one-shot `codex exec --ephemeral`.
+T3 `runtimeMode: "auto"` is a thread label. Codex already maps Auto to `approvalsReviewer: "auto_review"`. Cursor, Grok, and other providers fall through to ask. The optional host-only sidecar `t3-auto-guardian` is a T3 client, not a harness hook: it polls the existing `t3-orchestrationd` socket and judges Auto pending approvals only when the resolved T3 provider driver is `grok`, `cursor`, or `opencode`. It skips Codex drivers, missing or malformed drivers, and any other unknown driver, including custom instance IDs whose driver is not on that allowlist. Judgments use one-shot `codex exec --ephemeral`.
 
 It will not:
 

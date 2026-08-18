@@ -630,6 +630,9 @@ function parseGuardianClaimKey(key, fallbackThreadId) {
     return { threadId: key.slice(0, split), requestId: key.slice(split + 1) };
   return { threadId: fallbackThreadId, requestId: key };
 }
+function hasCompleteActionIdentity(action) {
+  return Boolean(action && (action.requestKind === "command" || action.requestKind === "file-read" || action.requestKind === "file-change") && typeof action.command === "string" && action.command.trim() !== "");
+}
 function parseClaimAction(value) {
   if (!value || typeof value !== "object")
     return;
@@ -758,6 +761,9 @@ async function deliverClaim(dependencies, input, dryRun) {
     return false;
   if (!input.leaseId)
     return false;
+  if (input.decision === "accept" && !hasCompleteActionIdentity(input.action)) {
+    input = { ...input, decision: "decline", reason: "legacy claim has no action identity" };
+  }
   return dependencies.withDeliveryLock(input.threadId, input.requestId, async () => {
     if (!await dependencies.renewRequest(input.requestId, input.leaseId, input.threadId))
       return false;
@@ -852,12 +858,16 @@ async function runGuardianCycle(dependencies, config) {
         continue;
       }
       if (existing?.status === "pending" && candidate.requestId) {
+        const actionlessAccept = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action);
+        const retryDecision = actionlessAccept ? "decline" : existing.decision;
+        const retryAction = actionlessAccept ? candidateAction(candidate) : existing.action;
+        const retryReason = actionlessAccept ? "legacy claim has no action identity" : "retrying incomplete guardian claim";
         const claim2 = await claimOrSkip(dependencies, {
           requestId: candidate.requestId,
           threadId: candidate.threadId,
-          decision: existing.decision,
+          decision: retryDecision,
           at: now,
-          action: existing.action
+          action: retryAction
         }, config.dryRun);
         if (!config.dryRun && claim2.status === "duplicate") {
           decisions.push({
@@ -874,24 +884,25 @@ async function runGuardianCycle(dependencies, config) {
           });
           continue;
         }
+        const decision2 = claim2.decision ?? retryDecision;
         const responded2 = await deliverClaim(dependencies, {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
-          decision: existing.decision,
-          reason: "retrying incomplete guardian claim",
+          decision: decision2,
+          reason: retryReason,
           leaseId: claim2.leaseId,
-          action: existing.action
+          action: retryAction
         }, config.dryRun);
         state = await dependencies.loadState();
         decisions.push({
-          action: config.dryRun ? "dry_run" : "judged",
+          action: config.dryRun ? "dry_run" : decision2 === "decline" && actionlessAccept ? "denied_unidentifiable" : "judged",
           threadId: candidate.threadId,
           requestId: candidate.requestId,
           provider: candidate.provider,
           runtimeMode: candidate.runtimeMode,
           command: candidate.command,
-          decision: existing.decision,
-          reason: "retrying incomplete guardian claim",
+          decision: decision2,
+          reason: retryReason,
           dryRun: config.dryRun,
           responded: responded2
         });
@@ -1137,14 +1148,17 @@ async function claimGuardianRequest(input, path = defaultGuardianStatePath(), op
       });
       if (!liveHolder.ok)
         return { status: "duplicate", decision: existing.decision, leaseId: existing.leaseId };
+      const decision = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action) ? "decline" : existing.decision;
       const leaseId2 = newOwnershipToken();
       await writeGuardianStateAtomic(writeClaimState(state, key, {
         ...existing,
+        decision,
+        ...decision === "decline" && input.action ? { action: input.action } : {},
         leaseId: leaseId2,
         leaseUntil: new Date(nowMs + leaseMs).toISOString(),
         attempt: (existing.attempt ?? 0) + 1
       }), path);
-      return { status: "retry", decision: existing.decision, leaseId: leaseId2 };
+      return { status: "retry", decision, leaseId: leaseId2 };
     }
     const leaseId = newOwnershipToken();
     await writeGuardianStateAtomic(writeClaimState(state, key, {

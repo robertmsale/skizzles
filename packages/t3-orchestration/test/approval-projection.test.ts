@@ -260,6 +260,27 @@ describe("pending approval projection", () => {
       identifiable: false,
       reason: CONFLICTING_COMMAND_GAP,
     });
+    const dualCwd = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        payload: {
+          requestId: "req-dual-cwd",
+          requestKind: "command",
+          data: {
+            input: { command: "git clean -fd", cwd: "/safe" },
+            item: { input: { command: "git clean -fd", cwd: "/sensitive" } },
+          },
+        },
+      }),
+    ]);
+    expect(dualCwd[0]).toMatchObject({
+      requestId: "req-dual-cwd",
+      command: null,
+      cwd: null,
+      identifiable: false,
+      reason: CONFLICTING_COMMAND_GAP,
+    });
   });
 
   test("lists identifiable approvals and documents snapshot gaps", () => {

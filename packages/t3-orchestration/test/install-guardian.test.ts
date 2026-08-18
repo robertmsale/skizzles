@@ -343,6 +343,32 @@ describe("auto guardian installer", () => {
     expect(uninstalled.exitCode).toBe(0);
   });
 
+  test("does not delete a replacement install root after a pre-rename crash", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installing",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const installRoot = join(root, ".local/share/skizzles/t3-auto-guardian");
+    await mkdir(join(installRoot, "runtime"), { recursive: true });
+    await writeFile(join(installRoot, "install-receipt.json"), `${JSON.stringify({
+      version: 1,
+      schema: 1,
+      runtimeVersion: "0.0.0",
+      runtimeRoot: join(installRoot, "runtime"),
+      runtime: [],
+      links: [],
+      files: [],
+    }, null, 2)}\n`);
+    await writeFile(join(installRoot, "runtime", "planted.txt"), "foreign-root");
+    const recovered = await installWithEnvironment(root, fixture.environment);
+    expect(recovered.exitCode).not.toBe(0);
+    expect(await readFile(join(installRoot, "runtime", "planted.txt"), "utf8")).toBe("foreign-root");
+  });
+
   test("A-crash then B-install then A-recovery cannot clobber a completed B install", async () => {
     const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
     roots.push(root);

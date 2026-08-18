@@ -158,29 +158,68 @@ function uniqueTypedActions(payload: Record<string, unknown>): string[] {
   return [...new Set(values)];
 }
 
-function extractTypedAction(payload: Record<string, unknown> | null): { command: string | null; reason?: string } {
-  if (!payload) return { command: null, reason: MISSING_COMMAND_GAP };
-  const typed = uniqueTypedActions(payload);
-  const detail = asTrimmedString(payload.detail);
-  if (typed.length > 1) return { command: null, reason: CONFLICTING_COMMAND_GAP };
-  if (typed.length === 1) {
-    if (detail && detail !== typed[0]) return { command: null, reason: CONFLICTING_COMMAND_GAP };
-    return { command: typed[0]! };
-  }
-  return { command: null, reason: MISSING_COMMAND_GAP };
+function uniqueNonEmpty(values: Array<string | null>): string[] {
+  return [...new Set(values.filter((value): value is string => value !== null))];
 }
 
-function extractCwd(payload: Record<string, unknown> | null): string | null {
-  if (!payload) return null;
+function uniqueTypedCwds(payload: Record<string, unknown>): string[] {
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  const input = asRecord(data?.input) ?? asRecord(item?.input);
-  return asTrimmedString(payload.cwd)
-    ?? asTrimmedString(payload.workingDirectory)
-    ?? asTrimmedString(data?.cwd)
-    ?? asTrimmedString(data?.workingDirectory)
-    ?? asTrimmedString(item?.cwd)
-    ?? asTrimmedString(input?.cwd);
+  const dataInput = asRecord(data?.input);
+  const itemInput = asRecord(item?.input);
+  const itemResult = asRecord(item?.result);
+  const dataResult = asRecord(data?.result);
+  return uniqueNonEmpty([
+    asTrimmedString(payload.cwd),
+    asTrimmedString(payload.workingDirectory),
+    asTrimmedString(data?.cwd),
+    asTrimmedString(data?.workingDirectory),
+    asTrimmedString(item?.cwd),
+    asTrimmedString(item?.workingDirectory),
+    asTrimmedString(dataInput?.cwd),
+    asTrimmedString(dataInput?.workingDirectory),
+    asTrimmedString(itemInput?.cwd),
+    asTrimmedString(itemInput?.workingDirectory),
+    asTrimmedString(itemResult?.cwd),
+    asTrimmedString(itemResult?.workingDirectory),
+    asTrimmedString(dataResult?.cwd),
+    asTrimmedString(dataResult?.workingDirectory),
+  ]);
+}
+
+function uniqueTypedTools(payload: Record<string, unknown>): string[] {
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  const dataInput = asRecord(data?.input);
+  const itemInput = asRecord(item?.input);
+  return uniqueNonEmpty([
+    asTrimmedString(data?.toolName),
+    asTrimmedString(item?.tool),
+    asTrimmedString(item?.toolName),
+    asTrimmedString(dataInput?.toolName),
+    asTrimmedString(itemInput?.toolName),
+  ]);
+}
+
+function extractTypedAction(payload: Record<string, unknown> | null): {
+  command: string | null;
+  cwd: string | null;
+  toolName: string | null;
+  reason?: string;
+} {
+  if (!payload) return { command: null, cwd: null, toolName: null, reason: MISSING_COMMAND_GAP };
+  const typed = uniqueTypedActions(payload);
+  const cwds = uniqueTypedCwds(payload);
+  const tools = uniqueTypedTools(payload);
+  const detail = asTrimmedString(payload.detail);
+  if (typed.length > 1 || cwds.length > 1 || tools.length > 1) {
+    return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+  }
+  if (typed.length === 1) {
+    if (detail && detail !== typed[0]) return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+    return { command: typed[0]!, cwd: cwds[0] ?? null, toolName: tools[0] ?? null };
+  }
+  return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, reason: MISSING_COMMAND_GAP };
 }
 
 function extractToolName(activity: T3ThreadActivity, payload: Record<string, unknown> | null): string | null {
@@ -208,8 +247,8 @@ export function derivePendingApprovals(activities: readonly T3ThreadActivity[]):
         requestKind: requestKindFromPayload(payload),
         createdAt: activity.createdAt,
         command: extracted.command,
-        toolName: extractToolName(activity, payload),
-        cwd: extractCwd(payload),
+        toolName: extracted.toolName ?? extractToolName(activity, payload),
+        cwd: extracted.cwd,
         identifiable: extracted.command !== null,
         ...(extracted.reason ? { reason: extracted.reason } : {}),
       });
