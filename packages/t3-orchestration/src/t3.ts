@@ -248,7 +248,7 @@ export function isExistingTaskTurnStart(command: Record<string, unknown>): boole
   return command.type === "thread.turn.start" && !command.bootstrap;
 }
 
-export const rawDispatch = (command: Record<string, unknown>) =>
+const transmitDispatch = (command: Record<string, unknown>): Promise<any> =>
   requiresRpcDispatch(command)
     ? requestRpc("orchestration.dispatchCommand", command)
     : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
@@ -279,12 +279,25 @@ export async function startExistingTaskTurn(
   if (!threadId) throw new Error("thread.turn.start requires a thread id");
   const path = await (deps.resolvePath ?? resolveExistingTaskTurnPath)(threadId);
   return withWorktreeGate(path, threadId, "turn-start", async () => (
-    deps.dispatchCommand ?? rawDispatch
+    deps.dispatchCommand ?? transmitDispatch
   )(command), { home: deps.home });
 }
 
-export const dispatch = (command: Record<string, unknown>) =>
-  isExistingTaskTurnStart(command) ? startExistingTaskTurn(command) : rawDispatch(command);
+export async function rawDispatch(
+  command: Record<string, unknown>,
+  deps: {
+    resolvePath?: (threadId: string) => Promise<string>;
+    dispatchCommand?: (command: Record<string, unknown>) => Promise<any>;
+    home?: string;
+  } = {},
+): Promise<any> {
+  if (isExistingTaskTurnStart(command)) {
+    return startExistingTaskTurn(command, { ...deps, dispatchCommand: deps.dispatchCommand ?? transmitDispatch });
+  }
+  return (deps.dispatchCommand ?? transmitDispatch)(command);
+}
+
+export const dispatch = rawDispatch;
 
 type ProviderCatalogEntry = {
   instanceId?: unknown;

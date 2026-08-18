@@ -5,7 +5,10 @@ import {
   acquireWorktreeGate,
   assertWorktreeNotLeased,
   cleanLeaseLockPath,
+  defaultProcessStartKey,
   holdExclusiveCleanLease,
+  isLiveLeaseRecord,
+  parseLeaseRecord,
   readLiveCleanLease,
   withWorktreeGate,
 } from "../src/worktree-reaper-lease.ts";
@@ -51,6 +54,7 @@ describe("worktree clean lease", () => {
       path,
       role: "clean",
       pid: process.pid,
+      startKey: defaultProcessStartKey(process.pid),
       acquiredAt: "now",
     })}\n`);
     await expect(assertWorktreeNotLeased(path, root)).rejects.toThrow("reserved for artifact cleanup");
@@ -136,5 +140,92 @@ describe("worktree clean lease", () => {
     await replacement.release();
     const remaining = JSON.parse(await Bun.file(lockPath).text()) as { token: string; threadId: string };
     expect(remaining).toMatchObject({ token: "other-owner", threadId: "other" });
+  });
+
+  test("treats a missing startKey as not live even when the pid probe succeeds", async () => {
+    const record = parseLeaseRecord({
+      token: "legacy",
+      threadId: "old-owner",
+      path: "/repo/worktree",
+      role: "clean",
+      pid: process.pid,
+      startKey: null,
+      acquiredAt: "now",
+    });
+    expect(record).not.toBeNull();
+    expect(isLiveLeaseRecord(record!, {
+      processProbe: () => undefined,
+      processStartKey: () => "some-other-process",
+    })).toBe(false);
+
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    await writeFile(cleanLeaseLockPath(path, root), `${JSON.stringify({
+      token: "legacy",
+      threadId: "old-owner",
+      path,
+      role: "clean",
+      pid: process.pid,
+      startKey: null,
+      acquiredAt: "now",
+    })}\n`);
+    expect(await readLiveCleanLease(path, root, {
+      processProbe: () => undefined,
+      processStartKey: () => "some-other-process",
+    })).toBeNull();
+    const lease = await acquireWorktreeGate(path, "task", "clean", { home: root });
+    expect(await readLiveCleanLease(path, root)).toMatchObject({ threadId: "task", pid: process.pid });
+    await lease.release();
+  });
+
+  test("recovers an orphan reclaim claim instead of stranding the lease", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    const lockPath = cleanLeaseLockPath(path, root);
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    await writeFile(lockPath, "{not-a-lease\n");
+    await writeFile(`${lockPath}.reclaim`, `${JSON.stringify({
+      pid: 2147483647,
+      startKey: "dead-claimant",
+      token: "orphan",
+      createdAt: "now",
+    })}\n`);
+    const lease = await acquireWorktreeGate(path, "task", "clean", { home: root });
+    expect(await readLiveCleanLease(path, root)).toMatchObject({ threadId: "task" });
+    await lease.release();
+  });
+
+  test("stale reclaim does not unlink a replacement lease installed after the identity check", async () => {
+    const root = `/tmp/t3-reaper-lease-${crypto.randomUUID()}`;
+    const path = `${root}/worktree`;
+    const lockPath = cleanLeaseLockPath(path, root);
+    await mkdir(join(root, "worktree-reaper-leases"), { recursive: true });
+    await writeFile(lockPath, `${JSON.stringify({
+      token: "stale",
+      threadId: "dead-owner",
+      path,
+      role: "clean",
+      pid: 2147483647,
+      startKey: "gone",
+      acquiredAt: "now",
+    })}\n`);
+    const replacement = {
+      token: "replacement",
+      threadId: "live-owner",
+      path,
+      role: "clean" as const,
+      pid: process.pid,
+      startKey: defaultProcessStartKey(process.pid),
+      acquiredAt: "now",
+    };
+    await expect(acquireWorktreeGate(path, "task", "clean", {
+      home: root,
+      beforeUnlink: async () => {
+        await rm(lockPath, { force: true });
+        await writeFile(lockPath, `${JSON.stringify(replacement)}\n`);
+      },
+    })).rejects.toThrow(/reserved for artifact cleanup/);
+    expect(JSON.parse(await Bun.file(lockPath).text())).toMatchObject({ token: "replacement", threadId: "live-owner" });
   });
 });

@@ -596,12 +596,12 @@ function parseLeaseRecord(value) {
 function isLiveLeaseRecord(record, fns = {}) {
   const processProbe = fns.processProbe ?? defaultProcessProbe;
   const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  if (typeof record.startKey !== "string" || record.startKey.trim() === "")
+    return false;
   if (!isLivePid(record.pid, processProbe))
     return false;
   const currentStart = processStartKey(record.pid);
-  if (currentStart === null)
-    return false;
-  if (record.startKey && record.startKey !== currentStart)
+  if (currentStart === null || currentStart !== record.startKey)
     return false;
   return true;
 }
@@ -649,38 +649,116 @@ async function inspectLock(lockPath, fns) {
     throw error;
   }
 }
-async function reclaimStaleLock(lockPath, inspected) {
-  const token2 = crypto.randomUUID();
-  const candidate = `${lockPath}.reclaim-candidate-${process.pid}-${token2}`;
-  const claimPath = `${lockPath}.reclaim`;
-  await writeFile(candidate, `${JSON.stringify({ pid: process.pid, token: token2 })}
-`, { mode: 384, flag: "wx" });
-  const candidateIdentity = lockIdentity(await lstat(candidate, { bigint: true }));
-  let claimed = false;
+function reclaimClaimPath(lockPath) {
+  return `${lockPath}.reclaim`;
+}
+function parseReclaimClaim(value) {
+  if (!value || typeof value !== "object")
+    return null;
+  const raw = value;
+  if (!Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0 || typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.createdAt !== "string") {
+    return null;
+  }
+  return {
+    pid: raw.pid,
+    startKey: typeof raw.startKey === "string" ? raw.startKey : null,
+    token: raw.token,
+    createdAt: raw.createdAt
+  };
+}
+function isLiveReclaimClaim(record, fns) {
+  return isLiveLeaseRecord({
+    token: record.token,
+    threadId: "reclaim",
+    path: "reclaim",
+    role: "clean",
+    pid: record.pid,
+    startKey: record.startKey,
+    acquiredAt: record.createdAt
+  }, fns);
+}
+async function unlinkIfSameIdentity(path, inspected) {
+  if (!await hasIdentity(path, inspected))
+    return false;
+  await rm(path, { force: true });
+  return !await hasIdentity(path, inspected);
+}
+async function recoverOrphanReclaimClaim(lockPath, fns) {
+  const claimPath = reclaimClaimPath(lockPath);
   try {
-    if (!candidateIdentity)
+    const identity = lockIdentity(await lstat(claimPath, { bigint: true }));
+    if (!identity)
       return false;
+    let record = null;
     try {
-      await link(candidate, claimPath);
-      claimed = true;
-    } catch (error) {
-      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
-      if (code === "EEXIST" || code === "ENOTEMPTY")
-        return false;
-      throw error;
+      record = parseReclaimClaim(JSON.parse(await Bun.file(claimPath).text()));
+    } catch {
+      record = null;
     }
-    if (!await hasIdentity(claimPath, candidateIdentity) || !await hasIdentity(lockPath, inspected)) {
+    if (record && isLiveReclaimClaim(record, fns))
       return false;
+    return await unlinkIfSameIdentity(claimPath, identity);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return true;
     }
-    await rm(lockPath, { force: true });
-    return !await hasIdentity(lockPath, inspected);
-  } finally {
-    await rm(candidate, { force: true });
-    if (claimed && candidateIdentity) {
-      if (await hasIdentity(claimPath, candidateIdentity))
-        await rm(claimPath, { force: true });
+    throw error;
+  }
+}
+async function withReclaimMutex(lockPath, fn, fns = {}, hooks = {}) {
+  const token2 = crypto.randomUUID();
+  const claimPath = reclaimClaimPath(lockPath);
+  const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  const record = {
+    pid: process.pid,
+    startKey: processStartKey(process.pid),
+    token: token2,
+    createdAt: new Date().toISOString()
+  };
+  for (let attempt = 0;attempt < 3; attempt++) {
+    await recoverOrphanReclaimClaim(lockPath, fns);
+    const candidate = `${claimPath}.candidate-${process.pid}-${token2}-${attempt}`;
+    await writeFile(candidate, `${JSON.stringify(record)}
+`, { mode: 384, flag: "wx" });
+    const candidateIdentity = lockIdentity(await lstat(candidate, { bigint: true }));
+    let claimed = false;
+    try {
+      if (!candidateIdentity)
+        throw new Error("could not identity a reclaim claim candidate");
+      try {
+        await link(candidate, claimPath);
+        claimed = true;
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (code === "EEXIST" || code === "ENOTEMPTY") {
+          if (attempt === 2)
+            throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+          continue;
+        }
+        throw error;
+      }
+      if (!await hasIdentity(claimPath, candidateIdentity)) {
+        if (attempt === 2)
+          throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+        continue;
+      }
+      if (hooks.beforeUnlink)
+        await hooks.beforeUnlink();
+      return await fn();
+    } finally {
+      await rm(candidate, { force: true });
+      if (claimed && candidateIdentity)
+        await unlinkIfSameIdentity(claimPath, candidateIdentity);
     }
   }
+  throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+}
+async function reclaimStaleLock(lockPath, inspected, fns, hooks = {}) {
+  return await withReclaimMutex(lockPath, async () => {
+    if (!await hasIdentity(lockPath, inspected))
+      return false;
+    return await unlinkIfSameIdentity(lockPath, inspected);
+  }, fns, hooks);
 }
 function reservationError(path, existing, requested) {
   if (existing?.role === "clean" || existing == null && requested === "clean") {
@@ -696,13 +774,16 @@ async function acquireWorktreeGate(path, threadId, role, options = {}) {
   const lockPath = cleanLeaseLockPath(path, options.home);
   await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 448 });
   const processStartKey = options.processStartKey ?? defaultProcessStartKey;
+  const startKey = processStartKey(process.pid);
+  if (!startKey)
+    throw new Error("could not record process start key for worktree lease");
   const record = {
     token: token2,
     threadId,
     path,
     role,
     pid: process.pid,
-    startKey: processStartKey(process.pid),
+    startKey,
     acquiredAt: (options.now ?? (() => new Date().toISOString()))()
   };
   const fns = {
@@ -730,7 +811,7 @@ async function acquireWorktreeGate(path, threadId, role, options = {}) {
           throw reservationError(path, inspected.record, role);
         continue;
       }
-      const reclaimed = await reclaimStaleLock(lockPath, inspected.identity);
+      const reclaimed = await reclaimStaleLock(lockPath, inspected.identity, fns, { beforeUnlink: options.beforeUnlink });
       if (!reclaimed && attempt === 2)
         throw reservationError(path, await readLiveCleanLease(path, options.home, fns), role);
     } finally {
@@ -755,12 +836,14 @@ async function acquireWorktreeGate(path, threadId, role, options = {}) {
       if (!controller.signal.aborted)
         controller.abort();
       try {
-        const current = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
-        if (!current || current.token !== token2)
-          return;
-        if (!await hasIdentity(lockPath, heldIdentity))
-          return;
-        await rm(lockPath, { force: true });
+        await withReclaimMutex(lockPath, async () => {
+          const current = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
+          if (!current || current.token !== token2)
+            return;
+          if (!await hasIdentity(lockPath, heldIdentity))
+            return;
+          await unlinkIfSameIdentity(lockPath, heldIdentity);
+        }, fns);
       } catch (error) {
         if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
           return;
@@ -993,7 +1076,7 @@ var requiresRpcDispatch = (command) => command.type === "thread.turn.start" && B
 function isExistingTaskTurnStart(command) {
   return command.type === "thread.turn.start" && !command.bootstrap;
 }
-var rawDispatch = (command) => requiresRpcDispatch(command) ? requestRpc("orchestration.dispatchCommand", command) : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
+var transmitDispatch = (command) => requiresRpcDispatch(command) ? requestRpc("orchestration.dispatchCommand", command) : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
 async function resolveExistingTaskTurnPath(threadId, loadThread = thread) {
   const target = await loadThread(threadId);
   const claimed = target.worktreePath?.trim();
@@ -1010,9 +1093,15 @@ async function startExistingTaskTurn(command, deps = {}) {
   if (!threadId)
     throw new Error("thread.turn.start requires a thread id");
   const path = await (deps.resolvePath ?? resolveExistingTaskTurnPath)(threadId);
-  return withWorktreeGate(path, threadId, "turn-start", async () => (deps.dispatchCommand ?? rawDispatch)(command), { home: deps.home });
+  return withWorktreeGate(path, threadId, "turn-start", async () => (deps.dispatchCommand ?? transmitDispatch)(command), { home: deps.home });
 }
-var dispatch = (command) => isExistingTaskTurnStart(command) ? startExistingTaskTurn(command) : rawDispatch(command);
+async function rawDispatch(command, deps = {}) {
+  if (isExistingTaskTurnStart(command)) {
+    return startExistingTaskTurn(command, { ...deps, dispatchCommand: deps.dispatchCommand ?? transmitDispatch });
+  }
+  return (deps.dispatchCommand ?? transmitDispatch)(command);
+}
+var dispatch = rawDispatch;
 function requireAvailableProviderSelection(config, selection) {
   const providers = config && typeof config === "object" && "providers" in config ? config.providers : undefined;
   if (!Array.isArray(providers))

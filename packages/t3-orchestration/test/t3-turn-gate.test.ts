@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { acquireWorktreeGate } from "../src/worktree-reaper-lease.ts";
-import { isExistingTaskTurnStart, startExistingTaskTurn, taskTurnCommand } from "../src/t3.ts";
+import { dispatch, isExistingTaskTurnStart, rawDispatch, taskTurnCommand } from "../src/t3.ts";
 import type { T3Thread } from "../src/protocol.ts";
 
 const thread: T3Thread = {
@@ -22,16 +22,16 @@ describe("existing-task turn-start gate", () => {
     expect(isExistingTaskTurnStart({ type: "thread.archive" })).toBe(false);
   });
 
-  test("holds the worktree gate across dispatch so a cleaner cannot acquire mid-start", async () => {
+  test("t3ctl send/dispatch holds the gate through T3 transmit so a cleaner cannot acquire mid-start", async () => {
     const root = `/tmp/t3-turn-gate-${crypto.randomUUID()}`;
     const path = `${root}/shared`;
     const started: string[] = [];
     let cleanerAcquiredDuringDispatch = false;
-    await startExistingTaskTurn(taskTurnCommand(thread, "continue"), {
+    await dispatch(taskTurnCommand(thread, "continue"), {
       home: root,
       resolvePath: async () => path,
       dispatchCommand: async () => {
-        started.push("dispatch");
+        started.push("transmit");
         try {
           await acquireWorktreeGate(path, "task-A", "clean", { home: root });
           cleanerAcquiredDuringDispatch = true;
@@ -41,24 +41,28 @@ describe("existing-task turn-start gate", () => {
         return { sequence: 1 };
       },
     });
-    expect(started).toEqual(["dispatch"]);
+    expect(started).toEqual(["transmit"]);
     expect(cleanerAcquiredDuringDispatch).toBe(false);
   });
 
-  test("direct UI/thread.turn.start path refuses a worktree already reserved for cleanup", async () => {
+  test("native HTTP/RPC thread.turn.start refuses a worktree reserved for cleanup without a package helper pre-entry", async () => {
     const root = `/tmp/t3-turn-gate-${crypto.randomUUID()}`;
     const path = `${root}/shared`;
     const clean = await acquireWorktreeGate(path, "task-A", "clean", { home: root });
-    const dispatched: unknown[] = [];
-    await expect(startExistingTaskTurn(taskTurnCommand(thread, "continue"), {
+    const transmitted: unknown[] = [];
+    await expect(rawDispatch({
+      type: "thread.turn.start",
+      threadId: "task-A",
+      message: { messageId: "m", role: "user", text: "continue", attachments: [] },
+    }, {
       home: root,
       resolvePath: async () => path,
       dispatchCommand: async (command) => {
-        dispatched.push(command);
+        transmitted.push(command);
         return { sequence: 1 };
       },
     })).rejects.toThrow(/reserved for artifact cleanup/);
-    expect(dispatched).toEqual([]);
+    expect(transmitted).toEqual([]);
     await clean.release();
   });
 });

@@ -108,10 +108,10 @@ export function isLiveLeaseRecord(
 ): boolean {
   const processProbe = fns.processProbe ?? defaultProcessProbe;
   const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  if (typeof record.startKey !== "string" || record.startKey.trim() === "") return false;
   if (!isLivePid(record.pid, processProbe)) return false;
   const currentStart = processStartKey(record.pid);
-  if (currentStart === null) return false;
-  if (record.startKey && record.startKey !== currentStart) return false;
+  if (currentStart === null || currentStart !== record.startKey) return false;
   return true;
 }
 
@@ -168,34 +168,132 @@ async function inspectLock(
   }
 }
 
-async function reclaimStaleLock(lockPath: string, inspected: LockIdentity): Promise<boolean> {
-  const token = crypto.randomUUID();
-  const candidate = `${lockPath}.reclaim-candidate-${process.pid}-${token}`;
-  const claimPath = `${lockPath}.reclaim`;
-  await writeFile(candidate, `${JSON.stringify({ pid: process.pid, token })}\n`, { mode: 0o600, flag: "wx" });
-  const candidateIdentity = lockIdentity(await lstat(candidate, { bigint: true }));
-  let claimed = false;
+type ReclaimClaimRecord = {
+  pid: number;
+  startKey: string | null;
+  token: string;
+  createdAt: string;
+};
+
+function reclaimClaimPath(lockPath: string): string {
+  return `${lockPath}.reclaim`;
+}
+
+function parseReclaimClaim(value: unknown): ReclaimClaimRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<ReclaimClaimRecord>;
+  if (
+    !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0
+    || typeof raw.token !== "string" || raw.token.trim() === ""
+    || typeof raw.createdAt !== "string"
+  ) {
+    return null;
+  }
+  return {
+    pid: raw.pid!,
+    startKey: typeof raw.startKey === "string" ? raw.startKey : null,
+    token: raw.token,
+    createdAt: raw.createdAt,
+  };
+}
+
+function isLiveReclaimClaim(record: ReclaimClaimRecord, fns: LeaseProcessFns): boolean {
+  return isLiveLeaseRecord({
+    token: record.token,
+    threadId: "reclaim",
+    path: "reclaim",
+    role: "clean",
+    pid: record.pid,
+    startKey: record.startKey,
+    acquiredAt: record.createdAt,
+  }, fns);
+}
+
+async function unlinkIfSameIdentity(path: string, inspected: LockIdentity): Promise<boolean> {
+  if (!await hasIdentity(path, inspected)) return false;
+  await rm(path, { force: true });
+  return !await hasIdentity(path, inspected);
+}
+
+async function recoverOrphanReclaimClaim(lockPath: string, fns: LeaseProcessFns): Promise<boolean> {
+  const claimPath = reclaimClaimPath(lockPath);
   try {
-    if (!candidateIdentity) return false;
+    const identity = lockIdentity(await lstat(claimPath, { bigint: true }));
+    if (!identity) return false;
+    let record: ReclaimClaimRecord | null = null;
     try {
-      await link(candidate, claimPath);
-      claimed = true;
-    } catch (error) {
-      const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
-      if (code === "EEXIST" || code === "ENOTEMPTY") return false;
-      throw error;
+      record = parseReclaimClaim(JSON.parse(await Bun.file(claimPath).text()));
+    } catch {
+      record = null;
     }
-    if (!await hasIdentity(claimPath, candidateIdentity) || !await hasIdentity(lockPath, inspected)) {
-      return false;
+    if (record && isLiveReclaimClaim(record, fns)) return false;
+    return await unlinkIfSameIdentity(claimPath, identity);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+      return true;
     }
-    await rm(lockPath, { force: true });
-    return !await hasIdentity(lockPath, inspected);
-  } finally {
-    await rm(candidate, { force: true });
-    if (claimed && candidateIdentity) {
-      if (await hasIdentity(claimPath, candidateIdentity)) await rm(claimPath, { force: true });
+    throw error;
+  }
+}
+
+export async function withReclaimMutex<T>(
+  lockPath: string,
+  fn: () => Promise<T>,
+  fns: LeaseProcessFns = {},
+  hooks: { beforeUnlink?: () => Promise<void> } = {},
+): Promise<T> {
+  const token = crypto.randomUUID();
+  const claimPath = reclaimClaimPath(lockPath);
+  const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  const record: ReclaimClaimRecord = {
+    pid: process.pid,
+    startKey: processStartKey(process.pid),
+    token,
+    createdAt: new Date().toISOString(),
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await recoverOrphanReclaimClaim(lockPath, fns);
+    const candidate = `${claimPath}.candidate-${process.pid}-${token}-${attempt}`;
+    await writeFile(candidate, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
+    const candidateIdentity = lockIdentity(await lstat(candidate, { bigint: true }));
+    let claimed = false;
+    try {
+      if (!candidateIdentity) throw new Error("could not identity a reclaim claim candidate");
+      try {
+        await link(candidate, claimPath);
+        claimed = true;
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+        if (code === "EEXIST" || code === "ENOTEMPTY") {
+          if (attempt === 2) throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+          continue;
+        }
+        throw error;
+      }
+      if (!await hasIdentity(claimPath, candidateIdentity)) {
+        if (attempt === 2) throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+        continue;
+      }
+      if (hooks.beforeUnlink) await hooks.beforeUnlink();
+      return await fn();
+    } finally {
+      await rm(candidate, { force: true });
+      if (claimed && candidateIdentity) await unlinkIfSameIdentity(claimPath, candidateIdentity);
     }
   }
+  throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+}
+
+async function reclaimStaleLock(
+  lockPath: string,
+  inspected: LockIdentity,
+  fns: LeaseProcessFns,
+  hooks: { beforeUnlink?: () => Promise<void> } = {},
+): Promise<boolean> {
+  return await withReclaimMutex(lockPath, async () => {
+    if (!await hasIdentity(lockPath, inspected)) return false;
+    return await unlinkIfSameIdentity(lockPath, inspected);
+  }, fns, hooks);
 }
 
 function reservationError(path: string, existing: CleanLeaseRecord | null, requested: WorktreeGateRole): Error {
@@ -216,19 +314,21 @@ export async function acquireWorktreeGate(
   path: string,
   threadId: string,
   role: WorktreeGateRole,
-  options: { now?: () => string; home?: string } & LeaseProcessFns = {},
+  options: { now?: () => string; home?: string; beforeUnlink?: () => Promise<void> } & LeaseProcessFns = {},
 ): Promise<CleanLease> {
   const token = crypto.randomUUID();
   const lockPath = cleanLeaseLockPath(path, options.home);
   await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 0o700 });
   const processStartKey = options.processStartKey ?? defaultProcessStartKey;
+  const startKey = processStartKey(process.pid);
+  if (!startKey) throw new Error("could not record process start key for worktree lease");
   const record: CleanLeaseRecord = {
     token,
     threadId,
     path,
     role,
     pid: process.pid,
-    startKey: processStartKey(process.pid),
+    startKey,
     acquiredAt: (options.now ?? (() => new Date().toISOString()))(),
   };
   const fns: LeaseProcessFns = {
@@ -252,7 +352,7 @@ export async function acquireWorktreeGate(
         if (attempt === 2) throw reservationError(path, inspected.record, role);
         continue;
       }
-      const reclaimed = await reclaimStaleLock(lockPath, inspected.identity);
+      const reclaimed = await reclaimStaleLock(lockPath, inspected.identity, fns, { beforeUnlink: options.beforeUnlink });
       if (!reclaimed && attempt === 2) throw reservationError(path, await readLiveCleanLease(path, options.home, fns), role);
     } finally {
       await rm(candidate, { force: true });
@@ -273,10 +373,12 @@ export async function acquireWorktreeGate(
     async release() {
       if (!controller.signal.aborted) controller.abort();
       try {
-        const current = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
-        if (!current || current.token !== token) return;
-        if (!await hasIdentity(lockPath, heldIdentity)) return;
-        await rm(lockPath, { force: true });
+        await withReclaimMutex(lockPath, async () => {
+          const current = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
+          if (!current || current.token !== token) return;
+          if (!await hasIdentity(lockPath, heldIdentity)) return;
+          await unlinkIfSameIdentity(lockPath, heldIdentity);
+        }, fns);
       } catch (error) {
         if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") return;
         if (error instanceof SyntaxError) return;
