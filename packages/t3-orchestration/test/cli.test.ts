@@ -49,6 +49,7 @@ describe("cross-project collaboration CLI", () => {
     expect(help.help).toContain("t3ctl tasks approvals");
     expect(help.help).toContain("t3ctl tasks approve ID [REQUEST_ID]");
     expect(help.help).toContain("t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]");
+    expect(help.help).not.toContain("t3-auto-guardian");
     expect(help.help).toContain("t3ctl worktrees clean-settled [--dry-run] [--config PATH]");
     expect(help.help).toContain("t3ctl tasks wait ID [ID ...] [--timeout-ms 0..58000] [--after ID=CURSOR]");
     expect(stderr).toBe("");

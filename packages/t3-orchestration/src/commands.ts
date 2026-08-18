@@ -18,9 +18,38 @@ export type CommandDependencies = {
   settleTask(threadId: string, settled: boolean): Promise<unknown>;
   interruptTask(threadId: string): Promise<unknown>;
   listTaskApprovals(projectId?: string): Promise<unknown>;
-  resolveTaskApproval(input: { threadId: string; requestId?: string; decision: "accept" | "decline"; reason?: string }): Promise<unknown>;
+  resolveTaskApproval(input: {
+    threadId: string;
+    requestId?: string;
+    decision: "accept" | "decline";
+    reason?: string;
+    expected?: { requestKind: "command" | "file-read" | "file-change" | null; command: string | null; cwd: string | null; toolName: string | null };
+  }): Promise<unknown>;
   listCleanableWorktrees(): Promise<unknown>;
 };
+
+function parseExpectedAction(value: unknown): {
+  requestKind: "command" | "file-read" | "file-change" | null;
+  command: string | null;
+  cwd: string | null;
+  toolName: string | null;
+} | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected action identity is invalid");
+  const record = value as Record<string, unknown>;
+  const requestKind = record.requestKind === "command" || record.requestKind === "file-read" || record.requestKind === "file-change"
+    ? record.requestKind
+    : record.requestKind == null ? null : null;
+  if (record.requestKind !== undefined && record.requestKind !== null && requestKind === null) {
+    throw new Error("expected action identity is invalid");
+  }
+  return {
+    requestKind,
+    command: typeof record.command === "string" ? record.command : record.command == null ? null : (() => { throw new Error("expected action identity is invalid"); })(),
+    cwd: typeof record.cwd === "string" ? record.cwd : record.cwd == null ? null : (() => { throw new Error("expected action identity is invalid"); })(),
+    toolName: typeof record.toolName === "string" ? record.toolName : record.toolName == null ? null : (() => { throw new Error("expected action identity is invalid"); })(),
+  };
+}
 
 export async function executeCommand(command: Record<string, unknown>, dependencies: CommandDependencies): Promise<unknown> {
   const caller = command.op === "tasks.create" ? dependencies.resolveCallerThread(command.callerThreadId) : null;
@@ -77,6 +106,7 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
       threadId: String(command.threadId),
       ...(command.requestId ? { requestId: String(command.requestId) } : {}),
       decision: "accept",
+      ...(command.expected !== undefined ? { expected: parseExpectedAction(command.expected) } : {}),
     });
     case "tasks.deny": return dependencies.resolveTaskApproval({
       threadId: String(command.threadId),

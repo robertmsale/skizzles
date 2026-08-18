@@ -11,13 +11,23 @@ export type PendingApproval = {
   toolName: string | null;
   cwd: string | null;
   identifiable: boolean;
+  reason?: string;
+};
+
+export type ApprovalProject = {
+  title?: string | null;
+  workspaceRoot?: string | null;
 };
 
 export type ProjectedApproval = {
   threadId: string;
   title: string;
   projectId: string;
+  projectTitle: string | null;
+  workspaceRoot: string | null;
   provider: string;
+  providerDriver: string | null;
+  runtimeMode: string;
   requestId: string;
   requestKind: ApprovalRequestKind | null;
   toolName: string | null;
@@ -31,17 +41,34 @@ export type UnidentifiableApproval = {
   threadId: string;
   title: string;
   projectId: string;
+  projectTitle: string | null;
+  workspaceRoot: string | null;
   provider: string;
+  providerDriver: string | null;
+  runtimeMode: string;
   requestId: string | null;
   reason: string;
   createdAt: string | null;
   worktreePath: string | null;
 };
 
-const MISSING_COMMAND_GAP =
+export const MISSING_COMMAND_GAP =
   "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
-const MISSING_SNAPSHOT_GAP =
+export const CONFLICTING_COMMAND_GAP =
+  "T3 approval payload has conflicting command or path representations. Refusing to approve blindly.";
+export const APPROVAL_ACTION_CHANGED =
+  "Pending approval action changed after judgment. Refusing to approve blindly.";
+export const UNBOUND_ACCEPT_GAP =
+  "T3 cannot bind accept to the judged action. Refusing to approve blindly.";
+export const MISSING_SNAPSHOT_GAP =
   "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
+
+export type ApprovalActionIdentity = {
+  requestKind: ApprovalRequestKind | null;
+  command: string | null;
+  cwd: string | null;
+  toolName: string | null;
+};
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -53,6 +80,10 @@ function asTrimmedString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function asLiteralString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
 }
 
 export function threadActivities(snapshot: ThreadSnapshot): T3ThreadActivity[] {
@@ -108,34 +139,93 @@ function compareActivitiesByOrder(left: T3ThreadActivity, right: T3ThreadActivit
   return (left.id ?? "").localeCompare(right.id ?? "");
 }
 
-function extractCommand(payload: Record<string, unknown> | null): string | null {
-  if (!payload) return null;
+function uniqueTypedActions(payload: Record<string, unknown>): string[] {
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  const input = asRecord(data?.input) ?? asRecord(item?.input);
-  const result = asRecord(item?.result) ?? asRecord(data?.result);
-  return asTrimmedString(payload.detail)
-    ?? asTrimmedString(data?.command)
-    ?? asTrimmedString(item?.command)
-    ?? asTrimmedString(input?.command)
-    ?? asTrimmedString(result?.command)
-    ?? asTrimmedString(payload.path)
-    ?? asTrimmedString(data?.path)
-    ?? asTrimmedString(item?.path)
-    ?? asTrimmedString(input?.path);
+  const dataInput = asRecord(data?.input);
+  const itemInput = asRecord(item?.input);
+  const itemResult = asRecord(item?.result);
+  const dataResult = asRecord(data?.result);
+  const values = [
+    asLiteralString(data?.command),
+    asLiteralString(item?.command),
+    asLiteralString(dataInput?.command),
+    asLiteralString(itemInput?.command),
+    asLiteralString(itemResult?.command),
+    asLiteralString(dataResult?.command),
+    asLiteralString(payload.path),
+    asLiteralString(data?.path),
+    asLiteralString(item?.path),
+    asLiteralString(dataInput?.path),
+    asLiteralString(itemInput?.path),
+    asLiteralString(itemResult?.path),
+    asLiteralString(dataResult?.path),
+  ].filter((value): value is string => value !== null);
+  return [...new Set(values)];
 }
 
-function extractCwd(payload: Record<string, unknown> | null): string | null {
-  if (!payload) return null;
+function uniqueNonEmpty(values: Array<string | null>): string[] {
+  return [...new Set(values.filter((value): value is string => value !== null))];
+}
+
+function uniqueTypedCwds(payload: Record<string, unknown>): string[] {
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  const input = asRecord(data?.input) ?? asRecord(item?.input);
-  return asTrimmedString(payload.cwd)
-    ?? asTrimmedString(payload.workingDirectory)
-    ?? asTrimmedString(data?.cwd)
-    ?? asTrimmedString(data?.workingDirectory)
-    ?? asTrimmedString(item?.cwd)
-    ?? asTrimmedString(input?.cwd);
+  const dataInput = asRecord(data?.input);
+  const itemInput = asRecord(item?.input);
+  const itemResult = asRecord(item?.result);
+  const dataResult = asRecord(data?.result);
+  return uniqueNonEmpty([
+    asLiteralString(payload.cwd),
+    asLiteralString(payload.workingDirectory),
+    asLiteralString(data?.cwd),
+    asLiteralString(data?.workingDirectory),
+    asLiteralString(item?.cwd),
+    asLiteralString(item?.workingDirectory),
+    asLiteralString(dataInput?.cwd),
+    asLiteralString(dataInput?.workingDirectory),
+    asLiteralString(itemInput?.cwd),
+    asLiteralString(itemInput?.workingDirectory),
+    asLiteralString(itemResult?.cwd),
+    asLiteralString(itemResult?.workingDirectory),
+    asLiteralString(dataResult?.cwd),
+    asLiteralString(dataResult?.workingDirectory),
+  ]);
+}
+
+function uniqueTypedTools(payload: Record<string, unknown>): string[] {
+  const data = asRecord(payload.data);
+  const item = asRecord(data?.item);
+  const dataInput = asRecord(data?.input);
+  const itemInput = asRecord(item?.input);
+  return uniqueNonEmpty([
+    asLiteralString(data?.toolName),
+    asLiteralString(item?.tool),
+    asLiteralString(item?.toolName),
+    asLiteralString(dataInput?.toolName),
+    asLiteralString(itemInput?.toolName),
+  ]);
+}
+
+function extractTypedAction(payload: Record<string, unknown> | null): {
+  command: string | null;
+  cwd: string | null;
+  toolName: string | null;
+  reason?: string;
+} {
+  if (!payload) return { command: null, cwd: null, toolName: null, reason: MISSING_COMMAND_GAP };
+  const typed = uniqueTypedActions(payload);
+  const cwds = uniqueTypedCwds(payload);
+  const tools = uniqueTypedTools(payload);
+  const detail = asLiteralString(payload.detail);
+  if (typed.length > 1 || cwds.length > 1 || tools.length > 1) {
+    return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+  }
+  if (typed.length === 1) {
+    if (detail !== null && detail !== typed[0]) return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+    return { command: typed[0]!, cwd: cwds[0] ?? null, toolName: tools[0] ?? null };
+  }
+  return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, reason: MISSING_COMMAND_GAP };
 }
 
 function extractToolName(activity: T3ThreadActivity, payload: Record<string, unknown> | null): string | null {
@@ -157,15 +247,16 @@ export function derivePendingApprovals(activities: readonly T3ThreadActivity[]):
     if (!requestId) continue;
     const detail = asTrimmedString(payload?.detail);
     if (activity.kind === "approval.requested") {
-      const command = extractCommand(payload);
+      const extracted = extractTypedAction(payload);
       openByRequestId.set(requestId, {
         requestId,
         requestKind: requestKindFromPayload(payload),
         createdAt: activity.createdAt,
-        command,
-        toolName: extractToolName(activity, payload),
-        cwd: extractCwd(payload),
-        identifiable: command !== null,
+        command: extracted.command,
+        toolName: extracted.toolName ?? extractToolName(activity, payload),
+        cwd: extracted.cwd,
+        identifiable: extracted.command !== null && extracted.command.trim() !== "",
+        ...(extracted.reason ? { reason: extracted.reason } : {}),
       });
       continue;
     }
@@ -198,16 +289,65 @@ export function selectPendingApproval(pending: readonly PendingApproval[], reque
 
 export function requireIdentifiableApproval(approval: PendingApproval): void {
   if (approval.identifiable && approval.command) return;
-  throw new Error(MISSING_COMMAND_GAP);
+  throw new Error(approval.reason ?? MISSING_COMMAND_GAP);
+}
+
+export function approvalActionIdentity(approval: Pick<PendingApproval, "requestKind" | "command" | "cwd" | "toolName">): ApprovalActionIdentity {
+  return {
+    requestKind: approval.requestKind,
+    command: approval.command,
+    cwd: approval.cwd,
+    toolName: approval.toolName,
+  };
+}
+
+export function sameApprovalAction(left: ApprovalActionIdentity, right: ApprovalActionIdentity): boolean {
+  return left.requestKind === right.requestKind &&
+    left.command === right.command &&
+    left.cwd === right.cwd &&
+    left.toolName === right.toolName;
+}
+
+export function hasBindableApprovalAction(action: ApprovalActionIdentity | undefined): action is ApprovalActionIdentity {
+  return Boolean(action && typeof action.command === "string" && action.command.trim() !== "");
 }
 
 function threadProvider(thread: T3Thread): string {
   return thread.modelSelection.instanceId;
 }
 
+export function providerDriversFromConfig(config: unknown): Map<string, string> {
+  const providers = config && typeof config === "object" && "providers" in config
+    ? (config as { providers?: unknown }).providers
+    : undefined;
+  const drivers = new Map<string, string>();
+  if (!Array.isArray(providers)) return drivers;
+  for (const entry of providers) {
+    if (!entry || typeof entry !== "object") continue;
+    const provider = entry as { instanceId?: unknown; driver?: unknown };
+    if (typeof provider.instanceId !== "string" || provider.instanceId.trim() === "") continue;
+    if (typeof provider.driver !== "string" || provider.driver.trim() === "") continue;
+    drivers.set(provider.instanceId, provider.driver.trim());
+  }
+  return drivers;
+}
+
+function projectContext(
+  thread: T3ThreadShell,
+  projects?: ReadonlyMap<string, ApprovalProject>,
+): { projectTitle: string | null; workspaceRoot: string | null } {
+  const project = projects?.get(thread.projectId);
+  return {
+    projectTitle: project?.title?.trim() || null,
+    workspaceRoot: project?.workspaceRoot?.trim() || null,
+  };
+}
+
 export function projectPendingApprovalList(
   threads: readonly T3ThreadShell[],
   snapshots: ReadonlyMap<string, ThreadSnapshot>,
+  projects?: ReadonlyMap<string, ApprovalProject>,
+  drivers?: ReadonlyMap<string, string>,
 ): { approvals: ProjectedApproval[]; unidentifiable: UnidentifiableApproval[]; count: number } {
   const approvals: ProjectedApproval[] = [];
   const unidentifiable: UnidentifiableApproval[] = [];
@@ -215,12 +355,18 @@ export function projectPendingApprovalList(
     if (thread.deletedAt || thread.archivedAt || !thread.hasPendingApprovals) continue;
     const snapshot = snapshots.get(thread.id);
     const pending = snapshot ? derivePendingApprovals(threadActivities(snapshot)) : [];
+    const context = projectContext(thread, projects);
+    const provider = threadProvider(thread);
+    const providerDriver = drivers?.get(provider)?.trim() || null;
     if (pending.length === 0) {
       unidentifiable.push({
         threadId: thread.id,
         title: thread.title,
         projectId: thread.projectId,
-        provider: threadProvider(thread),
+        ...context,
+        provider,
+        providerDriver,
+        runtimeMode: thread.runtimeMode,
         requestId: null,
         reason: MISSING_SNAPSHOT_GAP,
         createdAt: thread.updatedAt ?? null,
@@ -234,12 +380,15 @@ export function projectPendingApprovalList(
           threadId: thread.id,
           title: thread.title,
           projectId: thread.projectId,
-          provider: threadProvider(thread),
+          ...context,
+          provider,
+          providerDriver,
+          runtimeMode: thread.runtimeMode,
           requestId: approval.requestId,
           requestKind: approval.requestKind,
           toolName: approval.toolName,
           command: approval.command,
-          cwd: approval.cwd ?? thread.worktreePath,
+          cwd: approval.cwd,
           worktreePath: thread.worktreePath,
           createdAt: approval.createdAt,
         });
@@ -249,9 +398,12 @@ export function projectPendingApprovalList(
         threadId: thread.id,
         title: thread.title,
         projectId: thread.projectId,
-        provider: threadProvider(thread),
+        ...context,
+        provider,
+        providerDriver,
+        runtimeMode: thread.runtimeMode,
         requestId: approval.requestId,
-        reason: MISSING_COMMAND_GAP,
+        reason: approval.reason ?? MISSING_COMMAND_GAP,
         createdAt: approval.createdAt,
         worktreePath: thread.worktreePath,
       });
@@ -268,7 +420,11 @@ export function approvalRespondCommand(
   decision: ApprovalDecision,
   commandId: string,
   createdAt: string,
+  expected?: ApprovalActionIdentity,
 ) {
+  if (decision === "accept") {
+    throw new Error(UNBOUND_ACCEPT_GAP);
+  }
   return {
     type: "thread.approval.respond",
     commandId,

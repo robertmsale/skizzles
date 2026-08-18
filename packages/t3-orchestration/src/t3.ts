@@ -3,12 +3,14 @@ import { realpath } from "node:fs/promises";
 import { $ } from "bun";
 import { origin, token, taskProviderDefaults } from "./config.ts";
 import {
+  UNBOUND_ACCEPT_GAP,
   approvalRespondCommand,
   derivePendingApprovals,
   projectPendingApprovalList,
-  requireIdentifiableApproval,
+  providerDriversFromConfig,
   selectPendingApproval,
   threadActivities,
+  type ApprovalActionIdentity,
   type ApprovalDecision,
 } from "./approval-projection.ts";
 import { mergeArchivedTasks, projectCleanableWorktrees, projectOccupiedWorktrees, projectProjects, projectTaskList, projectTask, waitForTasks, type TaskListOptions, type TaskWaitInput } from "./task-projection.ts";
@@ -437,8 +439,9 @@ export function taskApprovalRespondCommand(
   decision: ApprovalDecision,
   commandId = id(),
   createdAt = now(),
+  expected?: ApprovalActionIdentity,
 ) {
-  return approvalRespondCommand(threadId, requestId, decision, commandId, createdAt);
+  return approvalRespondCommand(threadId, requestId, decision, commandId, createdAt, expected);
 }
 
 export function taskLifecycleCommand(
@@ -482,6 +485,13 @@ const APPROVAL_TURN_WINDOW = 10;
 
 export async function listTaskApprovals(projectId?: string) {
   const shell = await shellSnapshot();
+  const projects = new Map(shell.projects.map((project) => [project.id, project]));
+  let drivers = new Map<string, string>();
+  try {
+    drivers = providerDriversFromConfig(await requestRpc("server.getConfig", {}));
+  } catch {
+    drivers = new Map();
+  }
   const candidates = shell.threads.filter((thread) =>
     !thread.deletedAt &&
     !thread.archivedAt &&
@@ -492,7 +502,7 @@ export async function listTaskApprovals(projectId?: string) {
   await Promise.all(candidates.map(async (thread) => {
     snapshots.set(thread.id, await threadSnapshot(thread.id, APPROVAL_TURN_WINDOW));
   }));
-  return projectPendingApprovalList(candidates, snapshots);
+  return projectPendingApprovalList(candidates, snapshots, projects, drivers);
 }
 
 export async function resolveTaskApproval(input: {
@@ -500,12 +510,23 @@ export async function resolveTaskApproval(input: {
   requestId?: string;
   decision: ApprovalDecision;
   reason?: string;
+  expected?: ApprovalActionIdentity;
 }): Promise<{ sequence: number; threadId: string; requestId: string; decision: ApprovalDecision; command: string | null; reason?: string }> {
-  const snapshot = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
-  const pending = derivePendingApprovals(threadActivities(snapshot));
-  const selected = selectPendingApproval(pending, input.requestId);
-  if (input.decision === "accept") requireIdentifiableApproval(selected);
-  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision));
+  if (input.decision === "accept") {
+    throw new Error(UNBOUND_ACCEPT_GAP);
+  }
+  const selectFresh = async () => {
+    const snapshot = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
+    return selectPendingApproval(derivePendingApprovals(threadActivities(snapshot)), input.requestId);
+  };
+  const selected = await selectFresh();
+  const result = await dispatch(taskApprovalRespondCommand(
+    input.threadId,
+    selected.requestId,
+    input.decision,
+    undefined,
+    undefined,
+  ));
   return {
     sequence: result.sequence,
     threadId: input.threadId,
