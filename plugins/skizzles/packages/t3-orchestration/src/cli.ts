@@ -146,17 +146,25 @@ var init_config = __esm(() => {
   KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
 });
 
-// packages/t3-orchestration/src/client.ts
-init_config();
-import { connect } from "net";
-
 // packages/t3-orchestration/src/remote-config.ts
+var exports_remote_config = {};
+__export(exports_remote_config, {
+  resolveRemoteConfigPath: () => resolveRemoteConfigPath,
+  requireLocalReaperTransport: () => requireLocalReaperTransport,
+  normalizeRemoteUrl: () => normalizeRemoteUrl,
+  configuredRemoteUrl: () => configuredRemoteUrl,
+  configureRemoteUrl: () => configureRemoteUrl,
+  clearRemoteUrl: () => clearRemoteUrl,
+  REMOTE_CONFIG_PATH: () => REMOTE_CONFIG_PATH
+});
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname, join as join2 } from "path";
-var home2 = process.env.HOME ?? (() => {
-  throw new Error("HOME is required");
-})();
-var REMOTE_CONFIG_PATH = process.env.T3_ORCHESTRATION_REMOTE_CONFIG ?? join2(home2, ".config/t3-orchestration/client.json");
+import { dirname, join as join2, resolve } from "path";
+function resolveRemoteConfigPath(rawSelector = process.env.T3_ORCHESTRATION_REMOTE_CONFIG, homeDirectory = process.env.HOME ?? home2) {
+  const explicit = rawSelector?.trim();
+  if (!explicit)
+    return join2(homeDirectory, ".config/t3-orchestration/client.json");
+  return resolve(explicit);
+}
 function normalizeRemoteUrl(input) {
   let url;
   try {
@@ -181,8 +189,9 @@ async function configuredRemoteUrl() {
   const environmentUrl = process.env.T3_ORCHESTRATION_REMOTE_URL?.trim();
   if (environmentUrl)
     return normalizeRemoteUrl(environmentUrl);
+  const path = resolveRemoteConfigPath();
   try {
-    const parsed = JSON.parse(await readFile(REMOTE_CONFIG_PATH, "utf8"));
+    const parsed = JSON.parse(await readFile(path, "utf8"));
     if (typeof parsed.url !== "string")
       throw new Error("Remote orchestration config is malformed");
     return normalizeRemoteUrl(parsed.url);
@@ -190,6 +199,25 @@ async function configuredRemoteUrl() {
     if (error instanceof Error && "code" in error && error.code === "ENOENT")
       return;
     throw error;
+  }
+}
+async function requireLocalReaperTransport() {
+  if (process.env.T3_WORKTREE_REAPER_TRANSPORT?.trim() === "local")
+    return;
+  const explicit = process.env.T3_ORCHESTRATION_REMOTE_CONFIG?.trim();
+  const path = resolveRemoteConfigPath();
+  if (explicit) {
+    try {
+      await readFile(path, "utf8");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(`explicit remote orchestration config is unavailable: ${path}`);
+      }
+      throw error;
+    }
+  }
+  if (await configuredRemoteUrl()) {
+    throw new Error("t3-worktree-reaper is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
   }
 }
 async function configureRemoteUrl(input) {
@@ -207,8 +235,2010 @@ async function configureRemoteUrl(input) {
 async function clearRemoteUrl() {
   await rm(REMOTE_CONFIG_PATH, { force: true });
 }
+var home2, REMOTE_CONFIG_PATH;
+var init_remote_config = __esm(() => {
+  home2 = process.env.HOME ?? (() => {
+    throw new Error("HOME is required");
+  })();
+  REMOTE_CONFIG_PATH = resolveRemoteConfigPath();
+});
+
+// packages/t3-orchestration/src/worktree-reaper-config.ts
+var exports_worktree_reaper_config = {};
+__export(exports_worktree_reaper_config, {
+  resolveProjectPolicy: () => resolveProjectPolicy,
+  resolveDenyPaths: () => resolveDenyPaths,
+  relativeInside: () => relativeInside,
+  parseReaperConfig: () => parseReaperConfig,
+  normalizeRelative: () => normalizeRelative,
+  matchesAnyGlob: () => matchesAnyGlob,
+  matchRelativeGlob: () => matchRelativeGlob,
+  loadReaperConfig: () => loadReaperConfig,
+  isDeniedPath: () => isDeniedPath,
+  extraCommandToStrategy: () => extraCommandToStrategy,
+  expandUserPath: () => expandUserPath,
+  defaultReaperConfigPath: () => defaultReaperConfigPath,
+  defaultReaperConfig: () => defaultReaperConfig,
+  assertAllowedCleanCommand: () => assertAllowedCleanCommand,
+  assertAllowedArtifact: () => assertAllowedArtifact,
+  GENERATED_ARTIFACT_DIRS: () => GENERATED_ARTIFACT_DIRS
+});
+import { readFile as readFile2, realpath } from "fs/promises";
+import { homedir } from "os";
+import { isAbsolute, join as join3, relative, resolve as resolve2, sep } from "path";
+function defaultReaperConfig() {
+  return {
+    enabled: true,
+    includeProjects: [],
+    denyPaths: [],
+    extraCommands: [],
+    projects: [],
+    strategies: [
+      {
+        name: "cargo",
+        enabled: true,
+        markers: ["Cargo.toml"],
+        artifactDir: "target",
+        command: ["cargo", "clean", "--target-dir", "target"],
+        match: []
+      },
+      {
+        name: "flutter",
+        enabled: true,
+        markers: ["pubspec.yaml"],
+        artifactDir: "build",
+        command: ["flutter", "clean"],
+        match: [],
+        requireText: { file: "pubspec.yaml", pattern: DEFAULT_FLUTTER_PATTERN }
+      }
+    ]
+  };
+}
+function defaultReaperConfigPath(home3 = process.env.HOME || homedir()) {
+  const configRoot = resolve2(process.env.XDG_CONFIG_HOME?.trim() || join3(home3, ".config"));
+  return join3(configRoot, "skizzles/t3-worktree-reaper.toml");
+}
+function asStringArray(value, label) {
+  if (value === undefined)
+    return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
+    throw new Error(`${label} must be an array of non-empty strings`);
+  }
+  return value.map((entry) => entry.trim());
+}
+function asCommand(value, label) {
+  const command = asStringArray(value, label);
+  if (command.length === 0)
+    throw new Error(`${label} must include an executable`);
+  return command;
+}
+function assertAllowedArtifact(artifactDir, label) {
+  if (!GENERATED_ARTIFACT_DIRS.has(artifactDir)) {
+    throw new Error(`${label} must be a generated artifact directory (${[...GENERATED_ARTIFACT_DIRS].join(", ")}), not ${artifactDir}`);
+  }
+}
+function assertAllowedCleanCommand(command, artifactDir) {
+  assertAllowedArtifact(artifactDir, "artifact_dir");
+  const executable = command[0];
+  if (!executable || executable.includes("/") || executable.includes("\\") || FORBIDDEN_EXEC.has(executable)) {
+    throw new Error(`cleaner executable is not allowed: ${executable ?? "(missing)"}`);
+  }
+  for (const argument of command) {
+    if (argument === "-c" || argument === "-C" || argument.startsWith("-C") || argument.startsWith("--git-") || argument.startsWith("--work-tree")) {
+      throw new Error(`cleaner flag is not allowed: ${argument}`);
+    }
+  }
+  if (executable === "cargo") {
+    if (command.length !== 4 || command[1] !== "clean" || command[2] !== "--target-dir" || command[3] !== artifactDir) {
+      throw new Error("cargo cleaner must be: cargo clean --target-dir <artifact_dir>");
+    }
+    return;
+  }
+  if (executable === "flutter") {
+    if (command.length !== 2 || command[1] !== "clean")
+      throw new Error("flutter cleaner must be: flutter clean");
+    return;
+  }
+  if (executable === "rm") {
+    const flags = command.slice(1, -1);
+    const operand = command.at(-1);
+    if (command.length < 3 || operand !== artifactDir || !flags.every((flag) => /^-[rf]+$/.test(flag))) {
+      throw new Error("rm cleaner must be: rm -rf <artifact_dir>");
+    }
+    return;
+  }
+  throw new Error(`unsupported cleaner: ${executable}`);
+}
+function parseStrategy(value, index) {
+  if (!value || typeof value !== "object")
+    throw new Error(`strategies[${index}] must be a table`);
+  const raw = value;
+  if (typeof raw.name !== "string" || raw.name.trim() === "")
+    throw new Error(`strategies[${index}].name is required`);
+  if (typeof raw.artifact_dir !== "string" || raw.artifact_dir.trim() === "") {
+    throw new Error(`strategies[${index}].artifact_dir is required`);
+  }
+  if (raw.artifact_dir.includes("..") || raw.artifact_dir.includes("/") || raw.artifact_dir.includes("\\")) {
+    throw new Error(`strategies[${index}].artifact_dir must be a single relative directory name`);
+  }
+  let requireText;
+  if (raw.require_text !== undefined) {
+    if (!raw.require_text || typeof raw.require_text !== "object")
+      throw new Error(`strategies[${index}].require_text must be a table`);
+    const text = raw.require_text;
+    if (typeof text.file !== "string" || text.file.trim() === "" || typeof text.pattern !== "string" || text.pattern.trim() === "") {
+      throw new Error(`strategies[${index}].require_text needs file and pattern`);
+    }
+    if (text.file.includes("..") || isAbsolute(text.file))
+      throw new Error(`strategies[${index}].require_text.file must be a relative file name`);
+    requireText = { file: text.file.trim(), pattern: text.pattern };
+  }
+  const strategy = {
+    name: raw.name.trim(),
+    enabled: raw.enabled === undefined ? true : raw.enabled === true,
+    markers: (() => {
+      const markers = asStringArray(raw.markers, `strategies[${index}].markers`);
+      const match = asStringArray(raw.match, `strategies[${index}].match`);
+      if (markers.length === 0 && match.length === 0)
+        throw new Error(`strategies[${index}] needs markers or match`);
+      return markers;
+    })(),
+    artifactDir: raw.artifact_dir.trim(),
+    command: asCommand(raw.command, `strategies[${index}].command`),
+    match: asStringArray(raw.match, `strategies[${index}].match`),
+    ...requireText ? { requireText } : {}
+  };
+  assertAllowedCleanCommand(strategy.command, strategy.artifactDir);
+  return strategy;
+}
+function extraCommandToStrategy(extra, index) {
+  return {
+    name: `extra:${index}:${extra.match}`,
+    enabled: true,
+    markers: extra.markers,
+    artifactDir: extra.artifactDir,
+    command: extra.command,
+    match: [extra.match]
+  };
+}
+function parseExtraCommand(value, label) {
+  if (!value || typeof value !== "object")
+    throw new Error(`${label} must be a table`);
+  const raw = value;
+  if (typeof raw.match !== "string" || raw.match.trim() === "")
+    throw new Error(`${label}.match is required`);
+  if (typeof raw.artifact_dir !== "string" || raw.artifact_dir.trim() === "")
+    throw new Error(`${label}.artifact_dir is required`);
+  if (raw.artifact_dir.includes("..") || raw.artifact_dir.includes("/") || raw.artifact_dir.includes("\\")) {
+    throw new Error(`${label}.artifact_dir must be a single relative directory name`);
+  }
+  const extra = {
+    match: raw.match.trim().replaceAll("\\", "/"),
+    artifactDir: raw.artifact_dir.trim(),
+    command: asCommand(raw.command, `${label}.command`),
+    markers: asStringArray(raw.markers, `${label}.markers`)
+  };
+  assertAllowedCleanCommand(extra.command, extra.artifactDir);
+  return extra;
+}
+function parseProject(value, index) {
+  if (!value || typeof value !== "object")
+    throw new Error(`projects[${index}] must be a table`);
+  const raw = value;
+  const extra = raw.extra_commands === undefined ? [] : Array.isArray(raw.extra_commands) ? raw.extra_commands.map((entry, extraIndex) => parseExtraCommand(entry, `projects[${index}].extra_commands[${extraIndex}]`)) : (() => {
+    throw new Error(`projects[${index}].extra_commands must be an array`);
+  })();
+  const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : undefined;
+  const workspaceRoot = typeof raw.workspace_root === "string" && raw.workspace_root.trim() ? raw.workspace_root.trim() : undefined;
+  if (!id && !workspaceRoot)
+    throw new Error(`projects[${index}] needs id or workspace_root`);
+  return {
+    ...id ? { id } : {},
+    ...workspaceRoot ? { workspaceRoot } : {},
+    enabled: raw.enabled === undefined ? true : raw.enabled === true,
+    ...raw.strategies === undefined ? {} : { strategies: asStringArray(raw.strategies, `projects[${index}].strategies`) },
+    extraCommands: extra,
+    denyPaths: asStringArray(raw.deny_paths, `projects[${index}].deny_paths`)
+  };
+}
+function parseReaperConfig(text) {
+  let parsed;
+  try {
+    parsed = Bun.TOML.parse(text);
+  } catch (error) {
+    throw new Error(`Worktree reaper config is not valid TOML: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object")
+    throw new Error("Worktree reaper config must be a TOML table");
+  const raw = parsed;
+  const defaults = defaultReaperConfig();
+  const strategies = raw.strategies === undefined ? defaults.strategies : Array.isArray(raw.strategies) ? raw.strategies.map((entry, index) => parseStrategy(entry, index)) : (() => {
+    throw new Error("strategies must be an array of tables");
+  })();
+  const names = strategies.map((entry) => entry.name);
+  if (new Set(names).size !== names.length)
+    throw new Error("strategy names must be unique");
+  const extraCommands = raw.extra_commands === undefined ? [] : Array.isArray(raw.extra_commands) ? raw.extra_commands.map((entry, index) => parseExtraCommand(entry, `extra_commands[${index}]`)) : (() => {
+    throw new Error("extra_commands must be an array of tables");
+  })();
+  const projects = raw.projects === undefined ? [] : Array.isArray(raw.projects) ? raw.projects.map((entry, index) => parseProject(entry, index)) : (() => {
+    throw new Error("projects must be an array of tables");
+  })();
+  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean")
+    throw new Error("enabled must be a boolean");
+  return {
+    enabled: raw.enabled === undefined ? true : raw.enabled === true,
+    includeProjects: asStringArray(raw.include_projects, "include_projects"),
+    denyPaths: asStringArray(raw.deny_paths, "deny_paths"),
+    strategies,
+    extraCommands,
+    projects
+  };
+}
+async function loadReaperConfig(explicitPath) {
+  const configured = explicitPath?.trim() || process.env.T3_WORKTREE_REAPER_CONFIG?.trim();
+  const path = configured || defaultReaperConfigPath();
+  try {
+    return { config: parseReaperConfig(await readFile2(path, "utf8")), path };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      if (configured)
+        throw new Error(`Worktree reaper config is missing: ${path}`);
+      return { config: defaultReaperConfig(), path: null };
+    }
+    throw error;
+  }
+}
+function normalizeRelative(path) {
+  return path.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+function matchRelativeGlob(relativePath, pattern) {
+  const path = normalizeRelative(relativePath);
+  const glob = normalizeRelative(pattern);
+  if (glob === "" || glob === "**")
+    return path !== ".." && !path.startsWith("../");
+  let source = "^";
+  for (let index = 0;index < glob.length; ) {
+    if (glob.startsWith("**", index)) {
+      source += ".*";
+      index += 2;
+      if (glob[index] === "/")
+        index++;
+      continue;
+    }
+    const character = glob[index];
+    if (character === "*")
+      source += "[^/]*";
+    else if ("\\^$+?.()|[]{}".includes(character))
+      source += `\\${character}`;
+    else
+      source += character;
+    index++;
+  }
+  source += "$";
+  return new RegExp(source).test(path);
+}
+function matchesAnyGlob(relativePath, patterns) {
+  if (patterns.length === 0)
+    return true;
+  return patterns.some((pattern) => matchRelativeGlob(relativePath, pattern));
+}
+function selectorMatches(task, selector) {
+  const value = selector.trim();
+  if (!value)
+    return false;
+  return task.projectId === value || task.projectTitle === value || task.workspaceRoot === value;
+}
+function resolveProjectPolicy(task, config) {
+  if (!config.enabled)
+    return { enabled: false, reason: "reaper disabled by host config", strategies: [], extraCommands: [], denyPaths: [] };
+  if (config.includeProjects.length > 0 && !config.includeProjects.some((selector) => selectorMatches(task, selector))) {
+    return { enabled: false, reason: "project is not in include_projects", strategies: [], extraCommands: [], denyPaths: [] };
+  }
+  const matches = config.projects.filter((project) => {
+    if (project.id && selectorMatches(task, project.id))
+      return true;
+    if (project.workspaceRoot && task.workspaceRoot === project.workspaceRoot)
+      return true;
+    return false;
+  });
+  if (matches.length > 1) {
+    return { enabled: false, reason: `ambiguous project override for ${task.projectId}`, strategies: [], extraCommands: [], denyPaths: [] };
+  }
+  const override = matches[0];
+  if (override && !override.enabled) {
+    return { enabled: false, reason: "project disabled by host config", strategies: [], extraCommands: [], denyPaths: [] };
+  }
+  const named = override?.strategies;
+  let strategies = config.strategies.filter((strategy) => strategy.enabled);
+  if (named) {
+    const unknown = named.filter((name) => !config.strategies.some((strategy) => strategy.name === name));
+    if (unknown.length) {
+      return { enabled: false, reason: `unknown strategy ${unknown.join(", ")}`, strategies: [], extraCommands: [], denyPaths: [] };
+    }
+    strategies = named.map((name) => config.strategies.find((strategy) => strategy.name === name)).filter((strategy) => strategy.enabled);
+  }
+  const extras = [...config.extraCommands, ...override?.extraCommands ?? []].map((extra, index) => extraCommandToStrategy(extra, index));
+  return {
+    enabled: true,
+    strategies: [...strategies, ...extras],
+    extraCommands: [],
+    denyPaths: [...config.denyPaths, ...override?.denyPaths ?? []]
+  };
+}
+function relativeInside(parent, child) {
+  const rel = relative(parent, child);
+  if (rel === "")
+    return "";
+  if (rel.startsWith("..") || isAbsolute(rel))
+    return;
+  return rel.split(sep).join("/");
+}
+function isDeniedPath(path, denyPaths) {
+  return denyPaths.some((deny) => path === deny || path.startsWith(`${deny}${sep}`) || path.startsWith(`${deny}/`));
+}
+function expandUserPath(path, home3 = process.env.HOME || homedir()) {
+  if (path === "~")
+    return home3;
+  if (path.startsWith("~/"))
+    return join3(home3, path.slice(2));
+  return path;
+}
+async function resolveDenyPaths(paths, worktree, realpathFn = realpath) {
+  const resolved = [];
+  for (const path of paths) {
+    const expanded = expandUserPath(path);
+    const absolute = isAbsolute(expanded) ? resolve2(expanded) : resolve2(worktree, expanded);
+    try {
+      resolved.push(await realpathFn(absolute));
+    } catch {
+      resolved.push(absolute);
+    }
+  }
+  return resolved;
+}
+var DEFAULT_FLUTTER_PATTERN, FORBIDDEN_EXEC, GENERATED_ARTIFACT_DIRS;
+var init_worktree_reaper_config = __esm(() => {
+  DEFAULT_FLUTTER_PATTERN = String.raw`(?:^|\n)flutter:\s*(?:$|\n)|sdk:\s*flutter`;
+  FORBIDDEN_EXEC = new Set([
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "csh",
+    "ksh",
+    "env",
+    "sudo",
+    "git",
+    "python",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+    "osascript",
+    "chmod",
+    "chown",
+    "mv",
+    "cp",
+    "dd",
+    "find",
+    "xargs",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+    "deno",
+    "make",
+    "cmake"
+  ]);
+  GENERATED_ARTIFACT_DIRS = new Set(["target", "build", ".dart_tool"]);
+});
+
+// packages/t3-orchestration/src/worktree-reaper-lease.ts
+import { createHash } from "crypto";
+import { link, lstat, mkdir as mkdir2, open, rename as rename2, rm as rm2, unlink, writeFile as writeFile2 } from "fs/promises";
+import { homedir as homedir2 } from "os";
+import { join as join4 } from "path";
+function cleanLeaseHome(home3 = process.env.T3_HOME?.trim() || join4(process.env.HOME || homedir2(), ".t3")) {
+  return join4(home3, "worktree-reaper-leases");
+}
+function cleanLeaseLockPath(worktreePath, home3) {
+  const digest = createHash("sha256").update(worktreePath).digest("hex");
+  return join4(cleanLeaseHome(home3), digest);
+}
+function defaultProcessProbe(pid) {
+  process.kill(pid, 0);
+}
+function defaultProcessStartKey(pid) {
+  const result = Bun.spawnSync(["ps", "-p", String(pid), "-o", "lstart="], {
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  if (result.exitCode !== 0)
+    return null;
+  const text = result.stdout.toString().trim();
+  return text || null;
+}
+function isLivePid(pid, processProbe) {
+  try {
+    processProbe(pid);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function parseLeaseRecord(value) {
+  if (!value || typeof value !== "object")
+    return null;
+  const raw = value;
+  if (typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.threadId !== "string" || raw.threadId.trim() === "" || typeof raw.path !== "string" || raw.path.trim() === "" || raw.role !== "clean" && raw.role !== "turn-start" || !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0) {
+    return null;
+  }
+  return {
+    token: raw.token,
+    threadId: raw.threadId,
+    path: raw.path,
+    role: raw.role,
+    pid: raw.pid,
+    startKey: typeof raw.startKey === "string" || raw.startKey === null ? raw.startKey : null,
+    acquiredAt: typeof raw.acquiredAt === "string" ? raw.acquiredAt : ""
+  };
+}
+function isLiveLeaseRecord(record, fns = {}) {
+  const processProbe = fns.processProbe ?? defaultProcessProbe;
+  const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  if (typeof record.startKey !== "string" || record.startKey.trim() === "")
+    return false;
+  if (!isLivePid(record.pid, processProbe))
+    return false;
+  const currentStart = processStartKey(record.pid);
+  if (currentStart === null || currentStart !== record.startKey)
+    return false;
+  return true;
+}
+function lockIdentity(info) {
+  if (info.dev < 0n || info.ino <= 0n)
+    return;
+  return { dev: info.dev, ino: info.ino };
+}
+function sameLockIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+async function hasIdentity(path, expected) {
+  try {
+    const current = lockIdentity(await lstat(path, { bigint: true }));
+    return Boolean(current && current.dev === expected.dev && current.ino === expected.ino);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+async function readLiveCleanLease(worktreePath, home3, fns = {}) {
+  const path = cleanLeaseLockPath(worktreePath, home3);
+  try {
+    const record = parseLeaseRecord(JSON.parse(await Bun.file(path).text()));
+    if (!record || !isLiveLeaseRecord(record, fns))
+      return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+async function inspectLock(lockPath, fns) {
+  try {
+    const identity = lockIdentity(await lstat(lockPath, { bigint: true }));
+    let record = null;
+    try {
+      record = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
+    } catch {
+      record = null;
+    }
+    return { identity, record, live: Boolean(record && isLiveLeaseRecord(record, fns)) };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return { identity: undefined, record: null, live: false };
+    }
+    throw error;
+  }
+}
+function reclaimClaimPath(lockPath) {
+  return `${lockPath}.reclaim`;
+}
+function parseReclaimClaim(value) {
+  if (!value || typeof value !== "object")
+    return null;
+  const raw = value;
+  if (!Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0 || typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.createdAt !== "string") {
+    return null;
+  }
+  return {
+    pid: raw.pid,
+    startKey: typeof raw.startKey === "string" ? raw.startKey : null,
+    token: raw.token,
+    createdAt: raw.createdAt
+  };
+}
+function isLiveReclaimClaim(record, fns) {
+  return isLiveLeaseRecord({
+    token: record.token,
+    threadId: "reclaim",
+    path: "reclaim",
+    role: "clean",
+    pid: record.pid,
+    startKey: record.startKey,
+    acquiredAt: record.createdAt
+  }, fns);
+}
+async function inspectPathIdentity(path) {
+  try {
+    return lockIdentity(await lstat(path, { bigint: true }));
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+}
+async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!opened || opened.dev !== inspected.dev || opened.ino !== inspected.ino)
+      return false;
+    if (hooks.afterStat)
+      await hooks.afterStat();
+    const trash = `${path}.unlinking-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename2(path, trash);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+    const movedAtRename = await inspectOpenIdentity(trash);
+    if (hooks.afterMoved)
+      await hooks.afterMoved(trash);
+    if (!sameLockIdentity(movedAtRename, inspected)) {
+      if (hooks.afterMismatch)
+        await hooks.afterMismatch(trash);
+      await restoreNamedIdentity(trash, path, movedAtRename);
+      return false;
+    }
+    if (hooks.afterVerified)
+      await hooks.afterVerified(trash);
+    const stillMoved = await inspectOpenIdentity(trash);
+    if (!sameLockIdentity(stillMoved, inspected)) {
+      return false;
+    }
+    await disposeNamedIdentity(trash, inspected);
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+async function restoreNamedIdentity(source, destination, expected) {
+  if (!expected)
+    return;
+  const current = await inspectOpenIdentity(source);
+  if (!sameLockIdentity(current, expected))
+    return;
+  try {
+    await link(source, destination);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST")
+      throw error;
+    return;
+  }
+  const published = await inspectOpenIdentity(destination);
+  if (!sameLockIdentity(published, expected))
+    return;
+  const stillSource = await inspectOpenIdentity(source);
+  if (sameLockIdentity(stillSource, expected)) {
+    await disposeNamedIdentity(source, expected);
+  }
+}
+async function disposeNamedIdentity(path, inspected) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return true;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!sameLockIdentity(opened, inspected))
+      return false;
+    const secret = `${path}.gc-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename2(path, secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return true;
+      }
+      throw error;
+    }
+    const moved = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(moved, inspected)) {
+      try {
+        await link(secret, path);
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (code !== "EEXIST")
+          throw error;
+      }
+      return false;
+    }
+    const held = lockIdentity(await handle.stat({ bigint: true }));
+    const named = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(held, inspected) || !sameLockIdentity(named, inspected) || !held) {
+      return false;
+    }
+    try {
+      await unlink(secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return true;
+      }
+      throw error;
+    }
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+async function inspectOpenIdentity(path) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  try {
+    return lockIdentity(await handle.stat({ bigint: true }));
+  } finally {
+    await handle.close();
+  }
+}
+async function recoverOrphanReclaimClaim(lockPath, fns) {
+  const claimPath = reclaimClaimPath(lockPath);
+  try {
+    const identity = lockIdentity(await lstat(claimPath, { bigint: true }));
+    if (!identity)
+      return false;
+    let record = null;
+    try {
+      record = parseReclaimClaim(JSON.parse(await Bun.file(claimPath).text()));
+    } catch {
+      record = null;
+    }
+    if (record && isLiveReclaimClaim(record, fns))
+      return false;
+    return await unlinkIfSameIdentity(claimPath, identity);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return true;
+    }
+    throw error;
+  }
+}
+async function withReclaimMutex(lockPath, fn, fns = {}, hooks = {}) {
+  const token2 = crypto.randomUUID();
+  const claimPath = reclaimClaimPath(lockPath);
+  const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  const startKey = processStartKey(process.pid);
+  if (typeof startKey !== "string" || startKey.trim() === "") {
+    throw new Error("could not record process start key for worktree lease reclaim");
+  }
+  const record = {
+    pid: process.pid,
+    startKey,
+    token: token2,
+    createdAt: new Date().toISOString()
+  };
+  for (let attempt = 0;attempt < 3; attempt++) {
+    await recoverOrphanReclaimClaim(lockPath, fns);
+    const candidate = `${claimPath}.candidate-${process.pid}-${token2}-${attempt}`;
+    await writeFile2(candidate, `${JSON.stringify(record)}
+`, { mode: 384, flag: "wx" });
+    const candidateIdentity = lockIdentity(await lstat(candidate, { bigint: true }));
+    let claimed = false;
+    try {
+      if (!candidateIdentity)
+        throw new Error("could not identity a reclaim claim candidate");
+      try {
+        await link(candidate, claimPath);
+        claimed = true;
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (code === "EEXIST" || code === "ENOTEMPTY") {
+          if (attempt === 2)
+            throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+          continue;
+        }
+        throw error;
+      }
+      if (!await hasIdentity(claimPath, candidateIdentity)) {
+        if (attempt === 2)
+          throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+        continue;
+      }
+      if (hooks.beforeUnlink)
+        await hooks.beforeUnlink();
+      return await fn();
+    } finally {
+      await rm2(candidate, { force: true });
+      if (claimed && candidateIdentity)
+        await unlinkIfSameIdentity(claimPath, candidateIdentity);
+    }
+  }
+  throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+}
+async function reclaimStaleLock(lockPath, inspected, fns, hooks = {}) {
+  return await withReclaimMutex(lockPath, async () => {
+    if (!await hasIdentity(lockPath, inspected))
+      return false;
+    return await unlinkIfSameIdentity(lockPath, inspected);
+  }, fns, hooks);
+}
+function reservationError(path, existing, requested) {
+  if (existing?.role === "clean" || existing == null && requested === "clean") {
+    return new Error(existing ? `worktree ${path} is reserved for artifact cleanup by task ${existing.threadId}` : `worktree ${path} already has a clean lease`);
+  }
+  if (existing?.role === "turn-start") {
+    return new Error(`worktree ${path} has a turn start in progress for task ${existing.threadId}`);
+  }
+  return new Error(`worktree ${path} already has a clean lease`);
+}
+async function acquireWorktreeGate(path, threadId, role, options = {}) {
+  const token2 = crypto.randomUUID();
+  const lockPath = cleanLeaseLockPath(path, options.home);
+  await mkdir2(cleanLeaseHome(options.home), { recursive: true, mode: 448 });
+  const processStartKey = options.processStartKey ?? defaultProcessStartKey;
+  const startKey = processStartKey(process.pid);
+  if (typeof startKey !== "string" || startKey.trim() === "") {
+    throw new Error("could not record process start key for worktree lease");
+  }
+  const record = {
+    token: token2,
+    threadId,
+    path,
+    role,
+    pid: process.pid,
+    startKey,
+    acquiredAt: (options.now ?? (() => new Date().toISOString()))()
+  };
+  const fns = {
+    processProbe: options.processProbe,
+    processStartKey: options.processStartKey
+  };
+  let acquiredIdentity;
+  for (let attempt = 0;attempt < 3; attempt++) {
+    const candidate = `${lockPath}.candidate-${process.pid}-${token2}-${attempt}`;
+    await writeFile2(candidate, `${JSON.stringify(record)}
+`, { mode: 384, flag: "wx" });
+    try {
+      await link(candidate, lockPath);
+      acquiredIdentity = lockIdentity(await lstat(lockPath, { bigint: true }));
+      break;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (code !== "EEXIST")
+        throw error;
+      const inspected = await inspectLock(lockPath, fns);
+      if (inspected.live)
+        throw reservationError(path, inspected.record, role);
+      if (!inspected.identity) {
+        if (attempt === 2)
+          throw reservationError(path, inspected.record, role);
+        continue;
+      }
+      const reclaimed = await reclaimStaleLock(lockPath, inspected.identity, fns, { beforeUnlink: options.beforeUnlink });
+      if (!reclaimed && attempt === 2)
+        throw reservationError(path, await readLiveCleanLease(path, options.home, fns), role);
+    } finally {
+      await rm2(candidate, { force: true });
+    }
+  }
+  if (!acquiredIdentity)
+    throw reservationError(path, await readLiveCleanLease(path, options.home, fns), role);
+  const heldIdentity = acquiredIdentity;
+  const controller = new AbortController;
+  return {
+    token: token2,
+    path,
+    threadId,
+    role,
+    signal: controller.signal,
+    abort() {
+      if (!controller.signal.aborted)
+        controller.abort();
+    },
+    async release() {
+      if (!controller.signal.aborted)
+        controller.abort();
+      try {
+        await withReclaimMutex(lockPath, async () => {
+          const current = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
+          if (!current || current.token !== token2)
+            return;
+          if (!await hasIdentity(lockPath, heldIdentity))
+            return;
+          await unlinkIfSameIdentity(lockPath, heldIdentity);
+        }, fns);
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+          return;
+        if (error instanceof SyntaxError)
+          return;
+      }
+    }
+  };
+}
+async function holdExclusiveCleanLease(task, path, readTask, isViolated, options = {}) {
+  const gate = await acquireWorktreeGate(path, task.id, "clean", options);
+  let stopped = false;
+  const pollMs = options.pollMs ?? 25;
+  const watch = (async () => {
+    while (!stopped && !gate.signal.aborted) {
+      try {
+        const current = await readTask(task.id);
+        if (isViolated(current)) {
+          gate.abort();
+          return;
+        }
+      } catch {
+        gate.abort();
+        return;
+      }
+      await Bun.sleep(pollMs);
+    }
+  })();
+  return {
+    ...gate,
+    async release() {
+      stopped = true;
+      await watch.catch(() => {
+        return;
+      });
+      await gate.release();
+    }
+  };
+}
+var init_worktree_reaper_lease = () => {};
+
+// packages/t3-orchestration/src/worktree-reaper.ts
+var exports_worktree_reaper = {};
+__export(exports_worktree_reaper, {
+  writeReaperState: () => writeReaperState,
+  taskTargetIdentityChanged: () => taskTargetIdentityChanged,
+  taskListEnumerationTruncated: () => taskListEnumerationTruncated,
+  shouldSkipUnchanged: () => shouldSkipUnchanged,
+  sameFsIdentity: () => sameFsIdentity,
+  runIdentityBoundClean: () => runIdentityBoundClean,
+  resolveRegisteredWorktree: () => resolveRegisteredWorktree,
+  resolveOccupiedWorktrees: () => resolveOccupiedWorktrees,
+  readReaperState: () => readReaperState,
+  parseOccupiedWorktrees: () => parseOccupiedWorktrees,
+  parseListCleanableResult: () => parseListCleanableResult,
+  parseGitWorktreePorcelain: () => parseGitWorktreePorcelain,
+  otherTaskOccupyingPath: () => otherTaskOccupyingPath,
+  normalizeBranch: () => normalizeBranch,
+  isUnknownOperationError: () => isUnknownOperationError,
+  isRunningTask: () => isRunningTask,
+  isLivenessUnavailable: () => isLivenessUnavailable,
+  isFlutterPubspec: () => isFlutterPubspec,
+  isCleanableLifecycle: () => isCleanableLifecycle,
+  formatReaperLogs: () => formatReaperLogs,
+  discoverCleanTargets: () => discoverCleanTargets,
+  defaultStatePath: () => defaultStatePath,
+  createDefaultReaperDependencies: () => createDefaultReaperDependencies,
+  cleanSettledWorktrees: () => cleanSettledWorktrees,
+  REAPER_LAUNCH_AGENT_LABEL: () => REAPER_LAUNCH_AGENT_LABEL,
+  ORCHESTRATION_LAUNCH_AGENT_LABEL: () => ORCHESTRATION_LAUNCH_AGENT_LABEL
+});
+import { spawn } from "child_process";
+import { lstat as lstat2, mkdir as mkdir3, open as open2, readdir, readFile as readFile3, realpath as realpath2, rm as rm3, writeFile as writeFile3 } from "fs/promises";
+import { dirname as dirname2, join as join5, resolve as resolve3 } from "path";
+import { homedir as homedir3 } from "os";
+function parseGitWorktreePorcelain(text) {
+  const worktrees = [];
+  let current;
+  const finish = () => {
+    if (current)
+      worktrees.push(current);
+    current = undefined;
+  };
+  for (const line of text.split(`
+`)) {
+    if (line === "") {
+      finish();
+      continue;
+    }
+    if (line.startsWith("worktree ")) {
+      finish();
+      current = { path: line.slice("worktree ".length), branch: null, bare: false };
+      continue;
+    }
+    if (!current)
+      continue;
+    if (line.startsWith("branch ")) {
+      const ref = line.slice("branch ".length);
+      current.branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+    } else if (line === "bare") {
+      current.bare = true;
+    }
+  }
+  finish();
+  return worktrees;
+}
+function normalizeBranch(branch) {
+  if (!branch)
+    return null;
+  return branch.startsWith("refs/heads/") ? branch.slice("refs/heads/".length) : branch;
+}
+function isRunningTask(task) {
+  return task.sessionStatus === "running" || task.sessionStatus === "starting" || task.latestTurnState === "running" || task.phase === "running" || task.phase === "starting" || task.backgroundLiveness === "working" || task.backgroundLiveness === "monitoring";
+}
+function isLivenessUnavailable(task) {
+  return task.backgroundLiveness !== null && task.backgroundLiveness !== "working" && task.backgroundLiveness !== "monitoring";
+}
+function isCleanableLifecycle(task) {
+  return !task.deleted && (task.settled === true || task.archived === true);
+}
+function taskTargetIdentityChanged(before, after) {
+  return before.projectId !== after.projectId || (before.workspaceRoot ?? "") !== (after.workspaceRoot ?? "") || (before.worktreePath ?? "") !== (after.worktreePath ?? "") || (before.branch ?? "") !== (after.branch ?? "");
+}
+function otherTaskOccupyingPath(taskId, path, occupied) {
+  return occupied.find((entry) => entry.id !== taskId && entry.path === path);
+}
+async function resolveOccupiedWorktrees(occupied, realpathFn) {
+  const resolved = [];
+  const seen = new Set;
+  const add = (id, path) => {
+    const key = `${id}\x00${path}`;
+    if (seen.has(key))
+      return;
+    seen.add(key);
+    resolved.push({ id, path });
+  };
+  for (const entry of occupied) {
+    const id = entry.id?.trim();
+    const raw = entry.path?.trim();
+    if (!id || !raw)
+      continue;
+    add(id, raw);
+    try {
+      add(id, await realpathFn(raw));
+    } catch {}
+  }
+  return resolved;
+}
+function resolveRegisteredWorktree(task, worktrees, resolvedPaths, occupied = []) {
+  if (worktrees.length === 0)
+    return { ok: false, reason: "project has no git worktrees", failClosed: true };
+  const primary = worktrees[0];
+  if (!primary || primary.bare)
+    return { ok: false, reason: "project primary checkout is missing", failClosed: true };
+  const primaryPath = resolvedPaths.get(primary.path);
+  if (!primaryPath)
+    return { ok: false, reason: "could not resolve primary checkout", failClosed: true };
+  const workspaceRoot = task.workspaceRoot?.trim();
+  const workspacePath = workspaceRoot ? resolvedPaths.get(workspaceRoot) : undefined;
+  const registered = new Map;
+  for (const worktree of worktrees) {
+    const resolved = resolvedPaths.get(worktree.path);
+    if (!resolved)
+      continue;
+    if (registered.has(resolved) && registered.get(resolved) !== worktree) {
+      return { ok: false, reason: `ambiguous registered worktree path ${resolved}`, failClosed: true };
+    }
+    registered.set(resolved, worktree);
+  }
+  const claimed = task.worktreePath?.trim();
+  if (claimed) {
+    const resolvedClaim = resolvedPaths.get(claimed);
+    if (!resolvedClaim)
+      return { ok: false, reason: `claimed worktreePath is not resolvable: ${claimed}`, failClosed: true };
+    const match = registered.get(resolvedClaim);
+    if (!match)
+      return { ok: false, reason: `claimed worktreePath is not a registered git worktree: ${resolvedClaim}`, failClosed: true };
+    if (resolvedClaim === primaryPath || resolvedClaim === workspacePath) {
+      return { ok: false, reason: `refusing to clean project primary checkout ${resolvedClaim}`, failClosed: true };
+    }
+    const taskBranch = normalizeBranch(task.branch);
+    const claimedBranch = normalizeBranch(match.branch);
+    if (!taskBranch || !claimedBranch || taskBranch !== claimedBranch) {
+      return {
+        ok: false,
+        reason: `claimed worktreePath branch ${claimedBranch ?? "(none)"} does not match task branch ${taskBranch ?? "(none)"}`,
+        failClosed: true
+      };
+    }
+    const owner2 = otherTaskOccupyingPath(task.id, resolvedClaim, occupied);
+    if (owner2) {
+      return { ok: false, reason: `worktree ${resolvedClaim} is owned by another task ${owner2.id}`, failClosed: true };
+    }
+    return { ok: true, path: resolvedClaim };
+  }
+  const branch = normalizeBranch(task.branch);
+  if (!branch)
+    return { ok: false, reason: "task has no worktreePath or branch", failClosed: true };
+  const matches = worktrees.map((worktree) => ({ worktree, path: resolvedPaths.get(worktree.path) })).filter((entry) => {
+    return Boolean(entry.path && normalizeBranch(entry.worktree.branch) === branch && entry.path !== primaryPath && entry.path !== workspacePath);
+  });
+  if (matches.length === 0)
+    return { ok: false, reason: `no registered worktree matches branch ${branch}`, failClosed: false };
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      reason: `ambiguous worktree match for branch ${branch}: ${matches.map((entry) => entry.path).join(", ")}`,
+      failClosed: true
+    };
+  }
+  const matchedPath = matches[0].path;
+  const owner = otherTaskOccupyingPath(task.id, matchedPath, occupied);
+  if (owner) {
+    return { ok: false, reason: `worktree ${matchedPath} is owned by another task ${owner.id}`, failClosed: true };
+  }
+  return { ok: true, path: matchedPath };
+}
+function shouldSkipUnchanged(state, threadId, path, currentBytes) {
+  const previous = state.threads[threadId];
+  return Boolean(previous && previous.path === path && previous.bytesAfter === currentBytes);
+}
+function isFlutterPubspec(text) {
+  return /(?:^|\n)flutter:\s*(?:$|\n)/.test(text) || /sdk:\s*flutter/.test(text);
+}
+function sameFsIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+async function walkDirectories(worktree, deps) {
+  const directories = [worktree];
+  const queue = [worktree];
+  const seen = new Set([worktree]);
+  while (queue.length) {
+    const directory = queue.shift();
+    for (const name of await deps.readDirectoryNames(directory)) {
+      if (SKIP_DIRECTORY_NAMES.has(name))
+        continue;
+      const child = join5(directory, name);
+      if (seen.has(child) || !await deps.isDirectory(child))
+        continue;
+      seen.add(child);
+      directories.push(child);
+      queue.push(child);
+    }
+  }
+  return directories;
+}
+async function strategyMatchesDirectory(strategy, worktree, directory, names, deps) {
+  const relative2 = relativeInside(worktree, directory);
+  if (relative2 === undefined)
+    return false;
+  if (!matchesAnyGlob(relative2, strategy.match))
+    return false;
+  if (!strategy.markers.every((marker) => names.includes(marker)))
+    return false;
+  if (!await deps.isDirectory(join5(directory, strategy.artifactDir)))
+    return false;
+  if (!strategy.requireText)
+    return true;
+  try {
+    return new RegExp(strategy.requireText.pattern).test(await deps.readText(join5(directory, strategy.requireText.file)));
+  } catch {
+    return false;
+  }
+}
+async function discoverCleanTargets(worktree, strategies, deps) {
+  const targets = [];
+  for (const directory of await walkDirectories(worktree, deps)) {
+    const names = await deps.readDirectoryNames(directory);
+    for (const strategy of strategies) {
+      if (!await strategyMatchesDirectory(strategy, worktree, directory, names, deps))
+        continue;
+      targets.push({
+        strategy: strategy.name,
+        directory,
+        artifactDir: join5(directory, strategy.artifactDir),
+        artifactName: strategy.artifactDir,
+        command: strategy.command
+      });
+    }
+  }
+  return targets;
+}
+async function planClean(task, config, deps, worktreesByRoot, occupied) {
+  const policy = resolveProjectPolicy(task, config);
+  if (!policy.enabled)
+    return { ok: false, action: "skipped", reason: policy.reason ?? "project disabled by host config" };
+  const workspaceRoot = task.workspaceRoot?.trim();
+  if (!workspaceRoot)
+    return { ok: false, action: "failed", reason: "project workspaceRoot is missing" };
+  let worktrees = worktreesByRoot.get(workspaceRoot);
+  if (!worktrees) {
+    try {
+      worktrees = await deps.listGitWorktrees(workspaceRoot);
+    } catch (error) {
+      return { ok: false, action: "failed", reason: `git worktree list failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    worktreesByRoot.set(workspaceRoot, worktrees);
+  }
+  const resolvedPaths = new Map;
+  try {
+    resolvedPaths.set(workspaceRoot, await deps.realpath(workspaceRoot));
+  } catch (error) {
+    return { ok: false, action: "skipped", reason: `workspaceRoot is not resolvable: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (task.worktreePath?.trim()) {
+    try {
+      resolvedPaths.set(task.worktreePath, await deps.realpath(task.worktreePath));
+    } catch (error) {
+      return { ok: false, action: "skipped", reason: `claimed worktreePath is not resolvable: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+  for (const worktree of worktrees) {
+    try {
+      resolvedPaths.set(worktree.path, await deps.realpath(worktree.path));
+    } catch {}
+  }
+  const resolved = resolveRegisteredWorktree(task, worktrees, resolvedPaths, occupied);
+  if (!resolved.ok)
+    return { ok: false, action: resolved.failClosed ? "failed" : "skipped", reason: resolved.reason };
+  const denyPaths = await resolveDenyPaths(policy.denyPaths, resolved.path, deps.realpath);
+  if (isDeniedPath(resolved.path, denyPaths)) {
+    return { ok: false, action: "skipped", path: resolved.path, reason: "worktree is denied by host config" };
+  }
+  const targets = (await discoverCleanTargets(resolved.path, policy.strategies, deps)).filter((target) => !isDeniedPath(target.directory, denyPaths) && !isDeniedPath(target.artifactDir, denyPaths));
+  try {
+    for (const target of targets)
+      assertAllowedCleanCommand(target.command, target.artifactName);
+  } catch (error) {
+    return { ok: false, action: "failed", path: resolved.path, reason: error instanceof Error ? error.message : String(error) };
+  }
+  const pathIdentity = await deps.statIdentity(resolved.path);
+  if (!pathIdentity) {
+    return { ok: false, action: "failed", path: resolved.path, reason: "could not identify registered worktree inode" };
+  }
+  const identified = [];
+  for (const target of targets) {
+    const directoryIdentity = await deps.statIdentity(target.directory);
+    if (!directoryIdentity) {
+      return { ok: false, action: "failed", path: resolved.path, reason: `could not identify clean directory inode ${target.directory}` };
+    }
+    const artifactIdentity = await deps.statIdentity(target.artifactDir);
+    if (!artifactIdentity) {
+      return { ok: false, action: "failed", path: resolved.path, reason: `could not identify artifact directory inode ${target.artifactDir}` };
+    }
+    identified.push({ ...target, directoryIdentity, artifactIdentity });
+  }
+  const artifactDirs = identified.map((target) => target.artifactDir);
+  let bytesBefore = 0;
+  for (const directory of artifactDirs)
+    bytesBefore += await deps.measureBytes(directory);
+  return { ok: true, path: resolved.path, pathIdentity, targets: identified, artifactDirs, bytesBefore };
+}
+async function assertPlanIdentities(plan, deps) {
+  const pathIdentity = await deps.statIdentity(plan.path);
+  if (!sameFsIdentity(pathIdentity, plan.pathIdentity)) {
+    return { ok: false, reason: `worktree ${plan.path} was replaced after planning` };
+  }
+  for (const target of plan.targets) {
+    const directoryIdentity = await deps.statIdentity(target.directory);
+    if (!sameFsIdentity(directoryIdentity, target.directoryIdentity)) {
+      return { ok: false, reason: `clean directory ${target.directory} was replaced after planning` };
+    }
+    const artifactIdentity = await deps.statIdentity(target.artifactDir);
+    if (!sameFsIdentity(artifactIdentity, target.artifactIdentity)) {
+      return { ok: false, reason: `artifact directory ${target.artifactDir} was replaced after planning` };
+    }
+  }
+  return { ok: true };
+}
+async function cleanSettledWorktrees(deps, options) {
+  const config = options.config ?? defaultReaperConfig();
+  const report = {
+    ok: true,
+    dryRun: options.dryRun,
+    configPath: options.configPath ?? null,
+    scanned: 0,
+    cleaned: 0,
+    skipped: 0,
+    failed: 0,
+    bytesFreed: 0,
+    tasks: []
+  };
+  if (!config.enabled) {
+    return report;
+  }
+  const state = await deps.readState();
+  let listing;
+  try {
+    listing = await deps.listCleanableTasks();
+    if (typeof listing.truncated !== "boolean") {
+      throw new Error("cleanable-task listing omitted or malformed truncated; refusing incomplete cleanup");
+    }
+    listing = { ...listing, occupied: parseOccupiedWorktrees(listing.occupied) };
+  } catch (error) {
+    report.ok = false;
+    report.failed = 1;
+    report.tasks.push({
+      threadId: "enumeration",
+      action: "failed",
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return report;
+  }
+  report.scanned = listing.tasks.length;
+  if (listing.truncated) {
+    report.ok = false;
+    report.failed = 1;
+    report.tasks.push({
+      threadId: "enumeration",
+      action: "failed",
+      reason: `cleanable-task enumeration truncated at ${listing.tasks.length}; refusing incomplete cleanup`
+    });
+    return report;
+  }
+  const tasks = listing.tasks;
+  let occupied = await resolveOccupiedWorktrees(listing.occupied, deps.realpath);
+  const worktreesByRoot = new Map;
+  const refreshOccupancy = async (task, path) => {
+    let fresh;
+    try {
+      fresh = await deps.listCleanableTasks();
+      if (typeof fresh.truncated !== "boolean") {
+        throw new Error("cleanable-task listing omitted or malformed truncated; refusing incomplete cleanup");
+      }
+      fresh = { ...fresh, occupied: parseOccupiedWorktrees(fresh.occupied) };
+    } catch (error) {
+      return {
+        ok: false,
+        action: "failed",
+        path,
+        reason: `could not revalidate occupancy: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+    if (fresh.truncated) {
+      return {
+        ok: false,
+        action: "failed",
+        path,
+        reason: `cleanable-task enumeration truncated at ${fresh.tasks.length}; refusing incomplete cleanup`
+      };
+    }
+    const nextOccupied = await resolveOccupiedWorktrees(fresh.occupied, deps.realpath);
+    const freshTask = fresh.tasks.find((entry) => entry.id === task.id);
+    if (!freshTask) {
+      return { ok: false, action: "failed", path, reason: "task is no longer listed as cleanable" };
+    }
+    if (!isCleanableLifecycle(freshTask)) {
+      return { ok: false, action: "skipped", path, reason: "not settled or archived" };
+    }
+    if (isRunningTask(freshTask) || isLivenessUnavailable(freshTask)) {
+      return {
+        ok: false,
+        action: "skipped",
+        path,
+        reason: isLivenessUnavailable(freshTask) ? "liveness unavailable" : "task is running"
+      };
+    }
+    if (taskTargetIdentityChanged(task, freshTask)) {
+      return { ok: false, action: "failed", path, reason: "task identity changed during occupancy refresh" };
+    }
+    const owner = otherTaskOccupyingPath(task.id, path, nextOccupied);
+    if (owner) {
+      return { ok: false, action: "failed", path, reason: `worktree ${path} is owned by another task ${owner.id}` };
+    }
+    return { ok: true, occupied: nextOccupied };
+  };
+  const record = (result) => {
+    report.tasks.push(result);
+    if (result.action === "cleaned" || result.action === "would-clean") {
+      report.cleaned++;
+      report.bytesFreed += result.bytesFreed ?? 0;
+    } else if (result.action === "failed") {
+      report.failed++;
+      report.ok = false;
+    } else {
+      report.skipped++;
+    }
+  };
+  for (const task of tasks) {
+    if (!isCleanableLifecycle(task)) {
+      record({ threadId: task.id, action: "skipped", reason: "not settled or archived" });
+      continue;
+    }
+    if (isRunningTask(task) || isLivenessUnavailable(task)) {
+      record({
+        threadId: task.id,
+        action: "skipped",
+        reason: isLivenessUnavailable(task) ? "liveness unavailable" : "task is running"
+      });
+      continue;
+    }
+    let plan = await planClean(task, config, deps, worktreesByRoot, occupied);
+    if (!plan.ok) {
+      record({ threadId: task.id, action: plan.action, path: plan.path, reason: plan.reason });
+      continue;
+    }
+    if (plan.targets.length === 0 || plan.bytesBefore === 0) {
+      if (!options.dryRun) {
+        state.threads[task.id] = { path: plan.path, bytesAfter: 0, cleanedAt: deps.now() };
+      }
+      record({
+        threadId: task.id,
+        action: "unchanged",
+        path: plan.path,
+        bytesBefore: 0,
+        bytesAfter: 0,
+        bytesFreed: 0,
+        reason: "no matching artifacts"
+      });
+      continue;
+    }
+    if (shouldSkipUnchanged(state, task.id, plan.path, plan.bytesBefore)) {
+      record({
+        threadId: task.id,
+        action: "unchanged",
+        path: plan.path,
+        bytesBefore: plan.bytesBefore,
+        bytesAfter: plan.bytesBefore,
+        bytesFreed: 0,
+        reason: "already cleaned at recorded size"
+      });
+      continue;
+    }
+    let current = task;
+    try {
+      current = await deps.readTask(task.id);
+    } catch (error) {
+      record({
+        threadId: task.id,
+        action: "failed",
+        path: plan.path,
+        reason: `could not revalidate task: ${error instanceof Error ? error.message : String(error)}`
+      });
+      continue;
+    }
+    if (isRunningTask(current) || isLivenessUnavailable(current)) {
+      record({
+        threadId: task.id,
+        action: "skipped",
+        path: plan.path,
+        reason: isLivenessUnavailable(current) ? "liveness unavailable" : "task is running"
+      });
+      continue;
+    }
+    if (!isCleanableLifecycle(current)) {
+      record({ threadId: task.id, action: "skipped", path: plan.path, reason: "not settled or archived" });
+      continue;
+    }
+    if (taskTargetIdentityChanged(task, current)) {
+      plan = await planClean(current, config, deps, worktreesByRoot, occupied);
+      if (!plan.ok) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: `task identity changed: ${plan.reason}` });
+        continue;
+      }
+      if (plan.targets.length === 0 || plan.bytesBefore === 0) {
+        record({
+          threadId: task.id,
+          action: "unchanged",
+          path: plan.path,
+          bytesBefore: 0,
+          bytesAfter: 0,
+          bytesFreed: 0,
+          reason: "no matching artifacts"
+        });
+        continue;
+      }
+    }
+    let lease;
+    try {
+      lease = await deps.holdCleanLease(current, plan.path);
+    } catch (error) {
+      record({
+        threadId: task.id,
+        action: "failed",
+        path: plan.path,
+        reason: `could not acquire clean lease: ${error instanceof Error ? error.message : String(error)}`
+      });
+      continue;
+    }
+    try {
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      const refreshed = await refreshOccupancy(current, plan.path);
+      if (!refreshed.ok) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: refreshed.path ?? plan.path,
+          reason: refreshed.reason
+        });
+        continue;
+      }
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      occupied = refreshed.occupied;
+      const bound = await assertPlanIdentities(plan, deps);
+      if (!bound.ok) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: bound.reason });
+        continue;
+      }
+      if (options.dryRun) {
+        record({
+          threadId: task.id,
+          action: "would-clean",
+          path: plan.path,
+          bytesBefore: plan.bytesBefore,
+          bytesAfter: 0,
+          bytesFreed: plan.bytesBefore
+        });
+        continue;
+      }
+      let aborted;
+      try {
+        for (const target of plan.targets) {
+          if (lease.signal.aborted) {
+            aborted = { ok: false, action: "failed", path: plan.path, reason: "task resumed during clean lease" };
+            break;
+          }
+          const stillBound = await assertPlanIdentities(plan, deps);
+          if (!stillBound.ok) {
+            aborted = { ok: false, action: "failed", path: plan.path, reason: stillBound.reason };
+            break;
+          }
+          await deps.runClean(target.command, target.directory, lease.signal, {
+            directoryIdentity: target.directoryIdentity,
+            artifactDir: target.artifactDir,
+            artifactName: target.artifactName,
+            artifactIdentity: target.artifactIdentity
+          });
+        }
+      } catch (error) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: plan.path,
+          bytesBefore: plan.bytesBefore,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+        continue;
+      }
+      if (aborted) {
+        record({ threadId: task.id, action: aborted.action, path: aborted.path, reason: aborted.reason });
+        continue;
+      }
+      if (lease.signal.aborted) {
+        record({ threadId: task.id, action: "failed", path: plan.path, reason: "task resumed during clean lease" });
+        continue;
+      }
+      try {
+        const after = await deps.readTask(current.id);
+        if (isRunningTask(after) || isLivenessUnavailable(after) || !isCleanableLifecycle(after) || taskTargetIdentityChanged(current, after)) {
+          record({
+            threadId: task.id,
+            action: "failed",
+            path: plan.path,
+            reason: "task resumed during cleanup"
+          });
+          continue;
+        }
+      } catch (error) {
+        record({
+          threadId: task.id,
+          action: "failed",
+          path: plan.path,
+          reason: `could not confirm task after cleanup: ${error instanceof Error ? error.message : String(error)}`
+        });
+        continue;
+      }
+      let bytesAfter = 0;
+      for (const directory of plan.artifactDirs) {
+        if (await deps.pathExists(directory))
+          bytesAfter += await deps.measureBytes(directory);
+      }
+      const bytesFreed = Math.max(0, plan.bytesBefore - bytesAfter);
+      state.threads[task.id] = { path: plan.path, bytesAfter, cleanedAt: deps.now() };
+      record({
+        threadId: task.id,
+        action: "cleaned",
+        path: plan.path,
+        bytesBefore: plan.bytesBefore,
+        bytesAfter,
+        bytesFreed
+      });
+    } finally {
+      await lease.release();
+    }
+  }
+  if (!options.dryRun)
+    await deps.writeState(state);
+  return report;
+}
+function isMissing(error) {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+async function optionalRealpath(path) {
+  try {
+    return await realpath2(path);
+  } catch (error) {
+    if (isMissing(error))
+      throw new Error(`path does not exist: ${path}`);
+    throw error;
+  }
+}
+async function directorySize(path) {
+  try {
+    const metadata = await lstat2(path);
+    if (metadata.isSymbolicLink())
+      return 0;
+    if (metadata.isFile())
+      return metadata.size;
+    if (!metadata.isDirectory())
+      return 0;
+  } catch (error) {
+    if (isMissing(error))
+      return 0;
+    throw error;
+  }
+  const entries = await readdir(path, { withFileTypes: true });
+  let total = 0;
+  for (const entry of entries) {
+    const child = join5(path, entry.name);
+    if (entry.isSymbolicLink())
+      continue;
+    if (entry.isDirectory())
+      total += await directorySize(child);
+    else if (entry.isFile()) {
+      try {
+        total += (await lstat2(child)).size;
+      } catch (error) {
+        if (!isMissing(error))
+          throw error;
+      }
+    }
+  }
+  return total;
+}
+function defaultStatePath(home3 = process.env.HOME || homedir3()) {
+  const t3Home = resolve3(process.env.T3_HOME?.trim() || join5(home3, ".t3"));
+  return join5(t3Home, "worktree-reaper-state.json");
+}
+async function readReaperState(path = defaultStatePath()) {
+  try {
+    const parsed = JSON.parse(await readFile3(path, "utf8"));
+    if (parsed.version !== 1 || !parsed.threads || typeof parsed.threads !== "object") {
+      throw new Error(`Unsupported worktree reaper state at ${path}`);
+    }
+    return parsed;
+  } catch (error) {
+    if (isMissing(error))
+      return { version: 1, threads: {} };
+    throw error;
+  }
+}
+async function writeReaperState(state, path = defaultStatePath()) {
+  await mkdir3(dirname2(path), { recursive: true, mode: 448 });
+  await writeFile3(path, `${JSON.stringify(state, null, 2)}
+`, { mode: 384 });
+}
+function isUnknownOperationError(error) {
+  return Boolean(error && error.startsWith("Unknown operation:"));
+}
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function parseOccupiedWorktrees(value) {
+  if (!Array.isArray(value)) {
+    throw new Error("worktrees.listCleanable omitted occupied; refusing mixed-version occupancy");
+  }
+  return value.map((entry, index) => {
+    if (!isRecord(entry))
+      throw new Error(`worktrees.listCleanable occupied[${index}] is malformed`);
+    const id = typeof entry.id === "string" ? entry.id.trim() : "";
+    const path = typeof entry.path === "string" ? entry.path.trim() : "";
+    if (!id || !path)
+      throw new Error(`worktrees.listCleanable occupied[${index}] is malformed`);
+    return { id, path };
+  });
+}
+function parseListCleanableResult(result) {
+  if (!isRecord(result))
+    throw new Error("worktrees.listCleanable result is malformed");
+  if (typeof result.truncated !== "boolean") {
+    throw new Error("worktrees.listCleanable omitted or malformed truncated; refusing incomplete cleanup");
+  }
+  if (!Array.isArray(result.tasks))
+    throw new Error("worktrees.listCleanable omitted tasks");
+  return {
+    tasks: result.tasks.filter((task) => isCleanableLifecycle(task)),
+    truncated: result.truncated,
+    occupied: parseOccupiedWorktrees(result.occupied)
+  };
+}
+function taskListEnumerationTruncated(moreRecent) {
+  return !Number.isInteger(moreRecent) || moreRecent < 0 || moreRecent > 0;
+}
+async function runIdentityBoundClean(command, directory, binding, signal, hooks = {}) {
+  if (signal?.aborted)
+    throw new Error("clean aborted: task resumed");
+  if (!binding.artifactName.trim()) {
+    throw new Error("clean refused: missing artifact identity binding");
+  }
+  const directoryHandle = await open2(directory, "r");
+  try {
+    const directoryStat = await directoryHandle.stat({ bigint: true });
+    const directoryIdentity = { dev: directoryStat.dev, ino: directoryStat.ino };
+    if (!sameFsIdentity(directoryIdentity, binding.directoryIdentity)) {
+      throw new Error(`clean directory ${directory} was replaced after planning`);
+    }
+    const artifactHandle = await open2(binding.artifactDir, "r");
+    try {
+      const artifactStat = await artifactHandle.stat({ bigint: true });
+      const artifactIdentity = { dev: artifactStat.dev, ino: artifactStat.ino };
+      if (!sameFsIdentity(artifactIdentity, binding.artifactIdentity)) {
+        throw new Error(`artifact directory ${binding.artifactDir} was replaced after planning`);
+      }
+      if (hooks.afterParentBound)
+        await hooks.afterParentBound();
+      if (signal?.aborted)
+        throw new Error("clean aborted: task resumed");
+      const hookRoot = hooks.afterArtifactBound ? join5(directory, `.t3-reaper-hook-${process.pid}-${crypto.randomUUID()}`) : "";
+      if (hookRoot)
+        await mkdir3(hookRoot, { recursive: true, mode: 448 });
+      const hookReadyPath = hookRoot ? join5(hookRoot, "ready") : "";
+      const hookDonePath = hookRoot ? join5(hookRoot, "done") : "";
+      const env = { ...Bun.env };
+      if (command[0] === "cargo")
+        delete env.CARGO_TARGET_DIR;
+      env.T3_REAPER_CLEAN_SPEC = JSON.stringify({
+        command,
+        artifactName: binding.artifactName,
+        hookReadyPath,
+        hookDonePath,
+        directoryDev: String(binding.directoryIdentity.dev),
+        directoryIno: String(binding.directoryIdentity.ino),
+        artifactDev: String(binding.artifactIdentity.dev),
+        artifactIno: String(binding.artifactIdentity.ino)
+      });
+      const child = spawn(process.execPath, ["--eval", IDENTITY_BOUND_CLEAN_EVAL], {
+        cwd: directory,
+        env,
+        stdio: ["ignore", "pipe", "pipe", artifactHandle.fd, directoryHandle.fd]
+      });
+      const abort = () => {
+        try {
+          child.kill();
+        } catch {}
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      const exited = new Promise((resolve4, reject) => {
+        child.once("error", reject);
+        child.once("close", (code) => resolve4(code ?? 1));
+      });
+      try {
+        if (hooks.afterArtifactBound && hookReadyPath && hookDonePath) {
+          const ready = await Promise.race([
+            (async () => {
+              const started = Date.now();
+              while (!await Bun.file(hookReadyPath).exists()) {
+                if (Date.now() - started > 5000)
+                  return false;
+                await Bun.sleep(5);
+              }
+              return true;
+            })(),
+            exited.then(() => false)
+          ]);
+          if (ready) {
+            await hooks.afterArtifactBound();
+            await writeFile3(hookDonePath, `done
+`);
+          }
+        }
+        const exitCode = await exited;
+        if (signal?.aborted)
+          throw new Error("clean aborted: task resumed");
+        if (exitCode === 77)
+          throw new Error(`clean directory ${directory} was replaced after planning`);
+        if (exitCode === 78)
+          throw new Error(`artifact directory ${binding.artifactDir} was replaced after planning`);
+        if (exitCode !== 0) {
+          throw new Error(`${command.join(" ")} failed in ${directory}: ${stderr.trim() || stdout.trim() || `exit ${exitCode}`}`);
+        }
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        if (hookRoot)
+          await rm3(hookRoot, { recursive: true, force: true }).catch(() => {
+            return;
+          });
+      }
+    } finally {
+      await artifactHandle.close();
+    }
+  } finally {
+    await directoryHandle.close();
+  }
+}
+function createDefaultReaperDependencies(request) {
+  const occupiedFromTasks = (tasks) => tasks.flatMap((task) => {
+    const path = task.worktreePath?.trim();
+    if (task.deleted || !path)
+      return [];
+    return [{ id: task.id, path }];
+  });
+  const listFromTasks = async () => {
+    const projectsResponse = await request({ op: "projects.list" });
+    if (!projectsResponse.ok)
+      throw new Error(projectsResponse.error ?? "projects.list failed");
+    const projects = projectsResponse.result.projects ?? [];
+    const roots = new Map(projects.map((project) => [project.id, project.workspaceRoot]));
+    const seen = new Set;
+    const tasks = [];
+    let truncated = false;
+    const projectIds = projects.length ? projects.map((project) => project.id) : [undefined];
+    for (const projectId of projectIds) {
+      const response = await request({
+        op: "tasks.list",
+        limit: 200,
+        includeSettled: true,
+        includeArchived: true,
+        ...projectId ? { projectId } : {}
+      });
+      if (!response.ok)
+        throw new Error(response.error ?? "tasks.list failed");
+      if (!isRecord(response.result) || !Array.isArray(response.result.tasks)) {
+        throw new Error("tasks.list omitted tasks; refusing incomplete cleanup");
+      }
+      if (taskListEnumerationTruncated(response.result.moreRecent))
+        truncated = true;
+      for (const task of response.result.tasks) {
+        if (seen.has(task.id))
+          continue;
+        seen.add(task.id);
+        tasks.push({
+          ...task,
+          workspaceRoot: task.workspaceRoot ?? roots.get(task.projectId) ?? null
+        });
+      }
+    }
+    return {
+      tasks: tasks.filter((task) => isCleanableLifecycle(task)),
+      truncated,
+      occupied: occupiedFromTasks(tasks)
+    };
+  };
+  return {
+    async listCleanableTasks() {
+      const dedicated = await request({ op: "worktrees.listCleanable" });
+      if (dedicated.ok) {
+        return parseListCleanableResult(dedicated.result);
+      }
+      if (!isUnknownOperationError(dedicated.error)) {
+        throw new Error(dedicated.error ?? "worktrees.listCleanable failed");
+      }
+      return listFromTasks();
+    },
+    async readTask(threadId) {
+      const response = await request({ op: "tasks.status", threadId });
+      if (!response.ok)
+        throw new Error(response.error ?? `tasks.status failed for ${threadId}`);
+      return response.result;
+    },
+    async listGitWorktrees(workspaceRoot) {
+      const result = await Bun.$`git -C ${workspaceRoot} worktree list --porcelain`.nothrow().quiet();
+      if (result.exitCode !== 0) {
+        throw new Error(result.stderr.toString().trim() || `git worktree list failed in ${workspaceRoot}`);
+      }
+      return parseGitWorktreePorcelain(result.text());
+    },
+    realpath: optionalRealpath,
+    async pathExists(path) {
+      try {
+        await lstat2(path);
+        return true;
+      } catch (error) {
+        if (isMissing(error))
+          return false;
+        throw error;
+      }
+    },
+    async isDirectory(path) {
+      try {
+        const metadata = await lstat2(path);
+        return metadata.isDirectory() && !metadata.isSymbolicLink();
+      } catch (error) {
+        if (isMissing(error))
+          return false;
+        throw error;
+      }
+    },
+    async readDirectoryNames(path) {
+      try {
+        const entries = await readdir(path, { withFileTypes: true });
+        return entries.filter((entry) => !entry.isSymbolicLink()).map((entry) => entry.name);
+      } catch (error) {
+        if (isMissing(error))
+          return [];
+        throw error;
+      }
+    },
+    readText: (path) => readFile3(path, "utf8"),
+    measureBytes: directorySize,
+    statIdentity: inspectPathIdentity,
+    async runClean(command, directory, signal, binding) {
+      if (!binding)
+        throw new Error("clean refused: missing directory and artifact identity binding");
+      await runIdentityBoundClean(command, directory, binding, signal);
+    },
+    holdCleanLease(task, path) {
+      return holdExclusiveCleanLease(task, path, async (threadId) => {
+        const response = await request({ op: "tasks.status", threadId });
+        if (!response.ok)
+          throw new Error(response.error ?? `tasks.status failed for ${threadId}`);
+        return response.result;
+      }, (current) => isRunningTask(current) || isLivenessUnavailable(current) || !isCleanableLifecycle(current) || taskTargetIdentityChanged(task, current));
+    },
+    readState: readReaperState,
+    writeState: writeReaperState,
+    now: () => new Date().toISOString()
+  };
+}
+function formatReaperLogs(report) {
+  return report.tasks.map((task) => ({
+    threadId: task.threadId,
+    path: task.path ?? null,
+    action: task.action,
+    bytesFreed: task.bytesFreed ?? 0,
+    ...task.reason ? { reason: task.reason } : {}
+  }));
+}
+var REAPER_LAUNCH_AGENT_LABEL = "io.github.skizzles.t3-worktree-reaper", ORCHESTRATION_LAUNCH_AGENT_LABEL = "io.github.t3-orchestration.daemon", SKIP_DIRECTORY_NAMES, IDENTITY_BOUND_CLEAN_EVAL = `
+const spec = JSON.parse(process.env.T3_REAPER_CLEAN_SPEC ?? "null");
+if (!spec || !Array.isArray(spec.command) || spec.command.length === 0) {
+  process.stderr.write("clean refused: missing identity-bound launch spec\\n");
+  process.exit(76);
+}
+const { fstatSync, lstatSync, readdirSync, rmdirSync, unlinkSync } = await import("node:fs");
+const { lstat, writeFile } = await import("node:fs/promises");
+const { dlopen, ptr } = await import("bun:ffi");
+const sameIdentity = (info, dev, ino) => info && BigInt(info.dev) === BigInt(dev) && BigInt(info.ino) === BigInt(ino);
+const cwd = await lstat(".", { bigint: true });
+if (!sameIdentity(cwd, spec.directoryDev, spec.directoryIno)) {
+  process.stderr.write("clean directory was replaced after planning\\n");
+  process.exit(77);
+}
+let artifact;
+let directory;
+try {
+  artifact = fstatSync(3, { bigint: true });
+  directory = fstatSync(4, { bigint: true });
+} catch {
+  process.stderr.write("artifact directory was replaced after planning\\n");
+  process.exit(78);
+}
+if (!artifact.isDirectory() || !sameIdentity(artifact, spec.artifactDev, spec.artifactIno)) {
+  process.stderr.write("artifact directory was replaced after planning\\n");
+  process.exit(78);
+}
+if (!directory.isDirectory() || !sameIdentity(directory, spec.directoryDev, spec.directoryIno)) {
+  process.stderr.write("clean directory was replaced after planning\\n");
+  process.exit(77);
+}
+if (spec.hookReadyPath && spec.hookDonePath) {
+  await writeFile(spec.hookReadyPath, "ready\\n");
+  const deadline = Date.now() + 5000;
+  const { access } = await import("node:fs/promises");
+  while (Date.now() < deadline) {
+    try { await access(spec.hookDonePath); break; } catch { await Bun.sleep(5); }
+  }
+}
+const libName = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
+const libc = dlopen(libName, {
+  fchdir: { args: ["i32"], returns: "i32" },
+  execvp: { args: ["ptr", "ptr"], returns: "i32" },
+});
+if (libc.symbols.fchdir(3) !== 0) {
+  process.stderr.write("could not bind cleaner to approved inode\\n");
+  process.exit(78);
+}
+const stillArtifact = fstatSync(3, { bigint: true });
+const stillDirectory = fstatSync(4, { bigint: true });
+if (!sameIdentity(stillArtifact, spec.artifactDev, spec.artifactIno)) {
+  process.stderr.write("artifact directory was replaced after planning\\n");
+  process.exit(78);
+}
+if (!sameIdentity(stillDirectory, spec.directoryDev, spec.directoryIno)) {
+  process.stderr.write("clean directory was replaced after planning\\n");
+  process.exit(77);
+}
+const artifactChildren = () => readdirSync(".").filter((name) => name !== "." && name !== "..");
+if (spec.command[0] === "flutter") {
+  const remove = (rel) => {
+    const st = lstatSync(rel);
+    if (st.isDirectory() && !st.isSymbolicLink()) {
+      for (const name of readdirSync(rel)) {
+        if (name === "." || name === "..") continue;
+        remove(rel === "." ? name : rel + "/" + name);
+      }
+      if (rel !== ".") rmdirSync(rel);
+    } else {
+      unlinkSync(rel);
+    }
+  };
+  for (const name of artifactChildren()) remove(name);
+}
+const argv = spec.command[0] === "cargo"
+  ? ["cargo", "clean", "--target-dir", "."]
+  : spec.command[0] === "rm"
+    ? (() => {
+      const flags = spec.command.slice(1, -1);
+      const names = artifactChildren();
+      return ["rm", ...flags, ...(names.length > 0 ? names : ["--"])];
+    })()
+    : spec.command[0] === "flutter"
+      ? ["flutter", "clean", "."]
+      : spec.command;
+const bins = argv.map((value) => Buffer.from(String(value) + "\\0"));
+const argvPtrs = new BigUint64Array(bins.length + 1);
+for (let i = 0; i < bins.length; i++) argvPtrs[i] = BigInt(ptr(bins[i]));
+argvPtrs[bins.length] = 0n;
+libc.symbols.execvp(ptr(bins[0]), ptr(argvPtrs));
+process.stderr.write("could not execute " + argv[0] + "\\n");
+process.exit(127);
+`;
+var init_worktree_reaper = __esm(() => {
+  init_worktree_reaper_config();
+  init_worktree_reaper_lease();
+  SKIP_DIRECTORY_NAMES = new Set([
+    ".git",
+    ".dart_tool",
+    ".idea",
+    ".vscode",
+    "node_modules",
+    "target",
+    "build",
+    "Pods",
+    ".symlinks"
+  ]);
+});
 
 // packages/t3-orchestration/src/client.ts
+init_config();
+init_remote_config();
+import { connect } from "net";
 var CLIENT_DEADLINE_MS = 60000;
 var WAIT_RESPONSE_BUFFER_MS = 2000;
 var CLIENT_DEADLINE_ENV = "T3_ORCHESTRATION_CLIENT_DEADLINE_MS";
@@ -312,7 +2342,7 @@ function daemonRequest(payload, socketPath = SOCKET_PATH, deadlineMs = resolveCl
 }
 function localDaemonRequest(payload, socketPath, deadlineMs) {
   const deadline = createClientDeadline(deadlineMs);
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     const socket = connect(socketPath);
     let buffer = "";
     let settled = false;
@@ -340,7 +2370,7 @@ function localDaemonRequest(payload, socketPath, deadlineMs) {
       finish(() => {
         socket.end();
         try {
-          resolve(JSON.parse(line));
+          resolve2(JSON.parse(line));
         } catch {
           reject(new Error("t3-orchestrationd returned malformed JSON"));
         }
@@ -441,6 +2471,7 @@ async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
 }
 
 // packages/t3-orchestration/src/cli.ts
+init_remote_config();
 var clientDeadlineMs = resolveClientDeadlineMs();
 var maxWaitMs = maxWaitTimeoutMs(clientDeadlineMs);
 var USAGE = `t3ctl remote {configure --url HTTPS_URL|status|clear}
@@ -455,13 +2486,14 @@ t3ctl tasks title ID --title TITLE
 t3ctl tasks {archive|unarchive|pin|unpin|settle|unsettle|interrupt} ID
 t3ctl tasks approvals [--project ID]
 t3ctl tasks approve ID [REQUEST_ID]
-t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]`;
+t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]
+t3ctl worktrees clean-settled [--dry-run] [--config PATH]`;
 var [group, action, ...args] = process.argv.slice(2);
 if (group === "--help" || group === "-h") {
   console.log(JSON.stringify({ help: USAGE }));
   process.exit(0);
 }
-var booleanOptions = new Set(["include-settled", "include-archived"]);
+var booleanOptions = new Set(["include-settled", "include-archived", "dry-run"]);
 var options = new Map;
 var positionals = [];
 for (let i = 0;i < args.length; i++) {
@@ -577,13 +2609,27 @@ var waitIds = () => {
   return ids;
 };
 var callerThreadId = process.env.CODEX_THREAD_ID?.trim();
-var payload = group === "projects" && action === "import" ? { op: "projects.import" } : group === "projects" && action === "list" ? { op: "projects.list" } : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" } : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3600000), clientDeadlineMs), after: waitAfter() } : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") } : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") } : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") } : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() } : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() } : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() } : (() => {
+var payload = group === "projects" && action === "import" ? { op: "projects.import" } : group === "projects" && action === "list" ? { op: "projects.list" } : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" } : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3600000), clientDeadlineMs), after: waitAfter() } : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") } : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") } : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") } : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() } : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() } : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() } : group === "worktrees" && action === "clean-settled" ? { op: "worktrees.clean-settled", dryRun: option("dry-run") === "true" } : (() => {
   throw new Error(`Usage:
   ${USAGE.replaceAll(`
 `, `
   `)}`);
 })();
 try {
+  if (payload.op === "worktrees.clean-settled") {
+    const { requireLocalReaperTransport: requireLocalReaperTransport2 } = await Promise.resolve().then(() => (init_remote_config(), exports_remote_config));
+    await requireLocalReaperTransport2();
+    const { cleanSettledWorktrees: cleanSettledWorktrees2, createDefaultReaperDependencies: createDefaultReaperDependencies2, formatReaperLogs: formatReaperLogs2 } = await Promise.resolve().then(() => (init_worktree_reaper(), exports_worktree_reaper));
+    const { loadReaperConfig: loadReaperConfig2 } = await Promise.resolve().then(() => (init_worktree_reaper_config(), exports_worktree_reaper_config));
+    const loaded = await loadReaperConfig2(option("config"));
+    const report = await cleanSettledWorktrees2(createDefaultReaperDependencies2((command) => daemonRequest(command)), {
+      dryRun: payload.dryRun === true,
+      config: loaded.config,
+      configPath: loaded.path
+    });
+    console.log(JSON.stringify({ ...report, log: formatReaperLogs2(report) }, null, 2));
+    process.exit(report.ok ? 0 : 1);
+  }
   const result = await daemonRequest(payload, undefined, clientDeadlineMs, await configuredRemoteUrl());
   console.log(JSON.stringify(result.ok ? result.result : { error: result.error }, null, 2));
   process.exit(result.ok ? 0 : 1);

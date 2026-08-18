@@ -69,6 +69,14 @@ function projectName(projects: Map<string, T3Project>, thread: T3Thread): string
   return projects.get(thread.projectId)?.title ?? null;
 }
 
+export function projectedBackgroundLiveness(thread: T3Thread | T3ThreadShell): "working" | "monitoring" | "unknown" | null {
+  if (!Object.hasOwn(thread, "backgroundLiveness")) return "unknown";
+  const value = (thread as Partial<T3ThreadShell>).backgroundLiveness;
+  if (value === null) return null;
+  if (value === "working" || value === "monitoring" || value === "unknown") return value;
+  return "unknown";
+}
+
 export function projectTask(thread: T3Thread | T3ThreadShell, projects: Map<string, T3Project>, pinnedIndex?: number) {
   const shell = thread as Partial<T3ThreadShell>;
   return {
@@ -82,14 +90,56 @@ export function projectTask(thread: T3Thread | T3ThreadShell, projects: Map<stri
     pendingApproval: shell.hasPendingApprovals ?? false,
     pendingUserInput: shell.hasPendingUserInput ?? false,
     actionablePlan: shell.hasActionableProposedPlan ?? false,
-    backgroundLiveness: shell.backgroundLiveness ?? null,
+    backgroundLiveness: projectedBackgroundLiveness(thread),
     pinnedIndex: pinnedIndex ?? null,
     archived: thread.archivedAt != null,
     deleted: thread.deletedAt != null,
     settled: thread.settledOverride === "settled",
     branch: thread.branch,
+    worktreePath: thread.worktreePath,
+    workspaceRoot: projects.get(thread.projectId)?.workspaceRoot ?? null,
     updatedAt: thread.updatedAt ?? null,
     cursor: taskCursor(thread),
+  };
+}
+
+export const CLEANABLE_TASK_CAP = 5_000;
+
+export type OccupiedWorktree = {
+  id: string;
+  path: string;
+};
+
+export function projectOccupiedWorktrees(
+  ...snapshots: Array<Pick<Snapshot, "threads">>
+): OccupiedWorktree[] {
+  const occupied: OccupiedWorktree[] = [];
+  const seen = new Set<string>();
+  for (const snapshot of snapshots) {
+    for (const thread of snapshot.threads) {
+      const path = thread.worktreePath?.trim();
+      if (thread.deletedAt || !path) continue;
+      const key = `${thread.id}\0${path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      occupied.push({ id: thread.id, path });
+    }
+  }
+  return occupied;
+}
+
+export function projectCleanableWorktrees(snapshot: Snapshot) {
+  const projects = new Map(snapshot.projects.filter((project) => !project.deletedAt).map((project) => [project.id, project]));
+  const visible = snapshot.threads.filter((thread) =>
+    !thread.deletedAt && (thread.archivedAt != null || thread.settledOverride === "settled")
+  ).sort(compareRecent);
+  const truncated = visible.length > CLEANABLE_TASK_CAP;
+  return {
+    snapshotSequence: snapshot.snapshotSequence,
+    tasks: visible.slice(0, CLEANABLE_TASK_CAP).map((thread) => projectTask(thread, projects)),
+    count: Math.min(visible.length, CLEANABLE_TASK_CAP),
+    truncated,
+    occupied: projectOccupiedWorktrees(snapshot),
   };
 }
 
@@ -139,11 +189,18 @@ export function projectProjects(snapshot: Snapshot) {
 
 export function mergeArchivedTasks(shell: ShellSnapshot, full: Snapshot): Snapshot {
   const activeIds = new Set(shell.threads.map((thread) => thread.id));
-  const archived = full.threads.filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt && thread.archivedAt);
+  const extras = full.threads
+    .filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt)
+    .map((thread) => ({
+      ...thread,
+      backgroundLiveness: Object.hasOwn(thread, "backgroundLiveness")
+        ? thread.backgroundLiveness ?? null
+        : "unknown" as const,
+    }));
   return {
     snapshotSequence: Math.max(shell.snapshotSequence, full.snapshotSequence),
     projects: full.projects,
-    threads: [...shell.threads, ...archived],
+    threads: [...shell.threads, ...extras],
     updatedAt: shell.updatedAt,
   };
 }

@@ -12,7 +12,7 @@ Skizzles also includes a Grok Build harness with full root/Worker/Explorer/Revie
 - **Lean native orchestration** — Luna Max implements, Terra Medium explores, and Sol High supplies one adversarial terminal Review. Native Ultra-style fan-out stays available without a procedural obstacle course. 🗺️🤌
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
-- **T3 Code orchestration** — a worktree-first task collaboration skill plus bundled CLI/daemon for local or private-tailnet coordination across T3 projects. 🌳
+- **T3 Code orchestration** — a worktree-first task collaboration skill plus bundled CLI/daemon for local or private-tailnet coordination across T3 projects, with an optional host-only settled-worktree artifact reaper. 🌳
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
 - **Durable role brains** — tiny generated Default/Worker/Explorer/Reviewer overlays bind each duty to a configured model and reasoning effort that survives eviction and rework. 🧠✨
 - **A practical skill shelf** — auth semantics, Cargo optimization, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.

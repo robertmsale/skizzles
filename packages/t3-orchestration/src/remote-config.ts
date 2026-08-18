@@ -1,9 +1,18 @@
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const home = process.env.HOME ?? (() => { throw new Error("HOME is required"); })();
-export const REMOTE_CONFIG_PATH = process.env.T3_ORCHESTRATION_REMOTE_CONFIG
-  ?? join(home, ".config/t3-orchestration/client.json");
+
+export function resolveRemoteConfigPath(
+  rawSelector = process.env.T3_ORCHESTRATION_REMOTE_CONFIG,
+  homeDirectory = process.env.HOME ?? home,
+): string {
+  const explicit = rawSelector?.trim();
+  if (!explicit) return join(homeDirectory, ".config/t3-orchestration/client.json");
+  return resolve(explicit);
+}
+
+export const REMOTE_CONFIG_PATH = resolveRemoteConfigPath();
 
 type RemoteConfig = { url: string };
 
@@ -24,13 +33,33 @@ export function normalizeRemoteUrl(input: string): string {
 export async function configuredRemoteUrl(): Promise<string | undefined> {
   const environmentUrl = process.env.T3_ORCHESTRATION_REMOTE_URL?.trim();
   if (environmentUrl) return normalizeRemoteUrl(environmentUrl);
+  const path = resolveRemoteConfigPath();
   try {
-    const parsed = JSON.parse(await readFile(REMOTE_CONFIG_PATH, "utf8")) as Partial<RemoteConfig>;
+    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<RemoteConfig>;
     if (typeof parsed.url !== "string") throw new Error("Remote orchestration config is malformed");
     return normalizeRemoteUrl(parsed.url);
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
     throw error;
+  }
+}
+
+export async function requireLocalReaperTransport(): Promise<void> {
+  if (process.env.T3_WORKTREE_REAPER_TRANSPORT?.trim() === "local") return;
+  const explicit = process.env.T3_ORCHESTRATION_REMOTE_CONFIG?.trim();
+  const path = resolveRemoteConfigPath();
+  if (explicit) {
+    try {
+      await readFile(path, "utf8");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(`explicit remote orchestration config is unavailable: ${path}`);
+      }
+      throw error;
+    }
+  }
+  if (await configuredRemoteUrl()) {
+    throw new Error("t3-worktree-reaper is host-local and refuses remote t3ctl mode; it only talks to the existing local t3-orchestrationd socket");
   }
 }
 

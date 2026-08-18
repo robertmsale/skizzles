@@ -191,13 +191,15 @@ describe("deterministic plugin packaging", () => {
       "package.json",
       "scripts/host-gateway.ts",
       "scripts/install-guardian.ts",
+      "scripts/install-reaper.ts",
       "scripts/install.ts",
       "src/auto-guardian-cli.ts",
       "src/cli.ts",
       "src/daemon.ts",
+      "src/worktree-reaper-cli.ts",
     ]);
     expect(await Bun.file(join(isolatedPlugin, "node_modules")).exists()).toBe(false);
-    for (const entrypoint of ["src/cli.ts", "src/daemon.ts", "src/auto-guardian-cli.ts"]) {
+    for (const entrypoint of ["src/cli.ts", "src/daemon.ts", "src/auto-guardian-cli.ts", "src/worktree-reaper-cli.ts"]) {
       expect((await stat(join(runtimeRoot, entrypoint))).mode & 0o111).not.toBe(0);
     }
     const result = Bun.spawnSync(["bun", join(runtimeRoot, "src/cli.ts"), "--help"], {
@@ -224,6 +226,38 @@ describe("deterministic plugin packaging", () => {
     expect(installResult.exitCode).toBe(0);
     expect(JSON.parse(installResult.stdout.toString())).toMatchObject({ mode: "client" });
     expect(installResult.stderr.toString()).toBe("");
+
+    const reaperHome = join(temporaryRoot, "reaper-home");
+    const fakeBin = join(reaperHome, "fake-bin");
+    await mkdir(fakeBin, { recursive: true });
+    await writeFile(join(fakeBin, "launchctl"), `#!/bin/sh
+case "$1" in
+  print) exit 1 ;;
+  bootstrap) exit 0 ;;
+  kickstart) exit 0 ;;
+  bootout) exit 0 ;;
+  *) exit 43 ;;
+esac
+`);
+    await chmod(join(fakeBin, "launchctl"), 0o755);
+    const reaperInstall = Bun.spawnSync([
+      "bun",
+      join(runtimeRoot, "scripts/install-reaper.ts"),
+    ], {
+      cwd: isolatedPlugin,
+      env: {
+        HOME: reaperHome,
+        PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        UID: String(process.getuid?.() ?? 501),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(reaperInstall.stderr.toString()).toBe("");
+    expect(reaperInstall.exitCode).toBe(0);
+    expect(JSON.parse(reaperInstall.stdout.toString())).toMatchObject({
+      launchAgentLabel: "io.github.skizzles.t3-worktree-reaper",
+    });
   });
 
   test("exercises bundled YAML manifest configuration with a fake Docker binary", async () => {
@@ -510,8 +544,14 @@ async function fixture(): Promise<string> {
   );
   await write(root, "packages/t3-orchestration/src/daemon.ts", "#!/usr/bin/env bun\nsetInterval(() => {}, 1000);\n");
   await write(root, "packages/t3-orchestration/src/auto-guardian-cli.ts", "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture guardian' }));\n");
+  await write(
+    root,
+    "packages/t3-orchestration/src/worktree-reaper-cli.ts",
+    "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture reaper' }));\n",
+  );
   await write(root, "packages/t3-orchestration/scripts/install.ts", "console.log('fixture installer');\n");
   await write(root, "packages/t3-orchestration/scripts/install-guardian.ts", "console.log('fixture guardian installer');\n");
+  await write(root, "packages/t3-orchestration/scripts/install-reaper.ts", "console.log('fixture reaper installer');\n");
   await write(root, "packages/t3-orchestration/scripts/host-gateway.ts", "export const fixture = 'host-gateway';\n");
   await write(root, "packages/t3-orchestration/README.md", "# Fixture T3 orchestration\n");
   await write(root, "packages/t3-orchestration/package.json", JSON.stringify({ name: "@skizzles/t3-orchestration", version: "0.1.0" }));

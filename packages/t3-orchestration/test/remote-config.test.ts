@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { requireLocalReaperTransport, resolveRemoteConfigPath } from "../src/remote-config.ts";
 
 const roots: string[] = [];
 
@@ -41,5 +42,31 @@ describe("remote client configuration", () => {
 
     expect((await run(["remote", "clear"], root)).exitCode).toBe(0);
     expect(JSON.parse((await run(["remote", "status"], root)).stdout).url).toBeNull();
+  });
+
+  test("trims padded remote-config selectors to one canonical path", () => {
+    expect(resolveRemoteConfigPath(" remote.json ", "/tmp/home")).toBe(resolve("remote.json"));
+    expect(resolveRemoteConfigPath(undefined, "/tmp/home")).toBe(join("/tmp/home", ".config/t3-orchestration/client.json"));
+  });
+
+  test("an explicit local reaper transport pin ignores remote t3ctl selectors", async () => {
+    const previous = {
+      transport: process.env.T3_WORKTREE_REAPER_TRANSPORT,
+      url: process.env.T3_ORCHESTRATION_REMOTE_URL,
+      config: process.env.T3_ORCHESTRATION_REMOTE_CONFIG,
+    };
+    process.env.T3_WORKTREE_REAPER_TRANSPORT = "local";
+    process.env.T3_ORCHESTRATION_REMOTE_URL = "https://host.example.ts.net";
+    process.env.T3_ORCHESTRATION_REMOTE_CONFIG = "/tmp/missing-remote.json";
+    try {
+      await expect(requireLocalReaperTransport()).resolves.toBeUndefined();
+    } finally {
+      if (previous.transport === undefined) delete process.env.T3_WORKTREE_REAPER_TRANSPORT;
+      else process.env.T3_WORKTREE_REAPER_TRANSPORT = previous.transport;
+      if (previous.url === undefined) delete process.env.T3_ORCHESTRATION_REMOTE_URL;
+      else process.env.T3_ORCHESTRATION_REMOTE_URL = previous.url;
+      if (previous.config === undefined) delete process.env.T3_ORCHESTRATION_REMOTE_CONFIG;
+      else process.env.T3_ORCHESTRATION_REMOTE_CONFIG = previous.config;
+    }
   });
 });

@@ -25,6 +25,7 @@ export type CommandDependencies = {
     reason?: string;
     expected?: { requestKind: "command" | "file-read" | "file-change" | null; command: string | null; cwd: string | null; toolName: string | null };
   }): Promise<unknown>;
+  listCleanableWorktrees(): Promise<unknown>;
 };
 
 function parseExpectedAction(value: unknown): {
@@ -113,6 +114,7 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
       decision: "decline",
       ...(command.reason ? { reason: String(command.reason) } : {}),
     });
+    case "worktrees.listCleanable": return dependencies.listCleanableWorktrees();
     default: throw new Error(`Unknown operation: ${String(command.op)}`);
   }
 }

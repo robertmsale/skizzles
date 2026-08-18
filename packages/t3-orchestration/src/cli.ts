@@ -24,13 +24,14 @@ t3ctl tasks title ID --title TITLE
 t3ctl tasks {archive|unarchive|pin|unpin|settle|unsettle|interrupt} ID
 t3ctl tasks approvals [--project ID]
 t3ctl tasks approve ID [REQUEST_ID]
-t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]`;
+t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]
+t3ctl worktrees clean-settled [--dry-run] [--config PATH]`;
 const [group, action, ...args] = process.argv.slice(2);
 if (group === "--help" || group === "-h") {
   console.log(JSON.stringify({ help: USAGE }));
   process.exit(0);
 }
-const booleanOptions = new Set(["include-settled", "include-archived"]);
+const booleanOptions = new Set(["include-settled", "include-archived", "dry-run"]);
 const options = new Map<string, string[]>();
 const positionals: string[] = [];
 for (let i = 0; i < args.length; i++) {
@@ -152,9 +153,24 @@ const payload = group === "projects" && action === "import" ? { op: "projects.im
   : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() }
   : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() }
   : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() }
+  : group === "worktrees" && action === "clean-settled" ? { op: "worktrees.clean-settled", dryRun: option("dry-run") === "true" }
   : (() => { throw new Error(`Usage:\n  ${USAGE.replaceAll("\n", "\n  ")}`); })();
 
 try {
+  if (payload.op === "worktrees.clean-settled") {
+    const { requireLocalReaperTransport } = await import("./remote-config.ts");
+    await requireLocalReaperTransport();
+    const { cleanSettledWorktrees, createDefaultReaperDependencies, formatReaperLogs } = await import("./worktree-reaper.ts");
+    const { loadReaperConfig } = await import("./worktree-reaper-config.ts");
+    const loaded = await loadReaperConfig(option("config"));
+    const report = await cleanSettledWorktrees(createDefaultReaperDependencies((command) => daemonRequest(command)), {
+      dryRun: payload.dryRun === true,
+      config: loaded.config,
+      configPath: loaded.path,
+    });
+    console.log(JSON.stringify({ ...report, log: formatReaperLogs(report) }, null, 2));
+    process.exit(report.ok ? 0 : 1);
+  }
   const result = await daemonRequest(payload, undefined, clientDeadlineMs, await configuredRemoteUrl());
   console.log(JSON.stringify(result.ok ? result.result : { error: result.error }, null, 2));
   process.exit(result.ok ? 0 : 1);
