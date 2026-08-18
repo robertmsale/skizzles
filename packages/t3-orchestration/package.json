@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "t3ctl": "./src/cli.ts", "t3-orchestrationd": "./src/daemon.ts" },
+  "bin": { "t3ctl": "./src/cli.ts", "t3-orchestrationd": "./src/daemon.ts", "t3-worktree-reaper": "./src/worktree-reaper-cli.ts" },
   "scripts": {
     "check": "bun test",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "install-global": "bun run scripts/install.ts",
-    "install-client": "bun run scripts/install.ts --client-only"
+    "install-client": "bun run scripts/install.ts --client-only",
+    "install-reaper": "bun run scripts/install-reaper.ts"
   }
 }

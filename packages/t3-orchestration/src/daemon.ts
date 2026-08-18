@@ -26,6 +26,7 @@ const commandDependencies = {
   interruptTask: t3.interruptTask,
   listTaskApprovals: t3.listTaskApprovals,
   resolveTaskApproval: t3.resolveTaskApproval,
+  listCleanableWorktrees: t3.listCleanableWorktrees,
 };
 
 const dispatch = (command: { op: string; [key: string]: unknown }) => executeCommand(command, commandDependencies);

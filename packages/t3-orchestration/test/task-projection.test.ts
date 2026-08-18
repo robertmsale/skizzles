@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mergeArchivedTasks, projectProjects, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
-import type { ShellSnapshot, Snapshot, T3ThreadShell } from "../src/protocol.ts";
+import { CLEANABLE_TASK_CAP, mergeArchivedTasks, projectCleanableWorktrees, projectOccupiedWorktrees, projectedBackgroundLiveness, projectProjects, projectTask, projectTaskList, taskCursor, taskPhase, waitForTasks } from "../src/task-projection.ts";
+import type { ShellSnapshot, Snapshot, T3Thread, T3ThreadShell } from "../src/protocol.ts";
 
 const project = { id: "project", title: "Project", workspaceRoot: "/repo", deletedAt: null };
 const thread = (overrides: Partial<T3ThreadShell> = {}): T3ThreadShell => ({
@@ -93,6 +93,118 @@ describe("task list projection", () => {
 
   test("rejects unbounded list requests from raw daemon clients", () => {
     expect(() => projectTaskList({ snapshotSequence: 1, projects: [project], threads: [] }, { limit: 201, includeArchived: false, includeSettled: false })).toThrow("1 through 200");
+  });
+
+  test("exposes worktreePath and workspaceRoot on list and status projections", () => {
+    expect(projectTask(thread(), new Map([["project", project]]))).toMatchObject({
+      id: "task",
+      worktreePath: "/worktree",
+      workspaceRoot: "/repo",
+      branch: "t3code/task",
+    });
+  });
+
+  test("maps unrecognized and absent liveness to unknown for settled and archived tasks", () => {
+    const settled = thread({ id: "settled-only", settledOverride: "settled" });
+    const { backgroundLiveness: _drop, ...settledAbsent } = settled;
+    expect(projectedBackgroundLiveness({ ...settled, backgroundLiveness: "paused" as "unknown" })).toBe("unknown");
+    expect(projectedBackgroundLiveness(settledAbsent as typeof settled)).toBe("unknown");
+    expect(projectedBackgroundLiveness(thread({ settledOverride: "settled", backgroundLiveness: null }))).toBe(null);
+  });
+
+  test("marks archived rows missing liveness as unknown instead of idle", () => {
+    const { backgroundLiveness: _ignored, ...archivedOnly } = thread({ id: "archived-only", archivedAt: "now", session: { status: "stopped" } });
+    expect(Object.hasOwn(archivedOnly, "backgroundLiveness")).toBe(false);
+    expect(projectedBackgroundLiveness(archivedOnly as T3Thread)).toBe("unknown");
+    const merged = mergeArchivedTasks(shell([]), {
+      snapshotSequence: 12,
+      projects: [project],
+      threads: [archivedOnly as T3Thread],
+    });
+    const listed = projectCleanableWorktrees(merged);
+    expect(listed.tasks).toEqual([expect.objectContaining({
+      id: "archived-only",
+      archived: true,
+      backgroundLiveness: "unknown",
+    })]);
+  });
+
+  test("lists every settled or archived task for the worktree reaper", () => {
+    const snapshot: Snapshot = {
+      snapshotSequence: 10,
+      projects: [project],
+      threads: [
+        thread({ id: "active" }),
+        thread({ id: "settled", settledOverride: "settled", session: { status: "ready" } }),
+        thread({ id: "archived", archivedAt: "now", session: { status: "stopped" } }),
+        thread({ id: "deleted", deletedAt: "now", settledOverride: "settled" }),
+      ],
+    };
+    const listed = projectCleanableWorktrees(snapshot);
+    expect(listed.tasks.map(({ id, worktreePath, workspaceRoot }) => ({ id, worktreePath, workspaceRoot }))).toEqual([
+      { id: "settled", worktreePath: "/worktree", workspaceRoot: "/repo" },
+      { id: "archived", worktreePath: "/worktree", workspaceRoot: "/repo" },
+    ]);
+    expect(listed.truncated).toBe(false);
+    expect(listed.occupied).toEqual([
+      { id: "active", path: "/worktree" },
+      { id: "settled", path: "/worktree" },
+      { id: "archived", path: "/worktree" },
+    ]);
+  });
+
+  test("marks cleanable-task enumeration truncated at the 5000-task cap and omits the oldest", () => {
+    const snapshot: Snapshot = {
+      snapshotSequence: 10,
+      projects: [project],
+      threads: Array.from({ length: CLEANABLE_TASK_CAP + 1 }, (_, index) => thread({
+        id: `settled-${index}`,
+        settledOverride: "settled",
+        session: { status: "ready" },
+        worktreePath: `/worktree-${index}`,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, index)).toISOString(),
+      })),
+    };
+    const listed = projectCleanableWorktrees(snapshot);
+    expect(listed.truncated).toBe(true);
+    expect(listed.count).toBe(CLEANABLE_TASK_CAP);
+    expect(listed.tasks).toHaveLength(CLEANABLE_TASK_CAP);
+    expect(listed.tasks.some((entry) => entry.id === "settled-0")).toBe(false);
+    expect(listed.tasks[0]?.id).toBe(`settled-${CLEANABLE_TASK_CAP}`);
+    expect(listed.occupied).toHaveLength(CLEANABLE_TASK_CAP + 1);
+  });
+
+  test("keeps a newly active full-only thread so occupancy cannot drop a live owner", () => {
+    const settled = thread({
+      id: "settled-A",
+      settledOverride: "settled",
+      session: { status: "ready" },
+      worktreePath: "/repo/.t3/worktrees/repo/shared",
+      branch: "t3code/shared",
+    });
+    const activeB = thread({
+      id: "running-B",
+      session: { status: "running" },
+      worktreePath: "/repo/.t3/worktrees/repo/shared",
+      branch: "t3code/shared",
+      updatedAt: "2026-08-17T00:00:01Z",
+    });
+    const shellOnly = shell([settled]);
+    const newerFull = {
+      snapshotSequence: 12,
+      projects: [project],
+      threads: [settled, activeB],
+    };
+    const merged = mergeArchivedTasks(shellOnly, newerFull);
+    expect(merged.threads.map((entry) => entry.id)).toEqual(["settled-A", "running-B"]);
+    expect(projectOccupiedWorktrees(shellOnly, newerFull)).toEqual([
+      { id: "settled-A", path: "/repo/.t3/worktrees/repo/shared" },
+      { id: "running-B", path: "/repo/.t3/worktrees/repo/shared" },
+    ]);
+    expect(projectCleanableWorktrees(merged).occupied).toEqual([
+      { id: "settled-A", path: "/repo/.t3/worktrees/repo/shared" },
+      { id: "running-B", path: "/repo/.t3/worktrees/repo/shared" },
+    ]);
   });
 });
 

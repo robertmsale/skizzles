@@ -49,6 +49,7 @@ export type T3Thread = {
   pinOrderKey?: string | null;
   deletedAt?: string | null;
   session: T3Session | null;
+  backgroundLiveness?: "working" | "monitoring" | "unknown" | null;
 };
 
 export type T3ThreadShell = T3Thread & {
@@ -56,7 +57,7 @@ export type T3ThreadShell = T3Thread & {
   hasPendingApprovals: boolean;
   hasPendingUserInput: boolean;
   hasActionableProposedPlan: boolean;
-  backgroundLiveness?: "working" | "monitoring" | null;
+  backgroundLiveness?: "working" | "monitoring" | "unknown" | null;
 };
 
 export type T3Message = {

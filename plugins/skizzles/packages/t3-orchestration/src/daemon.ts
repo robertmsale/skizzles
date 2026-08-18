@@ -4,7 +4,7 @@
 // packages/t3-orchestration/src/daemon.ts
 import { connect, createServer as createServer2 } from "net";
 import { chmodSync } from "fs";
-import { lstat, mkdir, unlink } from "fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, unlink as unlink2 } from "fs/promises";
 import { dirname } from "path";
 
 // packages/t3-orchestration/src/config.ts
@@ -392,6 +392,16 @@ function taskCursor(thread) {
 function projectName(projects, thread) {
   return projects.get(thread.projectId)?.title ?? null;
 }
+function projectedBackgroundLiveness(thread) {
+  if (!Object.hasOwn(thread, "backgroundLiveness"))
+    return "unknown";
+  const value = thread.backgroundLiveness;
+  if (value === null)
+    return null;
+  if (value === "working" || value === "monitoring" || value === "unknown")
+    return value;
+  return "unknown";
+}
 function projectTask(thread, projects, pinnedIndex) {
   const shell = thread;
   return {
@@ -405,14 +415,46 @@ function projectTask(thread, projects, pinnedIndex) {
     pendingApproval: shell.hasPendingApprovals ?? false,
     pendingUserInput: shell.hasPendingUserInput ?? false,
     actionablePlan: shell.hasActionableProposedPlan ?? false,
-    backgroundLiveness: shell.backgroundLiveness ?? null,
+    backgroundLiveness: projectedBackgroundLiveness(thread),
     pinnedIndex: pinnedIndex ?? null,
     archived: thread.archivedAt != null,
     deleted: thread.deletedAt != null,
     settled: thread.settledOverride === "settled",
     branch: thread.branch,
+    worktreePath: thread.worktreePath,
+    workspaceRoot: projects.get(thread.projectId)?.workspaceRoot ?? null,
     updatedAt: thread.updatedAt ?? null,
     cursor: taskCursor(thread)
+  };
+}
+var CLEANABLE_TASK_CAP = 5000;
+function projectOccupiedWorktrees(...snapshots) {
+  const occupied = [];
+  const seen = new Set;
+  for (const snapshot of snapshots) {
+    for (const thread of snapshot.threads) {
+      const path = thread.worktreePath?.trim();
+      if (thread.deletedAt || !path)
+        continue;
+      const key = `${thread.id}\x00${path}`;
+      if (seen.has(key))
+        continue;
+      seen.add(key);
+      occupied.push({ id: thread.id, path });
+    }
+  }
+  return occupied;
+}
+function projectCleanableWorktrees(snapshot) {
+  const projects = new Map(snapshot.projects.filter((project) => !project.deletedAt).map((project) => [project.id, project]));
+  const visible = snapshot.threads.filter((thread) => !thread.deletedAt && (thread.archivedAt != null || thread.settledOverride === "settled")).sort(compareRecent);
+  const truncated = visible.length > CLEANABLE_TASK_CAP;
+  return {
+    snapshotSequence: snapshot.snapshotSequence,
+    tasks: visible.slice(0, CLEANABLE_TASK_CAP).map((thread) => projectTask(thread, projects)),
+    count: Math.min(visible.length, CLEANABLE_TASK_CAP),
+    truncated,
+    occupied: projectOccupiedWorktrees(snapshot)
   };
 }
 function comparePinned(left, right) {
@@ -452,11 +494,14 @@ function projectProjects(snapshot) {
 }
 function mergeArchivedTasks(shell, full) {
   const activeIds = new Set(shell.threads.map((thread) => thread.id));
-  const archived = full.threads.filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt && thread.archivedAt);
+  const extras = full.threads.filter((thread) => !activeIds.has(thread.id) && !thread.deletedAt).map((thread) => ({
+    ...thread,
+    backgroundLiveness: Object.hasOwn(thread, "backgroundLiveness") ? thread.backgroundLiveness ?? null : "unknown"
+  }));
   return {
     snapshotSequence: Math.max(shell.snapshotSequence, full.snapshotSequence),
     projects: full.projects,
-    threads: [...shell.threads, ...archived],
+    threads: [...shell.threads, ...extras],
     updatedAt: shell.updatedAt
   };
 }
@@ -495,6 +540,463 @@ async function waitForTasks(input, loadSnapshot, sleep = Bun.sleep, clock = Date
     if (remaining <= 0)
       return { timedOut: true, ready: [], tasks };
     await sleep(Math.min(1000, remaining));
+  }
+}
+
+// packages/t3-orchestration/src/worktree-reaper-lease.ts
+import { createHash } from "crypto";
+import { link, lstat, mkdir, open, rename, rm, unlink, writeFile } from "fs/promises";
+import { homedir } from "os";
+import { join as join2 } from "path";
+function cleanLeaseHome(home2 = process.env.T3_HOME?.trim() || join2(process.env.HOME || homedir(), ".t3")) {
+  return join2(home2, "worktree-reaper-leases");
+}
+function cleanLeaseLockPath(worktreePath, home2) {
+  const digest = createHash("sha256").update(worktreePath).digest("hex");
+  return join2(cleanLeaseHome(home2), digest);
+}
+function defaultProcessProbe(pid) {
+  process.kill(pid, 0);
+}
+function defaultProcessStartKey(pid) {
+  const result = Bun.spawnSync(["ps", "-p", String(pid), "-o", "lstart="], {
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  if (result.exitCode !== 0)
+    return null;
+  const text = result.stdout.toString().trim();
+  return text || null;
+}
+function isLivePid(pid, processProbe) {
+  try {
+    processProbe(pid);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function parseLeaseRecord(value) {
+  if (!value || typeof value !== "object")
+    return null;
+  const raw = value;
+  if (typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.threadId !== "string" || raw.threadId.trim() === "" || typeof raw.path !== "string" || raw.path.trim() === "" || raw.role !== "clean" && raw.role !== "turn-start" || !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0) {
+    return null;
+  }
+  return {
+    token: raw.token,
+    threadId: raw.threadId,
+    path: raw.path,
+    role: raw.role,
+    pid: raw.pid,
+    startKey: typeof raw.startKey === "string" || raw.startKey === null ? raw.startKey : null,
+    acquiredAt: typeof raw.acquiredAt === "string" ? raw.acquiredAt : ""
+  };
+}
+function isLiveLeaseRecord(record, fns = {}) {
+  const processProbe = fns.processProbe ?? defaultProcessProbe;
+  const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  if (typeof record.startKey !== "string" || record.startKey.trim() === "")
+    return false;
+  if (!isLivePid(record.pid, processProbe))
+    return false;
+  const currentStart = processStartKey(record.pid);
+  if (currentStart === null || currentStart !== record.startKey)
+    return false;
+  return true;
+}
+function lockIdentity(info) {
+  if (info.dev < 0n || info.ino <= 0n)
+    return;
+  return { dev: info.dev, ino: info.ino };
+}
+function sameLockIdentity(left, right) {
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+async function hasIdentity(path, expected) {
+  try {
+    const current = lockIdentity(await lstat(path, { bigint: true }));
+    return Boolean(current && current.dev === expected.dev && current.ino === expected.ino);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+async function readLiveCleanLease(worktreePath, home2, fns = {}) {
+  const path = cleanLeaseLockPath(worktreePath, home2);
+  try {
+    const record = parseLeaseRecord(JSON.parse(await Bun.file(path).text()));
+    if (!record || !isLiveLeaseRecord(record, fns))
+      return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+async function inspectLock(lockPath, fns) {
+  try {
+    const identity = lockIdentity(await lstat(lockPath, { bigint: true }));
+    let record = null;
+    try {
+      record = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
+    } catch {
+      record = null;
+    }
+    return { identity, record, live: Boolean(record && isLiveLeaseRecord(record, fns)) };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return { identity: undefined, record: null, live: false };
+    }
+    throw error;
+  }
+}
+function reclaimClaimPath(lockPath) {
+  return `${lockPath}.reclaim`;
+}
+function parseReclaimClaim(value) {
+  if (!value || typeof value !== "object")
+    return null;
+  const raw = value;
+  if (!Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0 || typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.createdAt !== "string") {
+    return null;
+  }
+  return {
+    pid: raw.pid,
+    startKey: typeof raw.startKey === "string" ? raw.startKey : null,
+    token: raw.token,
+    createdAt: raw.createdAt
+  };
+}
+function isLiveReclaimClaim(record, fns) {
+  return isLiveLeaseRecord({
+    token: record.token,
+    threadId: "reclaim",
+    path: "reclaim",
+    role: "clean",
+    pid: record.pid,
+    startKey: record.startKey,
+    acquiredAt: record.createdAt
+  }, fns);
+}
+async function unlinkIfSameIdentity(path, inspected, hooks = {}) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!opened || opened.dev !== inspected.dev || opened.ino !== inspected.ino)
+      return false;
+    if (hooks.afterStat)
+      await hooks.afterStat();
+    const trash = `${path}.unlinking-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename(path, trash);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+    const movedAtRename = await inspectOpenIdentity(trash);
+    if (hooks.afterMoved)
+      await hooks.afterMoved(trash);
+    if (!sameLockIdentity(movedAtRename, inspected)) {
+      if (hooks.afterMismatch)
+        await hooks.afterMismatch(trash);
+      await restoreNamedIdentity(trash, path, movedAtRename);
+      return false;
+    }
+    if (hooks.afterVerified)
+      await hooks.afterVerified(trash);
+    const stillMoved = await inspectOpenIdentity(trash);
+    if (!sameLockIdentity(stillMoved, inspected)) {
+      return false;
+    }
+    await disposeNamedIdentity(trash, inspected);
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+async function restoreNamedIdentity(source, destination, expected) {
+  if (!expected)
+    return;
+  const current = await inspectOpenIdentity(source);
+  if (!sameLockIdentity(current, expected))
+    return;
+  try {
+    await link(source, destination);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code !== "EEXIST")
+      throw error;
+    return;
+  }
+  const published = await inspectOpenIdentity(destination);
+  if (!sameLockIdentity(published, expected))
+    return;
+  const stillSource = await inspectOpenIdentity(source);
+  if (sameLockIdentity(stillSource, expected)) {
+    await disposeNamedIdentity(source, expected);
+  }
+}
+async function disposeNamedIdentity(path, inspected) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return true;
+    }
+    throw error;
+  }
+  try {
+    const opened = lockIdentity(await handle.stat({ bigint: true }));
+    if (!sameLockIdentity(opened, inspected))
+      return false;
+    const secret = `${path}.gc-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await rename(path, secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return true;
+      }
+      throw error;
+    }
+    const moved = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(moved, inspected)) {
+      try {
+        await link(secret, path);
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (code !== "EEXIST")
+          throw error;
+      }
+      return false;
+    }
+    const held = lockIdentity(await handle.stat({ bigint: true }));
+    const named = await inspectOpenIdentity(secret);
+    if (!sameLockIdentity(held, inspected) || !sameLockIdentity(named, inspected) || !held) {
+      return false;
+    }
+    try {
+      await unlink(secret);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        return true;
+      }
+      throw error;
+    }
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+async function inspectOpenIdentity(path) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  try {
+    return lockIdentity(await handle.stat({ bigint: true }));
+  } finally {
+    await handle.close();
+  }
+}
+async function recoverOrphanReclaimClaim(lockPath, fns) {
+  const claimPath = reclaimClaimPath(lockPath);
+  try {
+    const identity = lockIdentity(await lstat(claimPath, { bigint: true }));
+    if (!identity)
+      return false;
+    let record = null;
+    try {
+      record = parseReclaimClaim(JSON.parse(await Bun.file(claimPath).text()));
+    } catch {
+      record = null;
+    }
+    if (record && isLiveReclaimClaim(record, fns))
+      return false;
+    return await unlinkIfSameIdentity(claimPath, identity);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return true;
+    }
+    throw error;
+  }
+}
+async function withReclaimMutex(lockPath, fn, fns = {}, hooks = {}) {
+  const token2 = crypto.randomUUID();
+  const claimPath = reclaimClaimPath(lockPath);
+  const processStartKey = fns.processStartKey ?? defaultProcessStartKey;
+  const startKey = processStartKey(process.pid);
+  if (typeof startKey !== "string" || startKey.trim() === "") {
+    throw new Error("could not record process start key for worktree lease reclaim");
+  }
+  const record = {
+    pid: process.pid,
+    startKey,
+    token: token2,
+    createdAt: new Date().toISOString()
+  };
+  for (let attempt = 0;attempt < 3; attempt++) {
+    await recoverOrphanReclaimClaim(lockPath, fns);
+    const candidate = `${claimPath}.candidate-${process.pid}-${token2}-${attempt}`;
+    await writeFile(candidate, `${JSON.stringify(record)}
+`, { mode: 384, flag: "wx" });
+    const candidateIdentity = lockIdentity(await lstat(candidate, { bigint: true }));
+    let claimed = false;
+    try {
+      if (!candidateIdentity)
+        throw new Error("could not identity a reclaim claim candidate");
+      try {
+        await link(candidate, claimPath);
+        claimed = true;
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (code === "EEXIST" || code === "ENOTEMPTY") {
+          if (attempt === 2)
+            throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+          continue;
+        }
+        throw error;
+      }
+      if (!await hasIdentity(claimPath, candidateIdentity)) {
+        if (attempt === 2)
+          throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+        continue;
+      }
+      if (hooks.beforeUnlink)
+        await hooks.beforeUnlink();
+      return await fn();
+    } finally {
+      await rm(candidate, { force: true });
+      if (claimed && candidateIdentity)
+        await unlinkIfSameIdentity(claimPath, candidateIdentity);
+    }
+  }
+  throw new Error(`worktree lease reclaim is busy at ${lockPath}`);
+}
+async function reclaimStaleLock(lockPath, inspected, fns, hooks = {}) {
+  return await withReclaimMutex(lockPath, async () => {
+    if (!await hasIdentity(lockPath, inspected))
+      return false;
+    return await unlinkIfSameIdentity(lockPath, inspected);
+  }, fns, hooks);
+}
+function reservationError(path, existing, requested) {
+  if (existing?.role === "clean" || existing == null && requested === "clean") {
+    return new Error(existing ? `worktree ${path} is reserved for artifact cleanup by task ${existing.threadId}` : `worktree ${path} already has a clean lease`);
+  }
+  if (existing?.role === "turn-start") {
+    return new Error(`worktree ${path} has a turn start in progress for task ${existing.threadId}`);
+  }
+  return new Error(`worktree ${path} already has a clean lease`);
+}
+async function acquireWorktreeGate(path, threadId, role, options = {}) {
+  const token2 = crypto.randomUUID();
+  const lockPath = cleanLeaseLockPath(path, options.home);
+  await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 448 });
+  const processStartKey = options.processStartKey ?? defaultProcessStartKey;
+  const startKey = processStartKey(process.pid);
+  if (typeof startKey !== "string" || startKey.trim() === "") {
+    throw new Error("could not record process start key for worktree lease");
+  }
+  const record = {
+    token: token2,
+    threadId,
+    path,
+    role,
+    pid: process.pid,
+    startKey,
+    acquiredAt: (options.now ?? (() => new Date().toISOString()))()
+  };
+  const fns = {
+    processProbe: options.processProbe,
+    processStartKey: options.processStartKey
+  };
+  let acquiredIdentity;
+  for (let attempt = 0;attempt < 3; attempt++) {
+    const candidate = `${lockPath}.candidate-${process.pid}-${token2}-${attempt}`;
+    await writeFile(candidate, `${JSON.stringify(record)}
+`, { mode: 384, flag: "wx" });
+    try {
+      await link(candidate, lockPath);
+      acquiredIdentity = lockIdentity(await lstat(lockPath, { bigint: true }));
+      break;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (code !== "EEXIST")
+        throw error;
+      const inspected = await inspectLock(lockPath, fns);
+      if (inspected.live)
+        throw reservationError(path, inspected.record, role);
+      if (!inspected.identity) {
+        if (attempt === 2)
+          throw reservationError(path, inspected.record, role);
+        continue;
+      }
+      const reclaimed = await reclaimStaleLock(lockPath, inspected.identity, fns, { beforeUnlink: options.beforeUnlink });
+      if (!reclaimed && attempt === 2)
+        throw reservationError(path, await readLiveCleanLease(path, options.home, fns), role);
+    } finally {
+      await rm(candidate, { force: true });
+    }
+  }
+  if (!acquiredIdentity)
+    throw reservationError(path, await readLiveCleanLease(path, options.home, fns), role);
+  const heldIdentity = acquiredIdentity;
+  const controller = new AbortController;
+  return {
+    token: token2,
+    path,
+    threadId,
+    role,
+    signal: controller.signal,
+    abort() {
+      if (!controller.signal.aborted)
+        controller.abort();
+    },
+    async release() {
+      if (!controller.signal.aborted)
+        controller.abort();
+      try {
+        await withReclaimMutex(lockPath, async () => {
+          const current = parseLeaseRecord(JSON.parse(await Bun.file(lockPath).text()));
+          if (!current || current.token !== token2)
+            return;
+          if (!await hasIdentity(lockPath, heldIdentity))
+            return;
+          await unlinkIfSameIdentity(lockPath, heldIdentity);
+        }, fns);
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+          return;
+        if (error instanceof SyntaxError)
+          return;
+      }
+    }
+  };
+}
+async function withWorktreeGate(path, threadId, role, fn, options = {}) {
+  const gate = await acquireWorktreeGate(path, threadId, role, options);
+  try {
+    return await fn(gate);
+  } finally {
+    await gate.release();
   }
 }
 
@@ -583,6 +1085,14 @@ var taskStatus = async (id) => {
     return projectTask(active, new Map(shell.projects.map((project) => [project.id, project])));
   const [result, full] = await Promise.all([threadSnapshot(id, 1), snapshot()]);
   return projectTask(result.thread, new Map(full.projects.map((project) => [project.id, project])));
+};
+var listCleanableWorktrees = async () => {
+  const [shell, full] = await Promise.all([shellSnapshot(), snapshot()]);
+  const merged = mergeArchivedTasks(shell, full);
+  return {
+    ...projectCleanableWorktrees(merged),
+    occupied: projectOccupiedWorktrees(shell, full)
+  };
 };
 var HISTORY_MESSAGE_CHAR_LIMIT = 8000;
 var HISTORY_TOTAL_CHAR_LIMIT = 32000;
@@ -701,7 +1211,35 @@ async function requestRpc(tag, payload) {
   });
 }
 var requiresRpcDispatch = (command) => command.type === "thread.turn.start" && Boolean(command.bootstrap) || command.type === "thread.archive" || command.type === "thread.settle";
-var dispatch = (command) => requiresRpcDispatch(command) ? requestRpc("orchestration.dispatchCommand", command) : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
+function isExistingTaskTurnStart(command) {
+  return command.type === "thread.turn.start" && !command.bootstrap;
+}
+var transmitDispatch = (command) => requiresRpcDispatch(command) ? requestRpc("orchestration.dispatchCommand", command) : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
+async function resolveExistingTaskTurnPath(threadId, loadThread = thread) {
+  const target = await loadThread(threadId);
+  const claimed = target.worktreePath?.trim();
+  if (!claimed)
+    return `thread:${threadId}`;
+  try {
+    return await realpath(claimed);
+  } catch {
+    return claimed;
+  }
+}
+async function startExistingTaskTurn(command, deps = {}) {
+  const threadId = typeof command.threadId === "string" ? command.threadId.trim() : "";
+  if (!threadId)
+    throw new Error("thread.turn.start requires a thread id");
+  const path = await (deps.resolvePath ?? resolveExistingTaskTurnPath)(threadId);
+  return withWorktreeGate(path, threadId, "turn-start", async () => (deps.dispatchCommand ?? transmitDispatch)(command), { home: deps.home });
+}
+async function rawDispatch(command, deps = {}) {
+  if (isExistingTaskTurnStart(command)) {
+    return startExistingTaskTurn(command, { ...deps, dispatchCommand: deps.dispatchCommand ?? transmitDispatch });
+  }
+  return (deps.dispatchCommand ?? transmitDispatch)(command);
+}
+var dispatch = rawDispatch;
 function requireAvailableProviderSelection(config, selection) {
   const providers = config && typeof config === "object" && "providers" in config ? config.providers : undefined;
   if (!Array.isArray(providers))
@@ -832,7 +1370,7 @@ async function sendTask(threadId, message) {
   const target = await thread(threadId);
   const selection = requireSelection(target.modelSelection);
   const providerDriver = await preflightProviderSelection(selection);
-  return dispatch(taskTurnCommand(target, message, id(), id(), now(), providerDriver));
+  return await startExistingTaskTurn(taskTurnCommand(target, message, id(), id(), now(), providerDriver));
 }
 function taskTitleCommand(threadId, title, commandId = id()) {
   return { type: "thread.meta.update", commandId, threadId, title };
@@ -902,7 +1440,7 @@ async function resolveTaskApproval(input) {
 
 // packages/t3-orchestration/src/identity.ts
 import { Database } from "bun:sqlite";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 function rootProviderId(id2, db) {
   const edges = db.query("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges").all();
   const parentByChild = new Map(edges.map((edge) => [edge.child_thread_id, edge.parent_thread_id]));
@@ -919,10 +1457,10 @@ function resolveCallerThread(correlationId) {
   const codexThreadId = typeof correlationId === "string" ? correlationId.trim() : "";
   if (!codexThreadId)
     throw new Error("CODEX_THREAD_ID is required for task-to-task orchestration");
-  const codexDb = new Database(join2(CODEX_HOME, "state_5.sqlite"), { readonly: true });
+  const codexDb = new Database(join3(CODEX_HOME, "state_5.sqlite"), { readonly: true });
   const root = rootProviderId(codexThreadId, codexDb);
   codexDb.close();
-  const t3Db = new Database(join2(T3_HOME, "userdata/state.sqlite"), { readonly: true });
+  const t3Db = new Database(join3(T3_HOME, "userdata/state.sqlite"), { readonly: true });
   const rows = t3Db.query("SELECT thread_id, project_id FROM projection_threads WHERE json_extract((SELECT resume_cursor_json FROM provider_session_runtime WHERE thread_id = projection_threads.thread_id), '$.threadId') = ? AND deleted_at IS NULL").all(root);
   t3Db.close();
   if (rows.length !== 1)
@@ -1009,6 +1547,8 @@ async function executeCommand(command, dependencies) {
         decision: "decline",
         ...command.reason ? { reason: String(command.reason) } : {}
       });
+    case "worktrees.listCleanable":
+      return dependencies.listCleanableWorktrees();
     default:
       throw new Error(`Unknown operation: ${String(command.op)}`);
   }
@@ -1119,7 +1659,8 @@ var commandDependencies = {
   settleTask,
   interruptTask,
   listTaskApprovals,
-  resolveTaskApproval
+  resolveTaskApproval,
+  listCleanableWorktrees
 };
 var dispatch2 = (command) => executeCommand(command, commandDependencies);
 var server = createServer2((socket) => {
@@ -1170,7 +1711,7 @@ var shutdown = async (exitCode) => {
     return;
   shuttingDown = true;
   await Promise.all([closeServer(gateway), closeServer(server)]);
-  await unlink(SOCKET_PATH).catch(() => {
+  await unlink2(SOCKET_PATH).catch(() => {
     return;
   });
   process.exit(exitCode);
@@ -1179,15 +1720,15 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => void shutdown(0));
 }
 process.umask(63);
-await mkdir(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
+await mkdir2(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
 var prepareSocket = async (path, isLive) => {
   try {
-    const existing = await lstat(path);
+    const existing = await lstat2(path);
     if (!existing.isSocket())
       throw new Error(`Refusing to replace non-socket path ${path}`);
     if (await isLive())
       throw new Error(`Daemon already running on ${path}`);
-    await unlink(path);
+    await unlink2(path);
   } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("ENOENT"))
       throw error;
@@ -1233,7 +1774,7 @@ if (gateway) {
     });
   } catch (error) {
     await Promise.all([closeServer(gateway), closeServer(server)]);
-    await unlink(SOCKET_PATH).catch(() => {
+    await unlink2(SOCKET_PATH).catch(() => {
       return;
     });
     throw error;

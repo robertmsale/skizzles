@@ -44,6 +44,103 @@ anything:
 bun run packages/t3-orchestration/scripts/install.ts --uninstall
 ```
 
+### Settled-worktree artifact reaper
+
+T3 settle/archive does not delete worktrees or their build artifacts. The
+optional host-only sidecar `t3-worktree-reaper` talks to the existing
+`t3-orchestrationd` Unix socket, then runs configured cleaners inside
+registered Git worktrees for tasks that are `settled=true` or `archived=true`.
+
+With no host config, detection is generic: `cargo clean --target-dir target`
+in any directory that has `Cargo.toml` plus `target/`, and `flutter clean` in
+any directory that has a Flutter `pubspec.yaml` plus `build/`. Nothing in the
+public defaults names a particular application or repository.
+
+It will not:
+
+- start or install a second orchestration daemon
+- write `io.github.t3-orchestration.daemon`
+- `git worktree remove` or delete a worktree directory, source, or `.git`
+- clean the project's primary checkout
+- clean a claimed worktree whose registered Git branch does not match the task
+- clean a worktree owned by another live task
+- proceed without an explicit occupancy list or boolean truncation proof from the daemon
+- proceed when the settled/archived task list is truncated
+- clean after a refresh listing drops the task or shows it running, even if it still occupies the path
+- start an existing-task turn through this package's `t3ctl tasks send` / `dispatch` / `rawDispatch` while a clean lease is held, or clean while a turn-start gate is held. T3 Desktop and other direct callers of T3's own HTTP/WS are outside this package and are not admitted by the local lease.
+- clean a task whose session, latest turn, or phase is running or starting
+- guess when two worktrees match the same branch
+
+Install it separately from the orchestration daemon:
+
+```sh
+bun run packages/t3-orchestration/scripts/install-reaper.ts
+t3ctl worktrees clean-settled --dry-run
+t3-worktree-reaper --dry-run
+```
+
+Optional host config lives at `~/.config/skizzles/t3-worktree-reaper.toml`
+(or `T3_WORKTREE_REAPER_CONFIG` / `--config`). That file is machine-local and
+must not be committed. Example:
+
+```toml
+# ~/.config/skizzles/t3-worktree-reaper.toml
+enabled = true
+include_projects = ["acme"]
+deny_paths = ["~/Code/acme"]
+
+[[strategies]]
+name = "cargo"
+markers = ["Cargo.toml"]
+artifact_dir = "target"
+command = ["cargo", "clean", "--target-dir", "target"]
+
+[[strategies]]
+name = "flutter"
+markers = ["pubspec.yaml"]
+artifact_dir = "build"
+require_text = { file = "pubspec.yaml", pattern = "(?m)^flutter:\\s*$|sdk:\\s*flutter" }
+command = ["flutter", "clean"]
+match = ["apps/**"]
+
+[[projects]]
+id = "acme"
+enabled = true
+strategies = ["cargo", "flutter"]
+deny_paths = ["vendor"]
+
+[[projects.extra_commands]]
+match = "acme/app"
+artifact_dir = ".dart_tool"
+command = ["rm", "-rf", ".dart_tool"]
+```
+
+`include_projects` matches a T3 project title, project id, or workspace root.
+Set `enabled = false` on a `[[projects]]` entry to skip that project. Relative
+`deny_paths` are resolved against the worktree. Extra commands are additional
+artifact cleaners: `artifact_dir` must be a generated directory (`target`,
+`build`, or `.dart_tool`) and the command may only be `cargo clean`,
+`flutter clean`, or `rm -rf` of that same generated directory. Source
+directories such as `lib`, `app`, `packages`, `assets`, `docs`, and `tests`
+are refused.
+
+The reaper installer copies the runtime into
+`~/.local/share/skizzles/t3-worktree-reaper`, links `~/.local/bin/t3-worktree-reaper`,
+and loads LaunchAgent `io.github.skizzles.t3-worktree-reaper` every 1800 seconds.
+It refuses unowned PATH links, plists, and install roots; uninstall verifies
+receipt-owned artifacts first:
+
+```sh
+bun run packages/t3-orchestration/scripts/install-reaper.ts --uninstall
+```
+
+`t3ctl tasks list` / `status` now include `worktreePath` and `workspaceRoot`.
+The reaper prefers those paths, then falls back to `git worktree list --porcelain`
+matched by branch. A successful clean records the thread id and leftover artifact
+size in `~/.t3/worktree-reaper-state.json` so reruns stay cheap.
+
+This sidecar is host-only. `--client-only` is refused. `t3ctl worktrees clean-settled` also refuses remote/client mode so it only talks to the local Unix socket.
+
 The project importer is idempotent by canonical workspace root:
 
 ```sh
