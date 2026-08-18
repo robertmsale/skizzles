@@ -11,8 +11,10 @@ import {
   readdir,
   readlink,
   rename,
+  rmdir,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -27,6 +29,7 @@ type OwnedTreeEntry =
   | { path: string; kind: "link"; target: string }
   | { path: string; kind: "dir" };
 type PathGeneration = { dev: string; ino: string; token: string };
+type NodeIdentity = { dev: string; ino: string };
 type LinkEntry = { path: string; target: string };
 type FileEntry = { path: string; sha256: string; mode: number };
 type Receipt = {
@@ -91,6 +94,8 @@ type InstallJournal = {
   serviceWasLoaded?: boolean;
 };
 const TRANSACTION_TOKEN_NAME = ".skizzles-transaction";
+let journalPathIdentity: NodeIdentity | undefined;
+let journalTmpIdentity: NodeIdentity | undefined;
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
@@ -362,7 +367,10 @@ async function writeJournal(journal: InstallJournal): Promise<void> {
   await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
   const temporary = `${journalPath}.tmp`;
   await writeFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, { mode: 0o600 });
+  journalTmpIdentity = await liveNodeIdentity(temporary);
   await rename(temporary, journalPath);
+  journalPathIdentity = await liveNodeIdentity(journalPath);
+  journalTmpIdentity = undefined;
 }
 
 async function readJournalFrom(path: string): Promise<InstallJournal | undefined> {
@@ -378,9 +386,23 @@ async function readJournalFrom(path: string): Promise<InstallJournal | undefined
   }
 }
 
-async function clearJournalAt(path: string): Promise<void> {
-  await rm(path, { force: true });
-  await rm(`${path}.tmp`, { force: true });
+async function unlinkVerifiedRegularFile(path: string, expected?: NodeIdentity): Promise<void> {
+  if (!expected) return;
+  const live = await optionalLstat(path);
+  const identity = await liveNodeIdentity(path);
+  if (!live || live.isDirectory() || live.isSymbolicLink() || !identity || !sameNode(identity, expected)) return;
+  const aside = `${path}.cleared-${randomUUID()}`;
+  if (!await relocateVerifiedNode(path, expected, aside)) return;
+  const remaining = await optionalLstat(aside);
+  const remainingId = await liveNodeIdentity(aside);
+  if (remaining && remaining.isFile() && !remaining.isSymbolicLink() && remainingId && sameNode(remainingId, expected)) {
+    await unlink(aside).catch(() => undefined);
+  }
+}
+
+async function clearJournalAt(path: string, identity = path === journalPath ? journalPathIdentity : undefined): Promise<void> {
+  await unlinkVerifiedRegularFile(path, identity);
+  await unlinkVerifiedRegularFile(`${path}.tmp`, path === journalPath ? journalTmpIdentity : undefined);
 }
 
 async function clearJournal(): Promise<void> {
@@ -414,8 +436,6 @@ async function liveIsJournalArtifact(path: string, artifact: DestinationArtifact
   return Boolean(live && sameArtifact(live, artifact));
 }
 
-type NodeIdentity = { dev: string; ino: string };
-
 async function liveNodeIdentity(path: string): Promise<NodeIdentity | undefined> {
   const metadata = await optionalLstat(path);
   if (!metadata) return undefined;
@@ -427,6 +447,8 @@ function sameNode(left: NodeIdentity, right: NodeIdentity): boolean {
 }
 
 async function relocateVerifiedNode(path: string, expected: NodeIdentity, aside = `${path}.reclaim-${randomUUID()}`): Promise<boolean> {
+  const current = await liveNodeIdentity(path);
+  if (!current || !sameNode(current, expected)) return false;
   try {
     await rename(path, aside);
   } catch {
@@ -543,11 +565,54 @@ async function removeJournaledInstallRoot(journal: InstallJournal): Promise<void
   await removeExactDirectory(journal.installRoot, journal.rootIdentity, journal.rootTree);
 }
 
+async function disposeVerifiedDirectory(
+  path: string,
+  identity: NodeIdentity,
+  expectedTree?: OwnedTreeEntry[],
+): Promise<boolean> {
+  if (!expectedTree) return false;
+  const live = await liveRootIdentity(path);
+  if (!live || !sameNode(live, identity) || !await liveTreeMatches(path, expectedTree)) return false;
+  const files = expectedTree.filter((entry) => entry.kind !== "dir").sort((left, right) => right.path.length - left.path.length);
+  const dirs = expectedTree.filter((entry) => entry.kind === "dir").sort((left, right) => right.path.split("/").length - left.path.split("/").length || right.path.length - left.path.length);
+  for (const entry of files) {
+    const full = join(path, entry.path);
+    const root = await liveRootIdentity(path);
+    if (!root || !sameNode(root, identity)) return false;
+    if (entry.kind === "file") {
+      const metadata = await optionalLstat(full);
+      if (!metadata || !metadata.isFile() || metadata.isSymbolicLink() || await sha256(full) !== entry.sha256) return false;
+      await unlink(full);
+    } else if (entry.kind === "link") {
+      const metadata = await optionalLstat(full);
+      if (!metadata || !metadata.isSymbolicLink() || await readlink(full) !== entry.target) return false;
+      await unlink(full);
+    }
+  }
+  for (const entry of dirs) {
+    const full = join(path, entry.path);
+    const root = await liveRootIdentity(path);
+    if (!root || !sameNode(root, identity)) return false;
+    try { await rmdir(full); }
+    catch { return false; }
+  }
+  const still = await liveRootIdentity(path);
+  if (!still || !sameNode(still, identity)) return false;
+  try { await rmdir(path); }
+  catch { return false; }
+  return true;
+}
+
 async function removeJournaledTransactionRoot(
   journal: Pick<InstallJournal, "transactionRoot" | "transactionIdentity" | "transactionTree">,
+  mode: "relocate" | "dispose" = "relocate",
 ): Promise<void> {
   if (!await livePathMatchesGeneration(journal.transactionRoot, journal.transactionIdentity)) return;
   if (!await liveTreeMatches(journal.transactionRoot, journal.transactionTree)) return;
+  if (mode === "dispose") {
+    await disposeVerifiedDirectory(journal.transactionRoot, journal.transactionIdentity!, journal.transactionTree);
+    return;
+  }
   await removeExactDirectory(journal.transactionRoot, journal.transactionIdentity!, journal.transactionTree);
 }
 
@@ -568,13 +633,14 @@ async function rollbackFromJournal(journal: InstallJournal): Promise<void> {
 }
 
 async function recoverJournalAt(path: string): Promise<void> {
+  const identity = await liveNodeIdentity(path);
   const journal = await readJournalFrom(path);
   if (!journal) return;
   if (journal.phase !== "complete") {
     await rollbackFromJournal(journal);
     if (journal.serviceWasLoaded) await activate();
-  } else await removeJournaledTransactionRoot(journal);
-  await clearJournalAt(path);
+  } else await removeJournaledTransactionRoot(journal, "dispose");
+  await clearJournalAt(path, identity);
 }
 
 async function recoverInterruptedInstall(): Promise<void> {
@@ -605,6 +671,34 @@ async function assertDestinationOwnership(path: string, receipt: Receipt | undef
   if (!receipt || (!receipt.links.some((entry) => entry.path === path) && !receipt.files.some((entry) => entry.path === path))) {
     throw new Error(`Refusing to replace unowned path ${path}`);
   }
+}
+
+async function plantForeignDestination(path: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o755 });
+  if (await optionalLstat(path)) await rename(path, `${path}.aside-${randomUUID()}`).catch(() => undefined);
+  await writeFile(path, path === launchAgent ? "foreign-plist" : "foreign-link");
+}
+
+async function injectForeignDestination(slot: string, path: string): Promise<void> {
+  if (process.env.T3_AUTO_GUARDIAN_FOREIGN_DEST === slot) await plantForeignDestination(path);
+}
+
+async function requireDestinationAbsent(path: string): Promise<void> {
+  if (await optionalLstat(path)) throw new Error(`Refusing to replace foreign destination ${path}`);
+}
+
+async function requireDestinationOwned(path: string, receipt: Receipt): Promise<void> {
+  const link = receipt.links.find((entry) => entry.path === path);
+  if (link) {
+    await assertLink(link);
+    return;
+  }
+  const file = receipt.files.find((entry) => entry.path === path);
+  if (file) {
+    await assertFile(file);
+    return;
+  }
+  throw new Error(`Refusing to replace unowned path ${path}`);
 }
 
 function escapeXml(value: string): string {
@@ -813,15 +907,21 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       const backup = existing ? join(backupsRoot, `link-${index}`) : undefined;
       const staged = join(installRoot, "staged-links", String(index));
       if (backup) {
+        await injectForeignDestination("link-backup", destination);
+        await requireDestinationOwned(destination, previous!);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
         await rename(destination, backup);
         await crashIf("link-backed-up");
         const artifact = await snapshotArtifact(staged);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: true, artifact });
+        await injectForeignDestination("link-place", destination);
+        await requireDestinationAbsent(destination);
         await rename(staged, destination);
       } else {
         const artifact = await snapshotArtifact(staged);
         await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
+        await injectForeignDestination("link-place", destination);
+        await requireDestinationAbsent(destination);
         await rename(staged, destination);
       }
       await writeJournal(journal);
@@ -834,15 +934,21 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
       const backup = existing ? join(backupsRoot, `file-${index}`) : undefined;
       const staged = join(installRoot, "launchAgent.plist");
       if (backup) {
+        await injectForeignDestination("plist-backup", destination);
+        await requireDestinationOwned(destination, previous!);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: false });
         await rename(destination, backup);
         await crashIf("plist-backed-up");
         const artifact = await snapshotArtifact(staged);
         await persistDestination(journal, movedDestinations, { destination, backup, installed: true, artifact });
+        await injectForeignDestination("plist-place", destination);
+        await requireDestinationAbsent(destination);
         await rename(staged, destination);
       } else {
         const artifact = await snapshotArtifact(staged);
         await persistDestination(journal, movedDestinations, { destination, installed: true, artifact });
+        await injectForeignDestination("plist-place", destination);
+        await requireDestinationAbsent(destination);
         await rename(staged, destination);
       }
       await writeJournal(journal);
@@ -856,7 +962,12 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
         await mkdir(stagedLinks, { recursive: true, mode: 0o700 });
         await writeFile(join(stagedLinks, "foreign.txt"), "keep-staged");
       }
-      if (!await relocateVerifiedNode(stagedLinks, stagedIdentity, join(dirname(installRoot), `.staged-links-reclaim-${randomUUID()}`))) {
+      const liveStaged = await liveRootIdentity(stagedLinks);
+      if (!liveStaged || !sameNode(liveStaged, stagedIdentity)) {
+        throw new Error("Refusing to remove staged-links after identity drift");
+      }
+      const stagedTree = await snapshotOwnedTree(stagedLinks);
+      if (!await disposeVerifiedDirectory(stagedLinks, stagedIdentity, stagedTree)) {
         throw new Error("Refusing to remove staged-links after identity drift");
       }
     }
@@ -886,7 +997,7 @@ async function install(runtimeVersion: string, previous: Receipt | undefined): P
     await clearJournal();
     throw error;
   }
-  await removeJournaledTransactionRoot(journal);
+  await removeJournaledTransactionRoot(journal, "dispose");
   await clearJournal();
   console.log(JSON.stringify({
     root: sourceRoot,
@@ -928,6 +1039,8 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
   try {
     for (const [index, link] of previous.links.entries()) {
       const backup = join(transactionRoot, `link-${index}`);
+      await injectForeignDestination("uninstall-link", link.path);
+      await requireDestinationOwned(link.path, previous);
       await persistDestination(journal, movedDestinations, { destination: link.path, backup, installed: false });
       await rename(link.path, backup);
       await crashIf("uninstall-link-moved");
@@ -935,6 +1048,8 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
     for (const [index, file] of previous.files.entries()) {
       if (isForeignLaunchAgent(file.path)) throw new Error(`Refusing to remove ${file.path === orchestrationLaunchAgent ? ORCHESTRATION_LAUNCH_AGENT_LABEL : REAPER_LAUNCH_AGENT_LABEL}`);
       const backup = join(transactionRoot, `file-${index}`);
+      await injectForeignDestination("uninstall-plist", file.path);
+      await requireDestinationOwned(file.path, previous);
       await persistDestination(journal, movedDestinations, { destination: file.path, backup, installed: false });
       await rename(file.path, backup);
       await crashIf("uninstall-plist-moved");
@@ -959,7 +1074,7 @@ async function uninstallInstallation(previous: Receipt | undefined): Promise<voi
     await clearJournal();
     throw error;
   }
-  await removeJournaledTransactionRoot(journal);
+  await removeJournaledTransactionRoot(journal, "dispose");
   await clearJournal();
   console.log(JSON.stringify({ ok: true, uninstalled: true, installRoot, launchAgentLabel: GUARDIAN_LAUNCH_AGENT_LABEL }));
 }
