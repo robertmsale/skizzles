@@ -438,9 +438,81 @@ describe("auto guardian installer", () => {
     expect(recovered.exitCode).toBe(0);
     const dataRoot = join(root, ".local/share/skizzles");
     const names = await readdir(dataRoot);
-    const reclaim = names.find((name) => name.includes(".reclaim-") && !name.endsWith(".aside"));
+    const reclaim = names.find((name) => name.startsWith("t3-auto-guardian.reclaim-") && !name.endsWith(".aside"));
     expect(reclaim).toBeTruthy();
     expect(await readFile(join(dataRoot, reclaim!, "foreign-reclaim.txt"), "utf8")).toBe("keep-reclaim");
+  });
+
+  test("does not recursive-rm a foreign staged-links replacement", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const result = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_STAGED_LINKS_SWAP: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    const staged = join(root, ".local/share/skizzles/t3-auto-guardian/staged-links/foreign.txt");
+    expect(await readFile(staged, "utf8")).toBe("keep-staged");
+  });
+
+  test("does not unlink a destination replaced after artifact validation", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "plist-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_DEST_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    const plist = join(root, "Library/LaunchAgents/io.github.skizzles.t3-auto-guardian.plist");
+    expect(await readFile(plist, "utf8")).toBe("foreign-destination");
+  });
+
+  test("does not delete a descendant swapped after reclaim inode validation", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_DESCENDANT_SWAP: "1",
+    });
+    expect(recovered.exitCode).toBe(0);
+    const dataRoot = join(root, ".local/share/skizzles");
+    const reclaim = (await readdir(dataRoot)).find((name) => name.startsWith("t3-auto-guardian.reclaim-") && !name.endsWith(".aside"));
+    expect(reclaim).toBeTruthy();
+    expect(await readFile(join(dataRoot, reclaim!, "runtime/auto-guardian.ts"), "utf8")).toBe("foreign-child");
+  });
+
+  test("does not rmdir a foreign reclaim root swapped after inode verification", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    const crashed = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_INSTALL_CRASH: "root-installed",
+    });
+    expect(crashed.exitCode).toBe(75);
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_RECLAIM_POST_FSTAT_SWAP: "1",
+    });
+    expect(recovered.exitCode).toBe(0);
+    const dataRoot = join(root, ".local/share/skizzles");
+    const reclaim = (await readdir(dataRoot)).find((name) => name.startsWith("t3-auto-guardian.reclaim-") && !name.endsWith(".aside"));
+    expect(reclaim).toBeTruthy();
+    expect(await readFile(join(dataRoot, reclaim!, "foreign-post-fstat.txt"), "utf8")).toBe("keep-post-fstat");
   });
 
   test("does not delete a same-inode transaction root after foreign content is added", async () => {
