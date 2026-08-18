@@ -454,7 +454,7 @@ var POLICY_SOURCE = "openai/codex codex-rs/core/src/guardian/{policy_template.md
 var POLICY_DELTAS = [
   "Official auto-review is an in-session reviewer swap. This sidecar reconstructs it as one-shot `codex exec --ephemeral`.",
   "Official Config.base_instructions is supplied through `codex exec -c model_instructions_file=...` because `codex exec` has no `model_base_instructions` flag.",
-  "Official preferred model id is `codex-auto-review`, not `luna-low`. Host config may override `model`.",
+  "Official preferred model id is `codex-auto-review`, not `luna-low`. Host config may override `model`. Judge effort is an explicit `model_reasoning_effort` pin (default `low`) passed as `codex exec -c model_reasoning_effort=...` because `codex exec` has no dedicated effort flag.",
   "JSON decode is fail-closed on extra keys, missing outcome, and any non-JSON wrapper. Official serde parse ignores unknown fields and extracts a JSON object from surrounding prose; this sidecar does not.",
   "Transcript is the last T3 user message plus the identifiable command/path, not the full Codex agent history.",
   "This client never calls acceptForSession. It only judges known non-Codex Auto harnesses (grok, cursor, opencode) and skips every other instance ID, including custom Codex drivers."
@@ -557,8 +557,19 @@ function buildGuardianUserPrompt(input) {
 }
 
 // packages/t3-orchestration/src/auto-guardian-config.ts
+var MODEL_REASONING_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra"
+];
 var DEFAULT_POLL_INTERVAL_MS = 5000;
 var DEFAULT_JUDGE_TIMEOUT_MS = 120000;
+var DEFAULT_MODEL_REASONING_EFFORT = "low";
 var MIN_POLL_INTERVAL_MS = 1000;
 var MAX_POLL_INTERVAL_MS = 3600000;
 var MIN_JUDGE_TIMEOUT_MS = 5000;
@@ -568,6 +579,7 @@ function defaultGuardianConfig() {
     enabled: true,
     pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
     model: OFFICIAL_AUTO_REVIEW_MODEL,
+    modelReasoningEffort: DEFAULT_MODEL_REASONING_EFFORT,
     dryRun: false,
     includeProjects: [],
     excludeProjects: [],
@@ -593,6 +605,18 @@ function asBoolean(value, label, fallback) {
     throw new Error(`${label} must be a boolean`);
   return value;
 }
+function asModelReasoningEffort(value, fallback) {
+  if (value === undefined)
+    return fallback;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("model_reasoning_effort must be a non-empty string");
+  }
+  const effort = value.trim();
+  if (!MODEL_REASONING_EFFORTS.includes(effort)) {
+    throw new Error(`model_reasoning_effort must be one of ${MODEL_REASONING_EFFORTS.join(", ")}`);
+  }
+  return effort;
+}
 function asBoundedInteger(value, label, fallback, minimum, maximum) {
   if (value === undefined)
     return fallback;
@@ -615,6 +639,7 @@ function parseGuardianConfig(text) {
     "enabled",
     "poll_interval_ms",
     "model",
+    "model_reasoning_effort",
     "dry_run",
     "include_projects",
     "exclude_projects",
@@ -632,6 +657,7 @@ function parseGuardianConfig(text) {
     enabled: asBoolean(raw.enabled, "enabled", defaults.enabled),
     pollIntervalMs: asBoundedInteger(raw.poll_interval_ms, "poll_interval_ms", defaults.pollIntervalMs, MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS),
     model,
+    modelReasoningEffort: asModelReasoningEffort(raw.model_reasoning_effort, defaults.modelReasoningEffort),
     dryRun: asBoolean(raw.dry_run, "dry_run", defaults.dryRun),
     includeProjects: asStringArray(raw.include_projects, "include_projects"),
     excludeProjects: asStringArray(raw.exclude_projects, "exclude_projects"),
@@ -938,7 +964,15 @@ async function runGuardianCycle(dependencies, config) {
   let state = await dependencies.loadState();
   if (!config.enabled) {
     await dependencies.recordPoll(now, null);
-    return { ok: true, enabled: false, dryRun: config.dryRun, model: config.model, scanned: 0, decisions: [] };
+    return {
+      ok: true,
+      enabled: false,
+      dryRun: config.dryRun,
+      model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
+      scanned: 0,
+      decisions: []
+    };
   }
   try {
     const list = await dependencies.listTaskApprovals();
@@ -1129,6 +1163,7 @@ async function runGuardianCycle(dependencies, config) {
       const executionCwd = candidate.cwd ?? candidate.worktreePath;
       const judged = await dependencies.judge({
         model: config.model,
+        modelReasoningEffort: config.modelReasoningEffort,
         timeoutMs: config.judgeTimeoutMs,
         lastUserMessage,
         action: {
@@ -1198,6 +1233,7 @@ async function runGuardianCycle(dependencies, config) {
       enabled: true,
       dryRun: config.dryRun,
       model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
       scanned: candidates.length,
       decisions
     };
@@ -1209,6 +1245,7 @@ async function runGuardianCycle(dependencies, config) {
       enabled: true,
       dryRun: config.dryRun,
       model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
       scanned: 0,
       decisions: [],
       error: message
@@ -1414,6 +1451,30 @@ async function reconcileGuardianRequests(liveRequestIds, path = defaultGuardianS
     return completed;
   });
 }
+function buildCodexJudgeCommand(input) {
+  return [
+    "codex",
+    "exec",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+    "--ignore-user-config",
+    "--color",
+    "never",
+    "-m",
+    input.model,
+    "-c",
+    `model_reasoning_effort=${JSON.stringify(input.modelReasoningEffort)}`,
+    "-c",
+    `model_instructions_file=${JSON.stringify(input.policyPath)}`,
+    "--output-schema",
+    input.schemaPath,
+    "--output-last-message",
+    input.lastMessagePath,
+    input.prompt
+  ];
+}
 async function runCodexJudge(input) {
   const which = await Bun.$`command -v codex`.nothrow().quiet();
   if (which.exitCode !== 0 || !which.text().trim()) {
@@ -1431,26 +1492,14 @@ async function runCodexJudge(input) {
       lastUserMessage: input.lastUserMessage,
       action: input.action
     });
-    const process2 = Bun.spawn([
-      "codex",
-      "exec",
-      "--ephemeral",
-      "--skip-git-repo-check",
-      "--sandbox",
-      "read-only",
-      "--ignore-user-config",
-      "--color",
-      "never",
-      "-m",
-      input.model,
-      "-c",
-      `model_instructions_file=${JSON.stringify(policyPath)}`,
-      "--output-schema",
+    const process2 = Bun.spawn(buildCodexJudgeCommand({
+      model: input.model,
+      modelReasoningEffort: input.modelReasoningEffort,
+      policyPath,
       schemaPath,
-      "--output-last-message",
       lastMessagePath,
       prompt
-    ], {
+    }), {
       cwd: input.cwd && input.cwd.trim() ? input.cwd : undefined,
       stdout: "pipe",
       stderr: "pipe"
@@ -1587,6 +1636,7 @@ try {
       enabled: config.enabled,
       dryRun: config.dryRun,
       model: config.model,
+      modelReasoningEffort: config.modelReasoningEffort,
       pollIntervalMs: config.pollIntervalMs,
       configPath: loaded.path ?? defaultGuardianConfigPath(),
       statePath: defaultGuardianStatePath(),
