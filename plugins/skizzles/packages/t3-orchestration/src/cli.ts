@@ -2131,7 +2131,7 @@ if (!spec || !Array.isArray(spec.command) || spec.command.length === 0) {
   process.stderr.write("clean refused: missing identity-bound launch spec\\n");
   process.exit(76);
 }
-const { fstatSync, lstatSync, readdirSync } = await import("node:fs");
+const { fstatSync, lstatSync, readdirSync, rmdirSync, unlinkSync } = await import("node:fs");
 const { lstat, writeFile } = await import("node:fs/promises");
 const { dlopen, ptr } = await import("bun:ffi");
 const sameIdentity = (info, dev, ino) => info && BigInt(info.dev) === BigInt(dev) && BigInt(info.ino) === BigInt(ino);
@@ -2170,8 +2170,7 @@ const libc = dlopen(libName, {
   fchdir: { args: ["i32"], returns: "i32" },
   execvp: { args: ["ptr", "ptr"], returns: "i32" },
 });
-const bindFd = spec.command[0] === "flutter" ? 4 : 3;
-if (libc.symbols.fchdir(bindFd) !== 0) {
+if (libc.symbols.fchdir(3) !== 0) {
   process.stderr.write("could not bind cleaner to approved inode\\n");
   process.exit(78);
 }
@@ -2185,22 +2184,33 @@ if (!sameIdentity(stillDirectory, spec.directoryDev, spec.directoryIno)) {
   process.stderr.write("clean directory was replaced after planning\\n");
   process.exit(77);
 }
+const artifactChildren = () => readdirSync(".").filter((name) => name !== "." && name !== "..");
 if (spec.command[0] === "flutter") {
-  const named = lstatSync(spec.artifactName, { bigint: true });
-  if (!named.isDirectory() || !sameIdentity(named, spec.artifactDev, spec.artifactIno)) {
-    process.stderr.write("artifact directory was replaced after planning\\n");
-    process.exit(78);
-  }
+  const remove = (rel) => {
+    const st = lstatSync(rel);
+    if (st.isDirectory() && !st.isSymbolicLink()) {
+      for (const name of readdirSync(rel)) {
+        if (name === "." || name === "..") continue;
+        remove(rel === "." ? name : rel + "/" + name);
+      }
+      if (rel !== ".") rmdirSync(rel);
+    } else {
+      unlinkSync(rel);
+    }
+  };
+  for (const name of artifactChildren()) remove(name);
 }
 const argv = spec.command[0] === "cargo"
   ? ["cargo", "clean", "--target-dir", "."]
   : spec.command[0] === "rm"
     ? (() => {
       const flags = spec.command.slice(1, -1);
-      const names = readdirSync(".").filter((name) => name !== "." && name !== "..");
+      const names = artifactChildren();
       return ["rm", ...flags, ...(names.length > 0 ? names : ["--"])];
     })()
-    : spec.command;
+    : spec.command[0] === "flutter"
+      ? ["flutter", "clean", "."]
+      : spec.command;
 const bins = argv.map((value) => Buffer.from(String(value) + "\\0"));
 const argvPtrs = new BigUint64Array(bins.length + 1);
 for (let i = 0; i < bins.length; i++) argvPtrs[i] = BigInt(ptr(bins[i]));

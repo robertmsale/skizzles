@@ -1255,7 +1255,7 @@ exit 0
       else process.env.PATH = previousPath;
     }
     expect(await Bun.file(join(directory, "flutter.invoked")).text()).toBe("invoked");
-    expect(await Bun.file(join(artifactDir, "sentinel.txt")).text()).toBe("planned-inode\n");
+    expect(await Bun.file(join(artifactDir, "sentinel.txt")).exists()).toBe(false);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -1420,6 +1420,71 @@ exit 0
     for (const name of leftoverHeld) {
       expect(await Bun.file(join(directory, name, "held-replacement.txt")).exists()).toBe(true);
     }
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("does not flutter-clean a replacement rebound onto the verified build name", async () => {
+    const root = await mkdtemp(join(tmpdir(), "t3-reaper-launch-"));
+    const directory = join(root, "crate");
+    const artifactDir = join(directory, "build");
+    const bin = join(root, "bin");
+    await mkdir(artifactDir, { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(directory, "pubspec.yaml"), "name: app\nflutter:\n");
+    await writeFile(join(artifactDir, "approved.txt"), "planned-inode\n");
+    await writeFile(join(bin, "flutter"), `#!/bin/sh
+printf invoked > "${join(directory, "flutter.invoked")}"
+# Model real flutter clean: look up build/ by public name from cwd.
+# Also honor an fd-3-relative operand (dot after fchdir on the artifact).
+if [ "$#" -gt 1 ]; then
+  shift
+  rm -rf "$@"
+fi
+rm -rf build
+exit 0
+`);
+    await chmod(join(bin, "flutter"), 0o755);
+    const directoryIdentity = await inspectPathIdentity(directory);
+    const artifactIdentity = await inspectPathIdentity(artifactDir);
+    expect(directoryIdentity).toBeDefined();
+    expect(artifactIdentity).toBeDefined();
+    const approvedAside = join(root, "approved-aside");
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath ?? "/usr/bin:/bin"}`;
+    try {
+      await runIdentityBoundClean(
+        ["flutter", "clean"],
+        directory,
+        {
+          directoryIdentity: directoryIdentity!,
+          artifactDir,
+          artifactName: "build",
+          artifactIdentity: artifactIdentity!,
+        },
+        undefined,
+        {
+          afterArtifactBound: async () => {
+            const names = await readdir(directory);
+            await rename(artifactDir, approvedAside);
+            await mkdir(artifactDir);
+            await writeFile(join(artifactDir, "replacement.txt"), "unapproved-inode\n");
+            for (const name of names.filter((entry) => entry.startsWith(".t3-reaper-held-"))) {
+              const held = join(directory, name);
+              const heldAside = join(root, `held-aside-${name}`);
+              await rename(held, heldAside);
+              await mkdir(held);
+              await writeFile(join(held, "held-replacement.txt"), "unapproved-held\n");
+            }
+          },
+        },
+      );
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+    expect(await Bun.file(join(directory, "flutter.invoked")).text()).toBe("invoked");
+    expect(await Bun.file(join(artifactDir, "replacement.txt")).text()).toBe("unapproved-inode\n");
+    expect(await Bun.file(join(approvedAside, "approved.txt")).exists()).toBe(false);
     await rm(root, { recursive: true, force: true });
   });
 });
