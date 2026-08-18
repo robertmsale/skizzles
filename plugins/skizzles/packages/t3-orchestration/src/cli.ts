@@ -271,11 +271,23 @@ function whenAborted(signal, op, deadlineMs) {
     signal.addEventListener("abort", fail, { once: true });
   });
 }
+async function withClientDeadline(promise, signal, op, deadlineMs) {
+  promise.catch(() => {
+    return;
+  });
+  return await Promise.race([promise, whenAborted(signal, op, deadlineMs)]);
+}
+function requestPayload(payload, deadlineMs) {
+  if (payload.op !== "tasks.wait")
+    return payload;
+  return { ...payload, timeoutMs: clampWaitTimeoutMs(Number(payload.timeoutMs), deadlineMs) };
+}
 function daemonRequest(payload, socketPath = SOCKET_PATH, deadlineMs = resolveClientDeadlineMs(), remoteUrl) {
   const resolvedDeadlineMs = resolveClientDeadlineMs(deadlineMs);
+  const command = requestPayload(payload, resolvedDeadlineMs);
   if (remoteUrl)
-    return remoteDaemonRequest(payload, remoteUrl, resolvedDeadlineMs);
-  return localDaemonRequest(payload, socketPath, resolvedDeadlineMs);
+    return remoteDaemonRequest(command, remoteUrl, resolvedDeadlineMs);
+  return localDaemonRequest(command, socketPath, resolvedDeadlineMs);
 }
 function localDaemonRequest(payload, socketPath, deadlineMs) {
   const deadline = createClientDeadline(deadlineMs);
@@ -344,20 +356,14 @@ function localDaemonRequest(payload, socketPath, deadlineMs) {
 async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
   const endpoint = normalizeRemoteUrl(remoteUrl);
   const deadline = createClientDeadline(deadlineMs);
-  const timedOut = whenAborted(deadline.signal, payload.op, deadlineMs);
-  timedOut.catch(() => {
-    return;
-  });
-  let request;
   try {
-    request = fetch(`${endpoint}/v1/request`, {
+    const response = await withClientDeadline(fetch(`${endpoint}/v1/request`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
       redirect: "error",
       signal: deadline.signal
-    });
-    const response = await Promise.race([request, timedOut]);
+    }), deadline.signal, payload.op, deadlineMs);
     if (response.status >= 300 && response.status < 400) {
       throw new Error("remote t3-orchestrationd redirect rejected");
     }
@@ -373,7 +379,7 @@ async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
       while (true) {
         if (deadline.signal.aborted)
           throw clientTimeoutError(payload.op, deadlineMs);
-        const { done, value } = await Promise.race([reader.read(), timedOut]);
+        const { done, value } = await withClientDeadline(reader.read(), deadline.signal, payload.op, deadlineMs);
         if (done)
           break;
         size += value.byteLength;
@@ -406,10 +412,6 @@ async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
       throw new Error(body.error || `remote t3-orchestrationd failed with HTTP ${response.status}`);
     return body;
   } catch (error) {
-    if (request)
-      request.catch(() => {
-        return;
-      });
     if (deadline.signal.aborted || isAbortError(error)) {
       throw clientTimeoutError(payload.op, deadlineMs);
     }
@@ -469,7 +471,7 @@ if (group === "auth" && action === "configure") {
   const deadline = createClientDeadline(clientDeadlineMs);
   let body;
   try {
-    const response = await fetch(`${await origin2()}/oauth/token`, {
+    const response = await withClientDeadline(fetch(`${await origin2()}/oauth/token`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -483,15 +485,15 @@ if (group === "auth" && action === "configure") {
         client_os: "macOS"
       }),
       signal: deadline.signal
-    });
-    body = await response.text();
+    }), deadline.signal, "auth.configure", clientDeadlineMs);
+    body = await withClientDeadline(response.text(), deadline.signal, "auth.configure", clientDeadlineMs);
     if (!response.ok)
       throw new Error(`T3 pairing exchange failed (${response.status}): ${body}`);
   } catch (error) {
-    if (deadline.signal.aborted || error instanceof Error && error.name === "AbortError") {
-      throw clientTimeoutError("auth.configure", clientDeadlineMs);
-    }
-    throw error;
+    const message = deadline.signal.aborted || error instanceof Error && error.name === "AbortError" ? clientTimeoutMessage("auth.configure", clientDeadlineMs) : error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}
+`);
+    process.exit(1);
   } finally {
     deadline.dispose();
   }

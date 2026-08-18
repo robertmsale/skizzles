@@ -73,6 +73,21 @@ function whenAborted(signal: AbortSignal, op: unknown, deadlineMs: number): Prom
   });
 }
 
+export async function withClientDeadline<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+  op: unknown,
+  deadlineMs: number,
+): Promise<T> {
+  void promise.catch(() => undefined);
+  return await Promise.race([promise, whenAborted(signal, op, deadlineMs)]);
+}
+
+function requestPayload(payload: Record<string, unknown>, deadlineMs: number): Record<string, unknown> {
+  if (payload.op !== "tasks.wait") return payload;
+  return { ...payload, timeoutMs: clampWaitTimeoutMs(Number(payload.timeoutMs), deadlineMs) };
+}
+
 export function daemonRequest(
   payload: Record<string, unknown>,
   socketPath = SOCKET_PATH,
@@ -80,8 +95,9 @@ export function daemonRequest(
   remoteUrl?: string,
 ): Promise<DaemonResponse> {
   const resolvedDeadlineMs = resolveClientDeadlineMs(deadlineMs);
-  if (remoteUrl) return remoteDaemonRequest(payload, remoteUrl, resolvedDeadlineMs);
-  return localDaemonRequest(payload, socketPath, resolvedDeadlineMs);
+  const command = requestPayload(payload, resolvedDeadlineMs);
+  if (remoteUrl) return remoteDaemonRequest(command, remoteUrl, resolvedDeadlineMs);
+  return localDaemonRequest(command, socketPath, resolvedDeadlineMs);
 }
 
 function localDaemonRequest(
@@ -152,18 +168,14 @@ async function remoteDaemonRequest(
 ): Promise<DaemonResponse> {
   const endpoint = normalizeRemoteUrl(remoteUrl);
   const deadline = createClientDeadline(deadlineMs);
-  const timedOut = whenAborted(deadline.signal, payload.op, deadlineMs);
-  void timedOut.catch(() => undefined);
-  let request: Promise<Response> | undefined;
   try {
-    request = fetch(`${endpoint}/v1/request`, {
+    const response = await withClientDeadline(fetch(`${endpoint}/v1/request`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
       redirect: "error",
       signal: deadline.signal,
-    });
-    const response = await Promise.race([request, timedOut]);
+    }), deadline.signal, payload.op, deadlineMs);
     if (response.status >= 300 && response.status < 400) {
       throw new Error("remote t3-orchestrationd redirect rejected");
     }
@@ -176,7 +188,7 @@ async function remoteDaemonRequest(
     try {
       while (true) {
         if (deadline.signal.aborted) throw clientTimeoutError(payload.op, deadlineMs);
-        const { done, value } = await Promise.race([reader.read(), timedOut]);
+        const { done, value } = await withClientDeadline(reader.read(), deadline.signal, payload.op, deadlineMs);
         if (done) break;
         size += value.byteLength;
         if (size > 1_048_576) {
@@ -199,7 +211,6 @@ async function remoteDaemonRequest(
     if (!response.ok) throw new Error(body.error || `remote t3-orchestrationd failed with HTTP ${response.status}`);
     return body;
   } catch (error) {
-    if (request) void request.catch(() => undefined);
     if (deadline.signal.aborted || isAbortError(error)) {
       throw clientTimeoutError(payload.op, deadlineMs);
     }

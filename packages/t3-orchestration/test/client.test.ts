@@ -88,4 +88,25 @@ describe("daemon client", () => {
     await expect(daemonRequest({ op: "tasks.list" }, socketPath, 80)).rejects.toThrow("t3ctl tasks.list timed out after 80ms");
     expect(Date.now() - started).toBeLessThan(1_000);
   });
+
+  test("clamps a tasks.wait payload before it leaves the client", async () => {
+    const socketPath = await listen((socket) => socket.once("data", (chunk) => {
+      expect(JSON.parse(chunk.toString())).toEqual({
+        op: "tasks.wait",
+        threadIds: ["one"],
+        timeoutMs: 58_000,
+        after: {},
+      });
+      socket.end('{"ok":true,"result":{"timedOut":true,"ready":[],"tasks":[]}}\n');
+    }));
+    expect(await daemonRequest({
+      op: "tasks.wait",
+      threadIds: ["one"],
+      timeoutMs: 3_600_000,
+      after: {},
+    }, socketPath, CLIENT_DEADLINE_MS)).toEqual({
+      ok: true,
+      result: { timedOut: true, ready: [], tasks: [] },
+    });
+  });
 });

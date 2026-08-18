@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 import {
-  clientTimeoutError,
+  clientTimeoutMessage,
   clampWaitTimeoutMs,
   createClientDeadline,
   daemonRequest,
   maxWaitTimeoutMs,
   resolveClientDeadlineMs,
+  withClientDeadline,
 } from "./client.ts";
 import { clearRemoteUrl, configuredRemoteUrl, configureRemoteUrl, REMOTE_CONFIG_PATH } from "./remote-config.ts";
 
@@ -55,7 +56,7 @@ if (group === "auth" && action === "configure") {
   const deadline = createClientDeadline(clientDeadlineMs);
   let body: string;
   try {
-    const response = await fetch(`${await origin()}/oauth/token`, {
+    const response = await withClientDeadline(fetch(`${await origin()}/oauth/token`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -69,14 +70,15 @@ if (group === "auth" && action === "configure") {
         client_os: "macOS",
       }),
       signal: deadline.signal,
-    });
-    body = await response.text();
+    }), deadline.signal, "auth.configure", clientDeadlineMs);
+    body = await withClientDeadline(response.text(), deadline.signal, "auth.configure", clientDeadlineMs);
     if (!response.ok) throw new Error(`T3 pairing exchange failed (${response.status}): ${body}`);
   } catch (error) {
-    if (deadline.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
-      throw clientTimeoutError("auth.configure", clientDeadlineMs);
-    }
-    throw error;
+    const message = deadline.signal.aborted || (error instanceof Error && error.name === "AbortError")
+      ? clientTimeoutMessage("auth.configure", clientDeadlineMs)
+      : error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exit(1);
   } finally {
     deadline.dispose();
   }

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 
 let server: Server | undefined;
 let root: string | undefined;
@@ -129,6 +129,38 @@ describe("cross-project collaboration CLI", () => {
     expect(stdout).toBe("");
     expect(stderr).toBe("t3ctl tasks.list timed out after 80ms\n");
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  test("exits promptly when pairing never responds", async () => {
+    root = await mkdtemp("/tmp/t3-cli-");
+    const origin = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Promise<Response>(() => undefined);
+      },
+    });
+    try {
+      await mkdir(join(root, "userdata"), { recursive: true });
+      await writeFile(join(root, "userdata/server-runtime.json"), `${JSON.stringify({ origin: String(origin.url).replace(/\/$/, "") })}\n`);
+      const started = Date.now();
+      const process = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "auth", "configure"], {
+        env: { ...Bun.env, T3_HOME: root, T3_ORCHESTRATION_CLIENT_DEADLINE_MS: "80" },
+        stdin: new Blob(["pairing-token\n"]),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [exitCode, stdout, stderr] = await Promise.all([
+        process.exited,
+        new Response(process.stdout).text(),
+        new Response(process.stderr).text(),
+      ]);
+      expect(exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toBe("t3ctl auth.configure timed out after 80ms\n");
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      origin.stop(true);
+    }
   });
 
   test("prints a daemon error without waiting for the client deadline", async () => {

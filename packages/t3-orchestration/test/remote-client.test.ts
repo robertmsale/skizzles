@@ -94,10 +94,19 @@ describe("remote daemon client", () => {
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
+    const rejections: unknown[] = [];
+    const onRejection = (error: unknown) => rejections.push(error);
+    process.on("unhandledRejection", onRejection);
     const started = Date.now();
-    await expect(daemonRequest({ op: "projects.list" }, undefined, 80, "https://host.tailnet.ts.net")).rejects.toThrow(
-      "t3ctl projects.list timed out after 80ms",
-    );
+    try {
+      await expect(daemonRequest({ op: "projects.list" }, undefined, 80, "https://host.tailnet.ts.net")).rejects.toThrow(
+        "t3ctl projects.list timed out after 80ms",
+      );
+      await Bun.sleep(20);
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
