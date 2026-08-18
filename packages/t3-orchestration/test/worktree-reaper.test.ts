@@ -259,7 +259,9 @@ describe("cleanSettledWorktrees", () => {
           token: "test-lease",
           path,
           threadId: entry.id,
+          role: "clean" as const,
           signal: controller.signal,
+          abort: () => controller.abort(),
           release: async () => undefined,
         };
       },
@@ -1054,11 +1056,14 @@ command = ["rm", "-rf", ".dart_tool"]
       holdCleanLease: async (entry, path) => {
         order.push("lease");
         leased = true;
+        const controller = new AbortController();
         return {
           token: "lease",
           path,
           threadId: entry.id,
-          signal: new AbortController().signal,
+          role: "clean" as const,
+          signal: controller.signal,
+          abort: () => controller.abort(),
           release: async () => { order.push("release"); },
         };
       },
@@ -1099,7 +1104,9 @@ command = ["rm", "-rf", ".dart_tool"]
         token: "lease",
         path,
         threadId: entry.id,
+        role: "clean" as const,
         signal: controller.signal,
+        abort: () => controller.abort(),
         release: async () => undefined,
       }),
       runClean: async (_command, _directory, signal) => {

@@ -4,7 +4,7 @@
 // packages/t3-orchestration/src/daemon.ts
 import { connect, createServer as createServer2 } from "net";
 import { chmodSync } from "fs";
-import { lstat, mkdir, unlink } from "fs/promises";
+import { lstat, mkdir as mkdir2, unlink } from "fs/promises";
 import { dirname } from "path";
 
 // packages/t3-orchestration/src/config.ts
@@ -545,6 +545,7 @@ async function waitForTasks(input, loadSnapshot, sleep = Bun.sleep, clock = Date
 
 // packages/t3-orchestration/src/worktree-reaper-lease.ts
 import { createHash } from "crypto";
+import { link, mkdir, rm, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join as join2 } from "path";
 function cleanLeaseHome(home2 = process.env.T3_HOME?.trim() || join2(process.env.HOME || homedir(), ".t3")) {
@@ -566,7 +567,7 @@ async function readLiveCleanLease(worktreePath, home2) {
   const path = cleanLeaseLockPath(worktreePath, home2);
   try {
     const raw = JSON.parse(await Bun.file(path).text());
-    if (typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.threadId !== "string" || raw.threadId.trim() === "" || typeof raw.path !== "string" || raw.path.trim() === "" || !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0) {
+    if (typeof raw.token !== "string" || raw.token.trim() === "" || typeof raw.threadId !== "string" || raw.threadId.trim() === "" || typeof raw.path !== "string" || raw.path.trim() === "" || raw.role !== "clean" && raw.role !== "turn-start" || !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0) {
       return null;
     }
     if (!isLivePid(raw.pid))
@@ -576,13 +577,64 @@ async function readLiveCleanLease(worktreePath, home2) {
     return null;
   }
 }
-async function assertWorktreeNotLeased(worktreePath, home2) {
-  const path = worktreePath?.trim();
-  if (!path)
-    return;
-  const lease = await readLiveCleanLease(path, home2);
-  if (lease) {
-    throw new Error(`worktree ${path} is reserved for artifact cleanup by task ${lease.threadId}`);
+function reservationError(path, existing, requested) {
+  if (existing?.role === "clean" || existing == null && requested === "clean") {
+    return new Error(existing ? `worktree ${path} is reserved for artifact cleanup by task ${existing.threadId}` : `worktree ${path} already has a clean lease`);
+  }
+  if (existing?.role === "turn-start") {
+    return new Error(`worktree ${path} has a turn start in progress for task ${existing.threadId}`);
+  }
+  return new Error(`worktree ${path} already has a clean lease`);
+}
+async function acquireWorktreeGate(path, threadId, role, options = {}) {
+  const token2 = crypto.randomUUID();
+  const lockPath = cleanLeaseLockPath(path, options.home);
+  await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 448 });
+  const record = {
+    token: token2,
+    threadId,
+    path,
+    role,
+    pid: process.pid,
+    acquiredAt: (options.now ?? (() => new Date().toISOString()))()
+  };
+  const candidate = `${lockPath}.candidate-${process.pid}-${token2}`;
+  await writeFile(candidate, `${JSON.stringify(record)}
+`, { mode: 384, flag: "wx" });
+  try {
+    await link(candidate, lockPath);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (code === "EEXIST")
+      throw reservationError(path, await readLiveCleanLease(path, options.home), role);
+    throw error;
+  } finally {
+    await rm(candidate, { force: true });
+  }
+  const controller = new AbortController;
+  return {
+    token: token2,
+    path,
+    threadId,
+    role,
+    signal: controller.signal,
+    abort() {
+      if (!controller.signal.aborted)
+        controller.abort();
+    },
+    async release() {
+      if (!controller.signal.aborted)
+        controller.abort();
+      await rm(lockPath, { force: true });
+    }
+  };
+}
+async function withWorktreeGate(path, threadId, role, fn, options = {}) {
+  const gate = await acquireWorktreeGate(path, threadId, role, options);
+  try {
+    return await fn(gate);
+  } finally {
+    await gate.release();
   }
 }
 
@@ -797,7 +849,29 @@ async function requestRpc(tag, payload) {
   });
 }
 var requiresRpcDispatch = (command) => command.type === "thread.turn.start" && Boolean(command.bootstrap) || command.type === "thread.archive" || command.type === "thread.settle";
-var dispatch = (command) => requiresRpcDispatch(command) ? requestRpc("orchestration.dispatchCommand", command) : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
+function isExistingTaskTurnStart(command) {
+  return command.type === "thread.turn.start" && !command.bootstrap;
+}
+var rawDispatch = (command) => requiresRpcDispatch(command) ? requestRpc("orchestration.dispatchCommand", command) : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
+async function resolveExistingTaskTurnPath(threadId, loadThread = thread) {
+  const target = await loadThread(threadId);
+  const claimed = target.worktreePath?.trim();
+  if (!claimed)
+    return `thread:${threadId}`;
+  try {
+    return await realpath(claimed);
+  } catch {
+    return claimed;
+  }
+}
+async function startExistingTaskTurn(command, deps = {}) {
+  const threadId = typeof command.threadId === "string" ? command.threadId.trim() : "";
+  if (!threadId)
+    throw new Error("thread.turn.start requires a thread id");
+  const path = await (deps.resolvePath ?? resolveExistingTaskTurnPath)(threadId);
+  return withWorktreeGate(path, threadId, "turn-start", async () => (deps.dispatchCommand ?? rawDispatch)(command), { home: deps.home });
+}
+var dispatch = (command) => isExistingTaskTurnStart(command) ? startExistingTaskTurn(command) : rawDispatch(command);
 function requireAvailableProviderSelection(config, selection) {
   const providers = config && typeof config === "object" && "providers" in config ? config.providers : undefined;
   if (!Array.isArray(providers))
@@ -926,18 +1000,9 @@ function taskTurnCommand(target, message, commandId = id(), messageId = id(), cr
 }
 async function sendTask(threadId, message) {
   const target = await thread(threadId);
-  const claimed = target.worktreePath?.trim();
-  if (claimed) {
-    await assertWorktreeNotLeased(claimed);
-    try {
-      const resolved = await realpath(claimed);
-      if (resolved !== claimed)
-        await assertWorktreeNotLeased(resolved);
-    } catch {}
-  }
   const selection = requireSelection(target.modelSelection);
   const providerDriver = await preflightProviderSelection(selection);
-  return dispatch(taskTurnCommand(target, message, id(), id(), now(), providerDriver));
+  return await startExistingTaskTurn(taskTurnCommand(target, message, id(), id(), now(), providerDriver));
 }
 function taskTitleCommand(threadId, title, commandId = id()) {
   return { type: "thread.meta.update", commandId, threadId, title };
@@ -1287,7 +1352,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => void shutdown(0));
 }
 process.umask(63);
-await mkdir(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
+await mkdir2(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
 var prepareSocket = async (path, isLive) => {
   try {
     const existing = await lstat(path);

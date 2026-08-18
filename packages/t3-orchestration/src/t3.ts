@@ -12,7 +12,7 @@ import {
   type ApprovalDecision,
 } from "./approval-projection.ts";
 import { mergeArchivedTasks, projectCleanableWorktrees, projectOccupiedWorktrees, projectProjects, projectTaskList, projectTask, waitForTasks, type TaskListOptions, type TaskWaitInput } from "./task-projection.ts";
-import { assertWorktreeNotLeased } from "./worktree-reaper-lease.ts";
+import { withWorktreeGate } from "./worktree-reaper-lease.ts";
 import { requireSelection, type ModelSelection, type ShellSnapshot, type Snapshot, type T3Thread, type ThreadSnapshot } from "./protocol.ts";
 
 async function request(path: string, init: RequestInit = {}, maxBodyBytes = 2_000_000): Promise<any> {
@@ -244,10 +244,47 @@ async function requestRpc(
 export const requiresRpcDispatch = (command: Record<string, unknown>): boolean =>
   (command.type === "thread.turn.start" && Boolean(command.bootstrap)) || command.type === "thread.archive" || command.type === "thread.settle";
 
-export const dispatch = (command: Record<string, unknown>) =>
+export function isExistingTaskTurnStart(command: Record<string, unknown>): boolean {
+  return command.type === "thread.turn.start" && !command.bootstrap;
+}
+
+export const rawDispatch = (command: Record<string, unknown>) =>
   requiresRpcDispatch(command)
     ? requestRpc("orchestration.dispatchCommand", command)
     : request("/api/orchestration/dispatch", { method: "POST", body: JSON.stringify(command) });
+
+export async function resolveExistingTaskTurnPath(
+  threadId: string,
+  loadThread: (id: string) => Promise<Pick<T3Thread, "id" | "worktreePath">> = thread,
+): Promise<string> {
+  const target = await loadThread(threadId);
+  const claimed = target.worktreePath?.trim();
+  if (!claimed) return `thread:${threadId}`;
+  try {
+    return await realpath(claimed);
+  } catch {
+    return claimed;
+  }
+}
+
+export async function startExistingTaskTurn(
+  command: Record<string, unknown>,
+  deps: {
+    resolvePath?: (threadId: string) => Promise<string>;
+    dispatchCommand?: (command: Record<string, unknown>) => Promise<unknown>;
+    home?: string;
+  } = {},
+): Promise<unknown> {
+  const threadId = typeof command.threadId === "string" ? command.threadId.trim() : "";
+  if (!threadId) throw new Error("thread.turn.start requires a thread id");
+  const path = await (deps.resolvePath ?? resolveExistingTaskTurnPath)(threadId);
+  return withWorktreeGate(path, threadId, "turn-start", async () => (
+    deps.dispatchCommand ?? rawDispatch
+  )(command), { home: deps.home });
+}
+
+export const dispatch = (command: Record<string, unknown>) =>
+  isExistingTaskTurnStart(command) ? startExistingTaskTurn(command) : rawDispatch(command);
 
 type ProviderCatalogEntry = {
   instanceId?: unknown;
@@ -372,19 +409,9 @@ export function taskTurnCommand(target: T3Thread, message: string, commandId = i
 
 export async function sendTask(threadId: string, message: string): Promise<{ sequence: number }> {
   const target = await thread(threadId);
-  const claimed = target.worktreePath?.trim();
-  if (claimed) {
-    await assertWorktreeNotLeased(claimed);
-    try {
-      const resolved = await realpath(claimed);
-      if (resolved !== claimed) await assertWorktreeNotLeased(resolved);
-    } catch {
-      // Unresolvable paths still fail closed on the claimed selector above.
-    }
-  }
   const selection = requireSelection(target.modelSelection);
   const providerDriver = await preflightProviderSelection(selection);
-  return dispatch(taskTurnCommand(target, message, id(), id(), now(), providerDriver));
+  return await startExistingTaskTurn(taskTurnCommand(target, message, id(), id(), now(), providerDriver)) as { sequence: number };
 }
 
 export function taskTitleCommand(threadId: string, title: string, commandId = id()) {

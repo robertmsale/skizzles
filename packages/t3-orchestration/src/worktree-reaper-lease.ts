@@ -18,11 +18,15 @@ export type CleanLeaseTask = {
   workspaceRoot?: string | null;
 };
 
+export type WorktreeGateRole = "clean" | "turn-start";
+
 export type CleanLease = {
   token: string;
   path: string;
   threadId: string;
+  role: WorktreeGateRole;
   signal: AbortSignal;
+  abort(): void;
   release(): Promise<void>;
 };
 
@@ -30,6 +34,7 @@ export type CleanLeaseRecord = {
   token: string;
   threadId: string;
   path: string;
+  role: WorktreeGateRole;
   pid: number;
   acquiredAt: string;
 };
@@ -60,6 +65,7 @@ export async function readLiveCleanLease(worktreePath: string, home?: string): P
       typeof raw.token !== "string" || raw.token.trim() === ""
       || typeof raw.threadId !== "string" || raw.threadId.trim() === ""
       || typeof raw.path !== "string" || raw.path.trim() === ""
+      || (raw.role !== "clean" && raw.role !== "turn-start")
       || !Number.isInteger(raw.pid) || (raw.pid ?? 0) <= 0
     ) {
       return null;
@@ -68,6 +74,80 @@ export async function readLiveCleanLease(worktreePath: string, home?: string): P
     return raw as CleanLeaseRecord;
   } catch {
     return null;
+  }
+}
+
+function reservationError(path: string, existing: CleanLeaseRecord | null, requested: WorktreeGateRole): Error {
+  if (existing?.role === "clean" || (existing == null && requested === "clean")) {
+    return new Error(
+      existing
+        ? `worktree ${path} is reserved for artifact cleanup by task ${existing.threadId}`
+        : `worktree ${path} already has a clean lease`,
+    );
+  }
+  if (existing?.role === "turn-start") {
+    return new Error(`worktree ${path} has a turn start in progress for task ${existing.threadId}`);
+  }
+  return new Error(`worktree ${path} already has a clean lease`);
+}
+
+export async function acquireWorktreeGate(
+  path: string,
+  threadId: string,
+  role: WorktreeGateRole,
+  options: { now?: () => string; home?: string } = {},
+): Promise<CleanLease> {
+  const token = crypto.randomUUID();
+  const lockPath = cleanLeaseLockPath(path, options.home);
+  await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 0o700 });
+  const record: CleanLeaseRecord = {
+    token,
+    threadId,
+    path,
+    role,
+    pid: process.pid,
+    acquiredAt: (options.now ?? (() => new Date().toISOString()))(),
+  };
+  const candidate = `${lockPath}.candidate-${process.pid}-${token}`;
+  await writeFile(candidate, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
+  try {
+    await link(candidate, lockPath);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+    if (code === "EEXIST") throw reservationError(path, await readLiveCleanLease(path, options.home), role);
+    throw error;
+  } finally {
+    await rm(candidate, { force: true });
+  }
+  const controller = new AbortController();
+  return {
+    token,
+    path,
+    threadId,
+    role,
+    signal: controller.signal,
+    abort() {
+      if (!controller.signal.aborted) controller.abort();
+    },
+    async release() {
+      if (!controller.signal.aborted) controller.abort();
+      await rm(lockPath, { force: true });
+    },
+  };
+}
+
+export async function withWorktreeGate<T>(
+  path: string,
+  threadId: string,
+  role: WorktreeGateRole,
+  fn: (gate: CleanLease) => Promise<T>,
+  options: { now?: () => string; home?: string } = {},
+): Promise<T> {
+  const gate = await acquireWorktreeGate(path, threadId, role, options);
+  try {
+    return await fn(gate);
+  } finally {
+    await gate.release();
   }
 }
 
@@ -87,41 +167,19 @@ export async function holdExclusiveCleanLease(
   isViolated: (current: CleanLeaseTask) => boolean,
   options: { pollMs?: number; now?: () => string; home?: string } = {},
 ): Promise<CleanLease> {
-  const token = crypto.randomUUID();
-  const lockPath = cleanLeaseLockPath(path, options.home);
-  await mkdir(cleanLeaseHome(options.home), { recursive: true, mode: 0o700 });
-  const record: CleanLeaseRecord = {
-    token,
-    threadId: task.id,
-    path,
-    pid: process.pid,
-    acquiredAt: (options.now ?? (() => new Date().toISOString()))(),
-  };
-  const candidate = `${lockPath}.candidate-${process.pid}-${token}`;
-  await writeFile(candidate, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
-  try {
-    await link(candidate, lockPath);
-  } catch (error) {
-    const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
-    if (code === "EEXIST") throw new Error(`worktree ${path} already has a clean lease`);
-    throw error;
-  } finally {
-    await rm(candidate, { force: true });
-  }
-
-  const controller = new AbortController();
+  const gate = await acquireWorktreeGate(path, task.id, "clean", options);
   let stopped = false;
   const pollMs = options.pollMs ?? 25;
   const watch = (async () => {
-    while (!stopped && !controller.signal.aborted) {
+    while (!stopped && !gate.signal.aborted) {
       try {
         const current = await readTask(task.id);
         if (isViolated(current)) {
-          controller.abort();
+          gate.abort();
           return;
         }
       } catch {
-        controller.abort();
+        gate.abort();
         return;
       }
       await Bun.sleep(pollMs);
@@ -129,15 +187,11 @@ export async function holdExclusiveCleanLease(
   })();
 
   return {
-    token,
-    path,
-    threadId: task.id,
-    signal: controller.signal,
+    ...gate,
     async release() {
       stopped = true;
-      if (!controller.signal.aborted) controller.abort();
       await watch.catch(() => undefined);
-      await rm(lockPath, { force: true });
+      await gate.release();
     },
   };
 }
