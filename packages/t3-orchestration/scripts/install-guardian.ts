@@ -345,11 +345,11 @@ function pathStillExpected(path: string, expected: NodeIdentity): boolean {
   return Boolean(live && live.dev === expected.dev && live.ino === expected.ino);
 }
 
-function selectedMutationSidecar(kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim"): string {
+function selectedMutationSidecar(kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk"): string {
   return join(installerStateDir, `t3-auto-guardian.posix-${kind}.selected`);
 }
 
-async function rememberSelectedMutationPath(kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim", selected: string): Promise<void> {
+async function rememberSelectedMutationPath(kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk", selected: string): Promise<void> {
   await mkdir(installerStateDir, { recursive: true, mode: 0o755 });
   await writeFile(selectedMutationSidecar(kind), `${selected}\n`, { mode: 0o600 });
 }
@@ -401,18 +401,18 @@ async function posixUnlinkIfInode(path: string, expected: NodeIdentity): Promise
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP");
-    if (swapped) {
-      await rememberSelectedMutationPath("unlink", selected);
-      await plantForeignDestination(selected);
-    }
     try {
       if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
     } catch {
       /* symlink fds cannot be truncated */
     }
-    if (swapped) return false;
-    if (selectedPathStillBound(selected, expected, "file", fd) && unlinkSymbol!(cString(selected)) !== 0) return false;
+    if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_UNLINK_SWAP")) {
+      await rememberSelectedMutationPath("unlink", selected);
+      await plantForeignDestination(selected);
+      return false;
+    }
+    if (unlinkSymbol!(cString(selected)) !== 0) return false;
     return !pathStillExpected(selected, expected);
   } catch {
     return false;
@@ -432,14 +432,13 @@ async function posixRmdirIfInode(path: string, expected: NodeIdentity): Promise<
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "dir", fd)) return false;
-    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP");
-    if (swapped) {
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_POSIX_RMDIR_SWAP")) {
       await rememberSelectedMutationPath("rmdir", selected);
       if (rawLstat(selected)) await rename(selected, `${selected}.aside-${randomUUID()}`).catch(() => undefined);
       await mkdir(selected, { recursive: true, mode: 0o700 });
+      return false;
     }
-    if (swapped) return false;
-    if (selectedPathStillBound(selected, expected, "dir", fd) && rmdirSymbol!(cString(selected)) !== 0) return false;
+    if (rmdirSymbol!(cString(selected)) !== 0) return false;
     return !pathStillExpected(selected, expected);
   } catch {
     return false;
@@ -798,18 +797,18 @@ async function unlinkExclusiveRegularFile(path: string, expected: NodeIdentity):
   try {
     const selected = path;
     if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
-    const swapped = consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP");
-    if (swapped) {
-      await rememberSelectedMutationPath("exclusive-unlink", selected);
-      await plantForeignDestination(selected);
-    }
     try {
       if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
     } catch {
       /* symlink fds cannot be truncated */
     }
-    if (swapped) return false;
-    if (selectedPathStillBound(selected, expected, "file", fd) && unlinkSymbol!(cString(selected)) !== 0) return false;
+    if (!selectedPathStillBound(selected, expected, "file", fd)) return false;
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_UNLINK_SWAP")) {
+      await rememberSelectedMutationPath("exclusive-unlink", selected);
+      await plantForeignDestination(selected);
+      return false;
+    }
+    if (unlinkSymbol!(cString(selected)) !== 0) return false;
     return !pathStillExpected(selected, expected);
   } catch {
     return false;
@@ -916,22 +915,28 @@ async function exclusiveMoveOwned(from: string, to: string, expected: NodeIdenti
   try {
     const selected = from;
     if (!selectedPathStillBound(selected, expected, kind, fd) || rawLstat(to)) return false;
-    const exclusiveSwap = consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_MOVE_SWAP");
-    if (exclusiveSwap) {
-      await rememberSelectedMutationPath("exclusive-move", selected);
-      await plantForeignDestination(selected);
-    }
     const renamed = consumeInstallerHook("T3_AUTO_GUARDIAN_RENAME_FROM_SWAP");
     if (renamed) await plantForeignDestination(selected);
     if (!cloneOpenedInode(fd, to, kind)) return false;
-    if (exclusiveSwap || renamed) return false;
-    if (selectedPathStillBound(selected, expected, kind, fd)) {
-      if (kind === "file") {
-        if (unlinkSymbol!(cString(selected)) !== 0) return Boolean(rawLstat(to));
-      } else {
-        const tree = await snapshotOwnedTree(selected).catch(() => undefined);
-        if (tree) await disposeVerifiedDirectory(selected, expected, tree);
+    if (renamed) return false;
+    if (kind === "file") {
+      try {
+        if (fstatSync(fd).isFile()) ftruncateSync(fd, 0);
+      } catch {
+        /* symlink fds cannot be truncated */
       }
+    }
+    if (!selectedPathStillBound(selected, expected, kind, fd)) return Boolean(rawLstat(to));
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_EXCLUSIVE_MOVE_SWAP")) {
+      await rememberSelectedMutationPath("exclusive-move", selected);
+      await plantForeignDestination(selected);
+      return false;
+    }
+    if (kind === "file") {
+      if (unlinkSymbol!(cString(selected)) !== 0) return Boolean(rawLstat(to));
+    } else {
+      const tree = await snapshotOwnedTree(selected).catch(() => undefined);
+      if (tree) await disposeVerifiedDirectory(selected, expected, tree);
     }
     return Boolean(rawLstat(to));
   } catch {
@@ -1373,12 +1378,35 @@ async function clearLeftoverDisposedInstallRoot(): Promise<void> {
   if (await optionalLstat(husk)) {
     throw new Error(`Refusing to reclaim leftover install root ${installRoot}`);
   }
-  if (!exclusiveRename(installRoot, husk)) {
-    throw new Error(`Refusing to reclaim leftover install root ${installRoot}`);
+  loadPosixSymbols();
+  let fd: number | undefined;
+  let tree: OwnedTreeEntry[] | undefined;
+  try {
+    fd = openIdentityFd(installRoot, "dir");
+    const selected = installRoot;
+    if (!selectedPathStillBound(selected, live, "dir", fd) || rawLstat(husk)) {
+      throw new Error(`Refusing to reclaim leftover install root ${installRoot}`);
+    }
+    tree = await snapshotOwnedTree(selected).catch(() => undefined);
+    if (!tree || !selectedPathStillBound(selected, live, "dir", fd) || rawLstat(husk)) {
+      throw new Error(`Refusing to reclaim leftover install root ${installRoot}`);
+    }
+    if (consumeInstallerHook("T3_AUTO_GUARDIAN_HUSK_RELOCATE_SWAP")) {
+      await rememberSelectedMutationPath("husk", selected);
+      await plantForeignDestination(selected);
+      throw new Error(`Refusing to reclaim leftover install root after identity drift`);
+    }
+    if (!cloneOpenedInode(fd, husk, "dir")) {
+      throw new Error(`Refusing to reclaim leftover install root ${installRoot}`);
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
   const identity = await liveRootIdentity(husk);
-  const tree = identity ? await snapshotOwnedTree(husk).catch(() => undefined) : undefined;
   if (!identity || !tree || !await disposeVerifiedDirectory(husk, identity, tree)) {
+    throw new Error(`Refusing to dispose leftover install root after identity drift`);
+  }
+  if (pathStillExpected(installRoot, live) && !await disposeVerifiedDirectory(installRoot, live, tree)) {
     throw new Error(`Refusing to dispose leftover install root after identity drift`);
   }
 }

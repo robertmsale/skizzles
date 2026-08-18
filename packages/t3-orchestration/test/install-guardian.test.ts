@@ -88,7 +88,7 @@ async function findSymlinkTarget(root: string, target: string): Promise<string |
   return walk(root);
 }
 
-async function selectedPosixPath(root: string, kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim"): Promise<string> {
+async function selectedPosixPath(root: string, kind: "rename" | "unlink" | "rmdir" | "exclusive-unlink" | "exclusive-move" | "reclaim" | "husk"): Promise<string> {
   const recorded = await readFile(
     join(root, ".local/share/skizzles", `t3-auto-guardian.posix-${kind}.selected`),
     "utf8",
@@ -1238,6 +1238,21 @@ describe("auto guardian installer", () => {
     });
     expect(recovered.exitCode).not.toBe(0);
     expect(await findFileWithContent(root, "keep")).toBeTruthy();
+  });
+
+  test("fails closed when leftover husk relocate source is swapped", async () => {
+    const root = `/tmp/t3-guardian-install-${crypto.randomUUID()}`;
+    roots.push(root);
+    const fixture = await launchctlFixture(root);
+    expect((await installWithEnvironment(root, fixture.environment)).exitCode).toBe(0);
+    await writeFile(join(root, ".local/share/skizzles/t3-auto-guardian/install-receipt.json"), "");
+    const recovered = await installWithEnvironment(root, {
+      ...fixture.environment,
+      T3_AUTO_GUARDIAN_HUSK_RELOCATE_SWAP: "1",
+    });
+    expect(recovered.exitCode).not.toBe(0);
+    const selected = await selectedPosixPath(root, "husk");
+    expect(await readFile(selected, "utf8")).toBe("foreign-link");
   });
 
   test("does not mutate a selected path swapped after reclaimOwnedDirectory validation", async () => {
