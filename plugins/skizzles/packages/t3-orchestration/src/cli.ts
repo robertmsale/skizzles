@@ -149,6 +149,7 @@ var init_config = __esm(() => {
 // packages/t3-orchestration/src/remote-config.ts
 var exports_remote_config = {};
 __export(exports_remote_config, {
+  resolveRemoteConfigPath: () => resolveRemoteConfigPath,
   requireLocalReaperTransport: () => requireLocalReaperTransport,
   normalizeRemoteUrl: () => normalizeRemoteUrl,
   configuredRemoteUrl: () => configuredRemoteUrl,
@@ -157,7 +158,13 @@ __export(exports_remote_config, {
   REMOTE_CONFIG_PATH: () => REMOTE_CONFIG_PATH
 });
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname, isAbsolute, join as join2, resolve } from "path";
+import { dirname, join as join2, resolve } from "path";
+function resolveRemoteConfigPath(rawSelector = process.env.T3_ORCHESTRATION_REMOTE_CONFIG, homeDirectory = process.env.HOME ?? home2) {
+  const explicit = rawSelector?.trim();
+  if (!explicit)
+    return join2(homeDirectory, ".config/t3-orchestration/client.json");
+  return resolve(explicit);
+}
 function normalizeRemoteUrl(input) {
   let url;
   try {
@@ -182,8 +189,9 @@ async function configuredRemoteUrl() {
   const environmentUrl = process.env.T3_ORCHESTRATION_REMOTE_URL?.trim();
   if (environmentUrl)
     return normalizeRemoteUrl(environmentUrl);
+  const path = resolveRemoteConfigPath();
   try {
-    const parsed = JSON.parse(await readFile(REMOTE_CONFIG_PATH, "utf8"));
+    const parsed = JSON.parse(await readFile(path, "utf8"));
     if (typeof parsed.url !== "string")
       throw new Error("Remote orchestration config is malformed");
     return normalizeRemoteUrl(parsed.url);
@@ -195,8 +203,8 @@ async function configuredRemoteUrl() {
 }
 async function requireLocalReaperTransport() {
   const explicit = process.env.T3_ORCHESTRATION_REMOTE_CONFIG?.trim();
+  const path = resolveRemoteConfigPath();
   if (explicit) {
-    const path = isAbsolute(explicit) ? explicit : resolve(explicit);
     try {
       await readFile(path, "utf8");
     } catch (error) {
@@ -230,7 +238,7 @@ var init_remote_config = __esm(() => {
   home2 = process.env.HOME ?? (() => {
     throw new Error("HOME is required");
   })();
-  REMOTE_CONFIG_PATH = process.env.T3_ORCHESTRATION_REMOTE_CONFIG ?? join2(home2, ".config/t3-orchestration/client.json");
+  REMOTE_CONFIG_PATH = resolveRemoteConfigPath();
 });
 
 // packages/t3-orchestration/src/worktree-reaper-config.ts
@@ -255,7 +263,7 @@ __export(exports_worktree_reaper_config, {
 });
 import { readFile as readFile2, realpath } from "fs/promises";
 import { homedir } from "os";
-import { isAbsolute as isAbsolute2, join as join3, relative, resolve as resolve2, sep } from "path";
+import { isAbsolute, join as join3, relative, resolve as resolve2, sep } from "path";
 function defaultReaperConfig() {
   return {
     enabled: true,
@@ -359,7 +367,7 @@ function parseStrategy(value, index) {
     if (typeof text.file !== "string" || text.file.trim() === "" || typeof text.pattern !== "string" || text.pattern.trim() === "") {
       throw new Error(`strategies[${index}].require_text needs file and pattern`);
     }
-    if (text.file.includes("..") || isAbsolute2(text.file))
+    if (text.file.includes("..") || isAbsolute(text.file))
       throw new Error(`strategies[${index}].require_text.file must be a relative file name`);
     requireText = { file: text.file.trim(), pattern: text.pattern };
   }
@@ -560,7 +568,7 @@ function relativeInside(parent, child) {
   const rel = relative(parent, child);
   if (rel === "")
     return "";
-  if (rel.startsWith("..") || isAbsolute2(rel))
+  if (rel.startsWith("..") || isAbsolute(rel))
     return;
   return rel.split(sep).join("/");
 }
@@ -578,7 +586,7 @@ async function resolveDenyPaths(paths, worktree, realpathFn = realpath) {
   const resolved = [];
   for (const path of paths) {
     const expanded = expandUserPath(path);
-    const absolute = isAbsolute2(expanded) ? resolve2(expanded) : resolve2(worktree, expanded);
+    const absolute = isAbsolute(expanded) ? resolve2(expanded) : resolve2(worktree, expanded);
     try {
       resolved.push(await realpathFn(absolute));
     } catch {

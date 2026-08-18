@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { resolveRemoteConfigPath } from "../src/remote-config.ts";
 
 const roots: string[] = [];
 
@@ -41,5 +42,10 @@ describe("remote client configuration", () => {
 
     expect((await run(["remote", "clear"], root)).exitCode).toBe(0);
     expect(JSON.parse((await run(["remote", "status"], root)).stdout).url).toBeNull();
+  });
+
+  test("trims padded remote-config selectors to one canonical path", () => {
+    expect(resolveRemoteConfigPath(" remote.json ", "/tmp/home")).toBe(resolve("remote.json"));
+    expect(resolveRemoteConfigPath(undefined, "/tmp/home")).toBe(join("/tmp/home", ".config/t3-orchestration/client.json"));
   });
 });

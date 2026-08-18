@@ -209,4 +209,34 @@ describe("cross-project collaboration CLI", () => {
     expect(stdout).toBe("");
     expect(stderr).toContain("explicit remote orchestration config is unavailable");
   });
+
+  test("refuses a padded explicit remote-config selector through both reaper entrypoints", async () => {
+    root = await mkdtemp("/tmp/t3-cli-");
+    await Bun.write(join(root, "remote.json"), `${JSON.stringify({ url: "https://review-host.example.ts.net" })}\n`);
+    for (const command of [
+      ["bun", resolve(import.meta.dir, "../src/cli.ts"), "worktrees", "clean-settled", "--dry-run"],
+      ["bun", resolve(import.meta.dir, "../src/worktree-reaper-cli.ts"), "--dry-run"],
+    ]) {
+      const process = Bun.spawn(command, {
+        cwd: root,
+        env: {
+          ...Bun.env,
+          HOME: root,
+          T3_HOME: root,
+          T3_ORCHESTRATION_REMOTE_CONFIG: " remote.json ",
+          T3_ORCHESTRATION_REMOTE_URL: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [exitCode, stdout, stderr] = await Promise.all([
+        process.exited,
+        new Response(process.stdout).text(),
+        new Response(process.stderr).text(),
+      ]);
+      expect(exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("refuses remote t3ctl mode");
+    }
+  });
 });
