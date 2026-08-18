@@ -735,7 +735,7 @@ async function remoteDaemonRequest(payload, remoteUrl, deadlineMs) {
 
 // packages/t3-orchestration/src/worktree-reaper.ts
 init_worktree_reaper_config();
-import { lstat as lstat2, mkdir as mkdir3, open as open2, readdir, readFile as readFile3, realpath as realpath2, writeFile as writeFile3 } from "fs/promises";
+import { lstat as lstat2, mkdir as mkdir3, open as open2, readdir, readFile as readFile3, realpath as realpath2, rm as rm3, writeFile as writeFile3 } from "fs/promises";
 import { dirname as dirname2, join as join5, resolve as resolve3 } from "path";
 import { homedir as homedir3 } from "os";
 
@@ -1389,6 +1389,24 @@ function shouldSkipUnchanged(state, threadId, path, currentBytes) {
 function sameFsIdentity(left, right) {
   return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
 }
+function bindCleanerToHeldArtifact(command, artifactName, heldName) {
+  if (!artifactName || artifactName.includes("/") || artifactName.includes("\\") || artifactName.includes("..")) {
+    throw new Error("clean refused: artifact name is not a single directory");
+  }
+  if (!heldName || heldName.includes("/") || heldName.includes("\\") || heldName.includes("..")) {
+    throw new Error("clean refused: held artifact name is not a single directory");
+  }
+  if (command[0] === "cargo") {
+    return ["cargo", "clean", "--target-dir", heldName];
+  }
+  if (command[0] === "rm") {
+    return [...command.slice(0, -1), heldName];
+  }
+  if (command[0] === "flutter") {
+    return ["rm", "-rf", heldName];
+  }
+  return command.map((argument) => argument === artifactName ? heldName : argument);
+}
 async function walkDirectories(worktree, deps) {
   const directories = [worktree];
   const queue = [worktree];
@@ -1963,25 +1981,57 @@ function taskListEnumerationTruncated(moreRecent) {
 }
 var IDENTITY_BOUND_CLEAN_EVAL = `
 const spec = JSON.parse(process.env.T3_REAPER_CLEAN_SPEC ?? "null");
-if (!spec || !Array.isArray(spec.command) || typeof spec.artifactName !== "string") {
+if (!spec || !Array.isArray(spec.command) || typeof spec.artifactName !== "string" || typeof spec.heldName !== "string") {
   process.stderr.write("clean refused: missing identity-bound launch spec\\n");
   process.exit(76);
 }
-const { lstat } = await import("node:fs/promises");
+const { lstat, rename, writeFile } = await import("node:fs/promises");
+const sameIdentity = (info, dev, ino) => info && info.dev === BigInt(dev) && info.ino === BigInt(ino);
 const cwd = await lstat(".", { bigint: true });
-if (cwd.dev !== BigInt(spec.directoryDev) || cwd.ino !== BigInt(spec.directoryIno)) {
+if (!sameIdentity(cwd, spec.directoryDev, spec.directoryIno)) {
   process.stderr.write("clean directory was replaced after planning\\n");
   process.exit(77);
 }
 const artifact = await lstat(spec.artifactName, { bigint: true });
-if (artifact.dev !== BigInt(spec.artifactDev) || artifact.ino !== BigInt(spec.artifactIno)) {
+if (!sameIdentity(artifact, spec.artifactDev, spec.artifactIno)) {
   process.stderr.write("artifact directory was replaced after planning\\n");
   process.exit(78);
 }
+try {
+  await rename(spec.artifactName, spec.heldName);
+} catch {
+  process.stderr.write("artifact directory was replaced after planning\\n");
+  process.exit(78);
+}
+const held = await lstat(spec.heldName, { bigint: true }).catch(() => undefined);
+if (!sameIdentity(held, spec.artifactDev, spec.artifactIno)) {
+  try { await rename(spec.heldName, spec.artifactName); } catch { /* destination may exist */ }
+  process.stderr.write("artifact directory was replaced after planning\\n");
+  process.exit(78);
+}
+if (spec.hookReadyPath && spec.hookDonePath) {
+  await writeFile(spec.hookReadyPath, "ready\\n");
+  const deadline = Date.now() + 5000;
+  const { access } = await import("node:fs/promises");
+  while (Date.now() < deadline) {
+    try { await access(spec.hookDonePath); break; } catch { await Bun.sleep(5); }
+  }
+}
 const env = { ...process.env };
 delete env.T3_REAPER_CLEAN_SPEC;
-const proc = Bun.spawn(spec.command, { stdout: "inherit", stderr: "inherit", env });
-process.exit(await proc.exited);
+let exitCode = 0;
+try {
+  const proc = Bun.spawn(spec.command, { stdout: "inherit", stderr: "inherit", env });
+  exitCode = await proc.exited;
+} finally {
+  try {
+    const leftover = await lstat(spec.heldName, { bigint: true });
+    if (sameIdentity(leftover, spec.artifactDev, spec.artifactIno)) {
+      try { await rename(spec.heldName, spec.artifactName); } catch { /* replacement occupies the public name */ }
+    }
+  } catch { /* held name already removed by the cleaner */ }
+}
+process.exit(exitCode);
 `;
 async function runIdentityBoundClean(command, directory, binding, signal, hooks = {}) {
   if (signal?.aborted)
@@ -1989,6 +2039,8 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
   if (!binding.artifactName.trim()) {
     throw new Error("clean refused: missing artifact identity binding");
   }
+  const heldName = `.t3-reaper-held-${process.pid}-${crypto.randomUUID()}`;
+  const boundCommand = bindCleanerToHeldArtifact(command, binding.artifactName, heldName);
   const directoryHandle = await open2(directory, "r");
   try {
     const directoryStat = await directoryHandle.stat({ bigint: true });
@@ -2007,12 +2059,20 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
         await hooks.afterParentBound();
       if (signal?.aborted)
         throw new Error("clean aborted: task resumed");
+      const hookRoot = hooks.afterArtifactBound ? join5(directory, `.t3-reaper-hook-${process.pid}-${crypto.randomUUID()}`) : "";
+      if (hookRoot)
+        await mkdir3(hookRoot, { recursive: true, mode: 448 });
+      const hookReadyPath = hookRoot ? join5(hookRoot, "ready") : "";
+      const hookDonePath = hookRoot ? join5(hookRoot, "done") : "";
       const env = { ...Bun.env };
       if (command[0] === "cargo")
         delete env.CARGO_TARGET_DIR;
       env.T3_REAPER_CLEAN_SPEC = JSON.stringify({
-        command,
+        command: boundCommand,
         artifactName: binding.artifactName,
+        heldName,
+        hookReadyPath,
+        hookDonePath,
         directoryDev: String(binding.directoryIdentity.dev),
         directoryIno: String(binding.directoryIdentity.ino),
         artifactDev: String(binding.artifactIdentity.dev),
@@ -2031,6 +2091,25 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
       };
       signal?.addEventListener("abort", abort, { once: true });
       try {
+        if (hooks.afterArtifactBound && hookReadyPath && hookDonePath) {
+          const ready = await Promise.race([
+            (async () => {
+              const started = Date.now();
+              while (!await Bun.file(hookReadyPath).exists()) {
+                if (Date.now() - started > 5000)
+                  return false;
+                await Bun.sleep(5);
+              }
+              return true;
+            })(),
+            proc.exited.then(() => false)
+          ]);
+          if (ready) {
+            await hooks.afterArtifactBound();
+            await writeFile3(hookDonePath, `done
+`);
+          }
+        }
         const exitCode = await proc.exited;
         if (signal?.aborted)
           throw new Error("clean aborted: task resumed");
@@ -2045,6 +2124,10 @@ async function runIdentityBoundClean(command, directory, binding, signal, hooks 
         }
       } finally {
         signal?.removeEventListener("abort", abort);
+        if (hookRoot)
+          await rm3(hookRoot, { recursive: true, force: true }).catch(() => {
+            return;
+          });
       }
     } finally {
       await artifactHandle.close();
