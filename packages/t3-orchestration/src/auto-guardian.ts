@@ -7,7 +7,6 @@ import {
   APPROVAL_ACTION_CHANGED,
   MISSING_COMMAND_GAP,
   MISSING_SNAPSHOT_GAP,
-  UNBOUND_ACCEPT_GAP,
   approvalActionIdentity,
   requireIdentifiableApproval,
   sameApprovalAction,
@@ -23,9 +22,9 @@ import {
 } from "./auto-guardian-config.ts";
 import {
   buildGuardianUserPrompt,
+  compactGuardianTranscript,
   decodeGuardianAssessment,
   GUARDIAN_OUTPUT_SCHEMA,
-  lastUserMessageText,
   officialGuardianPolicyPrompt,
   type GuardianAssessment,
   type PlannedAction,
@@ -35,7 +34,7 @@ export const CODEX_PROVIDER_INSTANCE = "codex";
 export const NON_CODEX_PROVIDERS = ["grok", "cursor", "opencode"] as const;
 export const AUTO_RUNTIME_MODE = "auto";
 const STATE_SCHEMA = 4;
-const HISTORY_TURNS = 10;
+export const HISTORY_TURNS = 10;
 export const GUARDIAN_CLAIM_LEASE_MS = 30_000;
 
 export type GuardianCandidate = {
@@ -64,6 +63,7 @@ export type GuardianAction =
   | "skipped_runtime"
   | "skipped_project"
   | "skipped_snapshot_gap"
+  | "skipped_unidentifiable"
   | "skipped_duplicate"
   | "denied_unidentifiable"
   | "judged"
@@ -145,7 +145,7 @@ export type JudgeInput = {
   model: string;
   modelReasoningEffort: string;
   timeoutMs: number;
-  lastUserMessage: string | null;
+  transcript: string;
   action: PlannedAction;
   cwd: string | null;
 };
@@ -543,12 +543,13 @@ export function candidatesFromApprovalList(list: ApprovalList): GuardianCandidat
 }
 
 function candidateAction(candidate: GuardianCandidate): ApprovalActionIdentity {
+  const requestKind = candidate.requestKind === "file-read" || candidate.requestKind === "file-change" || candidate.requestKind === "command"
+    ? candidate.requestKind
+    : null;
   return approvalActionIdentity({
-    requestKind: candidate.requestKind === "file-read" || candidate.requestKind === "file-change" || candidate.requestKind === "command"
-      ? candidate.requestKind
-      : null,
+    requestKind,
     command: candidate.command,
-    cwd: candidate.cwd ?? candidate.worktreePath,
+    cwd: candidate.cwd,
     toolName: candidate.toolName,
   });
 }
@@ -630,11 +631,11 @@ async function deliverClaim(
 ): Promise<boolean> {
   if (dryRun) return false;
   if (!input.leaseId) return false;
-  if (input.decision === "accept") {
+  if (input.decision === "accept" && !hasCompleteActionIdentity(input.action)) {
     input = {
       ...input,
       decision: "decline",
-      reason: hasCompleteActionIdentity(input.action) ? UNBOUND_ACCEPT_GAP : "legacy claim has no action identity",
+      reason: "legacy claim has no action identity",
     };
   }
   return dependencies.withDeliveryLock(input.threadId, input.requestId, async () => {
@@ -753,6 +754,46 @@ export async function runGuardianCycle(
         continue;
       }
 
+      if (candidate.snapshotGap || candidate.requestId == null) {
+        decisions.push({
+          action: "skipped_snapshot_gap",
+          threadId: candidate.threadId,
+          requestId: null,
+          provider: candidate.provider,
+          runtimeMode,
+          runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
+          command: null,
+          decision: null,
+          reason: MISSING_SNAPSHOT_GAP,
+          dryRun: config.dryRun,
+          responded: false,
+        });
+        continue;
+      }
+
+      if (!candidate.identifiable || !candidate.command) {
+        decisions.push({
+          action: "skipped_unidentifiable",
+          threadId: candidate.threadId,
+          requestId: candidate.requestId,
+          provider: candidate.provider,
+          runtimeMode,
+          runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
+          command: null,
+          decision: null,
+          reason: candidate.gapReason ?? MISSING_COMMAND_GAP,
+          dryRun: config.dryRun,
+          responded: false,
+        });
+        continue;
+      }
+
       const existing = candidate.requestId
         ? state.responded[guardianClaimKey(candidate.threadId, candidate.requestId)]
         : undefined;
@@ -815,8 +856,8 @@ export async function runGuardianCycle(
           });
           continue;
         }
-        const decision = (claim.decision ?? retryDecision) === "accept" ? "decline" : (claim.decision ?? retryDecision);
-        const reason = (claim.decision ?? retryDecision) === "accept" ? UNBOUND_ACCEPT_GAP : retryReason;
+        const decision = claim.decision ?? retryDecision;
+        const reason = retryReason;
         const responded = await deliverClaim(dependencies, {
           threadId: candidate.threadId,
           requestId: candidate.requestId,
@@ -845,82 +886,6 @@ export async function runGuardianCycle(
         continue;
       }
 
-      if (candidate.snapshotGap || candidate.requestId == null) {
-        decisions.push({
-          action: "skipped_snapshot_gap",
-          threadId: candidate.threadId,
-          requestId: null,
-          provider: candidate.provider,
-          runtimeMode,
-          runtimeModeSource,
-          providerDriver,
-          providerDriverSource,
-          inferredFromThread: inferred,
-          command: null,
-          decision: null,
-          reason: MISSING_SNAPSHOT_GAP,
-          dryRun: config.dryRun,
-          responded: false,
-        });
-        continue;
-      }
-
-      if (!candidate.identifiable || !candidate.command) {
-        const claim = await claimOrSkip(dependencies, {
-          requestId: candidate.requestId,
-          threadId: candidate.threadId,
-          decision: "decline",
-          at: now,
-          action: candidateAction(candidate),
-        }, config.dryRun);
-        if (!config.dryRun && claim.status === "duplicate") {
-          decisions.push({
-            action: "skipped_duplicate",
-            threadId: candidate.threadId,
-            requestId: candidate.requestId,
-            provider: candidate.provider,
-            runtimeMode,
-            runtimeModeSource,
-            providerDriver,
-            providerDriverSource,
-            inferredFromThread: inferred,
-            command: null,
-            decision: "decline",
-            reason: "already responded to this requestId",
-            dryRun: config.dryRun,
-            responded: false,
-          });
-          continue;
-        }
-        const denyReason = candidate.gapReason ?? MISSING_COMMAND_GAP;
-        const responded = await deliverClaim(dependencies, {
-          threadId: candidate.threadId,
-          requestId: candidate.requestId,
-          decision: "decline",
-          reason: denyReason,
-          leaseId: claim.leaseId,
-          action: candidateAction(candidate),
-        }, config.dryRun);
-        if (claim.status !== "duplicate") state = await dependencies.loadState();
-        decisions.push({
-          action: config.dryRun ? "dry_run" : "denied_unidentifiable",
-          threadId: candidate.threadId,
-          requestId: candidate.requestId,
-          provider: candidate.provider,
-          runtimeMode,
-          runtimeModeSource,
-          providerDriver,
-          providerDriverSource,
-          inferredFromThread: inferred,
-          command: null,
-          decision: "decline",
-          reason: denyReason,
-          dryRun: config.dryRun,
-          responded,
-        });
-        continue;
-      }
-
       requireIdentifiableApproval({
         requestId: candidate.requestId,
         requestKind: candidate.requestKind === "file-read" || candidate.requestKind === "file-change" ? candidate.requestKind : "command",
@@ -932,15 +897,17 @@ export async function runGuardianCycle(
       });
 
       const history = await dependencies.taskHistory(candidate.threadId, HISTORY_TURNS);
-      const lastUserMessage = lastUserMessageText(history.messages ?? []);
+      const transcript = compactGuardianTranscript(history.messages ?? []);
       const executionCwd = candidate.cwd ?? candidate.worktreePath;
       const judged = await dependencies.judge({
         model: config.model,
         modelReasoningEffort: config.modelReasoningEffort,
         timeoutMs: config.judgeTimeoutMs,
-        lastUserMessage,
+        transcript,
         action: {
-          requestKind: candidate.requestKind,
+          requestKind: candidate.requestKind === "file-read" || candidate.requestKind === "file-change" || candidate.requestKind === "command"
+            ? candidate.requestKind
+            : null,
           command: candidate.command,
           cwd: executionCwd,
           toolName: candidate.toolName,
@@ -980,13 +947,11 @@ export async function runGuardianCycle(
       const currentAction = candidateAction(candidate);
       const storedAccept = claim.status === "retry" && claim.decision === "accept";
       const identityMismatch = Boolean(storedAccept && (!claim.action || !sameApprovalAction(claim.action, currentAction)));
-      const decision: ApprovalDecision = "decline";
+      const decision: ApprovalDecision = identityMismatch ? "decline" : judgedDecision;
       const deliverAction = storedAccept && claim.action && !identityMismatch ? claim.action : currentAction;
       const reason = identityMismatch
         ? "stored accept identity does not match the current action"
-        : judgedDecision === "accept"
-          ? UNBOUND_ACCEPT_GAP
-          : failClosed.rationale;
+        : failClosed.rationale;
       const responded = await deliverClaim(dependencies, {
         threadId: candidate.threadId,
         requestId: candidate.requestId,
@@ -1329,7 +1294,7 @@ export async function runCodexJudge(input: JudgeInput): Promise<JudgeResult> {
     await writeFile(policyPath, officialGuardianPolicyPrompt());
     await writeFile(schemaPath, `${JSON.stringify(GUARDIAN_OUTPUT_SCHEMA, null, 2)}\n`);
     const prompt = buildGuardianUserPrompt({
-      lastUserMessage: input.lastUserMessage,
+      transcript: input.transcript,
       action: input.action,
     });
     const process = Bun.spawn(buildCodexJudgeCommand({

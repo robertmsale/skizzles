@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildGuardianUserPrompt,
+  compactGuardianTranscript,
   decodeGuardianAssessment,
   lastUserMessageText,
   officialGuardianPolicyPrompt,
@@ -39,18 +40,31 @@ describe("guardian prompt", () => {
     expect(officialGuardianPolicyPrompt()).toContain("default generic tenant");
   });
 
-  test("passes the last user message and identifiable command", () => {
+  test("passes a compact Codex-like transcript and identifiable command", () => {
     expect(lastUserMessageText([
       { role: "user", text: "Implement the feature" },
       { role: "assistant", text: "working" },
       { role: "user", text: "Push your branch" },
     ])).toBe("Push your branch");
     expect(lastUserMessageText([{ role: "assistant", text: "hello" }])).toBeNull();
+    const transcript = compactGuardianTranscript([
+      { role: "user", text: "Implement the feature" },
+      { role: "assistant", text: "I will commit and push the feature branch." },
+      { role: "tool", text: "{\"command\":\"git status\"}", toolName: "run_terminal_command" },
+      { role: "user", text: "Push your branch" },
+    ]);
+    expect(transcript).toContain("[1] user: Implement the feature");
+    expect(transcript).toContain("[2] assistant: I will commit and push the feature branch.");
+    expect(transcript).toContain("[3] tool run_terminal_command: {\"command\":\"git status\"}");
+    expect(transcript).toContain("[4] user: Push your branch");
     const prompt = buildGuardianUserPrompt({
-      lastUserMessage: "Push your branch",
-      action: { requestKind: "command", command: "git push origin t3code/acme", cwd: "/worktree", toolName: "Shell" },
+      transcript,
+      action: { requestKind: "command", command: "git push origin t3code/acme", cwd: "/worktree", toolName: "run_terminal_command" },
     });
-    expect(prompt).toContain("user: Push your branch");
+    expect(prompt).toContain("[4] user: Push your branch");
+    expect(prompt).toContain("[2] assistant: I will commit and push the feature branch.");
+    expect(prompt).toContain("tool run_terminal_command");
     expect(prompt).toContain("git push origin t3code/acme");
+    expect(prompt).not.toMatch(/^user: Push your branch$/m);
   });
 });

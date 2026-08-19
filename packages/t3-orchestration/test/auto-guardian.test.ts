@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP, UNBOUND_ACCEPT_GAP } from "../src/approval-projection.ts";
+import { APPROVAL_ACTION_CHANGED, MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP } from "../src/approval-projection.ts";
 import { defaultGuardianConfig } from "../src/auto-guardian-config.ts";
 import {
   buildCodexJudgeCommand,
@@ -10,6 +10,7 @@ import {
   claimGuardianRequest,
   completeGuardianRequest,
   emptyGuardianState,
+  HISTORY_TURNS,
   guardianClaimKey,
   guardianDeliveryLockPath,
   loadGuardianState,
@@ -76,7 +77,7 @@ function unidentifiable(overrides: Partial<ApprovalList["unidentifiable"][number
 
 function fixture(options: {
   list?: ApprovalList;
-  history?: Array<{ role: string; text: string }>;
+  history?: Array<{ role: string; text: string; toolName?: string }>;
   judge?: JudgeResult;
   state?: GuardianState;
   threadContext?: Record<string, ThreadContext | undefined> | ((threadId: string) => ThreadContext | undefined | Promise<ThreadContext | undefined>);
@@ -439,7 +440,7 @@ describe("guardian cycle", () => {
       inferredFromThread: ["runtimeMode"],
       responded: true,
     });
-    expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+    expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "accept" })]);
   });
 
   test("skips when the approval event omits runtimeMode and the thread is not auto", async () => {
@@ -495,7 +496,7 @@ describe("guardian cycle", () => {
       inferredFromThread: [],
       responded: true,
     });
-    expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+    expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "accept" })]);
   });
 
   test("skips an explicit non-auto runtimeMode when the thread runtime disagrees", async () => {
@@ -617,7 +618,7 @@ describe("guardian cycle", () => {
       requestId: "req-1",
       responded: true,
     });
-    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline", reason: UNBOUND_ACCEPT_GAP })]);
+    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "accept" })]);
   });
 
   test("skips when sqlite session driver identity disagrees with the approval event driver", async () => {
@@ -708,7 +709,7 @@ describe("guardian cycle", () => {
       inferredFromThread: ["providerDriver"],
       responded: true,
     });
-    expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline" })]);
+    expect(result.resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "accept" })]);
   });
 
   test("skips unknown instance IDs and explicit Codex drivers when providerDriver is omitted or Codex", async () => {
@@ -803,12 +804,11 @@ describe("guardian cycle", () => {
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(report.decisions[0]).toMatchObject({
       action: "judged",
-      decision: "decline",
-      reason: UNBOUND_ACCEPT_GAP,
+      decision: "accept",
+      reason: "retrying incomplete guardian claim",
       responded: true,
     });
-    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline", reason: UNBOUND_ACCEPT_GAP })]);
-    expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
+    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "accept" })]);
   });
 
   test("does not retry an actionless pending accept against a changed command", async () => {
@@ -948,23 +948,84 @@ describe("guardian cycle", () => {
     expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
   });
 
-  test("denies unidentifiable approvals fail-closed", async () => {
+  test("skips unidentifiable approvals instead of delivering a sticky ACP decline", async () => {
     const { deps, resolved } = fixture({
       list: { approvals: [], unidentifiable: [unidentifiable()] },
     });
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(report.decisions[0]).toMatchObject({
-      action: "denied_unidentifiable",
-      decision: "decline",
+      action: "skipped_unidentifiable",
+      decision: null,
       reason: MISSING_COMMAND_GAP,
+      responded: false,
+    });
+    expect(resolved).toEqual([]);
+  });
+
+  test("does not ACP-decline a leftover pending unidentifiable claim", async () => {
+    const { deps, resolved } = fixture({
+      list: { approvals: [], unidentifiable: [unidentifiable()] },
+      state: {
+        schema: 4,
+        responded: {
+          [guardianClaimKey("grok-task", "opaque")]: {
+            threadId: "grok-task",
+            decision: "decline",
+            at: "2026-08-17T01:00:00Z",
+            status: "pending",
+            leaseUntil: new Date(0).toISOString(),
+            action: { requestKind: null, command: null, cwd: "/worktree", toolName: null },
+          },
+        },
+        lastPollAt: null,
+        lastError: null,
+      },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_unidentifiable",
+      requestId: "opaque",
+      decision: null,
+      responded: false,
+    });
+    expect(resolved).toEqual([]);
+  });
+
+  test("judges a projected Grok run_terminal_command", async () => {
+    const result = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "grok-task",
+          title: "Grok work",
+          provider: "grok",
+          providerDriver: "grok",
+          toolName: "run_terminal_command",
+          command: "git push origin t3code/acme",
+        })],
+        unidentifiable: [],
+      },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(1);
+    expect(HISTORY_TURNS).toBeGreaterThanOrEqual(1);
+    expect(HISTORY_TURNS).toBeLessThanOrEqual(10);
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      threadId: "grok-task",
+      decision: "accept",
+      command: "git push origin t3code/acme",
       responded: true,
     });
-    expect(resolved).toEqual([{
+    expect(result.resolved[0]).toMatchObject({
       threadId: "grok-task",
-      requestId: "opaque",
-      decision: "decline",
-      reason: MISSING_COMMAND_GAP,
-    }]);
+      decision: "accept",
+      expected: {
+        requestKind: "command",
+        command: "git push origin t3code/acme",
+        cwd: "/worktree",
+        toolName: "run_terminal_command",
+      },
+    });
   });
 
   test("skips snapshot gaps instead of guessing a request id", async () => {
@@ -1048,7 +1109,7 @@ describe("guardian cycle", () => {
     const responded = [...left.decisions, ...right.decisions].filter((entry) => entry.responded);
     expect(responded).toHaveLength(1);
     expect(first.resolved).toHaveLength(1);
-    expect(first.resolved[0]).toMatchObject({ requestId: "req-1", decision: "decline" });
+    expect(first.resolved[0]).toMatchObject({ requestId: "req-1", decision: "accept" });
   });
 
   test("dry-run judges but does not call thread.approval.respond", async () => {
@@ -1057,8 +1118,8 @@ describe("guardian cycle", () => {
     expect(report.dryRun).toBe(true);
     expect(report.decisions[0]).toMatchObject({
       action: "dry_run",
-      decision: "decline",
-      reason: UNBOUND_ACCEPT_GAP,
+      decision: "accept",
+      reason: "local git status",
       responded: false,
     });
     expect(resolved).toEqual([]);
@@ -1162,7 +1223,7 @@ describe("guardian cycle", () => {
     expect(first.decisions[0]?.responded).toBe(false);
     expect(resolved).toEqual([]);
     const second = await runGuardianCycle(deps, defaultGuardianConfig());
-    expect(second.decisions[0]).toMatchObject({ action: "judged", responded: true, decision: "decline", reason: UNBOUND_ACCEPT_GAP });
+    expect(second.decisions[0]).toMatchObject({ action: "judged", responded: true, decision: "accept", reason: "retrying incomplete guardian claim" });
     expect(resolved).toHaveLength(1);
   });
 
@@ -1542,17 +1603,31 @@ describe("guardian lock and multi-process claims", () => {
     expect(resolved).toEqual([expect.objectContaining({ threadId: "thread-b", requestId: "req-1", decision: "decline" })]);
   });
 
-  test("declines when the fresh approval action no longer matches the judged command", async () => {
+  test("delivers a bound one-shot accept when the judge allows the current action", async () => {
     const { deps, resolved } = fixture();
     const report = await runGuardianCycle(deps, defaultGuardianConfig());
     expect(report.decisions[0]?.responded).toBe(true);
-    expect(report.decisions[0]).toMatchObject({ decision: "decline", reason: UNBOUND_ACCEPT_GAP });
+    expect(report.decisions[0]).toMatchObject({ decision: "accept", reason: "local git status" });
     expect(resolved).toEqual([expect.objectContaining({
       requestId: "req-1",
-      decision: "decline",
-      reason: UNBOUND_ACCEPT_GAP,
+      decision: "accept",
+      expected: { requestKind: "command", command: "git status", cwd: "/worktree", toolName: "Shell" },
     })]);
-    expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
+  });
+
+  test("declines when resolve sees a changed live action after judgment", async () => {
+    const { deps, resolved } = fixture();
+    deps.resolveTaskApproval = async (input) => {
+      if (input.decision === "accept") throw new Error(APPROVAL_ACTION_CHANGED);
+      resolved.push(input);
+      return { sequence: resolved.length, ...input };
+    };
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      decision: "accept",
+      responded: true,
+    });
+    expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline", reason: APPROVAL_ACTION_CHANGED })]);
   });
 
   test("judges missing explicit CWD with the inferred worktree path", async () => {
@@ -1573,10 +1648,33 @@ describe("guardian lock and multi-process claims", () => {
     };
     await runGuardianCycle(deps, defaultGuardianConfig());
     expect(judged).toEqual([{ cwd: "/worktree", actionCwd: "/worktree" }]);
-    expect(claimed).toEqual(["/worktree"]);
-    expect(judged[0]?.actionCwd).toBe(claimed[0]);
-    expect(resolved.some((entry) => entry.decision === "accept")).toBe(false);
-    expect(resolved[0]).toMatchObject({ decision: "decline" });
+    expect(claimed).toEqual([null]);
+    expect(resolved[0]).toMatchObject({
+      decision: "accept",
+      expected: { requestKind: "command", command: "git status", cwd: null, toolName: "Shell" },
+    });
+  });
+
+  test("feeds a compact user/assistant/tool transcript to the judge", async () => {
+    const judged: JudgeInput[] = [];
+    const { deps, resolved } = fixture({
+      history: [
+        { role: "user", text: "Ship the feature branch" },
+        { role: "assistant", text: "I will push origin t3code/acme" },
+        { role: "tool", text: "git status", toolName: "run_terminal_command" },
+      ],
+    });
+    const original = deps.judge;
+    deps.judge = async (input) => {
+      judged.push(input);
+      return original(input);
+    };
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(judged[0]?.transcript).toContain("[1] user: Ship the feature branch");
+    expect(judged[0]?.transcript).toContain("[2] assistant: I will push origin t3code/acme");
+    expect(judged[0]?.transcript).toContain("[3] tool run_terminal_command: git status");
+    expect(report.decisions[0]).toMatchObject({ decision: "accept", responded: true });
+    expect(resolved[0]).toMatchObject({ decision: "accept" });
   });
 });
 

@@ -139,29 +139,64 @@ function compareActivitiesByOrder(left: T3ThreadActivity, right: T3ThreadActivit
   return (left.id ?? "").localeCompare(right.id ?? "");
 }
 
-function uniqueTypedActions(payload: Record<string, unknown>): string[] {
+function xaiTool(record: Record<string, unknown> | null): Record<string, unknown> | null {
+  const meta = asRecord(record?._meta);
+  return asRecord(meta?.["x.ai/tool"]);
+}
+
+function nestedActionRecords(payload: Record<string, unknown>): Array<Record<string, unknown>> {
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  const dataInput = asRecord(data?.input);
-  const itemInput = asRecord(item?.input);
-  const itemResult = asRecord(item?.result);
-  const dataResult = asRecord(data?.result);
-  const values = [
-    asLiteralString(data?.command),
-    asLiteralString(item?.command),
-    asLiteralString(dataInput?.command),
-    asLiteralString(itemInput?.command),
-    asLiteralString(itemResult?.command),
-    asLiteralString(dataResult?.command),
-    asLiteralString(payload.path),
-    asLiteralString(data?.path),
-    asLiteralString(item?.path),
-    asLiteralString(dataInput?.path),
-    asLiteralString(itemInput?.path),
-    asLiteralString(itemResult?.path),
-    asLiteralString(dataResult?.path),
-  ].filter((value): value is string => value !== null);
-  return [...new Set(values)];
+  const payloadArgs = asRecord(payload.arguments) ?? asRecord(payload.args);
+  const dataArgs = asRecord(data?.arguments) ?? asRecord(data?.args);
+  const itemArgs = asRecord(item?.arguments) ?? asRecord(item?.args);
+  const toolCall = asRecord(payload.toolCall)
+    ?? asRecord(payloadArgs?.toolCall)
+    ?? asRecord(data?.toolCall)
+    ?? asRecord(dataArgs?.toolCall)
+    ?? asRecord(item?.toolCall);
+  const records = [
+    payload,
+    data,
+    item,
+    asRecord(data?.input),
+    asRecord(item?.input),
+    asRecord(item?.result),
+    asRecord(data?.result),
+    payloadArgs,
+    dataArgs,
+    itemArgs,
+    toolCall,
+    asRecord(payload.rawInput),
+    asRecord(data?.rawInput),
+    asRecord(item?.rawInput),
+    asRecord(payloadArgs?.rawInput),
+    asRecord(dataArgs?.rawInput),
+    asRecord(itemArgs?.rawInput),
+    asRecord(toolCall?.rawInput),
+    xaiTool(payload),
+    xaiTool(data),
+    xaiTool(item),
+    xaiTool(payloadArgs),
+    xaiTool(toolCall),
+    asRecord(xaiTool(payload)?.input),
+    asRecord(xaiTool(data)?.input),
+    asRecord(xaiTool(item)?.input),
+    asRecord(xaiTool(payloadArgs)?.input),
+    asRecord(xaiTool(toolCall)?.input),
+  ];
+  return records.filter((record): record is Record<string, unknown> => record !== null);
+}
+
+function uniqueTypedActions(payload: Record<string, unknown>): { commands: string[]; paths: string[] } {
+  const records = nestedActionRecords(payload);
+  const commands = [...new Set(records
+    .map((record) => asLiteralString(record.command))
+    .filter((value): value is string => value !== null))];
+  const paths = [...new Set(records
+    .map((record) => asLiteralString(record.path))
+    .filter((value): value is string => value !== null))];
+  return { commands, paths };
 }
 
 function uniqueNonEmpty(values: Array<string | null>): string[] {
@@ -169,41 +204,24 @@ function uniqueNonEmpty(values: Array<string | null>): string[] {
 }
 
 function uniqueTypedCwds(payload: Record<string, unknown>): string[] {
-  const data = asRecord(payload.data);
-  const item = asRecord(data?.item);
-  const dataInput = asRecord(data?.input);
-  const itemInput = asRecord(item?.input);
-  const itemResult = asRecord(item?.result);
-  const dataResult = asRecord(data?.result);
-  return uniqueNonEmpty([
-    asLiteralString(payload.cwd),
-    asLiteralString(payload.workingDirectory),
-    asLiteralString(data?.cwd),
-    asLiteralString(data?.workingDirectory),
-    asLiteralString(item?.cwd),
-    asLiteralString(item?.workingDirectory),
-    asLiteralString(dataInput?.cwd),
-    asLiteralString(dataInput?.workingDirectory),
-    asLiteralString(itemInput?.cwd),
-    asLiteralString(itemInput?.workingDirectory),
-    asLiteralString(itemResult?.cwd),
-    asLiteralString(itemResult?.workingDirectory),
-    asLiteralString(dataResult?.cwd),
-    asLiteralString(dataResult?.workingDirectory),
-  ]);
+  return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
+    asLiteralString(record.cwd),
+    asLiteralString(record.workingDirectory),
+  ]));
 }
 
 function uniqueTypedTools(payload: Record<string, unknown>): string[] {
-  const data = asRecord(payload.data);
-  const item = asRecord(data?.item);
-  const dataInput = asRecord(data?.input);
-  const itemInput = asRecord(item?.input);
+  const records = nestedActionRecords(payload);
+  const xaiNames = records
+    .map((record) => xaiTool(record))
+    .map((record) => asLiteralString(record?.name));
   return uniqueNonEmpty([
-    asLiteralString(data?.toolName),
-    asLiteralString(item?.tool),
-    asLiteralString(item?.toolName),
-    asLiteralString(dataInput?.toolName),
-    asLiteralString(itemInput?.toolName),
+    asLiteralString(payload.toolName),
+    ...xaiNames,
+    ...records.flatMap((record) => [
+      asLiteralString(record.toolName),
+      asLiteralString(record.tool),
+    ]),
   ]);
 }
 
@@ -211,28 +229,38 @@ function extractTypedAction(payload: Record<string, unknown> | null): {
   command: string | null;
   cwd: string | null;
   toolName: string | null;
+  commandSource: "command" | "path" | null;
   reason?: string;
 } {
-  if (!payload) return { command: null, cwd: null, toolName: null, reason: MISSING_COMMAND_GAP };
-  const typed = uniqueTypedActions(payload);
+  if (!payload) return { command: null, cwd: null, toolName: null, commandSource: null, reason: MISSING_COMMAND_GAP };
+  const { commands, paths } = uniqueTypedActions(payload);
+  const typed = [...new Set([...commands, ...paths])];
   const cwds = uniqueTypedCwds(payload);
   const tools = uniqueTypedTools(payload);
   const detail = asLiteralString(payload.detail);
   if (typed.length > 1 || cwds.length > 1 || tools.length > 1) {
-    return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+    return { command: null, cwd: null, toolName: null, commandSource: null, reason: CONFLICTING_COMMAND_GAP };
   }
   if (typed.length === 1) {
-    if (detail !== null && detail !== typed[0]) return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
-    return { command: typed[0]!, cwd: cwds[0] ?? null, toolName: tools[0] ?? null };
+    if (detail !== null && detail !== typed[0]) return { command: null, cwd: null, toolName: null, commandSource: null, reason: CONFLICTING_COMMAND_GAP };
+    return {
+      command: typed[0]!,
+      cwd: cwds[0] ?? null,
+      toolName: tools[0] ?? null,
+      commandSource: commands.length === 1 ? "command" : "path",
+    };
   }
-  return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, reason: MISSING_COMMAND_GAP };
+  return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, commandSource: null, reason: MISSING_COMMAND_GAP };
 }
 
 function extractToolName(activity: T3ThreadActivity, payload: Record<string, unknown> | null): string | null {
   if (!payload) return asTrimmedString(activity.summary);
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  return asTrimmedString(payload.title)
+  const xai = xaiTool(payload) ?? xaiTool(data) ?? xaiTool(asRecord(payload.args)) ?? xaiTool(asRecord(payload.toolCall));
+  return asTrimmedString(payload.toolName)
+    ?? asTrimmedString(xai?.name)
+    ?? asTrimmedString(payload.title)
     ?? asTrimmedString(data?.toolName)
     ?? asTrimmedString(item?.tool)
     ?? asTrimmedString(payload.itemType)
@@ -248,9 +276,11 @@ export function derivePendingApprovals(activities: readonly T3ThreadActivity[]):
     const detail = asTrimmedString(payload?.detail);
     if (activity.kind === "approval.requested") {
       const extracted = extractTypedAction(payload);
+      const requestKind = requestKindFromPayload(payload)
+        ?? (extracted.commandSource === "command" ? "command" : null);
       openByRequestId.set(requestId, {
         requestId,
-        requestKind: requestKindFromPayload(payload),
+        requestKind,
         createdAt: activity.createdAt,
         command: extracted.command,
         toolName: extracted.toolName ?? extractToolName(activity, payload),
@@ -431,11 +461,8 @@ export function approvalRespondCommand(
   decision: ApprovalDecision,
   commandId: string,
   createdAt: string,
-  expected?: ApprovalActionIdentity,
+  _expected?: ApprovalActionIdentity,
 ) {
-  if (decision === "accept") {
-    throw new Error(UNBOUND_ACCEPT_GAP);
-  }
   return {
     type: "thread.approval.respond",
     commandId,
