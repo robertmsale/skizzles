@@ -347,7 +347,10 @@ export function resolveProjectedRuntimeMode(
   thread: Pick<T3ThreadShell, "runtimeMode">,
   snapshot?: Pick<ThreadSnapshot, "thread">,
 ): string | null {
-  return asTrimmedString(thread.runtimeMode) ?? asTrimmedString(snapshot?.thread.runtimeMode);
+  const fromThread = asTrimmedString(thread.runtimeMode);
+  const fromSnapshot = asTrimmedString(snapshot?.thread.runtimeMode);
+  if (fromThread && fromSnapshot && fromThread.toLowerCase() !== fromSnapshot.toLowerCase()) return null;
+  return fromThread ?? fromSnapshot;
 }
 
 export function projectPendingApprovalList(

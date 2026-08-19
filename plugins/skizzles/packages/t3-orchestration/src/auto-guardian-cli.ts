@@ -853,9 +853,12 @@ function normalizeRuntimeMode(value) {
 }
 function resolveGuardianRuntimeMode(eventRuntimeMode, threadRuntimeMode) {
   const fromEvent = normalizeRuntimeMode(eventRuntimeMode);
+  const fromThread = normalizeRuntimeMode(threadRuntimeMode);
+  if (fromEvent && fromThread && fromEvent.toLowerCase() !== fromThread.toLowerCase()) {
+    return { runtimeMode: undefined, source: "missing" };
+  }
   if (fromEvent)
     return { runtimeMode: fromEvent, source: "event" };
-  const fromThread = normalizeRuntimeMode(threadRuntimeMode);
   if (fromThread)
     return { runtimeMode: fromThread, source: "thread" };
   return { runtimeMode: undefined, source: "missing" };
@@ -874,33 +877,47 @@ function explicitCodexInstance(instanceId) {
   const value = instanceId?.trim().toLowerCase();
   return value === CODEX_PROVIDER_INSTANCE || inferDriverFromInstanceId(value) === CODEX_PROVIDER_INSTANCE;
 }
-function identityKey(value) {
-  return inferDriverFromInstanceId(value) ?? value.trim().toLowerCase();
+function classifiedIdentityKind(value) {
+  const inferred = inferDriverFromInstanceId(value);
+  if (inferred)
+    return inferred;
+  const lower = value.trim().toLowerCase();
+  if (lower === CODEX_PROVIDER_INSTANCE || lower.startsWith("codex_") || lower.startsWith("codex-") || lower === "personal") {
+    return CODEX_PROVIDER_INSTANCE;
+  }
+  return;
 }
 function identitiesAgree(values) {
-  const keys = new Set;
+  const kinds = new Set;
   for (const value of values) {
     const token = normalizeRuntimeMode(value);
     if (!token)
       continue;
-    keys.add(identityKey(token));
+    const kind = classifiedIdentityKind(token);
+    if (kind)
+      kinds.add(kind);
+  }
+  return kinds.size <= 1;
+}
+function runtimesAgree(values) {
+  const keys = new Set;
+  for (const value of values) {
+    const token = normalizeRuntimeMode(value);
+    if (token)
+      keys.add(token.toLowerCase());
   }
   return keys.size <= 1;
 }
-function agreedToken(...values) {
-  const tokens = values.map((value) => normalizeRuntimeMode(value)).filter((value) => Boolean(value));
-  if (tokens.length === 0 || !identitiesAgree(tokens))
-    return;
-  return tokens[0];
-}
 function resolveGuardianProviderDriver(eventDriver, eventProvider, thread) {
+  if (thread?.inconsistent)
+    return { providerDriver: undefined, source: "missing" };
   const fromEvent = normalizeRuntimeMode(eventDriver);
-  if (fromEvent)
-    return { providerDriver: fromEvent, source: "event" };
   const eventInstance = normalizeRuntimeMode(eventProvider);
-  if (!identitiesAgree([eventInstance, thread?.provider, thread?.providerDriver])) {
+  if (!identitiesAgree([fromEvent, eventInstance, thread?.provider, thread?.providerDriver])) {
     return { providerDriver: undefined, source: "missing" };
   }
+  if (fromEvent)
+    return { providerDriver: fromEvent, source: "event" };
   if (explicitCodexInstance(eventInstance)) {
     return { providerDriver: CODEX_PROVIDER_INSTANCE, source: "event" };
   }
@@ -941,13 +958,31 @@ function instanceIdFromUnknown(value) {
   return firstToken(record?.instanceId, record?.instance_id);
 }
 function threadContextFromSqliteRows(thread, session) {
-  const runtimeMode = agreedToken(thread?.runtime_mode, thread?.runtimeMode, session?.runtime_mode, session?.runtimeMode);
-  const provider = agreedToken(thread?.provider_instance_id, instanceIdFromUnknown(thread?.model_selection_json), instanceIdFromUnknown(thread?.model_selection), session?.instance_id, session?.provider_instance_id);
-  const providerDriver = agreedToken(thread?.provider_driver, session?.driver, session?.provider_driver, inferDriverFromInstanceId(provider));
-  if (!identitiesAgree([provider, providerDriver])) {
-    return { runtimeMode };
+  const runtimes = [
+    thread?.runtime_mode,
+    thread?.runtimeMode,
+    session?.runtime_mode,
+    session?.runtimeMode
+  ];
+  const identities = [
+    thread?.provider_instance_id,
+    instanceIdFromUnknown(thread?.model_selection_json),
+    instanceIdFromUnknown(thread?.model_selection),
+    thread?.provider_driver,
+    session?.instance_id,
+    session?.provider_instance_id,
+    session?.driver,
+    session?.provider_driver
+  ];
+  if (!runtimesAgree(runtimes) || !identitiesAgree(identities)) {
+    return { inconsistent: true };
   }
-  return { runtimeMode, provider, providerDriver };
+  const provider = firstToken(thread?.provider_instance_id, instanceIdFromUnknown(thread?.model_selection_json), instanceIdFromUnknown(thread?.model_selection), session?.instance_id, session?.provider_instance_id);
+  return {
+    runtimeMode: firstToken(...runtimes),
+    provider,
+    providerDriver: firstToken(thread?.provider_driver, session?.driver, session?.provider_driver, inferDriverFromInstanceId(provider))
+  };
 }
 function defaultT3StateSqlitePath(home3 = process.env.HOME || homedir2()) {
   const t3Home = resolve3(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
@@ -1056,16 +1091,6 @@ function inferredFromThread(resolved) {
   return fields;
 }
 async function resolveCandidateFields(dependencies, candidate, cache) {
-  const eventMode = resolveGuardianRuntimeMode(candidate.runtimeMode);
-  const eventDriver = resolveGuardianProviderDriver(candidate.providerDriver, candidate.provider);
-  if (eventMode.source !== "missing" && normalizeRuntimeMode(candidate.providerDriver)) {
-    return {
-      runtimeMode: eventMode.runtimeMode,
-      runtimeModeSource: eventMode.source,
-      providerDriver: eventDriver.providerDriver,
-      providerDriverSource: eventDriver.source
-    };
-  }
   if (!cache.has(candidate.threadId) && dependencies.threadContext) {
     try {
       cache.set(candidate.threadId, await dependencies.threadContext(candidate.threadId) ?? null);
@@ -1074,6 +1099,14 @@ async function resolveCandidateFields(dependencies, candidate, cache) {
     }
   }
   const thread = cache.get(candidate.threadId);
+  if (thread?.inconsistent) {
+    return {
+      runtimeMode: undefined,
+      runtimeModeSource: "missing",
+      providerDriver: undefined,
+      providerDriverSource: "missing"
+    };
+  }
   const runtime = resolveGuardianRuntimeMode(candidate.runtimeMode, thread?.runtimeMode);
   const driver = resolveGuardianProviderDriver(candidate.providerDriver, candidate.provider, thread);
   return {

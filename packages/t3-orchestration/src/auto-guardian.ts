@@ -133,6 +133,7 @@ export type ThreadContext = {
   runtimeMode?: string | null;
   provider?: string | null;
   providerDriver?: string | null;
+  inconsistent?: boolean;
 };
 
 export type HistoryResult = {
@@ -276,8 +277,11 @@ export function resolveGuardianRuntimeMode(
   threadRuntimeMode?: unknown,
 ): { runtimeMode: string | undefined; source: RuntimeModeSource } {
   const fromEvent = normalizeRuntimeMode(eventRuntimeMode);
-  if (fromEvent) return { runtimeMode: fromEvent, source: "event" };
   const fromThread = normalizeRuntimeMode(threadRuntimeMode);
+  if (fromEvent && fromThread && fromEvent.toLowerCase() !== fromThread.toLowerCase()) {
+    return { runtimeMode: undefined, source: "missing" };
+  }
+  if (fromEvent) return { runtimeMode: fromEvent, source: "event" };
   if (fromThread) return { runtimeMode: fromThread, source: "thread" };
   return { runtimeMode: undefined, source: "missing" };
 }
@@ -295,24 +299,34 @@ function explicitCodexInstance(instanceId: string | null | undefined): boolean {
   return value === CODEX_PROVIDER_INSTANCE || inferDriverFromInstanceId(value) === CODEX_PROVIDER_INSTANCE;
 }
 
-function identityKey(value: string): string {
-  return inferDriverFromInstanceId(value) ?? value.trim().toLowerCase();
+function classifiedIdentityKind(value: string): string | undefined {
+  const inferred = inferDriverFromInstanceId(value);
+  if (inferred) return inferred;
+  const lower = value.trim().toLowerCase();
+  if (lower === CODEX_PROVIDER_INSTANCE || lower.startsWith("codex_") || lower.startsWith("codex-") || lower === "personal") {
+    return CODEX_PROVIDER_INSTANCE;
+  }
+  return undefined;
 }
 
-function identitiesAgree(values: Array<string | null | undefined>): boolean {
-  const keys = new Set<string>();
+function identitiesAgree(values: unknown[]): boolean {
+  const kinds = new Set<string>();
   for (const value of values) {
     const token = normalizeRuntimeMode(value);
     if (!token) continue;
-    keys.add(identityKey(token));
+    const kind = classifiedIdentityKind(token);
+    if (kind) kinds.add(kind);
   }
-  return keys.size <= 1;
+  return kinds.size <= 1;
 }
 
-function agreedToken(...values: unknown[]): string | undefined {
-  const tokens = values.map((value) => normalizeRuntimeMode(value)).filter((value): value is string => Boolean(value));
-  if (tokens.length === 0 || !identitiesAgree(tokens)) return undefined;
-  return tokens[0];
+function runtimesAgree(values: unknown[]): boolean {
+  const keys = new Set<string>();
+  for (const value of values) {
+    const token = normalizeRuntimeMode(value);
+    if (token) keys.add(token.toLowerCase());
+  }
+  return keys.size <= 1;
 }
 
 export function resolveGuardianProviderDriver(
@@ -320,12 +334,13 @@ export function resolveGuardianProviderDriver(
   eventProvider?: unknown,
   thread?: ThreadContext | null,
 ): { providerDriver: string | undefined; source: RuntimeModeSource } {
+  if (thread?.inconsistent) return { providerDriver: undefined, source: "missing" };
   const fromEvent = normalizeRuntimeMode(eventDriver);
-  if (fromEvent) return { providerDriver: fromEvent, source: "event" };
   const eventInstance = normalizeRuntimeMode(eventProvider);
-  if (!identitiesAgree([eventInstance, thread?.provider, thread?.providerDriver])) {
+  if (!identitiesAgree([fromEvent, eventInstance, thread?.provider, thread?.providerDriver])) {
     return { providerDriver: undefined, source: "missing" };
   }
+  if (fromEvent) return { providerDriver: fromEvent, source: "event" };
   if (explicitCodexInstance(eventInstance)) {
     return { providerDriver: CODEX_PROVIDER_INSTANCE, source: "event" };
   }
@@ -373,29 +388,42 @@ export function threadContextFromSqliteRows(
   thread?: Record<string, unknown> | null,
   session?: Record<string, unknown> | null,
 ): ThreadContext {
-  const runtimeMode = agreedToken(
+  const runtimes = [
     thread?.runtime_mode,
     thread?.runtimeMode,
     session?.runtime_mode,
     session?.runtimeMode,
-  );
-  const provider = agreedToken(
+  ];
+  const identities = [
+    thread?.provider_instance_id,
+    instanceIdFromUnknown(thread?.model_selection_json),
+    instanceIdFromUnknown(thread?.model_selection),
+    thread?.provider_driver,
+    session?.instance_id,
+    session?.provider_instance_id,
+    session?.driver,
+    session?.provider_driver,
+  ];
+  if (!runtimesAgree(runtimes) || !identitiesAgree(identities)) {
+    return { inconsistent: true };
+  }
+  const provider = firstToken(
     thread?.provider_instance_id,
     instanceIdFromUnknown(thread?.model_selection_json),
     instanceIdFromUnknown(thread?.model_selection),
     session?.instance_id,
     session?.provider_instance_id,
   );
-  const providerDriver = agreedToken(
-    thread?.provider_driver,
-    session?.driver,
-    session?.provider_driver,
-    inferDriverFromInstanceId(provider),
-  );
-  if (!identitiesAgree([provider, providerDriver])) {
-    return { runtimeMode };
-  }
-  return { runtimeMode, provider, providerDriver };
+  return {
+    runtimeMode: firstToken(...runtimes),
+    provider,
+    providerDriver: firstToken(
+      thread?.provider_driver,
+      session?.driver,
+      session?.provider_driver,
+      inferDriverFromInstanceId(provider),
+    ),
+  };
 }
 
 export function defaultT3StateSqlitePath(home = process.env.HOME || homedir()): string {
@@ -530,16 +558,6 @@ async function resolveCandidateFields(
   candidate: GuardianCandidate,
   cache: Map<string, ThreadContext | null>,
 ): Promise<ResolvedGuardianFields> {
-  const eventMode = resolveGuardianRuntimeMode(candidate.runtimeMode);
-  const eventDriver = resolveGuardianProviderDriver(candidate.providerDriver, candidate.provider);
-  if (eventMode.source !== "missing" && normalizeRuntimeMode(candidate.providerDriver)) {
-    return {
-      runtimeMode: eventMode.runtimeMode,
-      runtimeModeSource: eventMode.source,
-      providerDriver: eventDriver.providerDriver,
-      providerDriverSource: eventDriver.source,
-    };
-  }
   if (!cache.has(candidate.threadId) && dependencies.threadContext) {
     try {
       cache.set(candidate.threadId, await dependencies.threadContext(candidate.threadId) ?? null);
@@ -548,6 +566,14 @@ async function resolveCandidateFields(
     }
   }
   const thread = cache.get(candidate.threadId);
+  if (thread?.inconsistent) {
+    return {
+      runtimeMode: undefined,
+      runtimeModeSource: "missing",
+      providerDriver: undefined,
+      providerDriverSource: "missing",
+    };
+  }
   const runtime = resolveGuardianRuntimeMode(candidate.runtimeMode, thread?.runtimeMode);
   const driver = resolveGuardianProviderDriver(candidate.providerDriver, candidate.provider, thread);
   return {

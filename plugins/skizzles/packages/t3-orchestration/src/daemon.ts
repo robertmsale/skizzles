@@ -363,7 +363,11 @@ function projectContext(thread, projects) {
   };
 }
 function resolveProjectedRuntimeMode(thread, snapshot) {
-  return asTrimmedString(thread.runtimeMode) ?? asTrimmedString(snapshot?.thread.runtimeMode);
+  const fromThread = asTrimmedString(thread.runtimeMode);
+  const fromSnapshot = asTrimmedString(snapshot?.thread.runtimeMode);
+  if (fromThread && fromSnapshot && fromThread.toLowerCase() !== fromSnapshot.toLowerCase())
+    return null;
+  return fromThread ?? fromSnapshot;
 }
 function projectPendingApprovalList(threads, snapshots, projects, drivers) {
   const approvals = [];
