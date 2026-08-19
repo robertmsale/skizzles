@@ -28,6 +28,13 @@
       "name": "@skizzles/core",
       "version": "0.1.0",
     },
+    "packages/cursor-acp-shim": {
+      "name": "@skizzles/cursor-acp-shim",
+      "version": "0.1.0",
+      "bin": {
+        "t3-cursor-acp": "./src/cli.ts",
+      },
+    },
     "packages/installer": {
       "name": "@skizzles/installer",
       "version": "0.1.0",
@@ -43,6 +50,8 @@
   },
   "packages": {
     "@skizzles/core": ["@skizzles/core@workspace:packages/core"],
+
+    "@skizzles/cursor-acp-shim": ["@skizzles/cursor-acp-shim@workspace:packages/cursor-acp-shim"],
 
     "@skizzles/installer": ["@skizzles/installer@workspace:packages/installer"],
 
