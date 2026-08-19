@@ -229,11 +229,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       return;
     }
     if (held.cancelled) {
-      await writeMappedResult({
-        jsonrpc: "2.0",
-        id: held.t3Id,
-        result: { stopReason: "cancelled" },
-      }, held.t3Id, held.style);
+      await writeMappedResult(frame.message, held.t3Id, held.style);
       held = undefined;
       return;
     }
@@ -282,9 +278,11 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
           if (!ok) {
             if (held?.cancelled) {
               await finishCancelled();
+              await closeShim();
               return;
             }
             await failHeld("Cursor ACP child died; could not restore a visible session for replay");
+            await closeShim();
             return;
           }
         }
@@ -300,14 +298,16 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
           method: held.method,
           params: held.params,
         };
+        const writeGeneration = childGeneration;
+        if (sameChild) held.sameChildReplayGeneration = writeGeneration;
         try {
           await writeChild(encodeFrame(request, held.style));
           if (!held) return;
           held.childHasPrompt = true;
-          held.sameChildReplayGeneration = sameChild ? childGeneration : undefined;
           if (held.cancelled) return;
           return;
         } catch {
+          if (held?.sameChildReplayGeneration === writeGeneration) held.sameChildReplayGeneration = undefined;
           nextMode = "respawn";
           increment = false;
           sameChild = false;

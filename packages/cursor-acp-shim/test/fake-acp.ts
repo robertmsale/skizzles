@@ -35,6 +35,8 @@ export async function runFakeAcp(options: {
   exitAfterReverse?: boolean;
   waitForCancel?: boolean;
   partialThenExit?: boolean;
+  failLoad?: boolean;
+  deferReplayResult?: Promise<void>;
   onRequest?: (request: FakeAcpRequest) => void;
 }): Promise<void> {
   const mode = options.mode ?? (process.env.FAKE_ACP_MODE as FakeAcpMode | undefined) ?? "ok";
@@ -62,6 +64,14 @@ export async function runFakeAcp(options: {
     if (message.method === "session/new" || message.method === "session/load") {
       const params = asRecord(message.params);
       const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
+      if (message.method === "session/load" && options.failLoad) {
+        await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+          jsonrpc: "2.0",
+          id: message.id ?? null,
+          error: { code: -32603, message: "session not found" },
+        }, frame.style));
+        continue;
+      }
       if (message.method === "session/load") {
         for (const update of options.loadHistory ?? []) {
           await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
@@ -95,6 +105,21 @@ export async function runFakeAcp(options: {
           },
         }, frame.style));
         return;
+      }
+      if (options.deferReplayResult && prompts >= 2) {
+        if (options.deferReplayResult) await options.deferReplayResult;
+        const params = asRecord(message.params);
+        const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
+        await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: successText } },
+          },
+        }, frame.style));
+        await reply(options.stdout, message, { stopReason: "end_turn" });
+        continue;
       }
       if (options.waitForCancel && prompts >= 2) {
         const request = message;

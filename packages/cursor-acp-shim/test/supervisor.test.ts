@@ -316,6 +316,59 @@ describe("ACP supervisor", () => {
     ]);
   });
 
+  test("closes the wrapper when synthetic session/load restore fails and the child stays alive", async () => {
+    let launches = 0;
+    const session = await startHarness({
+      handshake: "load",
+      spawn: () => {
+        launches += 1;
+        const launch = launches;
+        return fakeChild(launch === 1 ? "always-flake" : "ok", {
+          exitAfterPrompts: launch === 1 ? 1 : undefined,
+          failLoad: launch === 2,
+        });
+      },
+    });
+    const result = await session.prompt("try again", []);
+    expect(result.id).toBe(3);
+    expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
+    expect(JSON.stringify(result.error)).toContain("could not restore");
+    await Promise.race([
+      session.done,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("shim stayed open after failed session/load restore")), 500);
+      }),
+    ]);
+    expect(launches).toBe(2);
+  });
+
+  test("preserves a normal child result when cancel races with completion", async () => {
+    let release!: () => void;
+    const deferReplayResult = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let replayId: string | number | undefined;
+    const session = await startSession("flake-then-ok", {
+      deferReplayResult,
+      onRequest: (request) => {
+        if (request.method === "session/prompt" && request.id !== 3 && request.id != null) replayId = request.id;
+      },
+    });
+    await session.startPrompt("try again");
+    await waitFor(() => replayId !== undefined);
+    await session.sendCancel();
+    release();
+    while (true) {
+      const message = await session.next();
+      if (message.method === "session/update") continue;
+      expect(message.id).toBe(3);
+      expect(message.id).not.toBe(replayId);
+      expect(message.result).toEqual({ stopReason: "end_turn" });
+      break;
+    }
+    await session.close();
+  });
+
   test("does not grant an extra prompt after a same-child replay is proven received", async () => {
     let prompts = 0;
     const session = await startHarness({
@@ -365,6 +418,7 @@ async function startSession(mode: FakeAcpMode, options: {
   reverseRequest?: boolean;
   extraUpdate?: string;
   waitForCancel?: boolean;
+  deferReplayResult?: Promise<void>;
   onRequest?: (request: FakeAcpRequest) => void;
   deferResult?: Promise<void>;
 } = {}) {
@@ -460,6 +514,8 @@ function fakeChild(mode: FakeAcpMode, options: {
   exitAfterReverse?: boolean;
   waitForCancel?: boolean;
   partialThenExit?: boolean;
+  failLoad?: boolean;
+  deferReplayResult?: Promise<void>;
   loadHistory?: import("./fake-acp.ts").FakeAcpHistoryUpdate[];
   deferResult?: Promise<void>;
   exitAfterPrompts?: number;
