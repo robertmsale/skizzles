@@ -152,6 +152,22 @@ function asTrimmedString(value) {
 function asLiteralString(value) {
   return typeof value === "string" ? value : null;
 }
+function unwrapPresentation(value) {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith("`") && trimmed.endsWith("`")) {
+    const inner = trimmed.slice(1, -1).trim();
+    if (inner)
+      return inner;
+  }
+  return trimmed;
+}
+function asActionText(value) {
+  const literal = asLiteralString(value);
+  if (literal === null)
+    return null;
+  const unwrapped = unwrapPresentation(literal);
+  return unwrapped.length > 0 ? unwrapped : null;
+}
 function threadActivities(snapshot) {
   const activities = snapshot.thread.activities;
   if (!Array.isArray(activities))
@@ -245,9 +261,13 @@ function nestedActionRecords(payload) {
 }
 function uniqueTypedActions(payload) {
   const records = nestedActionRecords(payload);
-  const commands = [...new Set(records.map((record) => asLiteralString(record.command)).filter((value) => value !== null))];
-  const paths = [...new Set(records.map((record) => asLiteralString(record.path)).filter((value) => value !== null))];
-  return { commands, paths };
+  const commands = uniqueNonEmpty(records.flatMap((record) => [
+    asActionText(record.command),
+    asActionText(record.rawCommand)
+  ]));
+  const details = uniqueNonEmpty(records.map((record) => asActionText(record.detail))).filter((value) => !isGenericApprovalLabel(value));
+  const paths = uniqueNonEmpty(records.map((record) => asLiteralString(record.path)));
+  return { commands: uniqueNonEmpty([...commands, ...details]), paths };
 }
 var GENERIC_APPROVAL_LABELS = new Set([
   "searched files",
@@ -286,7 +306,7 @@ function uniqueTypedQueries(payload) {
 }
 function uniqueTypedTitles(payload) {
   return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
-    asLiteralString(record.title)
+    asActionText(record.title)
   ])).filter((value) => !isGenericApprovalLabel(value));
 }
 function uniqueTypedKinds(payload) {
@@ -375,8 +395,8 @@ function extractTypedAction(payload) {
     return { command: null, cwd: null, toolName: null, commandSource: null, kind: null, reason: CONFLICTING_COMMAND_GAP };
   }
   const identity = command.value ?? path.value ?? url.value ?? title.value ?? query.value ?? composeKindIdentity(kind.value, toolCallId.value) ?? tool.value;
-  const detail = asLiteralString(payload.detail);
-  if (identity && detail !== null && !isGenericApprovalLabel(detail) && detail !== identity) {
+  const presented = asActionText(payload.detail);
+  if (identity && presented && !isGenericApprovalLabel(presented) && unwrapPresentation(identity) !== presented) {
     return { command: null, cwd: null, toolName: null, commandSource: null, kind: kind.value, reason: CONFLICTING_COMMAND_GAP };
   }
   if (!identity) {
