@@ -974,22 +974,23 @@ function threadContextFromSqliteRows(thread, session) {
     thread?.provider_instance_id,
     instanceIdFromUnknown(thread?.model_selection_json),
     instanceIdFromUnknown(thread?.model_selection),
-    session?.instance_id,
-    session?.provider_instance_id
+    session?.provider_instance_id,
+    session?.providerInstanceId
   ];
   const drivers = [
-    thread?.provider_driver,
-    session?.driver,
-    session?.provider_driver
+    session?.provider_name,
+    session?.providerName,
+    session?.adapter_key,
+    session?.adapterKey
   ];
   if (!runtimesAgree(runtimes) || !providerAndDriverIdentitiesAgree(providers, drivers)) {
     return { inconsistent: true };
   }
-  const provider = firstToken(thread?.provider_instance_id, instanceIdFromUnknown(thread?.model_selection_json), instanceIdFromUnknown(thread?.model_selection), session?.instance_id, session?.provider_instance_id);
+  const provider = firstToken(thread?.provider_instance_id, instanceIdFromUnknown(thread?.model_selection_json), instanceIdFromUnknown(thread?.model_selection), session?.provider_instance_id, session?.providerInstanceId);
   return {
     runtimeMode: firstToken(...runtimes),
     provider,
-    providerDriver: firstToken(thread?.provider_driver, session?.driver, session?.provider_driver, inferDriverFromInstanceId(provider))
+    providerDriver: firstToken(session?.provider_name, session?.providerName, session?.adapter_key, session?.adapterKey, inferDriverFromInstanceId(provider))
   };
 }
 function defaultT3StateSqlitePath(home3 = process.env.HOME || homedir2()) {

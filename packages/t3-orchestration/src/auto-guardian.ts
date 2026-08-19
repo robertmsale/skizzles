@@ -408,13 +408,14 @@ export function threadContextFromSqliteRows(
     thread?.provider_instance_id,
     instanceIdFromUnknown(thread?.model_selection_json),
     instanceIdFromUnknown(thread?.model_selection),
-    session?.instance_id,
     session?.provider_instance_id,
+    session?.providerInstanceId,
   ];
   const drivers = [
-    thread?.provider_driver,
-    session?.driver,
-    session?.provider_driver,
+    session?.provider_name,
+    session?.providerName,
+    session?.adapter_key,
+    session?.adapterKey,
   ];
   if (!runtimesAgree(runtimes) || !providerAndDriverIdentitiesAgree(providers, drivers)) {
     return { inconsistent: true };
@@ -423,16 +424,17 @@ export function threadContextFromSqliteRows(
     thread?.provider_instance_id,
     instanceIdFromUnknown(thread?.model_selection_json),
     instanceIdFromUnknown(thread?.model_selection),
-    session?.instance_id,
     session?.provider_instance_id,
+    session?.providerInstanceId,
   );
   return {
     runtimeMode: firstToken(...runtimes),
     provider,
     providerDriver: firstToken(
-      thread?.provider_driver,
-      session?.driver,
-      session?.provider_driver,
+      session?.provider_name,
+      session?.providerName,
+      session?.adapter_key,
+      session?.adapterKey,
       inferDriverFromInstanceId(provider),
     ),
   };

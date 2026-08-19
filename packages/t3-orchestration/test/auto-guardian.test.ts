@@ -341,12 +341,15 @@ describe("guardian eligibility filter", () => {
       const path = join(root, "state.sqlite");
       const db = new Database(path);
       db.run("CREATE TABLE projection_threads (thread_id TEXT, runtime_mode TEXT, model_selection_json TEXT)");
-      db.run("CREATE TABLE provider_session_runtime (thread_id TEXT, runtime_mode TEXT)");
+      db.run("CREATE TABLE provider_session_runtime (thread_id TEXT, runtime_mode TEXT, provider_instance_id TEXT, provider_name TEXT, adapter_key TEXT)");
       db.run(
         "INSERT INTO projection_threads VALUES (?, 'auto', ?)",
         ["596426a6-6d6e-43a4-b0d3-23ed99208aeb", JSON.stringify({ instanceId: "cursor" })],
       );
-      db.run("INSERT INTO provider_session_runtime VALUES (?, 'auto')", ["596426a6-6d6e-43a4-b0d3-23ed99208aeb"]);
+      db.run(
+        "INSERT INTO provider_session_runtime VALUES (?, 'auto', 'cursor', 'cursor', 'cursor')",
+        ["596426a6-6d6e-43a4-b0d3-23ed99208aeb"],
+      );
       db.close();
       expect(readSqliteThreadContext("596426a6-6d6e-43a4-b0d3-23ed99208aeb", path)).toEqual({
         runtimeMode: "auto",
@@ -360,25 +363,37 @@ describe("guardian eligibility filter", () => {
 
   test("does not collapse conflicting projection and session identities", () => {
     expect(threadContextFromSqliteRows(
-      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "cursor" }), provider_driver: "cursor" },
-      { runtime_mode: "full-access", instance_id: "codex", driver: "codex" },
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "cursor" }) },
+      { runtime_mode: "full-access", provider_instance_id: "codex", provider_name: "codex", adapter_key: "codex" },
     )).toEqual({ inconsistent: true });
     expect(threadContextFromSqliteRows(
-      { runtime_mode: "auto", provider_driver: "cursor" },
-      { runtime_mode: "auto", driver: "grok" },
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "cursor" }) },
+      { runtime_mode: "auto", provider_name: "grok", adapter_key: "grok" },
     )).toEqual({ inconsistent: true });
     expect(threadContextFromSqliteRows(
       { runtime_mode: "auto", runtimeMode: "plan" },
       { runtime_mode: "auto" },
     )).toEqual({ inconsistent: true });
     expect(threadContextFromSqliteRows(
-      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }), provider_driver: "cursor" },
-      { runtime_mode: "auto", instance_id: "custom-b", driver: "cursor" },
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }) },
+      { runtime_mode: "auto", provider_instance_id: "custom-b", provider_name: "cursor", adapter_key: "cursor" },
     )).toEqual({ inconsistent: true });
     expect(threadContextFromSqliteRows(
-      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }), provider_driver: "cursor" },
-      { runtime_mode: "auto", instance_id: "custom-a", driver: "cursor" },
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }) },
+      { runtime_mode: "auto", provider_instance_id: "custom-a", provider_name: "cursor", adapter_key: "cursor" },
     )).toEqual({ runtimeMode: "auto", provider: "custom-a", providerDriver: "cursor" });
+    expect(threadContextFromSqliteRows(
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }) },
+      { runtime_mode: "auto", provider_instance_id: "custom-a", provider_name: "codex", adapter_key: "codex" },
+    )).toEqual({ runtimeMode: "auto", provider: "custom-a", providerDriver: "codex" });
+    expect(isGuardianEligible({
+      provider: "custom-a",
+      providerDriver: resolveGuardianProviderDriver("cursor", "custom-a", threadContextFromSqliteRows(
+        { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }) },
+        { runtime_mode: "auto", provider_instance_id: "custom-a", provider_name: "codex", adapter_key: "codex" },
+      )).providerDriver,
+      runtimeMode: "auto",
+    }).eligible).toBe(false);
     expect(isGuardianEligible({
       provider: "cursor",
       providerDriver: resolveGuardianProviderDriver(undefined, "cursor", {
@@ -503,8 +518,8 @@ describe("guardian cycle", () => {
 
   test("skips when sqlite projection and session rows disagree even if the event looks eligible", async () => {
     const inconsistent = threadContextFromSqliteRows(
-      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "cursor" }), provider_driver: "cursor" },
-      { runtime_mode: "full-access", instance_id: "codex", driver: "codex" },
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "cursor" }) },
+      { runtime_mode: "full-access", provider_instance_id: "codex", provider_name: "codex", adapter_key: "codex" },
     );
     expect(inconsistent).toEqual({ inconsistent: true });
     const complete = fixture({
@@ -603,6 +618,29 @@ describe("guardian cycle", () => {
       responded: true,
     });
     expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline", reason: UNBOUND_ACCEPT_GAP })]);
+  });
+
+  test("skips when sqlite session driver identity disagrees with the approval event driver", async () => {
+    const thread = threadContextFromSqliteRows(
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }) },
+      { runtime_mode: "auto", provider_instance_id: "custom-a", provider_name: "codex", adapter_key: "codex" },
+    );
+    expect(thread).toEqual({ runtimeMode: "auto", provider: "custom-a", providerDriver: "codex" });
+    const result = fixture({
+      list: { approvals: [approval({ provider: "custom-a", providerDriver: "cursor" })], unidentifiable: [] },
+      threadContext: { "cursor-task": thread },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.threadLookups).toEqual(["cursor-task"]);
+    expect(result.judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_codex",
+      providerDriver: "undefined",
+      providerDriverSource: "missing",
+      reason: "provider driver is unavailable (missing)",
+      responded: false,
+    });
+    expect(result.resolved).toEqual([]);
   });
 
   test("skips when two populated custom provider instance IDs disagree", async () => {
