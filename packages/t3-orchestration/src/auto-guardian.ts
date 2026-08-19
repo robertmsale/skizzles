@@ -3,7 +3,6 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Database } from "bun:sqlite";
-import { origin, token } from "./config.ts";
 import {
   APPROVAL_ACTION_CHANGED,
   MISSING_COMMAND_GAP,
@@ -291,6 +290,20 @@ export function inferDriverFromInstanceId(instanceId: string | null | undefined)
   return undefined;
 }
 
+function explicitCodexInstance(instanceId: string | null | undefined): boolean {
+  const value = instanceId?.trim().toLowerCase();
+  return value === CODEX_PROVIDER_INSTANCE || inferDriverFromInstanceId(value) === CODEX_PROVIDER_INSTANCE;
+}
+
+function providerIdentitiesAgree(eventInstance: string, thread?: ThreadContext | null): boolean {
+  const threadInstance = normalizeRuntimeMode(thread?.provider);
+  const threadDriver = normalizeRuntimeMode(thread?.providerDriver);
+  if (threadInstance && threadInstance.toLowerCase() === eventInstance.toLowerCase()) return true;
+  const eventKind = inferDriverFromInstanceId(eventInstance) ?? eventInstance.toLowerCase();
+  const threadKind = (threadDriver ?? inferDriverFromInstanceId(threadInstance))?.toLowerCase();
+  return Boolean(threadKind && eventKind === threadKind);
+}
+
 export function resolveGuardianProviderDriver(
   eventDriver: unknown,
   eventProvider?: unknown,
@@ -298,10 +311,17 @@ export function resolveGuardianProviderDriver(
 ): { providerDriver: string | undefined; source: RuntimeModeSource } {
   const fromEvent = normalizeRuntimeMode(eventDriver);
   if (fromEvent) return { providerDriver: fromEvent, source: "event" };
+  const eventInstance = normalizeRuntimeMode(eventProvider);
+  if (explicitCodexInstance(eventInstance)) {
+    return { providerDriver: CODEX_PROVIDER_INSTANCE, source: "event" };
+  }
+  if (eventInstance && (thread?.provider || thread?.providerDriver) && !providerIdentitiesAgree(eventInstance, thread)) {
+    return { providerDriver: undefined, source: "missing" };
+  }
   const fromThreadDriver = normalizeRuntimeMode(thread?.providerDriver);
   if (fromThreadDriver) return { providerDriver: fromThreadDriver, source: "thread" };
   const fromInstance = inferDriverFromInstanceId(
-    normalizeRuntimeMode(thread?.provider) ?? normalizeRuntimeMode(eventProvider),
+    normalizeRuntimeMode(thread?.provider) ?? eventInstance,
   );
   if (fromInstance) return { providerDriver: fromInstance, source: "thread" };
   return { providerDriver: undefined, source: "missing" };
@@ -386,39 +406,8 @@ export function readSqliteThreadContext(
   }
 }
 
-export async function fetchT3ThreadContext(threadId: string): Promise<ThreadContext | undefined> {
-  if (!threadId.trim()) return undefined;
-  try {
-    const query = new URLSearchParams({ turnLimit: "1" });
-    const response = await fetch(`${await origin()}/api/orchestration/threads/${encodeURIComponent(threadId)}?${query}`, {
-      headers: { authorization: `Bearer ${await token()}`, "content-type": "application/json" },
-    });
-    if (!response.ok) return undefined;
-    const payload = await response.json() as {
-      thread?: { runtimeMode?: unknown; modelSelection?: { instanceId?: unknown } };
-    };
-    const provider = normalizeRuntimeMode(payload.thread?.modelSelection?.instanceId);
-    return {
-      runtimeMode: normalizeRuntimeMode(payload.thread?.runtimeMode),
-      provider,
-      providerDriver: inferDriverFromInstanceId(provider),
-    };
-  } catch {
-    return undefined;
-  }
-}
-
 export async function lookupT3ThreadContext(threadId: string): Promise<ThreadContext | undefined> {
-  const sqlite = readSqliteThreadContext(threadId);
-  if (sqlite?.runtimeMode && (sqlite.providerDriver || sqlite.provider)) return sqlite;
-  const remote = await fetchT3ThreadContext(threadId);
-  if (!sqlite && !remote) return undefined;
-  const provider = sqlite?.provider ?? remote?.provider;
-  return {
-    runtimeMode: sqlite?.runtimeMode ?? remote?.runtimeMode,
-    provider,
-    providerDriver: sqlite?.providerDriver ?? remote?.providerDriver ?? inferDriverFromInstanceId(provider),
-  };
+  return readSqliteThreadContext(threadId);
 }
 
 export function isCodexDriver(driver: string | null | undefined): boolean {
@@ -433,6 +422,9 @@ export function isKnownNonCodexDriver(driver: string | null | undefined): boolea
 export function isGuardianEligible(target: { provider: string; providerDriver?: string | null; runtimeMode: string | null | undefined }): { eligible: boolean; action?: GuardianAction; reason?: string } {
   if (!isAutoRuntime(target.runtimeMode)) {
     return { eligible: false, action: "skipped_runtime", reason: `runtimeMode ${target.runtimeMode} is not auto` };
+  }
+  if (explicitCodexInstance(target.provider)) {
+    return { eligible: false, action: "skipped_codex", reason: "provider is Codex or not a known non-Codex Auto harness" };
   }
   const driver = target.providerDriver?.trim() || null;
   if (!driver) {

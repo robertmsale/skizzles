@@ -253,6 +253,10 @@ describe("guardian eligibility filter", () => {
     expect(isGuardianEligible({ provider: "personal", runtimeMode: "auto" }).eligible).toBe(false);
     expect(isGuardianEligible({ provider: "personal", providerDriver: "codex", runtimeMode: "auto" }).eligible).toBe(false);
     expect(isGuardianEligible({ provider: "cursor", providerDriver: "cursor", runtimeMode: "auto" }).eligible).toBe(true);
+    expect(isGuardianEligible({ provider: "codex", providerDriver: "cursor", runtimeMode: "auto" })).toMatchObject({
+      eligible: false,
+      action: "skipped_codex",
+    });
     expect(isGuardianEligible({ provider: "cursor", runtimeMode: "ask" }).eligible).toBe(false);
     expect(isGuardianEligible({ provider: "grok", providerDriver: "grok", runtimeMode: "auto" }).eligible).toBe(true);
     expect(isGuardianEligible({ provider: "cursor", providerDriver: null, runtimeMode: "auto" })).toMatchObject({
@@ -290,7 +294,14 @@ describe("guardian eligibility filter", () => {
     expect(inferDriverFromInstanceId("personal")).toBeUndefined();
     expect(resolveGuardianProviderDriver(undefined, "cursor")).toEqual({ providerDriver: "cursor", source: "thread" });
     expect(resolveGuardianProviderDriver(null, undefined, { provider: "cursor" })).toEqual({ providerDriver: "cursor", source: "thread" });
-    expect(resolveGuardianProviderDriver(undefined, "personal", { providerDriver: "cursor" })).toEqual({ providerDriver: "cursor", source: "thread" });
+    expect(resolveGuardianProviderDriver(undefined, "codex", { provider: "cursor", providerDriver: "cursor" })).toEqual({
+      providerDriver: "codex",
+      source: "event",
+    });
+    expect(resolveGuardianProviderDriver(undefined, "personal", { providerDriver: "cursor" })).toEqual({
+      providerDriver: undefined,
+      source: "missing",
+    });
     expect(resolveGuardianProviderDriver("codex", "cursor", { providerDriver: "cursor" })).toEqual({ providerDriver: "codex", source: "event" });
     expect(resolveGuardianProviderDriver(undefined, "personal")).toEqual({ providerDriver: undefined, source: "missing" });
   });
@@ -464,6 +475,23 @@ describe("guardian cycle", () => {
       responded: true,
     });
     expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline", reason: UNBOUND_ACCEPT_GAP })]);
+  });
+
+  test("skips an explicit Codex provider when the driver is missing and thread context disagrees", async () => {
+    const result = fixture({
+      list: { approvals: [approval({ provider: "codex", providerDriver: null })], unidentifiable: [] },
+      threadContext: { "cursor-task": { runtimeMode: "auto", provider: "cursor", providerDriver: "cursor" } },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_codex",
+      provider: "codex",
+      providerDriver: "codex",
+      providerDriverSource: "event",
+      responded: false,
+    });
+    expect(result.resolved).toEqual([]);
   });
 
   test("infers a known non-Codex driver from the thread when the approval omits providerDriver", async () => {

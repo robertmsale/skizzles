@@ -6,7 +6,6 @@ import { connect } from "net";
 
 // packages/t3-orchestration/src/config.ts
 import { join } from "path";
-var {$ } = globalThis.Bun;
 var home = process.env.HOME ?? (() => {
   throw new Error("HOME is required");
 })();
@@ -26,22 +25,7 @@ function parseTailscaleGatewayPort(value) {
 }
 var TAILSCALE_GATEWAY_PORT = parseTailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
 var TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
-var KEYCHAIN_SERVICE = "t3-orchestration";
 var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
-async function origin() {
-  const path = join(T3_HOME, "userdata/server-runtime.json");
-  const runtime = await Bun.file(path).json();
-  if (typeof runtime.origin !== "string" || !/^https?:\/\//.test(runtime.origin))
-    throw new Error(`Invalid T3 runtime origin in ${path}`);
-  return runtime.origin.replace(/\/$/, "");
-}
-async function token() {
-  const result = await $`security find-generic-password -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`.quiet();
-  const value = result.text().trim();
-  if (!value)
-    throw new Error("No T3 token. Run t3ctl auth configure.");
-  return value;
-}
 
 // packages/t3-orchestration/src/remote-config.ts
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
@@ -886,14 +870,34 @@ function inferDriverFromInstanceId(instanceId) {
     return value;
   return;
 }
+function explicitCodexInstance(instanceId) {
+  const value = instanceId?.trim().toLowerCase();
+  return value === CODEX_PROVIDER_INSTANCE || inferDriverFromInstanceId(value) === CODEX_PROVIDER_INSTANCE;
+}
+function providerIdentitiesAgree(eventInstance, thread) {
+  const threadInstance = normalizeRuntimeMode(thread?.provider);
+  const threadDriver = normalizeRuntimeMode(thread?.providerDriver);
+  if (threadInstance && threadInstance.toLowerCase() === eventInstance.toLowerCase())
+    return true;
+  const eventKind = inferDriverFromInstanceId(eventInstance) ?? eventInstance.toLowerCase();
+  const threadKind = (threadDriver ?? inferDriverFromInstanceId(threadInstance))?.toLowerCase();
+  return Boolean(threadKind && eventKind === threadKind);
+}
 function resolveGuardianProviderDriver(eventDriver, eventProvider, thread) {
   const fromEvent = normalizeRuntimeMode(eventDriver);
   if (fromEvent)
     return { providerDriver: fromEvent, source: "event" };
+  const eventInstance = normalizeRuntimeMode(eventProvider);
+  if (explicitCodexInstance(eventInstance)) {
+    return { providerDriver: CODEX_PROVIDER_INSTANCE, source: "event" };
+  }
+  if (eventInstance && (thread?.provider || thread?.providerDriver) && !providerIdentitiesAgree(eventInstance, thread)) {
+    return { providerDriver: undefined, source: "missing" };
+  }
   const fromThreadDriver = normalizeRuntimeMode(thread?.providerDriver);
   if (fromThreadDriver)
     return { providerDriver: fromThreadDriver, source: "thread" };
-  const fromInstance = inferDriverFromInstanceId(normalizeRuntimeMode(thread?.provider) ?? normalizeRuntimeMode(eventProvider));
+  const fromInstance = inferDriverFromInstanceId(normalizeRuntimeMode(thread?.provider) ?? eventInstance);
   if (fromInstance)
     return { providerDriver: fromInstance, source: "thread" };
   return { providerDriver: undefined, source: "missing" };
@@ -903,9 +907,9 @@ function asSqliteRow(value) {
 }
 function firstToken(...values) {
   for (const value of values) {
-    const token2 = normalizeRuntimeMode(value);
-    if (token2)
-      return token2;
+    const token = normalizeRuntimeMode(value);
+    if (token)
+      return token;
   }
   return;
 }
@@ -956,40 +960,8 @@ function readSqliteThreadContext(threadId, dbPath = defaultT3StateSqlitePath()) 
     return;
   }
 }
-async function fetchT3ThreadContext(threadId) {
-  if (!threadId.trim())
-    return;
-  try {
-    const query = new URLSearchParams({ turnLimit: "1" });
-    const response = await fetch(`${await origin()}/api/orchestration/threads/${encodeURIComponent(threadId)}?${query}`, {
-      headers: { authorization: `Bearer ${await token()}`, "content-type": "application/json" }
-    });
-    if (!response.ok)
-      return;
-    const payload = await response.json();
-    const provider = normalizeRuntimeMode(payload.thread?.modelSelection?.instanceId);
-    return {
-      runtimeMode: normalizeRuntimeMode(payload.thread?.runtimeMode),
-      provider,
-      providerDriver: inferDriverFromInstanceId(provider)
-    };
-  } catch {
-    return;
-  }
-}
 async function lookupT3ThreadContext(threadId) {
-  const sqlite = readSqliteThreadContext(threadId);
-  if (sqlite?.runtimeMode && (sqlite.providerDriver || sqlite.provider))
-    return sqlite;
-  const remote = await fetchT3ThreadContext(threadId);
-  if (!sqlite && !remote)
-    return;
-  const provider = sqlite?.provider ?? remote?.provider;
-  return {
-    runtimeMode: sqlite?.runtimeMode ?? remote?.runtimeMode,
-    provider,
-    providerDriver: sqlite?.providerDriver ?? remote?.providerDriver ?? inferDriverFromInstanceId(provider)
-  };
+  return readSqliteThreadContext(threadId);
 }
 function isCodexDriver(driver) {
   return driver?.trim().toLowerCase() === CODEX_PROVIDER_INSTANCE;
@@ -1001,6 +973,9 @@ function isKnownNonCodexDriver(driver) {
 function isGuardianEligible(target) {
   if (!isAutoRuntime(target.runtimeMode)) {
     return { eligible: false, action: "skipped_runtime", reason: `runtimeMode ${target.runtimeMode} is not auto` };
+  }
+  if (explicitCodexInstance(target.provider)) {
+    return { eligible: false, action: "skipped_codex", reason: "provider is Codex or not a known non-Codex Auto harness" };
   }
   const driver = target.providerDriver?.trim() || null;
   if (!driver) {
