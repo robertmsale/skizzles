@@ -3,11 +3,16 @@ import { realpath } from "node:fs/promises";
 import { $ } from "bun";
 import { origin, token, taskProviderDefaults } from "./config.ts";
 import {
+  APPROVAL_ACTION_CHANGED,
   UNBOUND_ACCEPT_GAP,
+  approvalActionIdentity,
   approvalRespondCommand,
   derivePendingApprovals,
+  hasBindableApprovalAction,
   projectPendingApprovalList,
   providerDriversFromConfig,
+  requireIdentifiableApproval,
+  sameApprovalAction,
   selectPendingApproval,
   threadActivities,
   type ApprovalActionIdentity,
@@ -513,20 +518,27 @@ export async function resolveTaskApproval(input: {
   reason?: string;
   expected?: ApprovalActionIdentity;
 }): Promise<{ sequence: number; threadId: string; requestId: string; decision: ApprovalDecision; command: string | null; reason?: string }> {
-  if (input.decision === "accept") {
-    throw new Error(UNBOUND_ACCEPT_GAP);
-  }
   const selectFresh = async () => {
     const snapshot = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
     return selectPendingApproval(derivePendingApprovals(threadActivities(snapshot)), input.requestId);
   };
   const selected = await selectFresh();
+  if (input.decision === "accept") {
+    requireIdentifiableApproval(selected);
+    if (!hasBindableApprovalAction(input.expected) || !hasBindableApprovalAction(approvalActionIdentity(selected))) {
+      throw new Error(UNBOUND_ACCEPT_GAP);
+    }
+    if (!sameApprovalAction(input.expected, approvalActionIdentity(selected))) {
+      throw new Error(APPROVAL_ACTION_CHANGED);
+    }
+  }
   const result = await dispatch(taskApprovalRespondCommand(
     input.threadId,
     selected.requestId,
     input.decision,
     undefined,
     undefined,
+    input.expected,
   ));
   return {
     sequence: result.sequence,

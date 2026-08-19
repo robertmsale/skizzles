@@ -4,7 +4,6 @@ import {
   CONFLICTING_COMMAND_GAP,
   derivePendingApprovals,
   MISSING_COMMAND_GAP,
-  UNBOUND_ACCEPT_GAP,
   projectPendingApprovalList,
   providerDriversFromConfig,
   resolveProjectedRuntimeMode,
@@ -221,6 +220,91 @@ describe("pending approval projection", () => {
     expect(pending[0]).toMatchObject({ command: null, identifiable: false, reason: MISSING_COMMAND_GAP });
   });
 
+  test("projects a Grok run_terminal_command arguments.command payload", () => {
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        payload: {
+          requestId: "grok-args",
+          toolName: "run_terminal_command",
+          cwd: "/worktree",
+          arguments: { command: "git push origin t3code/acme" },
+        },
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "grok-args",
+      requestKind: "command",
+      command: "git push origin t3code/acme",
+      toolName: "run_terminal_command",
+      cwd: "/worktree",
+      identifiable: true,
+    });
+  });
+
+  test("projects a Grok ACP permission args.toolCall.rawInput.command payload", () => {
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        payload: {
+          requestId: "grok-acp",
+          requestType: "exec_command_approval",
+          detail: "git push origin t3code/acme",
+          cwd: "/worktree",
+          args: {
+            sessionId: "session",
+            options: [{ kind: "allow_once", optionId: "allow-once" }],
+            toolCall: {
+              kind: "execute",
+              _meta: {
+                "x.ai/tool": {
+                  name: "run_terminal_command",
+                  input: { command: "git push origin t3code/acme", description: "Push the feature branch" },
+                },
+              },
+              rawInput: { variant: "Bash", command: "git push origin t3code/acme" },
+            },
+          },
+        },
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "grok-acp",
+      requestKind: "command",
+      command: "git push origin t3code/acme",
+      toolName: "run_terminal_command",
+      cwd: "/worktree",
+      identifiable: true,
+    });
+  });
+
+  test("projects a Cursor ACP toolCall.rawInput.command payload", () => {
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-17T01:00:00Z",
+        payload: {
+          requestId: "cursor-acp",
+          cwd: "/worktree",
+          toolCall: {
+            title: "Shell",
+            kind: "execute",
+            rawInput: { command: "git commit -m feat" },
+          },
+        },
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "cursor-acp",
+      requestKind: "command",
+      command: "git commit -m feat",
+      cwd: "/worktree",
+      identifiable: true,
+    });
+  });
+
   test("rejects conflicting nested input and result command representations", () => {
     const dualInput = derivePendingApprovals([
       activity({
@@ -418,12 +502,18 @@ describe("pending approval projection", () => {
       decision: "decline",
       createdAt: "now",
     });
-    expect(() => approvalRespondCommand("task", "req-1", "accept", "command", "now", {
+    expect(approvalRespondCommand("task", "req-1", "accept", "command", "now", {
       requestKind: "command",
       command: "git status",
       cwd: null,
       toolName: "Shell",
-    })).toThrow(UNBOUND_ACCEPT_GAP);
-    expect(() => approvalRespondCommand("task", "req-1", "accept", "command", "now")).toThrow(UNBOUND_ACCEPT_GAP);
+    })).toEqual({
+      type: "thread.approval.respond",
+      commandId: "command",
+      threadId: "task",
+      requestId: "req-1",
+      decision: "accept",
+      createdAt: "now",
+    });
   });
 });

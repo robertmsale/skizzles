@@ -187,7 +187,7 @@ Every `t3ctl` invocation has a hard 60-second client deadline covering the local
 
 Wait wakes only for completion, failure, archival/deletion, plan approval, approval, or user input—not progress chatter. Background subagent/workflow work and monitoring remain nonterminal. Rename, pin, archive, settle, interrupt, and pending-approval inspect/approve/deny operations are also exposed through `t3ctl tasks`; they preserve the task's existing provider/model/reasoning/runtime selection.
 
-Coordinator approval commands wrap T3's existing `thread.approval.respond` command. `t3ctl tasks approvals` lists live `hasPendingApprovals` threads and projects `approval.requested` activity payloads from the thread snapshot. `t3ctl tasks approve ID [REQUEST_ID]` and `t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]` never auto-approve; approve refuses when T3 does not expose the command or path, and refuses accept because T3 cannot bind the decision to the judged action. Codex auto-guardian is unchanged.
+Coordinator approval commands wrap T3's existing `thread.approval.respond` command. `t3ctl tasks approvals` lists live `hasPendingApprovals` threads and projects `approval.requested` activity payloads from the thread snapshot. `t3ctl tasks approve ID [REQUEST_ID]` and `t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]` never auto-approve; approve refuses when T3 does not expose the command or path, and refuses accept unless the caller supplies an expected action identity that still matches the live pending approval. Codex auto-guardian is unchanged.
 
 ### T3 Auto guardian sidecar
 
@@ -198,8 +198,10 @@ It will not:
 - start or install a second orchestration daemon
 - write `io.github.t3-orchestration.daemon` or `io.github.skizzles.t3-worktree-reaper`
 - call `acceptForSession` or yolo
-- approve an unidentifiable command or path
+- ACP-decline an unidentifiable command or path (that session-binds Grok Auto); it skips and leaves the request pending for a human
 - respond twice to the same `requestId`
+
+It will deliver a one-shot `thread.approval.respond` accept only when the command is identifiable and the live pending action still matches the judged identity. Feature-branch push, commit, and an authorized `gh pr merge` are allow under the official Codex tenant policy; push to `master`/`main` stays deny.
 
 Install it separately from the orchestration daemon:
 
@@ -233,8 +235,10 @@ passes it as `codex exec --ignore-user-config -m <model> -c model_reasoning_effo
 `codex exec` has no dedicated effort flag. Unknown keys, including typos such
 as `effort` or `model_reasoning_effrot`, are rejected. Policy text is the
 extracted official guardian template and tenant policy from `openai/codex`
-`codex-rs/core/src/guardian/`; the judge prompt is the last T3 user message
-plus the identifiable command or path.
+`codex-rs/core/src/guardian/`; the judge prompt is a compact last-N T3
+user/assistant/tool transcript plus the identifiable command or path.
+Command extraction reads Codex `data.command` and Grok/Cursor
+`arguments.command` / `args.toolCall.rawInput.command`.
 
 The guardian installer copies only the guardian CLI and its imported modules into
 `~/.local/share/skizzles/t3-auto-guardian`. It does not copy `cli.ts` or

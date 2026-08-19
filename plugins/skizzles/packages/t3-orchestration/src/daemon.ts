@@ -137,6 +137,7 @@ var {$: $2 } = globalThis.Bun;
 // packages/t3-orchestration/src/approval-projection.ts
 var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
 var CONFLICTING_COMMAND_GAP = "T3 approval payload has conflicting command or path representations. Refusing to approve blindly.";
+var APPROVAL_ACTION_CHANGED = "Pending approval action changed after judgment. Refusing to approve blindly.";
 var UNBOUND_ACCEPT_GAP = "T3 cannot bind accept to the judged action. Refusing to approve blindly.";
 var MISSING_SNAPSHOT_GAP = "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
 function asRecord(value) {
@@ -199,93 +200,106 @@ function compareActivitiesByOrder(left, right) {
     return createdAt;
   return (left.id ?? "").localeCompare(right.id ?? "");
 }
-function uniqueTypedActions(payload) {
+function xaiTool(record) {
+  const meta = asRecord(record?._meta);
+  return asRecord(meta?.["x.ai/tool"]);
+}
+function nestedActionRecords(payload) {
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  const dataInput = asRecord(data?.input);
-  const itemInput = asRecord(item?.input);
-  const itemResult = asRecord(item?.result);
-  const dataResult = asRecord(data?.result);
-  const values = [
-    asLiteralString(data?.command),
-    asLiteralString(item?.command),
-    asLiteralString(dataInput?.command),
-    asLiteralString(itemInput?.command),
-    asLiteralString(itemResult?.command),
-    asLiteralString(dataResult?.command),
-    asLiteralString(payload.path),
-    asLiteralString(data?.path),
-    asLiteralString(item?.path),
-    asLiteralString(dataInput?.path),
-    asLiteralString(itemInput?.path),
-    asLiteralString(itemResult?.path),
-    asLiteralString(dataResult?.path)
-  ].filter((value) => value !== null);
-  return [...new Set(values)];
+  const payloadArgs = asRecord(payload.arguments) ?? asRecord(payload.args);
+  const dataArgs = asRecord(data?.arguments) ?? asRecord(data?.args);
+  const itemArgs = asRecord(item?.arguments) ?? asRecord(item?.args);
+  const toolCall = asRecord(payload.toolCall) ?? asRecord(payloadArgs?.toolCall) ?? asRecord(data?.toolCall) ?? asRecord(dataArgs?.toolCall) ?? asRecord(item?.toolCall);
+  const records = [
+    payload,
+    data,
+    item,
+    asRecord(data?.input),
+    asRecord(item?.input),
+    asRecord(item?.result),
+    asRecord(data?.result),
+    payloadArgs,
+    dataArgs,
+    itemArgs,
+    toolCall,
+    asRecord(payload.rawInput),
+    asRecord(data?.rawInput),
+    asRecord(item?.rawInput),
+    asRecord(payloadArgs?.rawInput),
+    asRecord(dataArgs?.rawInput),
+    asRecord(itemArgs?.rawInput),
+    asRecord(toolCall?.rawInput),
+    xaiTool(payload),
+    xaiTool(data),
+    xaiTool(item),
+    xaiTool(payloadArgs),
+    xaiTool(toolCall),
+    asRecord(xaiTool(payload)?.input),
+    asRecord(xaiTool(data)?.input),
+    asRecord(xaiTool(item)?.input),
+    asRecord(xaiTool(payloadArgs)?.input),
+    asRecord(xaiTool(toolCall)?.input)
+  ];
+  return records.filter((record) => record !== null);
+}
+function uniqueTypedActions(payload) {
+  const records = nestedActionRecords(payload);
+  const commands = [...new Set(records.map((record) => asLiteralString(record.command)).filter((value) => value !== null))];
+  const paths = [...new Set(records.map((record) => asLiteralString(record.path)).filter((value) => value !== null))];
+  return { commands, paths };
 }
 function uniqueNonEmpty(values) {
   return [...new Set(values.filter((value) => value !== null))];
 }
 function uniqueTypedCwds(payload) {
-  const data = asRecord(payload.data);
-  const item = asRecord(data?.item);
-  const dataInput = asRecord(data?.input);
-  const itemInput = asRecord(item?.input);
-  const itemResult = asRecord(item?.result);
-  const dataResult = asRecord(data?.result);
-  return uniqueNonEmpty([
-    asLiteralString(payload.cwd),
-    asLiteralString(payload.workingDirectory),
-    asLiteralString(data?.cwd),
-    asLiteralString(data?.workingDirectory),
-    asLiteralString(item?.cwd),
-    asLiteralString(item?.workingDirectory),
-    asLiteralString(dataInput?.cwd),
-    asLiteralString(dataInput?.workingDirectory),
-    asLiteralString(itemInput?.cwd),
-    asLiteralString(itemInput?.workingDirectory),
-    asLiteralString(itemResult?.cwd),
-    asLiteralString(itemResult?.workingDirectory),
-    asLiteralString(dataResult?.cwd),
-    asLiteralString(dataResult?.workingDirectory)
-  ]);
+  return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
+    asLiteralString(record.cwd),
+    asLiteralString(record.workingDirectory)
+  ]));
 }
 function uniqueTypedTools(payload) {
-  const data = asRecord(payload.data);
-  const item = asRecord(data?.item);
-  const dataInput = asRecord(data?.input);
-  const itemInput = asRecord(item?.input);
+  const records = nestedActionRecords(payload);
+  const xaiNames = records.map((record) => xaiTool(record)).map((record) => asLiteralString(record?.name));
   return uniqueNonEmpty([
-    asLiteralString(data?.toolName),
-    asLiteralString(item?.tool),
-    asLiteralString(item?.toolName),
-    asLiteralString(dataInput?.toolName),
-    asLiteralString(itemInput?.toolName)
+    asLiteralString(payload.toolName),
+    ...xaiNames,
+    ...records.flatMap((record) => [
+      asLiteralString(record.toolName),
+      asLiteralString(record.tool)
+    ])
   ]);
 }
 function extractTypedAction(payload) {
   if (!payload)
-    return { command: null, cwd: null, toolName: null, reason: MISSING_COMMAND_GAP };
-  const typed = uniqueTypedActions(payload);
+    return { command: null, cwd: null, toolName: null, commandSource: null, reason: MISSING_COMMAND_GAP };
+  const { commands, paths } = uniqueTypedActions(payload);
+  const typed = [...new Set([...commands, ...paths])];
   const cwds = uniqueTypedCwds(payload);
   const tools = uniqueTypedTools(payload);
   const detail = asLiteralString(payload.detail);
   if (typed.length > 1 || cwds.length > 1 || tools.length > 1) {
-    return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
+    return { command: null, cwd: null, toolName: null, commandSource: null, reason: CONFLICTING_COMMAND_GAP };
   }
   if (typed.length === 1) {
     if (detail !== null && detail !== typed[0])
-      return { command: null, cwd: null, toolName: null, reason: CONFLICTING_COMMAND_GAP };
-    return { command: typed[0], cwd: cwds[0] ?? null, toolName: tools[0] ?? null };
+      return { command: null, cwd: null, toolName: null, commandSource: null, reason: CONFLICTING_COMMAND_GAP };
+    return {
+      command: typed[0],
+      cwd: cwds[0] ?? null,
+      toolName: tools[0] ?? null,
+      commandSource: commands.length === 1 ? "command" : "path"
+    };
   }
-  return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, reason: MISSING_COMMAND_GAP };
+  return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, commandSource: null, reason: MISSING_COMMAND_GAP };
 }
 function extractToolName(activity, payload) {
   if (!payload)
     return asTrimmedString(activity.summary);
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  return asTrimmedString(payload.title) ?? asTrimmedString(data?.toolName) ?? asTrimmedString(item?.tool) ?? asTrimmedString(payload.itemType) ?? asTrimmedString(activity.summary);
+  const xai = xaiTool(payload) ?? xaiTool(data) ?? xaiTool(asRecord(payload.args)) ?? xaiTool(asRecord(payload.toolCall));
+  return asTrimmedString(payload.toolName) ?? asTrimmedString(xai?.name) ?? asTrimmedString(payload.title) ?? asTrimmedString(data?.toolName) ?? asTrimmedString(item?.tool) ?? asTrimmedString(payload.itemType) ?? asTrimmedString(activity.summary);
 }
 function derivePendingApprovals(activities) {
   const openByRequestId = new Map;
@@ -297,9 +311,10 @@ function derivePendingApprovals(activities) {
     const detail = asTrimmedString(payload?.detail);
     if (activity.kind === "approval.requested") {
       const extracted = extractTypedAction(payload);
+      const requestKind = requestKindFromPayload(payload) ?? (extracted.commandSource === "command" ? "command" : null);
       openByRequestId.set(requestId, {
         requestId,
-        requestKind: requestKindFromPayload(payload),
+        requestKind,
         createdAt: activity.createdAt,
         command: extracted.command,
         toolName: extracted.toolName ?? extractToolName(activity, payload),
@@ -334,6 +349,25 @@ function selectPendingApproval(pending, requestId) {
     throw new Error(`Thread has ${pending.length} pending approvals; pass the request id from t3ctl tasks approvals`);
   }
   return pending[0];
+}
+function requireIdentifiableApproval(approval) {
+  if (approval.identifiable && approval.command)
+    return;
+  throw new Error(approval.reason ?? MISSING_COMMAND_GAP);
+}
+function approvalActionIdentity(approval) {
+  return {
+    requestKind: approval.requestKind,
+    command: approval.command,
+    cwd: approval.cwd,
+    toolName: approval.toolName
+  };
+}
+function sameApprovalAction(left, right) {
+  return left.requestKind === right.requestKind && left.command === right.command && left.cwd === right.cwd && left.toolName === right.toolName;
+}
+function hasBindableApprovalAction(action) {
+  return Boolean(action && typeof action.command === "string" && action.command.trim() !== "");
 }
 function threadProvider(thread) {
   return thread.modelSelection.instanceId;
@@ -436,10 +470,7 @@ function projectPendingApprovalList(threads, snapshots, projects, drivers) {
   unidentifiable.sort((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.threadId.localeCompare(right.threadId));
   return { approvals, unidentifiable, count: approvals.length };
 }
-function approvalRespondCommand(threadId, requestId, decision, commandId, createdAt, expected) {
-  if (decision === "accept") {
-    throw new Error(UNBOUND_ACCEPT_GAP);
-  }
+function approvalRespondCommand(threadId, requestId, decision, commandId, createdAt, _expected) {
   return {
     type: "thread.approval.respond",
     commandId,
@@ -1542,15 +1573,21 @@ async function listTaskApprovals(projectId) {
   return projectPendingApprovalList(candidates, snapshots, projects, drivers);
 }
 async function resolveTaskApproval(input) {
-  if (input.decision === "accept") {
-    throw new Error(UNBOUND_ACCEPT_GAP);
-  }
   const selectFresh = async () => {
     const snapshot2 = await threadSnapshot(input.threadId, APPROVAL_TURN_WINDOW);
     return selectPendingApproval(derivePendingApprovals(threadActivities(snapshot2)), input.requestId);
   };
   const selected = await selectFresh();
-  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision, undefined, undefined));
+  if (input.decision === "accept") {
+    requireIdentifiableApproval(selected);
+    if (!hasBindableApprovalAction(input.expected) || !hasBindableApprovalAction(approvalActionIdentity(selected))) {
+      throw new Error(UNBOUND_ACCEPT_GAP);
+    }
+    if (!sameApprovalAction(input.expected, approvalActionIdentity(selected))) {
+      throw new Error(APPROVAL_ACTION_CHANGED);
+    }
+  }
+  const result = await dispatch(taskApprovalRespondCommand(input.threadId, selected.requestId, input.decision, undefined, undefined, input.expected));
   return {
     sequence: result.sequence,
     threadId: input.threadId,
