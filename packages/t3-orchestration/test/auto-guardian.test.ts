@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { APPROVAL_ACTION_CHANGED, derivePendingApprovals, MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP } from "../src/approval-projection.ts";
+import { APPROVAL_ACTION_CHANGED, MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP, projectPendingApprovalList } from "../src/approval-projection.ts";
 import { defaultGuardianConfig } from "../src/auto-guardian-config.ts";
 import {
   buildCodexJudgeCommand,
@@ -35,6 +35,7 @@ import {
   type JudgeInput,
   type JudgeResult,
 } from "../src/auto-guardian.ts";
+import type { T3ThreadActivity, T3ThreadShell, ThreadSnapshot } from "../src/protocol.ts";
 
 function approval(overrides: Partial<ApprovalList["approvals"][number]> = {}): ApprovalList["approvals"][number] {
   return {
@@ -973,35 +974,60 @@ describe("guardian cycle", () => {
   });
 
   test("never ACP-responds to a kind-only execute envelope", async () => {
-    const pending = derivePendingApprovals([{
+    const payload = {
+      requestId: "r1",
+      requestType: "exec_command_approval",
+      detail: "Run requested command",
+      args: { toolCall: { kind: "execute", status: "pending" } },
+    };
+    const thread: T3ThreadShell = {
+      id: "cursor-task",
+      projectId: "project",
+      title: "Cursor work",
+      modelSelection: { instanceId: "cursor", model: "grok-4.6", options: [] },
+      runtimeMode: "auto",
+      interactionMode: "default",
+      worktreePath: "/worktree",
+      branch: "t3code/task",
+      latestTurn: null,
+      createdAt: "2026-08-17T00:00:00Z",
+      updatedAt: "2026-08-17T00:00:00Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      pinnedAt: null,
+      pinOrderKey: null,
+      deletedAt: null,
+      session: { status: "running" },
+      latestUserMessageAt: null,
+      hasPendingApprovals: true,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    };
+    const activity: T3ThreadActivity = {
       id: "approval.requested",
       kind: "approval.requested",
       createdAt: "2026-08-19T18:00:00Z",
-      payload: {
-        requestId: "r1",
-        requestType: "dynamic_tool_call",
-        detail: "Searched files",
-        args: { toolCall: { kind: "execute", status: "pending" } },
-      },
-    }]);
-    expect(pending[0]).toMatchObject({
+      payload,
+    };
+    const snapshot: ThreadSnapshot = {
+      snapshotSequence: 1,
+      thread: { ...thread, messages: [], activities: [activity] },
+    };
+    const projected = projectPendingApprovalList(
+      [thread],
+      new Map([["cursor-task", snapshot]]),
+      new Map([["project", { title: "acme", workspaceRoot: "/repo" }]]),
+      new Map([["cursor", "cursor"]]),
+    );
+    expect(projected.approvals).toEqual([]);
+    expect(projected.unidentifiable[0]).toMatchObject({
       requestId: "r1",
-      command: null,
-      identifiable: false,
       reason: MISSING_COMMAND_GAP,
     });
-    const identifiable = Boolean(pending[0]?.identifiable && pending[0]?.command);
     const result = fixture({
-      list: identifiable
-        ? {
-          approvals: [approval({ requestId: "r1", command: pending[0]!.command!, toolName: pending[0]!.toolName })],
-          unidentifiable: [],
-        }
-        : {
-          approvals: [],
-          unidentifiable: [unidentifiable({ requestId: "r1", reason: pending[0]?.reason })],
-        },
-      judge: { ok: true, assessment: { outcome: "deny", rationale: "no bindable action" }, raw: "" },
+      list: projected,
+      judge: { ok: true, assessment: { outcome: "allow", rationale: "should not run" }, raw: "" },
     });
     const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
     expect(result.judged).toBe(0);

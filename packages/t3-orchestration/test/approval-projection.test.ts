@@ -404,6 +404,48 @@ describe("pending approval projection", () => {
     });
   });
 
+  test("does not treat an exec_command_approval kind-only envelope as a bindable action", () => {
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-19T18:00:00Z",
+        payload: {
+          requestId: "r-exec",
+          requestType: "exec_command_approval",
+          detail: "Run requested command",
+          args: { toolCall: { kind: "execute", status: "pending" } },
+        },
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "r-exec",
+      command: null,
+      identifiable: false,
+      reason: MISSING_COMMAND_GAP,
+    });
+    expect(pending[0]?.command).not.toBe("execute");
+  });
+
+  test("does not treat generic execute or Shell toolName as action identity", () => {
+    for (const toolName of ["execute", "Shell"]) {
+      const pending = derivePendingApprovals([
+        activity({
+          kind: "approval.requested",
+          createdAt: "2026-08-19T18:00:00Z",
+          payload: { requestId: `r-${toolName}`, toolName },
+        }),
+      ]);
+      expect(pending[0]).toMatchObject({
+        requestId: `r-${toolName}`,
+        command: null,
+        identifiable: false,
+        reason: MISSING_COMMAND_GAP,
+      });
+      expect(pending[0]?.command).not.toBe(toolName);
+      expect(pending[0]?.command?.toLowerCase()).not.toBe(toolName.toLowerCase());
+    }
+  });
+
   test("does not treat a toolCallId without kind as a bindable action", () => {
     const pending = derivePendingApprovals([
       activity({
