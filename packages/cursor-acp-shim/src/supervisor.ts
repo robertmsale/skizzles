@@ -44,6 +44,7 @@ type HeldRequest = {
   sawWork: boolean;
   attempts: number;
   replaying: boolean;
+  sameChildReplayGeneration?: number;
 };
 
 type Handshake = {
@@ -53,7 +54,6 @@ type Handshake = {
   sessionNew?: JsonRpcMessage;
 };
 
-const WORK_UPDATES = new Set(["tool_call", "tool_call_update", "plan"]);
 const BUFFERED_UPDATES = new Set(["agent_message_chunk", "agent_thought_chunk"]);
 
 export async function runSupervisor(options: SupervisorOptions): Promise<number> {
@@ -157,6 +157,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         sawWork: false,
         attempts: 1,
         replaying: false,
+        sameChildReplayGeneration: undefined,
       };
     }
     await writeChild(frame.bytes);
@@ -188,12 +189,6 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       return;
     }
     const kind = sessionUpdateKind(frame.message);
-    if (kind && WORK_UPDATES.has(kind)) {
-      held.sawWork = true;
-      await flushHeld();
-      await writeFrame(options.io.stdout, frame.bytes);
-      return;
-    }
     if (kind && BUFFERED_UPDATES.has(kind)) {
       if (kind === "agent_message_chunk") held.assistantText += extractAssistantText(frame.message);
       held.buffered.push(frame);
@@ -202,6 +197,8 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       }
       return;
     }
+    held.sawWork = true;
+    await flushHeld();
     await writeFrame(options.io.stdout, frame.bytes);
   }
 
@@ -232,19 +229,19 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       let nextMode = mode;
       let increment = countAttempt;
       while (held) {
-        if (increment) {
-          if (held.attempts > maxRetries) {
-            await failHeld(`Cursor ACP stream failed after ${held.attempts} attempts`);
-            return;
-          }
-          held.attempts += 1;
+        if (held.attempts > maxRetries) {
+          await failHeld(`Cursor ACP stream failed after ${held.attempts} attempts`);
+          return;
         }
+        if (increment) held.attempts += 1;
         increment = true;
         held.assistantText = "";
         held.buffered = [];
         held.flushed = false;
         held.sawWork = false;
-        if (nextMode === "respawn" || !childAlive()) {
+        held.sameChildReplayGeneration = undefined;
+        let sameChild = nextMode === "same-child" && childAlive();
+        if (!sameChild) {
           log("t3-cursor-acp: child dead or wedged; respawning and re-handshaking for replay");
           const ok = await respawnAndHandshake();
           if (!ok) {
@@ -262,10 +259,12 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         };
         try {
           await writeChild(encodeFrame(request, held.style));
+          held.sameChildReplayGeneration = sameChild ? childGeneration : undefined;
           return;
         } catch {
           nextMode = "respawn";
           increment = false;
+          sameChild = false;
         }
       }
     } finally {
@@ -361,10 +360,20 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   async function onChildExit(handle: ChildHandle, generation: number, code: number): Promise<void> {
     if (generation !== childGeneration || closedByT3) return;
     if (!held || held.replaying) return;
-    const replayWriteLost = held.attempts > 1;
-    if (held.attempts <= maxRetries || replayWriteLost) {
+    if (held.sawWork || held.flushed) {
+      await failHeld(`Cursor ACP child exited (${code}) after the turn was already visible to T3`);
+      return;
+    }
+    const sameChildReplayLost = held.sameChildReplayGeneration === generation;
+    held.sameChildReplayGeneration = undefined;
+    if (sameChildReplayLost) {
       log(`t3-cursor-acp: child exited ${code} during session/prompt; respawning`);
-      await replayHeld("respawn", !replayWriteLost);
+      await replayHeld("respawn", false);
+      return;
+    }
+    if (held.attempts <= maxRetries) {
+      log(`t3-cursor-acp: child exited ${code} during session/prompt; respawning`);
+      await replayHeld("respawn", true);
       return;
     }
     await failHeld(`Cursor ACP child exited (${code}) after ${held.attempts} attempts`);

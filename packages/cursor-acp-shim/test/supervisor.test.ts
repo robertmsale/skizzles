@@ -195,6 +195,91 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("fails instead of replaying after a streamed chunk if the child exits", async () => {
+    let release!: () => void;
+    const deferResult = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let child: ChildHandle | undefined;
+    const session = await startHarness({
+      handshake: "load",
+      spawn: () => {
+        child = fakeChild("ok", { deferResult });
+        return child;
+      },
+    });
+    await session.startPrompt("hi");
+    const first = await session.next();
+    expect((first.params as { update?: { content?: { text?: string } } }).update?.content?.text).toBe(SUCCESS_TEXT);
+    child?.kill();
+    const result = await session.next();
+    expect(result.id).toBe(3);
+    expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
+    expect(JSON.stringify(result.error)).toContain("already visible");
+    expect(session.logs.join("\n")).not.toContain("replaying session/prompt");
+    release();
+    await session.close();
+  });
+
+  test("fails instead of replaying after a reverse request if the child exits", async () => {
+    const session = await startHarness({
+      handshake: "load",
+      spawn: () => fakeChild("ok", { reverseRequest: true, exitAfterReverse: true }),
+    });
+    await session.startPrompt("need approval");
+    const first = await session.next();
+    expect(first.method).toBe("session/request_permission");
+    const result = await session.next();
+    expect(result.id).toBe(3);
+    expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
+    expect(JSON.stringify(result.error)).toContain("already visible");
+    expect(session.logs.join("\n")).not.toContain("replaying session/prompt");
+    await session.close();
+  });
+
+  test("bounds consecutive pre-result child crashes to the retry budget", async () => {
+    let launches = 0;
+    const session = await startHarness({
+      handshake: "load",
+      maxRetries: 1,
+      spawn: () => {
+        launches += 1;
+        return fakeChild("ok", { crashOnPrompt: true });
+      },
+    });
+    const result = await session.prompt("keep crashing", []);
+    expect(result.id).toBe(3);
+    expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
+    expect(launches).toBeLessThanOrEqual(3);
+    expect(launches).toBeGreaterThan(1);
+    expect(session.logs.some((line) => line.includes("structured failure"))).toBe(true);
+    await session.close();
+  });
+
+  test("does not replay after a plan_update has been forwarded", async () => {
+    const session = await startSession("ok", { successText: FLAKE_TEXT, extraUpdate: "plan_update" });
+    const updates: string[] = [];
+    const seen: JsonRpcMessage[] = [];
+    await session.startPrompt("plan then flake");
+    while (true) {
+      const message = await session.next();
+      seen.push(message);
+      if (message.method === "session/update") {
+        const update = (message.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update;
+        if (update?.sessionUpdate === "agent_message_chunk" && update.content?.text) updates.push(update.content.text);
+        continue;
+      }
+      if (message.result !== undefined || message.error !== undefined) {
+        expect(message.id).toBe(3);
+        expect(updates).toEqual([FLAKE_TEXT]);
+        expect(seen.some((item) => (item.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === "plan_update")).toBe(true);
+        expect(session.logs.join("\n")).not.toContain("swallowed");
+        break;
+      }
+    }
+    await session.close();
+  });
+
   test("streams a normal first chunk before the prompt result", async () => {
     let release!: () => void;
     const deferResult = new Promise<void>((resolve) => {
@@ -223,6 +308,7 @@ async function startSession(mode: FakeAcpMode, options: {
   thoughtText?: string;
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
+  extraUpdate?: string;
   deferResult?: Promise<void>;
 } = {}) {
   return startHarness({
@@ -308,6 +394,9 @@ function fakeChild(mode: FakeAcpMode, options: {
   thoughtText?: string;
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
+  extraUpdate?: string;
+  crashOnPrompt?: boolean;
+  exitAfterReverse?: boolean;
   loadHistory?: import("./fake-acp.ts").FakeAcpHistoryUpdate[];
   deferResult?: Promise<void>;
   exitAfterPrompts?: number;

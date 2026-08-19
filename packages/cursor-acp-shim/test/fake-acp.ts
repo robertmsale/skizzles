@@ -30,6 +30,9 @@ export async function runFakeAcp(options: {
   reverseRequest?: boolean;
   loadHistory?: FakeAcpHistoryUpdate[];
   deferResult?: Promise<void>;
+  extraUpdate?: string;
+  crashOnPrompt?: boolean;
+  exitAfterReverse?: boolean;
   onRequest?: (request: FakeAcpRequest) => void;
 }): Promise<void> {
   const mode = options.mode ?? (process.env.FAKE_ACP_MODE as FakeAcpMode | undefined) ?? "ok";
@@ -69,6 +72,7 @@ export async function runFakeAcp(options: {
     }
     if (message.method === "session/prompt") {
       prompts += 1;
+      if (options.crashOnPrompt) return;
       const flake = mode === "always-flake" || (mode === "flake-then-ok" && prompts === 1);
       const text = flake ? flakeText : successText;
       const params = asRecord(message.params);
@@ -82,6 +86,17 @@ export async function runFakeAcp(options: {
             sessionId,
             toolCall: { toolCallId: "call-1", title: "ls", kind: "execute" },
             options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }],
+          },
+        }, frame.style));
+        if (options.exitAfterReverse) return;
+      }
+      if (options.extraUpdate) {
+        await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId,
+            update: { sessionUpdate: options.extraUpdate, entries: [{ content: "plan" }] },
           },
         }, frame.style));
       }
