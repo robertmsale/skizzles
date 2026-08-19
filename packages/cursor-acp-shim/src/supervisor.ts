@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
-import { extractAssistantText, isSpuriousNetworkDeath, sessionUpdateKind } from "./fingerprint.ts";
+import { couldBecomeSpuriousNetworkDeath, extractAssistantText, isSpuriousNetworkDeath, sessionUpdateKind } from "./fingerprint.ts";
 import { encodeFrame, readFrames, writeFrame, type Frame, type FrameStyle, type JsonRpcMessage } from "./framing.ts";
 
 export const DEFAULT_MAX_RETRIES = 2;
@@ -66,6 +66,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   let style: FrameStyle = "ndjson";
   let held: HeldRequest | undefined;
   let handshakeWaiter: { id: string | number; resolve: (message: JsonRpcMessage | undefined) => void } | undefined;
+  let suppressLoad: { loadId: string | number; sessionId?: string } | undefined;
   let nextSyntheticId = 1_000_000_001;
   let closedByT3 = false;
   let childGeneration = 0;
@@ -122,6 +123,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
           waiter.resolve(frame.message);
           continue;
         }
+        if (shouldDropReplayLoadTraffic(frame.message)) continue;
         await onChildFrame(frame);
       }
     } catch (error) {
@@ -173,6 +175,10 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       await onSessionUpdate(frame);
       return;
     }
+    if (isChildClientRequest(frame.message) && held && !held.flushed) {
+      held.sawWork = true;
+      await flushHeld();
+    }
     await writeFrame(options.io.stdout, frame.bytes);
   }
 
@@ -191,7 +197,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     if (kind && BUFFERED_UPDATES.has(kind)) {
       if (kind === "agent_message_chunk") held.assistantText += extractAssistantText(frame.message);
       held.buffered.push(frame);
-      if (held.assistantText.length > 1_500 && !isSpuriousNetworkDeath(held.assistantText)) {
+      if (!couldBecomeSpuriousNetworkDeath(held.assistantText)) {
         await flushHeld();
       }
       return;
@@ -308,6 +314,13 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   async function roundTrip(template: JsonRpcMessage): Promise<JsonRpcMessage | undefined> {
     const id = nextSyntheticId++;
     const request: JsonRpcMessage = { ...template, jsonrpc: "2.0", id };
+    const suppressingLoad = template.method === "session/load";
+    if (suppressingLoad) {
+      suppressLoad = {
+        loadId: id,
+        sessionId: firstString(asRecord(template.params)?.sessionId),
+      };
+    }
     const result = new Promise<JsonRpcMessage | undefined>((resolve) => {
       const timer = setTimeout(() => {
         if (handshakeWaiter?.id === id) handshakeWaiter = undefined;
@@ -325,9 +338,24 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       await writeChild(encodeFrame(request, style));
     } catch {
       if (handshakeWaiter?.id === id) handshakeWaiter = undefined;
+      if (suppressingLoad) suppressLoad = undefined;
       return undefined;
     }
-    return result;
+    try {
+      return await result;
+    } finally {
+      if (suppressingLoad && suppressLoad?.loadId === id) suppressLoad = undefined;
+    }
+  }
+
+  function shouldDropReplayLoadTraffic(message: JsonRpcMessage): boolean {
+    if (!suppressLoad) return false;
+    if (isResponseTo(message, suppressLoad.loadId)) return false;
+    if (message.method === "session/update") {
+      const sessionId = firstString(asRecord(message.params)?.sessionId);
+      return !sessionId || !suppressLoad.sessionId || sessionId === suppressLoad.sessionId;
+    }
+    return true;
   }
 
   async function onChildExit(handle: ChildHandle, generation: number, code: number): Promise<void> {
@@ -394,6 +422,15 @@ function isResponseTo(message: JsonRpcMessage, id: string | number): boolean {
   return message.id !== undefined && message.id !== null
     && String(message.id) === String(id)
     && (message.result !== undefined || message.error !== undefined);
+}
+
+function isChildClientRequest(message: JsonRpcMessage): boolean {
+  return typeof message.method === "string"
+    && message.method !== "session/update"
+    && message.id !== undefined
+    && message.id !== null
+    && message.result === undefined
+    && message.error === undefined;
 }
 
 function errorString(error: unknown): string {

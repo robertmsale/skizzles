@@ -12,6 +12,12 @@ export type FakeAcpRequest = {
   params?: unknown;
 };
 
+export type FakeAcpHistoryUpdate = {
+  sessionUpdate: string;
+  text?: string;
+  toolCallId?: string;
+};
+
 export async function runFakeAcp(options: {
   stdin: NodeJS.ReadableStream;
   stdout: NodeJS.WritableStream;
@@ -21,6 +27,9 @@ export async function runFakeAcp(options: {
   exitAfterPrompts?: number;
   thoughtText?: string;
   toolCallFirst?: boolean;
+  reverseRequest?: boolean;
+  loadHistory?: FakeAcpHistoryUpdate[];
+  deferResult?: Promise<void>;
   onRequest?: (request: FakeAcpRequest) => void;
 }): Promise<void> {
   const mode = options.mode ?? (process.env.FAKE_ACP_MODE as FakeAcpMode | undefined) ?? "ok";
@@ -41,6 +50,20 @@ export async function runFakeAcp(options: {
     if (message.method === "session/new" || message.method === "session/load") {
       const params = asRecord(message.params);
       const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
+      if (message.method === "session/load") {
+        for (const update of options.loadHistory ?? []) {
+          await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId,
+              update: update.sessionUpdate === "tool_call"
+                ? { sessionUpdate: "tool_call", toolCallId: update.toolCallId ?? "hist-1", title: "old", kind: "execute", status: "pending" }
+                : { sessionUpdate: update.sessionUpdate, content: { type: "text", text: update.text ?? "" } },
+            },
+          }, frame.style));
+        }
+      }
       await reply(options.stdout, message, { sessionId });
       continue;
     }
@@ -50,6 +73,18 @@ export async function runFakeAcp(options: {
       const text = flake ? flakeText : successText;
       const params = asRecord(message.params);
       const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
+      if (options.reverseRequest) {
+        await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+          jsonrpc: "2.0",
+          id: 99,
+          method: "session/request_permission",
+          params: {
+            sessionId,
+            toolCall: { toolCallId: "call-1", title: "ls", kind: "execute" },
+            options: [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }],
+          },
+        }, frame.style));
+      }
       if (options.toolCallFirst) {
         await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
           jsonrpc: "2.0",
@@ -78,6 +113,7 @@ export async function runFakeAcp(options: {
           update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
         },
       }, frame.style));
+      if (options.deferResult) await options.deferResult;
       await reply(options.stdout, message, { stopReason: "end_turn" });
       if (options.exitAfterPrompts && prompts >= options.exitAfterPrompts) return;
       continue;

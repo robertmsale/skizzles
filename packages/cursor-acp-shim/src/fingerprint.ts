@@ -11,6 +11,17 @@ const STREAM_DROPPED = /stream ended without turnended|connection likely dropped
 const AUTH_OR_PLAN = /\[unauthenticated\]|please sign in to continue|upgrade your plan to continue|add a payment method to continue/i;
 const DEBUGGING_APP = /\b(?:in the app you are debugging|handler returned|status(?: code)?\s*[1-5]\d\d)\b/i;
 const ERROR_DUMP_HEAD = /^(?:connecterror:|http\/2|stream |something went wrong|\[(?:unavailable|aborted|internal|unknown|cancelled)\])/i;
+const DUMP_HEADS = [
+  "connecterror:",
+  "http/2",
+  "stream ",
+  "something went wrong",
+  "[unavailable]",
+  "[aborted]",
+  "[internal]",
+  "[unknown]",
+  "[cancelled]",
+];
 
 export function isSpuriousNetworkDeath(text: string): boolean {
   const trimmed = text.trim();
@@ -34,6 +45,27 @@ function isErrorDumpShape(body: string): boolean {
   const lines = body.split(/\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length === 0 || lines.length > 8) return false;
   return ERROR_DUMP_HEAD.test(body);
+}
+
+export function couldBecomeSpuriousNetworkDeath(text: string): boolean {
+  if (isSpuriousNetworkDeath(text)) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (trimmed.length > MAX_DEATH_TEXT_CHARS) return false;
+  if (AUTH_OR_PLAN.test(trimmed)) return false;
+  if (DEBUGGING_APP.test(trimmed)) return false;
+  if (trimmed.includes("```")) return false;
+  const lower = trimmed.toLowerCase();
+  if (lower === "error" || "error: ".startsWith(lower)) return true;
+  if (lower.startsWith("error:")) {
+    const rest = lower.slice("error:".length).replace(/^\s+/, "");
+    return rest.length === 0 || matchesDumpHeadProgress(rest);
+  }
+  return matchesDumpHeadProgress(lower);
+}
+
+function matchesDumpHeadProgress(text: string): boolean {
+  return DUMP_HEADS.some((head) => head.startsWith(text) || text.startsWith(head));
 }
 
 export function extractAssistantText(message: unknown): string {

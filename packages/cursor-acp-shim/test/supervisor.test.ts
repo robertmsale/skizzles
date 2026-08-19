@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 import { encodeFrame, readFrames, writeFrame, type JsonRpcMessage } from "../src/framing.ts";
 import { STRUCTURED_ERROR_CODE, runSupervisor, type ChildHandle } from "../src/supervisor.ts";
-import { SUCCESS_TEXT, runFakeAcp, type FakeAcpMode, type FakeAcpRequest } from "./fake-acp.ts";
+import { FLAKE_TEXT, SUCCESS_TEXT, runFakeAcp, type FakeAcpMode, type FakeAcpRequest } from "./fake-acp.ts";
 
 const temporary: Array<() => void> = [];
 afterEach(() => {
@@ -134,6 +134,87 @@ describe("ACP supervisor", () => {
     expect(session.logs.join("\n")).not.toContain("swallowed");
     await session.close();
   });
+
+  test("drops historical session/load updates during a synthetic re-handshake", async () => {
+    let launches = 0;
+    const session = await startHarness({
+      handshake: "load",
+      spawn: () => {
+        launches += 1;
+        const launch = launches;
+        return fakeChild(launch === 1 ? "always-flake" : "ok", {
+          exitAfterPrompts: launch === 1 ? 1 : undefined,
+          loadHistory: launch === 2
+            ? [
+              { sessionUpdate: "user_message_chunk", text: "old user turn" },
+              { sessionUpdate: "agent_message_chunk", text: "old assistant turn" },
+              { sessionUpdate: "tool_call", toolCallId: "hist-tool" },
+            ]
+            : undefined,
+        });
+      },
+    });
+    await session.startPrompt("try again");
+    const seen: JsonRpcMessage[] = [];
+    while (true) {
+      const message = await session.next();
+      seen.push(message);
+      if (message.result !== undefined || message.error !== undefined) break;
+    }
+    const dumped = JSON.stringify(seen);
+    expect(dumped).not.toContain("old user turn");
+    expect(dumped).not.toContain("old assistant turn");
+    expect(dumped).not.toContain("hist-tool");
+    expect(dumped).toContain(SUCCESS_TEXT);
+    expect(seen.at(-1)?.id).toBe(3);
+    expect(seen.at(-1)?.result).toEqual({ stopReason: "end_turn" });
+    await session.close();
+  });
+
+  test("does not replay after a reverse child request has been forwarded", async () => {
+    const session = await startSession("ok", { successText: FLAKE_TEXT, reverseRequest: true });
+    const updates: string[] = [];
+    const seen: JsonRpcMessage[] = [];
+    await session.startPrompt("need approval");
+    while (true) {
+      const message = await session.next();
+      seen.push(message);
+      if (message.method === "session/update") {
+        const update = (message.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update;
+        if (update?.sessionUpdate === "agent_message_chunk" && update.content?.text) updates.push(update.content.text);
+        continue;
+      }
+      if (message.result !== undefined || message.error !== undefined) {
+        expect(message.id).toBe(3);
+        expect(updates).toEqual([FLAKE_TEXT]);
+        expect(seen.some((item) => item.method === "session/request_permission" && item.id === 99)).toBe(true);
+        expect(session.logs.join("\n")).not.toContain("swallowed");
+        break;
+      }
+    }
+    await session.close();
+  });
+
+  test("streams a normal first chunk before the prompt result", async () => {
+    let release!: () => void;
+    const deferResult = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const session = await startSession("ok", { deferResult });
+    await session.startPrompt("hi");
+    const first = await Promise.race([
+      session.next(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("normal chunk did not stream before session/prompt result")), 200);
+      }),
+    ]);
+    expect(first.method).toBe("session/update");
+    expect((first.params as { update?: { content?: { text?: string } } }).update?.content?.text).toBe(SUCCESS_TEXT);
+    release();
+    const result = await session.next();
+    expect(result).toEqual({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn" } });
+    await session.close();
+  });
 });
 
 async function startSession(mode: FakeAcpMode, options: {
@@ -141,6 +222,8 @@ async function startSession(mode: FakeAcpMode, options: {
   successText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
+  reverseRequest?: boolean;
+  deferResult?: Promise<void>;
 } = {}) {
   return startHarness({
     handshake: "load",
@@ -187,6 +270,15 @@ async function startHarness(options: {
 
   return {
     logs,
+    next: () => inbound.next(),
+    async startPrompt(text: string) {
+      await send(t3stdin, {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "session/prompt",
+        params: { sessionId: "sess-1", prompt: [{ type: "text", text }] },
+      });
+    },
     async prompt(text: string, updates: string[]) {
       await send(t3stdin, {
         jsonrpc: "2.0",
@@ -215,6 +307,9 @@ function fakeChild(mode: FakeAcpMode, options: {
   successText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
+  reverseRequest?: boolean;
+  loadHistory?: import("./fake-acp.ts").FakeAcpHistoryUpdate[];
+  deferResult?: Promise<void>;
   exitAfterPrompts?: number;
   onRequest?: (request: FakeAcpRequest) => void;
 } = {}): ChildHandle {

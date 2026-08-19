@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractAssistantText, isSpuriousNetworkDeath } from "../src/fingerprint.ts";
+import { couldBecomeSpuriousNetworkDeath, extractAssistantText, isSpuriousNetworkDeath } from "../src/fingerprint.ts";
 
 describe("spurious Cursor ACP network death fingerprint", () => {
   test("matches the Cursor ACP adapter Error: ConnectError death-as-text class", () => {
@@ -35,6 +35,16 @@ describe("spurious Cursor ACP network death fingerprint", () => {
         update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Error: ConnectError: [unavailable] ECONNRESET" } },
       },
     })).toBe("");
+  });
+
+  test("keeps buffering only while text could still become a death dump", () => {
+    expect(couldBecomeSpuriousNetworkDeath("")).toBe(true);
+    expect(couldBecomeSpuriousNetworkDeath("E")).toBe(true);
+    expect(couldBecomeSpuriousNetworkDeath("Error:")).toBe(true);
+    expect(couldBecomeSpuriousNetworkDeath("Error: Con")).toBe(true);
+    expect(couldBecomeSpuriousNetworkDeath("hello from cursor")).toBe(false);
+    expect(couldBecomeSpuriousNetworkDeath("Retry the webhook.")).toBe(false);
+    expect(couldBecomeSpuriousNetworkDeath("Error: file not found: src/http2.ts")).toBe(false);
   });
 
   test("extracts ACP agent_message_chunk text", () => {
