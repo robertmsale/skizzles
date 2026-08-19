@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { APPROVAL_ACTION_CHANGED, MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP } from "../src/approval-projection.ts";
+import { APPROVAL_ACTION_CHANGED, MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP, projectPendingApprovalList } from "../src/approval-projection.ts";
 import { defaultGuardianConfig } from "../src/auto-guardian-config.ts";
 import {
   buildCodexJudgeCommand,
@@ -35,6 +35,7 @@ import {
   type JudgeInput,
   type JudgeResult,
 } from "../src/auto-guardian.ts";
+import type { T3ThreadActivity, T3ThreadShell, ThreadSnapshot } from "../src/protocol.ts";
 
 function approval(overrides: Partial<ApprovalList["approvals"][number]> = {}): ApprovalList["approvals"][number] {
   return {
@@ -81,8 +82,15 @@ function fixture(options: {
   judge?: JudgeResult;
   state?: GuardianState;
   threadContext?: Record<string, ThreadContext | undefined> | ((threadId: string) => ThreadContext | undefined | Promise<ThreadContext | undefined>);
-} = {}): { deps: GuardianDependencies; resolved: Array<Record<string, unknown>>; judged: number; threadLookups: string[] } {
+} = {}): {
+  deps: GuardianDependencies;
+  resolved: Array<Record<string, unknown>>;
+  judged: number;
+  threadLookups: string[];
+  sent: Array<{ threadId: string; message: string }>;
+} {
   const resolved: Array<Record<string, unknown>> = [];
+  const sent: Array<{ threadId: string; message: string }> = [];
   const threadLookups: string[] = [];
   let judged = 0;
   let state = options.state ?? emptyGuardianState();
@@ -234,8 +242,11 @@ function fixture(options: {
       }
       state = { ...state, responded };
     },
+    sendTask: async (threadId, message) => {
+      sent.push({ threadId, message });
+    },
   };
-  return { deps, resolved, threadLookups, get judged() { return judged; } };
+  return { deps, resolved, threadLookups, sent, get judged() { return judged; } };
 }
 
 describe("guardian eligibility filter", () => {
@@ -962,6 +973,74 @@ describe("guardian cycle", () => {
     expect(resolved).toEqual([]);
   });
 
+  test("never ACP-responds to a kind-only execute envelope", async () => {
+    const payload = {
+      requestId: "r1",
+      requestType: "exec_command_approval",
+      detail: "Run requested command",
+      args: { toolCall: { kind: "execute", status: "pending" } },
+    };
+    const thread: T3ThreadShell = {
+      id: "cursor-task",
+      projectId: "project",
+      title: "Cursor work",
+      modelSelection: { instanceId: "cursor", model: "grok-4.6", options: [] },
+      runtimeMode: "auto",
+      interactionMode: "default",
+      worktreePath: "/worktree",
+      branch: "t3code/task",
+      latestTurn: null,
+      createdAt: "2026-08-17T00:00:00Z",
+      updatedAt: "2026-08-17T00:00:00Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      pinnedAt: null,
+      pinOrderKey: null,
+      deletedAt: null,
+      session: { status: "running" },
+      latestUserMessageAt: null,
+      hasPendingApprovals: true,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    };
+    const activity: T3ThreadActivity = {
+      id: "approval.requested",
+      kind: "approval.requested",
+      createdAt: "2026-08-19T18:00:00Z",
+      payload,
+    };
+    const snapshot: ThreadSnapshot = {
+      snapshotSequence: 1,
+      thread: { ...thread, messages: [], activities: [activity] },
+    };
+    const projected = projectPendingApprovalList(
+      [thread],
+      new Map([["cursor-task", snapshot]]),
+      new Map([["project", { title: "acme", workspaceRoot: "/repo" }]]),
+      new Map([["cursor", "cursor"]]),
+    );
+    expect(projected.approvals).toEqual([]);
+    expect(projected.unidentifiable[0]).toMatchObject({
+      requestId: "r1",
+      reason: MISSING_COMMAND_GAP,
+    });
+    const result = fixture({
+      list: projected,
+      judge: { ok: true, assessment: { outcome: "allow", rationale: "should not run" }, raw: "" },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_unidentifiable",
+      requestId: "r1",
+      decision: null,
+      command: null,
+      responded: false,
+    });
+    expect(result.resolved).toEqual([]);
+  });
+
   test("does not ACP-decline a leftover pending unidentifiable claim", async () => {
     const { deps, resolved } = fixture({
       list: { approvals: [], unidentifiable: [unidentifiable()] },
@@ -1025,6 +1104,109 @@ describe("guardian cycle", () => {
         cwd: "/worktree",
         toolName: "run_terminal_command",
       },
+    });
+    expect(result.sent).toEqual([]);
+  });
+
+  test("judges an identifiable Cursor execute from T3 detail instead of skipping it", async () => {
+    const command = "which grok; ls /opt/homebrew/opt/grok 2>/dev/null; ls /usr/local/bin/grok 2>/dev/null; mdfind -name 'xai-grok' 2>/dev/null | head; ls ~/src 2>/dev/null | head; ls /Users/robertsale/.grok | head";
+    const result = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "cursor-task",
+          title: "Cursor work",
+          provider: "cursor",
+          providerDriver: "cursor",
+          requestId: "7df41e4c-8a27-49b3-97e5-e43d3eebede7",
+          toolName: "execute",
+          command,
+        })],
+        unidentifiable: [],
+      },
+      history: [{ role: "user", text: "Find the grok binary" }],
+      judge: { ok: true, assessment: { outcome: "allow", rationale: "local which/ls lookup" }, raw: "" },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(1);
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      requestId: "7df41e4c-8a27-49b3-97e5-e43d3eebede7",
+      decision: "accept",
+      command,
+      responded: true,
+    });
+    expect(result.resolved[0]).toMatchObject({
+      decision: "accept",
+      expected: { requestKind: "command", command, toolName: "execute" },
+    });
+    expect(result.sent).toEqual([]);
+  });
+
+  test("judges an identifiable Cursor fetch instead of leaving it pending", async () => {
+    const result = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "cursor-task",
+          title: "Cursor work",
+          provider: "cursor",
+          providerDriver: "cursor",
+          toolName: "fetch",
+          command: "Fetch https://docs.x.ai/build/features/hooks",
+        })],
+        unidentifiable: [],
+      },
+      history: [{ role: "user", text: "Read the Grok hooks docs" }],
+      judge: { ok: true, assessment: { outcome: "allow", rationale: "public documentation fetch" }, raw: "" },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(1);
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      decision: "accept",
+      command: "Fetch https://docs.x.ai/build/features/hooks",
+      responded: true,
+    });
+    expect(result.resolved[0]).toMatchObject({
+      decision: "accept",
+      expected: {
+        requestKind: "command",
+        command: "Fetch https://docs.x.ai/build/features/hooks",
+        toolName: "fetch",
+      },
+    });
+    expect(result.sent).toEqual([]);
+  });
+
+  test("judges an identifiable search and MCP tool call", async () => {
+    const search = fixture({
+      list: {
+        approvals: [approval({
+          toolName: "search",
+          command: "Web search: Grok sticky deny",
+        })],
+        unidentifiable: [],
+      },
+      judge: { ok: true, assessment: { outcome: "allow", rationale: "read-only web search" }, raw: "" },
+    });
+    const mcp = fixture({
+      list: {
+        approvals: [approval({
+          toolName: "linear__list_issues",
+          command: "linear - list_issues",
+        })],
+        unidentifiable: [],
+      },
+      judge: { ok: true, assessment: { outcome: "allow", rationale: "read-only MCP list" }, raw: "" },
+    });
+    await runGuardianCycle(search.deps, defaultGuardianConfig());
+    await runGuardianCycle(mcp.deps, defaultGuardianConfig());
+    expect(search.resolved[0]).toMatchObject({
+      decision: "accept",
+      expected: { command: "Web search: Grok sticky deny", toolName: "search" },
+    });
+    expect(mcp.resolved[0]).toMatchObject({
+      decision: "accept",
+      expected: { command: "linear - list_issues", toolName: "linear__list_issues" },
     });
   });
 
@@ -1675,6 +1857,169 @@ describe("guardian lock and multi-process claims", () => {
     expect(judged[0]?.transcript).toContain("[3] tool run_terminal_command: git status");
     expect(report.decisions[0]).toMatchObject({ decision: "accept", responded: true });
     expect(resolved[0]).toMatchObject({ decision: "accept" });
+  });
+
+  test("skips a Grok judge failure instead of ACP-declining a sticky argv", async () => {
+    const { deps, resolved } = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "grok-task",
+          provider: "grok",
+          providerDriver: "grok",
+          toolName: "run_terminal_command",
+          command: "git push origin t3code/acme",
+        })],
+        unidentifiable: [],
+      },
+      judge: { ok: false, reason: "codex exec is unavailable; denying fail-closed" },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_sticky_fail_closed",
+      decision: null,
+      responded: false,
+    });
+    expect(resolved).toEqual([]);
+  });
+
+  test("still ACP-declines an explicit Grok deny of an identifiable command", async () => {
+    const { deps, resolved, sent } = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "grok-task",
+          provider: "grok",
+          providerDriver: "grok",
+          toolName: "run_terminal_command",
+          command: "git push origin master",
+        })],
+        unidentifiable: [],
+      },
+      judge: { ok: true, assessment: { outcome: "deny", rationale: "protected default branch" }, raw: "" },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      decision: "decline",
+      responded: true,
+    });
+    expect(resolved).toEqual([expect.objectContaining({ decision: "decline" })]);
+    expect(sent).toEqual([]);
+  });
+
+  test("after allowing a previously declined Grok argv, sends a user-shaped exact-argv unstick", async () => {
+    const push = "git push origin t3code/acme";
+    const { deps, resolved, sent } = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "grok-task",
+          requestId: "req-2",
+          provider: "grok",
+          providerDriver: "grok",
+          toolName: "run_terminal_command",
+          command: push,
+        })],
+        unidentifiable: [],
+      },
+      history: [{ role: "user", text: "please push" }],
+      state: {
+        schema: 4,
+        responded: {
+          [guardianClaimKey("grok-task", "req-1")]: {
+            threadId: "grok-task",
+            decision: "decline",
+            at: "2026-08-17T01:00:00Z",
+            status: "completed",
+            action: { requestKind: "command", command: push, cwd: "/worktree", toolName: "run_terminal_command" },
+          },
+        },
+        lastPollAt: null,
+        lastError: null,
+      },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      decision: "accept",
+      responded: true,
+      unstickSent: true,
+    });
+    expect(resolved[0]).toMatchObject({ decision: "accept", requestId: "req-2" });
+    expect(sent).toEqual([{ threadId: "grok-task", message: `I approve \`${push}\`` }]);
+  });
+
+  test("does not inject an unstick when the latest Grok user message already quotes the argv", async () => {
+    const push = "git push origin t3code/acme";
+    const { deps, sent } = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "grok-task",
+          requestId: "req-2",
+          provider: "grok",
+          providerDriver: "grok",
+          command: push,
+          toolName: "run_terminal_command",
+        })],
+        unidentifiable: [],
+      },
+      history: [{ role: "user", text: `I approve \`${push}\`` }],
+      state: {
+        schema: 4,
+        responded: {
+          [guardianClaimKey("grok-task", "req-1")]: {
+            threadId: "grok-task",
+            decision: "decline",
+            at: "2026-08-17T01:00:00Z",
+            status: "completed",
+            action: { requestKind: "command", command: push, cwd: "/worktree", toolName: "run_terminal_command" },
+          },
+        },
+        lastPollAt: null,
+        lastError: null,
+      },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({ decision: "accept", responded: true });
+    expect(report.decisions[0]?.unstickSent).toBeUndefined();
+    expect(sent).toEqual([]);
+  });
+
+  test("does not invent a Cursor sticky exact-argv ledger or unstick message", async () => {
+    const push = "git push origin t3code/acme";
+    const { deps, resolved, sent } = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "cursor-task",
+          requestId: "req-2",
+          provider: "cursor",
+          providerDriver: "cursor",
+          command: push,
+        })],
+        unidentifiable: [],
+      },
+      history: [{ role: "user", text: "please push" }],
+      state: {
+        schema: 4,
+        responded: {
+          [guardianClaimKey("cursor-task", "req-1")]: {
+            threadId: "cursor-task",
+            decision: "decline",
+            at: "2026-08-17T01:00:00Z",
+            status: "completed",
+            action: { requestKind: "command", command: push, cwd: "/worktree", toolName: "Shell" },
+          },
+        },
+        lastPollAt: null,
+        lastError: null,
+      },
+    });
+    const report = await runGuardianCycle(deps, defaultGuardianConfig());
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      decision: "accept",
+      responded: true,
+    });
+    expect(resolved[0]).toMatchObject({ decision: "accept" });
+    expect(sent).toEqual([]);
   });
 });
 

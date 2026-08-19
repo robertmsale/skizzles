@@ -148,8 +148,10 @@ export const POLICY_DELTAS = [
   "Official Config.base_instructions is supplied through `codex exec -c model_instructions_file=...` because `codex exec` has no `model_base_instructions` flag.",
   "Official preferred model id is `codex-auto-review`, not `luna-low`. Host config may override `model`. Judge effort is an explicit `model_reasoning_effort` pin (default `low`) passed as `codex exec -c model_reasoning_effort=...` because `codex exec` has no dedicated effort flag.",
   "JSON decode is fail-closed on extra keys, missing outcome, and any non-JSON wrapper. Official serde parse ignores unknown fields and extracts a JSON object from surrounding prose; this sidecar does not.",
-  "Transcript is a compact last-N T3 user/assistant/tool history plus the identifiable command/path, matching Codex guardian recent-entry limits rather than one last user line.",
+  "Transcript is a compact last-N T3 user/assistant/tool history plus the identifiable command/path/URL/title, matching Codex guardian recent-entry limits rather than one last user line.",
   "This client never calls acceptForSession. One-shot `thread.approval.respond` accept is allowed only when the live pending action still matches the judged identity. It only judges known non-Codex Auto harnesses (grok, cursor, opencode) and skips every other instance ID, including custom Codex drivers.",
+  "Pending-approval identity is any bindable ACP tool call (shell argv, path, URL, non-generic title, complete kind+toolCallId pair, MCP name), not only typed data.command. Kind alone or toolCallId alone is not identity. Cursor execute argv lives in T3 detail, toolCall.title, and rawInput.command; missing data.command is not a skip when those are present. Generic T3 labels such as 'Searched files' are not identity. Skip-unidentifiable only when T3 exposes nothing bindable.",
+  "Grok Auto treats ACP RejectOnce as a session-local exact-argv sticky deny in the live permission actor (not permission.toml; ResetPermissionState does not clear it). After a later allow of that argv, the sidecar sends a user-shaped `I approve \\`<exact argv>\\`` via tasks.send. Cursor Auto-review has no equivalent sticky ledger.",
 ] as const;
 
 export function officialGuardianPolicyPrompt(): string {

@@ -25,10 +25,16 @@ import {
   compactGuardianTranscript,
   decodeGuardianAssessment,
   GUARDIAN_OUTPUT_SCHEMA,
+  lastUserMessageText,
   officialGuardianPolicyPrompt,
   type GuardianAssessment,
   type PlannedAction,
 } from "./auto-guardian-policy.ts";
+import {
+  grokStickyUnstickUserMessage,
+  needsGrokStickyUnstick,
+  providerHasStickyExactArgvDeny,
+} from "./auto-guardian-sticky.ts";
 
 export const CODEX_PROVIDER_INSTANCE = "codex";
 export const NON_CODEX_PROVIDERS = ["grok", "cursor", "opencode"] as const;
@@ -64,6 +70,8 @@ export type GuardianAction =
   | "skipped_project"
   | "skipped_snapshot_gap"
   | "skipped_unidentifiable"
+  | "skipped_sticky_fail_closed"
+  | "skipped_sticky_identity"
   | "skipped_duplicate"
   | "denied_unidentifiable"
   | "judged"
@@ -84,6 +92,7 @@ export type GuardianDecisionRecord = {
   reason: string;
   dryRun: boolean;
   responded: boolean;
+  unstickSent?: boolean;
 };
 
 export type GuardianCycleReport = {
@@ -165,6 +174,7 @@ export type GuardianDependencies = {
     expected?: ApprovalActionIdentity;
   }): Promise<unknown>;
   taskHistory(threadId: string, turns: number): Promise<HistoryResult>;
+  sendTask?(threadId: string, message: string): Promise<unknown>;
   judge(input: JudgeInput): Promise<JudgeResult>;
   now(): string;
   loadState(): Promise<GuardianState>;
@@ -626,12 +636,14 @@ async function deliverClaim(
     reason: string;
     leaseId?: string;
     action?: ApprovalActionIdentity;
+    stickyExactArgvDeny?: boolean;
   },
   dryRun: boolean,
 ): Promise<boolean> {
   if (dryRun) return false;
   if (!input.leaseId) return false;
   if (input.decision === "accept" && !hasCompleteActionIdentity(input.action)) {
+    if (input.stickyExactArgvDeny) return false;
     input = {
       ...input,
       decision: "decline",
@@ -651,6 +663,10 @@ async function deliverClaim(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (input.decision === "accept" && message === APPROVAL_ACTION_CHANGED) {
+        if (input.stickyExactArgvDeny) {
+          await dependencies.releaseRequest(input.requestId, input.leaseId!, input.threadId);
+          return false;
+        }
         await dependencies.resolveTaskApproval({
           threadId: input.threadId,
           requestId: input.requestId,
@@ -664,6 +680,38 @@ async function deliverClaim(
     }
     return dependencies.completeRequest(input.requestId, input.leaseId!, input.threadId, input.decision);
   });
+}
+
+async function maybeSendGrokStickyUnstick(
+  dependencies: GuardianDependencies,
+  input: {
+    dryRun: boolean;
+    driver: string | null | undefined;
+    threadId: string;
+    requestId: string | null;
+    command: string;
+    messages?: ReadonlyArray<{ role?: unknown; text?: unknown }>;
+  },
+): Promise<boolean> {
+  if (input.dryRun || !dependencies.sendTask) return false;
+  const state = await dependencies.loadState();
+  if (!needsGrokStickyUnstick({
+    driver: input.driver,
+    command: input.command,
+    threadId: input.threadId,
+    requestId: input.requestId,
+    lastUserMessage: lastUserMessageText(input.messages ?? []),
+    messages: input.messages,
+    claims: state.responded,
+  })) {
+    return false;
+  }
+  try {
+    await dependencies.sendTask(input.threadId, grokStickyUnstickUserMessage(input.command));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function runGuardianCycle(
@@ -823,6 +871,28 @@ export async function runGuardianCycle(
         const identityMismatch = existing.decision === "accept" &&
           hasCompleteActionIdentity(existing.action) &&
           !sameApprovalAction(existing.action, currentAction);
+        const stickyExactArgvDeny = providerHasStickyExactArgvDeny(resolved.providerDriver);
+        if (stickyExactArgvDeny && (actionlessAccept || identityMismatch)) {
+          decisions.push({
+            action: "skipped_sticky_identity",
+            threadId: candidate.threadId,
+            requestId: candidate.requestId,
+            provider: candidate.provider,
+            runtimeMode,
+            runtimeModeSource,
+            providerDriver,
+            providerDriverSource,
+            inferredFromThread: inferred,
+            command: candidate.command,
+            decision: null,
+            reason: identityMismatch
+              ? "stored accept identity does not match the current action; skipping Grok ACP-decline to avoid a session sticky deny"
+              : "legacy claim has no action identity; skipping Grok ACP-decline to avoid a session sticky deny",
+            dryRun: config.dryRun,
+            responded: false,
+          });
+          continue;
+        }
         const retryDecision = actionlessAccept || identityMismatch ? "decline" : existing.decision;
         const retryAction = actionlessAccept || identityMismatch ? currentAction : existing.action;
         const retryReason = actionlessAccept
@@ -865,7 +935,20 @@ export async function runGuardianCycle(
           reason,
           leaseId: claim.leaseId,
           action: retryAction,
+          stickyExactArgvDeny,
         }, config.dryRun);
+        let unstickSent = false;
+        if (responded && decision === "accept" && candidate.command) {
+          const history = await dependencies.taskHistory(candidate.threadId, HISTORY_TURNS);
+          unstickSent = await maybeSendGrokStickyUnstick(dependencies, {
+            dryRun: config.dryRun,
+            driver: resolved.providerDriver,
+            threadId: candidate.threadId,
+            requestId: candidate.requestId,
+            command: candidate.command,
+            messages: history.messages,
+          });
+        }
         state = await dependencies.loadState();
         decisions.push({
           action: config.dryRun ? "dry_run" : decision === "decline" && actionlessAccept ? "denied_unidentifiable" : "judged",
@@ -882,6 +965,7 @@ export async function runGuardianCycle(
           reason,
           dryRun: config.dryRun,
           responded,
+          ...(unstickSent ? { unstickSent: true } : {}),
         });
         continue;
       }
@@ -914,6 +998,26 @@ export async function runGuardianCycle(
         },
         cwd: executionCwd,
       });
+      const stickyExactArgvDeny = providerHasStickyExactArgvDeny(resolved.providerDriver);
+      if (!judged.ok && stickyExactArgvDeny) {
+        decisions.push({
+          action: "skipped_sticky_fail_closed",
+          threadId: candidate.threadId,
+          requestId: candidate.requestId,
+          provider: candidate.provider,
+          runtimeMode,
+          runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
+          command: candidate.command,
+          decision: null,
+          reason: `${judged.reason}; skipping Grok ACP-decline to avoid a session sticky deny`,
+          dryRun: config.dryRun,
+          responded: false,
+        });
+        continue;
+      }
       const failClosed = judged.ok
         ? judged.assessment
         : { outcome: "deny" as const, rationale: judged.reason };
@@ -947,6 +1051,25 @@ export async function runGuardianCycle(
       const currentAction = candidateAction(candidate);
       const storedAccept = claim.status === "retry" && claim.decision === "accept";
       const identityMismatch = Boolean(storedAccept && (!claim.action || !sameApprovalAction(claim.action, currentAction)));
+      if (identityMismatch && stickyExactArgvDeny) {
+        decisions.push({
+          action: "skipped_sticky_identity",
+          threadId: candidate.threadId,
+          requestId: candidate.requestId,
+          provider: candidate.provider,
+          runtimeMode,
+          runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
+          command: candidate.command,
+          decision: null,
+          reason: "stored accept identity does not match the current action; skipping Grok ACP-decline to avoid a session sticky deny",
+          dryRun: config.dryRun,
+          responded: false,
+        });
+        continue;
+      }
       const decision: ApprovalDecision = identityMismatch ? "decline" : judgedDecision;
       const deliverAction = storedAccept && claim.action && !identityMismatch ? claim.action : currentAction;
       const reason = identityMismatch
@@ -959,7 +1082,19 @@ export async function runGuardianCycle(
         reason,
         leaseId: claim.leaseId,
         action: deliverAction,
+        stickyExactArgvDeny,
       }, config.dryRun);
+      let unstickSent = false;
+      if (responded && decision === "accept") {
+        unstickSent = await maybeSendGrokStickyUnstick(dependencies, {
+          dryRun: config.dryRun,
+          driver: resolved.providerDriver,
+          threadId: candidate.threadId,
+          requestId: candidate.requestId,
+          command: candidate.command,
+          messages: history.messages,
+        });
+      }
       if (claim.status !== "duplicate") state = await dependencies.loadState();
       decisions.push({
         action: config.dryRun ? "dry_run" : "judged",
@@ -976,6 +1111,7 @@ export async function runGuardianCycle(
         reason,
         dryRun: config.dryRun,
         responded,
+        ...(unstickSent ? { unstickSent: true } : {}),
       });
     }
 
@@ -1360,6 +1496,11 @@ export function createDefaultGuardianDependencies(
       threadId,
       turns,
     }) as Promise<HistoryResult>,
+    sendTask: async (threadId, message) => call({
+      op: "tasks.send",
+      threadId,
+      message,
+    }),
     judge: runCodexJudge,
     now: () => new Date().toISOString(),
     loadState: () => loadGuardianState(),
