@@ -199,9 +199,12 @@ It will not:
 - write `io.github.t3-orchestration.daemon` or `io.github.skizzles.t3-worktree-reaper`
 - call `acceptForSession` or yolo
 - ACP-decline an unidentifiable command or path (that session-binds Grok Auto); it skips and leaves the request pending for a human
+- treat a generic T3 label such as "Searched files" as the judged action when kind, title, URL, or tool name is present
 - respond twice to the same `requestId`
 
-It will deliver a one-shot `thread.approval.respond` accept only when the command is identifiable and the live pending action still matches the judged identity. Feature-branch push, commit, and an authorized `gh pr merge` are allow under the official Codex tenant policy; push to `master`/`main` stays deny.
+It will deliver a one-shot `thread.approval.respond` accept only when the action is identifiable and the live pending action still matches the judged identity. Identifiable means a bindable shell argv, path, URL, title, kind+toolCallId, or MCP/tool name — not only `command`/`path`. A public-docs WebFetch is judged; it does not sit. Feature-branch push, commit, and an authorized `gh pr merge` are allow under the official Codex tenant policy; push to `master`/`main` stays deny.
+
+Grok Auto records an ACP decline as a session-local exact-argv sticky deny in the live permission actor (not `$GROK_HOME/sessions/<cwd>/permission.toml`). `ResetPermissionState` / `x.ai/permissions/reset` resets persisted grants only and is not exposed through T3. After the guardian later allows that exact argv, it sends a user-shaped `I approve \`<exact argv>\`` via `tasks.send` so a later retry is not permanently dead. Generic "please push" does not unstick. Cursor Auto-review has no equivalent session-local exact-argv deny ledger: a classifier block can be retried and then surfaces a normal approval prompt; persistent policy is `permissions.json` allowlists / `autoRun` steering.
 
 Install it separately from the orchestration daemon:
 
@@ -236,9 +239,11 @@ passes it as `codex exec --ignore-user-config -m <model> -c model_reasoning_effo
 as `effort` or `model_reasoning_effrot`, are rejected. Policy text is the
 extracted official guardian template and tenant policy from `openai/codex`
 `codex-rs/core/src/guardian/`; the judge prompt is a compact last-N T3
-user/assistant/tool transcript plus the identifiable command or path.
+user/assistant/tool transcript plus the identifiable command, path, URL, or title.
 Command extraction reads Codex `data.command` and Grok/Cursor
-`arguments.command` / `args.toolCall.rawInput.command`.
+`arguments.command` / `args.toolCall.rawInput.command`, plus `toolCall.title`,
+`kind`, `toolCallId`, URL, and MCP/tool name. Generic T3 labels such as
+"Searched files" are not treated as the judged action.
 
 The guardian installer copies only the guardian CLI and its imported modules into
 `~/.local/share/skizzles/t3-auto-guardian`. It does not copy `cli.ts` or

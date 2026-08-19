@@ -456,8 +456,10 @@ var POLICY_DELTAS = [
   "Official Config.base_instructions is supplied through `codex exec -c model_instructions_file=...` because `codex exec` has no `model_base_instructions` flag.",
   "Official preferred model id is `codex-auto-review`, not `luna-low`. Host config may override `model`. Judge effort is an explicit `model_reasoning_effort` pin (default `low`) passed as `codex exec -c model_reasoning_effort=...` because `codex exec` has no dedicated effort flag.",
   "JSON decode is fail-closed on extra keys, missing outcome, and any non-JSON wrapper. Official serde parse ignores unknown fields and extracts a JSON object from surrounding prose; this sidecar does not.",
-  "Transcript is a compact last-N T3 user/assistant/tool history plus the identifiable command/path, matching Codex guardian recent-entry limits rather than one last user line.",
-  "This client never calls acceptForSession. One-shot `thread.approval.respond` accept is allowed only when the live pending action still matches the judged identity. It only judges known non-Codex Auto harnesses (grok, cursor, opencode) and skips every other instance ID, including custom Codex drivers."
+  "Transcript is a compact last-N T3 user/assistant/tool history plus the identifiable command/path/URL/title, matching Codex guardian recent-entry limits rather than one last user line.",
+  "This client never calls acceptForSession. One-shot `thread.approval.respond` accept is allowed only when the live pending action still matches the judged identity. It only judges known non-Codex Auto harnesses (grok, cursor, opencode) and skips every other instance ID, including custom Codex drivers.",
+  "Pending-approval identity is any bindable ACP tool call (shell argv, path, URL, title, kind+toolCallId, MCP name), not only shell command/path. Generic T3 labels such as 'Searched files' are not identity. Skip-unidentifiable only when T3 exposes nothing bindable.",
+  "Grok Auto treats ACP RejectOnce as a session-local exact-argv sticky deny in the live permission actor (not permission.toml; ResetPermissionState does not clear it). After a later allow of that argv, the sidecar sends a user-shaped `I approve \\`<exact argv>\\`` via tasks.send. Cursor Auto-review has no equivalent sticky ledger."
 ];
 function officialGuardianPolicyPrompt() {
   const template = OFFICIAL_POLICY_TEMPLATE.trimEnd();
@@ -635,6 +637,19 @@ function compactGuardianTranscript(messages) {
   ].join(`
 `);
 }
+function lastUserMessageText(messages) {
+  for (let index = messages.length - 1;index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role !== "user")
+      continue;
+    if (typeof message.text !== "string")
+      continue;
+    const text = message.text.trim();
+    if (text)
+      return text;
+  }
+  return null;
+}
 function buildGuardianUserPrompt(input) {
   const transcript = input.transcript?.trim() || (input.lastUserMessage?.trim() ? `[1] user: ${input.lastUserMessage.trim()}` : "") || "<no retained transcript entries>";
   const action = JSON.stringify({
@@ -807,9 +822,22 @@ import { randomBytes } from "crypto";
 import { Database } from "bun:sqlite";
 
 // packages/t3-orchestration/src/approval-projection.ts
-var MISSING_COMMAND_GAP = "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
+var MISSING_COMMAND_GAP = "T3 did not expose a bindable command, path, URL, title, kind, or tool name for this pending approval. Refusing to approve blindly.";
 var APPROVAL_ACTION_CHANGED = "Pending approval action changed after judgment. Refusing to approve blindly.";
 var MISSING_SNAPSHOT_GAP = "T3 reports hasPendingApprovals, but the thread snapshot window did not include an approval.requested activity with a request id.";
+var GENERIC_APPROVAL_LABELS = new Set([
+  "searched files",
+  "run requested command",
+  "run requested tool",
+  "fetch",
+  "search",
+  "read",
+  "edit",
+  "write",
+  "execute",
+  "shell",
+  "other"
+]);
 function requireIdentifiableApproval(approval) {
   if (approval.identifiable && approval.command)
     return;
@@ -880,6 +908,71 @@ async function withExclusiveFileLock(lockPath, body, options = {}) {
     await Bun.sleep(retryMs);
   }
   throw new Error(`Timed out waiting for exclusive lock ${lockPath}`);
+}
+
+// packages/t3-orchestration/src/auto-guardian-sticky.ts
+var STICKY_EXACT_ARGV_DENY_DRIVER = "grok";
+function providerHasStickyExactArgvDeny(driver) {
+  return driver?.trim().toLowerCase() === STICKY_EXACT_ARGV_DENY_DRIVER;
+}
+function grokStickyUnstickUserMessage(command) {
+  return `I approve \`${command}\``;
+}
+function latestUserMessageApprovesExactArgv(message, command) {
+  const quoted = command.trim();
+  if (!quoted || message == null)
+    return false;
+  return message.includes(quoted);
+}
+function historyLatestUserMessageApprovesExactArgv(messages, command) {
+  return latestUserMessageApprovesExactArgv(lastUserMessageText(messages ?? []), command);
+}
+function priorStickyDenyOfExactArgv(claims, input) {
+  if (!claims)
+    return false;
+  const command = input.command.trim();
+  if (!command)
+    return false;
+  for (const claim of Object.values(claims)) {
+    if (claim.threadId !== input.threadId)
+      continue;
+    if (claim.decision !== "decline")
+      continue;
+    if (claim.action?.command?.trim() !== command)
+      continue;
+    return true;
+  }
+  return false;
+}
+function transcriptShowsHarnessRecordedDeny(messages, command) {
+  if (!messages)
+    return false;
+  const quoted = command.trim();
+  if (!quoted)
+    return false;
+  for (const message of messages) {
+    if (typeof message.text !== "string")
+      continue;
+    const text = message.text;
+    if (!text.includes(quoted))
+      continue;
+    if (/already declined/i.test(text) || /harness-recorded permissions/i.test(text) || /Auto mode blocked this action/i.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+function needsGrokStickyUnstick(input) {
+  if (!providerHasStickyExactArgvDeny(input.driver))
+    return false;
+  const command = input.command.trim();
+  if (!command)
+    return false;
+  if (latestUserMessageApprovesExactArgv(input.lastUserMessage, command))
+    return false;
+  if (historyLatestUserMessageApprovesExactArgv(input.messages, command))
+    return false;
+  return priorStickyDenyOfExactArgv(input.claims, input) || transcriptShowsHarnessRecordedDeny(input.messages, command);
 }
 
 // packages/t3-orchestration/src/auto-guardian.ts
@@ -1249,6 +1342,8 @@ async function deliverClaim(dependencies, input, dryRun) {
   if (!input.leaseId)
     return false;
   if (input.decision === "accept" && !hasCompleteActionIdentity(input.action)) {
+    if (input.stickyExactArgvDeny)
+      return false;
     input = {
       ...input,
       decision: "decline",
@@ -1269,6 +1364,10 @@ async function deliverClaim(dependencies, input, dryRun) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (input.decision === "accept" && message === APPROVAL_ACTION_CHANGED) {
+        if (input.stickyExactArgvDeny) {
+          await dependencies.releaseRequest(input.requestId, input.leaseId, input.threadId);
+          return false;
+        }
         await dependencies.resolveTaskApproval({
           threadId: input.threadId,
           requestId: input.requestId,
@@ -1282,6 +1381,28 @@ async function deliverClaim(dependencies, input, dryRun) {
     }
     return dependencies.completeRequest(input.requestId, input.leaseId, input.threadId, input.decision);
   });
+}
+async function maybeSendGrokStickyUnstick(dependencies, input) {
+  if (input.dryRun || !dependencies.sendTask)
+    return false;
+  const state = await dependencies.loadState();
+  if (!needsGrokStickyUnstick({
+    driver: input.driver,
+    command: input.command,
+    threadId: input.threadId,
+    requestId: input.requestId,
+    lastUserMessage: lastUserMessageText(input.messages ?? []),
+    messages: input.messages,
+    claims: state.responded
+  })) {
+    return false;
+  }
+  try {
+    await dependencies.sendTask(input.threadId, grokStickyUnstickUserMessage(input.command));
+    return true;
+  } catch {
+    return false;
+  }
 }
 async function runGuardianCycle(dependencies, config) {
   const now = dependencies.now();
@@ -1421,6 +1542,26 @@ async function runGuardianCycle(dependencies, config) {
         const currentAction2 = candidateAction(candidate);
         const actionlessAccept = existing.decision === "accept" && !hasCompleteActionIdentity(existing.action);
         const identityMismatch2 = existing.decision === "accept" && hasCompleteActionIdentity(existing.action) && !sameApprovalAction(existing.action, currentAction2);
+        const stickyExactArgvDeny2 = providerHasStickyExactArgvDeny(resolved.providerDriver);
+        if (stickyExactArgvDeny2 && (actionlessAccept || identityMismatch2)) {
+          decisions.push({
+            action: "skipped_sticky_identity",
+            threadId: candidate.threadId,
+            requestId: candidate.requestId,
+            provider: candidate.provider,
+            runtimeMode,
+            runtimeModeSource,
+            providerDriver,
+            providerDriverSource,
+            inferredFromThread: inferred,
+            command: candidate.command,
+            decision: null,
+            reason: identityMismatch2 ? "stored accept identity does not match the current action; skipping Grok ACP-decline to avoid a session sticky deny" : "legacy claim has no action identity; skipping Grok ACP-decline to avoid a session sticky deny",
+            dryRun: config.dryRun,
+            responded: false
+          });
+          continue;
+        }
         const retryDecision = actionlessAccept || identityMismatch2 ? "decline" : existing.decision;
         const retryAction = actionlessAccept || identityMismatch2 ? currentAction2 : existing.action;
         const retryReason = actionlessAccept ? "legacy claim has no action identity" : identityMismatch2 ? "stored accept identity does not match the current action" : "retrying incomplete guardian claim";
@@ -1458,8 +1599,21 @@ async function runGuardianCycle(dependencies, config) {
           decision: decision2,
           reason: reason2,
           leaseId: claim2.leaseId,
-          action: retryAction
+          action: retryAction,
+          stickyExactArgvDeny: stickyExactArgvDeny2
         }, config.dryRun);
+        let unstickSent2 = false;
+        if (responded2 && decision2 === "accept" && candidate.command) {
+          const history2 = await dependencies.taskHistory(candidate.threadId, HISTORY_TURNS);
+          unstickSent2 = await maybeSendGrokStickyUnstick(dependencies, {
+            dryRun: config.dryRun,
+            driver: resolved.providerDriver,
+            threadId: candidate.threadId,
+            requestId: candidate.requestId,
+            command: candidate.command,
+            messages: history2.messages
+          });
+        }
         state = await dependencies.loadState();
         decisions.push({
           action: config.dryRun ? "dry_run" : decision2 === "decline" && actionlessAccept ? "denied_unidentifiable" : "judged",
@@ -1475,7 +1629,8 @@ async function runGuardianCycle(dependencies, config) {
           decision: decision2,
           reason: reason2,
           dryRun: config.dryRun,
-          responded: responded2
+          responded: responded2,
+          ...unstickSent2 ? { unstickSent: true } : {}
         });
         continue;
       }
@@ -1504,6 +1659,26 @@ async function runGuardianCycle(dependencies, config) {
         },
         cwd: executionCwd
       });
+      const stickyExactArgvDeny = providerHasStickyExactArgvDeny(resolved.providerDriver);
+      if (!judged.ok && stickyExactArgvDeny) {
+        decisions.push({
+          action: "skipped_sticky_fail_closed",
+          threadId: candidate.threadId,
+          requestId: candidate.requestId,
+          provider: candidate.provider,
+          runtimeMode,
+          runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
+          command: candidate.command,
+          decision: null,
+          reason: `${judged.reason}; skipping Grok ACP-decline to avoid a session sticky deny`,
+          dryRun: config.dryRun,
+          responded: false
+        });
+        continue;
+      }
       const failClosed = judged.ok ? judged.assessment : { outcome: "deny", rationale: judged.reason };
       const judgedDecision = failClosed.outcome === "allow" ? "accept" : "decline";
       const claim = await claimOrSkip(dependencies, {
@@ -1535,6 +1710,25 @@ async function runGuardianCycle(dependencies, config) {
       const currentAction = candidateAction(candidate);
       const storedAccept = claim.status === "retry" && claim.decision === "accept";
       const identityMismatch = Boolean(storedAccept && (!claim.action || !sameApprovalAction(claim.action, currentAction)));
+      if (identityMismatch && stickyExactArgvDeny) {
+        decisions.push({
+          action: "skipped_sticky_identity",
+          threadId: candidate.threadId,
+          requestId: candidate.requestId,
+          provider: candidate.provider,
+          runtimeMode,
+          runtimeModeSource,
+          providerDriver,
+          providerDriverSource,
+          inferredFromThread: inferred,
+          command: candidate.command,
+          decision: null,
+          reason: "stored accept identity does not match the current action; skipping Grok ACP-decline to avoid a session sticky deny",
+          dryRun: config.dryRun,
+          responded: false
+        });
+        continue;
+      }
       const decision = identityMismatch ? "decline" : judgedDecision;
       const deliverAction = storedAccept && claim.action && !identityMismatch ? claim.action : currentAction;
       const reason = identityMismatch ? "stored accept identity does not match the current action" : failClosed.rationale;
@@ -1544,8 +1738,20 @@ async function runGuardianCycle(dependencies, config) {
         decision,
         reason,
         leaseId: claim.leaseId,
-        action: deliverAction
+        action: deliverAction,
+        stickyExactArgvDeny
       }, config.dryRun);
+      let unstickSent = false;
+      if (responded && decision === "accept") {
+        unstickSent = await maybeSendGrokStickyUnstick(dependencies, {
+          dryRun: config.dryRun,
+          driver: resolved.providerDriver,
+          threadId: candidate.threadId,
+          requestId: candidate.requestId,
+          command: candidate.command,
+          messages: history.messages
+        });
+      }
       if (claim.status !== "duplicate")
         state = await dependencies.loadState();
       decisions.push({
@@ -1562,7 +1768,8 @@ async function runGuardianCycle(dependencies, config) {
         decision,
         reason,
         dryRun: config.dryRun,
-        responded
+        responded,
+        ...unstickSent ? { unstickSent: true } : {}
       });
     }
     await dependencies.recordPoll(now, null);
@@ -1891,6 +2098,11 @@ function createDefaultGuardianDependencies(request) {
       op: "tasks.history",
       threadId,
       turns
+    }),
+    sendTask: async (threadId, message) => call({
+      op: "tasks.send",
+      threadId,
+      message
     }),
     judge: runCodexJudge,
     now: () => new Date().toISOString(),
