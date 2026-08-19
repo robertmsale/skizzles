@@ -33,15 +33,24 @@ export async function runFakeAcp(options: {
   extraUpdate?: string;
   crashOnPrompt?: boolean;
   exitAfterReverse?: boolean;
+  waitForCancel?: boolean;
+  partialThenExit?: boolean;
   onRequest?: (request: FakeAcpRequest) => void;
 }): Promise<void> {
   const mode = options.mode ?? (process.env.FAKE_ACP_MODE as FakeAcpMode | undefined) ?? "ok";
   const flakeText = options.flakeText ?? process.env.FAKE_ACP_FLAKE_TEXT ?? FLAKE_TEXT;
   const successText = options.successText ?? SUCCESS_TEXT;
   let prompts = 0;
+  let cancelled = false;
+  let notifyCancel: (() => void) | undefined;
   for await (const frame of readFrames(options.stdin as import("node:stream").Readable)) {
     const { message } = frame;
     options.onRequest?.({ method: message.method, id: message.id, params: message.params });
+    if (message.method === "session/cancel") {
+      cancelled = true;
+      notifyCancel?.();
+      continue;
+    }
     if (message.method === "initialize") {
       await reply(options.stdout, message, { protocolVersion: 1, agentCapabilities: {} });
       continue;
@@ -74,6 +83,31 @@ export async function runFakeAcp(options: {
       prompts += 1;
       if (options.crashOnPrompt) return;
       const flake = mode === "always-flake" || (mode === "flake-then-ok" && prompts === 1);
+      if (options.partialThenExit && prompts >= 2) {
+        const params = asRecord(message.params);
+        const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
+        await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Error:" } },
+          },
+        }, frame.style));
+        return;
+      }
+      if (options.waitForCancel && prompts >= 2) {
+        const request = message;
+        void (async () => {
+          if (!cancelled) {
+            await new Promise<void>((resolve) => {
+              notifyCancel = resolve;
+            });
+          }
+          await reply(options.stdout, request, { stopReason: "cancelled" });
+        })();
+        continue;
+      }
       const text = flake ? flakeText : successText;
       const params = asRecord(message.params);
       const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";

@@ -280,6 +280,61 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("maps a cancelled synthetic replay result back to T3's original prompt id", async () => {
+    let replayId: string | number | undefined;
+    const session = await startSession("flake-then-ok", {
+      waitForCancel: true,
+      onRequest: (request) => {
+        if (request.method === "session/prompt" && request.id !== 3 && request.id != null) replayId = request.id;
+      },
+    });
+    await session.startPrompt("try again");
+    await waitFor(() => replayId !== undefined);
+    await session.sendCancel();
+    const result = await session.next();
+    expect(result.id).toBe(3);
+    expect(result.id).not.toBe(replayId);
+    expect(result.result).toEqual({ stopReason: "cancelled" });
+    await session.close();
+  });
+
+  test("idle child exit closes the ACP wrapper instead of leaving a zombie", async () => {
+    let child: ChildHandle | undefined;
+    const session = await startHarness({
+      handshake: "load",
+      spawn: () => {
+        child = fakeChild("ok");
+        return child;
+      },
+    });
+    child?.kill();
+    await Promise.race([
+      session.done,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("shim remained a zombie ACP connection after idle child exit")), 500);
+      }),
+    ]);
+  });
+
+  test("does not grant an extra prompt after a same-child replay is proven received", async () => {
+    let prompts = 0;
+    const session = await startHarness({
+      handshake: "load",
+      maxRetries: 1,
+      spawn: () => fakeChild("flake-then-ok", {
+        partialThenExit: true,
+        onRequest: (request) => {
+          if (request.method === "session/prompt") prompts += 1;
+        },
+      }),
+    });
+    const result = await session.prompt("try again", []);
+    expect(result.id).toBe(3);
+    expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
+    expect(prompts).toBe(2);
+    await session.close();
+  });
+
   test("streams a normal first chunk before the prompt result", async () => {
     let release!: () => void;
     const deferResult = new Promise<void>((resolve) => {
@@ -309,6 +364,8 @@ async function startSession(mode: FakeAcpMode, options: {
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
   extraUpdate?: string;
+  waitForCancel?: boolean;
+  onRequest?: (request: FakeAcpRequest) => void;
   deferResult?: Promise<void>;
 } = {}) {
   return startHarness({
@@ -356,7 +413,11 @@ async function startHarness(options: {
 
   return {
     logs,
+    done: supervisor,
     next: () => inbound.next(),
+    async sendCancel() {
+      await send(t3stdin, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "sess-1" } });
+    },
     async startPrompt(text: string) {
       await send(t3stdin, {
         jsonrpc: "2.0",
@@ -397,6 +458,8 @@ function fakeChild(mode: FakeAcpMode, options: {
   extraUpdate?: string;
   crashOnPrompt?: boolean;
   exitAfterReverse?: boolean;
+  waitForCancel?: boolean;
+  partialThenExit?: boolean;
   loadHistory?: import("./fake-acp.ts").FakeAcpHistoryUpdate[];
   deferResult?: Promise<void>;
   exitAfterPrompts?: number;
@@ -448,4 +511,12 @@ function readQueue(stream: PassThrough) {
 
 async function send(stream: PassThrough, message: JsonRpcMessage): Promise<void> {
   await writeFrame(stream, encodeFrame(message, "ndjson"));
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for replay prompt");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
 }

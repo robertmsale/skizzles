@@ -44,6 +44,8 @@ type HeldRequest = {
   sawWork: boolean;
   attempts: number;
   replaying: boolean;
+  cancelled: boolean;
+  childHasPrompt: boolean;
   sameChildReplayGeneration?: number;
 };
 
@@ -107,9 +109,13 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   }
 
   async function pumpT3(): Promise<void> {
-    for await (const frame of readFrames(options.io.stdin, style)) {
-      style = frame.style;
-      await onT3Frame(frame);
+    try {
+      for await (const frame of readFrames(options.io.stdin, style)) {
+        style = frame.style;
+        await onT3Frame(frame);
+      }
+    } catch {
+      // stdin destroyed while closing the shim
     }
   }
 
@@ -140,8 +146,18 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     if (message.method === "session/load") handshake.sessionLoad = message;
     if (message.method === "session/new") handshake.sessionNew = message;
     if (message.method === "session/cancel") {
-      held = undefined;
-      await writeChild(frame.bytes);
+      if (held) {
+        held.cancelled = true;
+        held.sawWork = true;
+        held.flushed = true;
+        held.sameChildReplayGeneration = undefined;
+      }
+      try {
+        await writeChild(frame.bytes);
+      } catch { /* child may already be gone */ }
+      if (held && !held.childHasPrompt && !held.replaying) {
+        await finishCancelled();
+      }
       return;
     }
     if (message.method === "session/prompt" && message.id !== undefined && message.id !== null) {
@@ -157,6 +173,8 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         sawWork: false,
         attempts: 1,
         replaying: false,
+        cancelled: false,
+        childHasPrompt: true,
         sameChildReplayGeneration: undefined,
       };
     }
@@ -164,6 +182,9 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   }
 
   async function onChildFrame(frame: Frame): Promise<void> {
+    if (held?.sameChildReplayGeneration === childGeneration) {
+      held.sameChildReplayGeneration = undefined;
+    }
     if (!held) {
       await writeFrame(options.io.stdout, frame.bytes);
       return;
@@ -207,7 +228,16 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       if (!held) await writeFrame(options.io.stdout, frame.bytes);
       return;
     }
-    const flake = !held.sawWork && !held.flushed && isSpuriousNetworkDeath(held.assistantText);
+    if (held.cancelled) {
+      await writeMappedResult({
+        jsonrpc: "2.0",
+        id: held.t3Id,
+        result: { stopReason: "cancelled" },
+      }, held.t3Id, held.style);
+      held = undefined;
+      return;
+    }
+    const flake = !held.sawWork && !held.flushed && !held.cancelled && isSpuriousNetworkDeath(held.assistantText);
     if (flake && held.attempts <= maxRetries) {
       log(`t3-cursor-acp: swallowed spurious Cursor ACP network death; replaying session/prompt (attempt ${held.attempts + 1}/${maxRetries + 1})`);
       await replayHeld(childAlive() ? "same-child" : "respawn", true);
@@ -229,6 +259,10 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       let nextMode = mode;
       let increment = countAttempt;
       while (held) {
+        if (held.cancelled) {
+          if (!held.childHasPrompt) await finishCancelled();
+          return;
+        }
         if (held.attempts > maxRetries) {
           await failHeld(`Cursor ACP stream failed after ${held.attempts} attempts`);
           return;
@@ -239,15 +273,24 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         held.buffered = [];
         held.flushed = false;
         held.sawWork = false;
+        held.childHasPrompt = false;
         held.sameChildReplayGeneration = undefined;
         let sameChild = nextMode === "same-child" && childAlive();
         if (!sameChild) {
           log("t3-cursor-acp: child dead or wedged; respawning and re-handshaking for replay");
           const ok = await respawnAndHandshake();
           if (!ok) {
+            if (held?.cancelled) {
+              await finishCancelled();
+              return;
+            }
             await failHeld("Cursor ACP child died; could not restore a visible session for replay");
             return;
           }
+        }
+        if (!held || held.cancelled) {
+          if (held && !held.childHasPrompt) await finishCancelled();
+          return;
         }
         const childId = nextSyntheticId++;
         held.childId = childId;
@@ -259,7 +302,10 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         };
         try {
           await writeChild(encodeFrame(request, held.style));
+          if (!held) return;
+          held.childHasPrompt = true;
           held.sameChildReplayGeneration = sameChild ? childGeneration : undefined;
+          if (held.cancelled) return;
           return;
         } catch {
           nextMode = "respawn";
@@ -359,9 +405,20 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
 
   async function onChildExit(handle: ChildHandle, generation: number, code: number): Promise<void> {
     if (generation !== childGeneration || closedByT3) return;
-    if (!held || held.replaying) return;
+    if (!held) {
+      log(`t3-cursor-acp: child exited ${code} with no in-flight prompt; closing ACP stream`);
+      await closeShim();
+      return;
+    }
+    if (held.replaying) return;
+    if (held.cancelled) {
+      await finishCancelled();
+      await closeShim();
+      return;
+    }
     if (held.sawWork || held.flushed) {
       await failHeld(`Cursor ACP child exited (${code}) after the turn was already visible to T3`);
+      await closeShim();
       return;
     }
     const sameChildReplayLost = held.sameChildReplayGeneration === generation;
@@ -377,6 +434,31 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       return;
     }
     await failHeld(`Cursor ACP child exited (${code}) after ${held.attempts} attempts`);
+    await closeShim();
+  }
+
+  async function finishCancelled(): Promise<void> {
+    if (!held) return;
+    await writeMappedResult({
+      jsonrpc: "2.0",
+      id: held.t3Id,
+      result: { stopReason: "cancelled" },
+    }, held.t3Id, held.style);
+    held = undefined;
+  }
+
+  async function closeShim(): Promise<void> {
+    if (closedByT3) return;
+    closedByT3 = true;
+    try {
+      options.io.stdout.end();
+    } catch { /* already closed */ }
+    try {
+      options.io.stdin.destroy();
+    } catch { /* already closed */ }
+    try {
+      child.kill("SIGTERM");
+    } catch { /* already gone */ }
   }
 
   async function failHeld(message: string): Promise<void> {
