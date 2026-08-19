@@ -1039,6 +1039,40 @@ describe("guardian cycle", () => {
     expect(result.sent).toEqual([]);
   });
 
+  test("judges an identifiable Cursor execute from T3 detail instead of skipping it", async () => {
+    const command = "which grok; ls /opt/homebrew/opt/grok 2>/dev/null; ls /usr/local/bin/grok 2>/dev/null; mdfind -name 'xai-grok' 2>/dev/null | head; ls ~/src 2>/dev/null | head; ls /Users/robertsale/.grok | head";
+    const result = fixture({
+      list: {
+        approvals: [approval({
+          threadId: "cursor-task",
+          title: "Cursor work",
+          provider: "cursor",
+          providerDriver: "cursor",
+          requestId: "7df41e4c-8a27-49b3-97e5-e43d3eebede7",
+          toolName: "execute",
+          command,
+        })],
+        unidentifiable: [],
+      },
+      history: [{ role: "user", text: "Find the grok binary" }],
+      judge: { ok: true, assessment: { outcome: "allow", rationale: "local which/ls lookup" }, raw: "" },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(1);
+    expect(report.decisions[0]).toMatchObject({
+      action: "judged",
+      requestId: "7df41e4c-8a27-49b3-97e5-e43d3eebede7",
+      decision: "accept",
+      command,
+      responded: true,
+    });
+    expect(result.resolved[0]).toMatchObject({
+      decision: "accept",
+      expected: { requestKind: "command", command, toolName: "execute" },
+    });
+    expect(result.sent).toEqual([]);
+  });
+
   test("judges an identifiable Cursor fetch instead of leaving it pending", async () => {
     const result = fixture({
       list: {

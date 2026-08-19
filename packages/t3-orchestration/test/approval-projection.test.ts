@@ -324,6 +324,66 @@ describe("pending approval projection", () => {
     });
   });
 
+  test("projects the live Cursor execute from T3 detail and backticked toolCall.title", () => {
+    const command = "which grok; ls /opt/homebrew/opt/grok 2>/dev/null; ls /usr/local/bin/grok 2>/dev/null; mdfind -name 'xai-grok' 2>/dev/null | head; ls ~/src 2>/dev/null | head; ls /Users/robertsale/.grok | head";
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-19T17:45:03.660Z",
+        payload: {
+          requestId: "7df41e4c-8a27-49b3-97e5-e43d3eebede7",
+          requestType: "exec_command_approval",
+          detail: command,
+          args: {
+            options: [
+              { kind: "allow_once", name: "Allow once", optionId: "allow-once" },
+              { kind: "allow_always", name: "Allow always", optionId: "allow-always" },
+              { kind: "reject_once", name: "Reject", optionId: "reject-once" },
+            ],
+            sessionId: "9dce6d12-2801-48c0-b5be-e2a000be7a5d",
+            toolCall: {
+              content: [{ type: "content", content: { type: "text", text: "Not in allowlist: mdfind, which" } }],
+              kind: "execute",
+              status: "pending",
+              title: `\`${command}\``,
+              toolCallId: "call-918f3e29-ddc3-4629-8845-28c2b11ca613-34\nfc_6f0a5e71-d830-9089-a243-682515bb681f_4",
+            },
+          },
+        },
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "7df41e4c-8a27-49b3-97e5-e43d3eebede7",
+      requestKind: "command",
+      command,
+      toolName: "execute",
+      identifiable: true,
+    });
+    expect(pending[0]?.command).not.toBe("execute");
+    expect(pending[0]?.reason).toBeUndefined();
+  });
+
+  test("projects a Cursor execute from non-generic detail when typed data.command is missing", () => {
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-19T17:45:03.660Z",
+        payload: {
+          requestId: "cursor-detail-only",
+          requestType: "exec_command_approval",
+          detail: "which grok",
+          args: { toolCall: { kind: "execute" } },
+        },
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "cursor-detail-only",
+      requestKind: "command",
+      command: "which grok",
+      identifiable: true,
+    });
+  });
+
   test("projects a Cursor ACP fetch without labeling it as a concurrent search", () => {
     const pending = derivePendingApprovals([
       activity({

@@ -86,6 +86,22 @@ function asLiteralString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+function unwrapPresentation(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith("`") && trimmed.endsWith("`")) {
+    const inner = trimmed.slice(1, -1).trim();
+    if (inner) return inner;
+  }
+  return trimmed;
+}
+
+function asActionText(value: unknown): string | null {
+  const literal = asLiteralString(value);
+  if (literal === null) return null;
+  const unwrapped = unwrapPresentation(literal);
+  return unwrapped.length > 0 ? unwrapped : null;
+}
+
 export function threadActivities(snapshot: ThreadSnapshot): T3ThreadActivity[] {
   const activities = snapshot.thread.activities;
   if (!Array.isArray(activities)) return [];
@@ -191,13 +207,14 @@ function nestedActionRecords(payload: Record<string, unknown>): Array<Record<str
 
 function uniqueTypedActions(payload: Record<string, unknown>): { commands: string[]; paths: string[] } {
   const records = nestedActionRecords(payload);
-  const commands = [...new Set(records
-    .map((record) => asLiteralString(record.command))
-    .filter((value): value is string => value !== null))];
-  const paths = [...new Set(records
-    .map((record) => asLiteralString(record.path))
-    .filter((value): value is string => value !== null))];
-  return { commands, paths };
+  const commands = uniqueNonEmpty(records.flatMap((record) => [
+    asActionText(record.command),
+    asActionText(record.rawCommand),
+  ]));
+  const details = uniqueNonEmpty(records.map((record) => asActionText(record.detail)))
+    .filter((value) => !isGenericApprovalLabel(value));
+  const paths = uniqueNonEmpty(records.map((record) => asLiteralString(record.path)));
+  return { commands: uniqueNonEmpty([...commands, ...details]), paths };
 }
 
 const GENERIC_APPROVAL_LABELS = new Set([
@@ -239,7 +256,7 @@ function uniqueTypedQueries(payload: Record<string, unknown>): string[] {
 
 function uniqueTypedTitles(payload: Record<string, unknown>): string[] {
   return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
-    asLiteralString(record.title),
+    asActionText(record.title),
   ])).filter((value) => !isGenericApprovalLabel(value));
 }
 
@@ -352,8 +369,13 @@ function extractTypedAction(payload: Record<string, unknown> | null): {
     ?? query.value
     ?? composeKindIdentity(kind.value, toolCallId.value)
     ?? tool.value;
-  const detail = asLiteralString(payload.detail);
-  if (identity && detail !== null && !isGenericApprovalLabel(detail) && detail !== identity) {
+  const presented = asActionText(payload.detail);
+  if (
+    identity
+    && presented
+    && !isGenericApprovalLabel(presented)
+    && unwrapPresentation(identity) !== presented
+  ) {
     return { command: null, cwd: null, toolName: null, commandSource: null, kind: kind.value, reason: CONFLICTING_COMMAND_GAP };
   }
   if (!identity) {
