@@ -48,7 +48,7 @@ describe("task history projection", () => {
 
   test("returns conversation messages without raw activity or model data", () => {
     expect(projectTaskHistory(snapshot([message("u1", "question"), message("a1", "answer")]))).toEqual({
-      thread: { id: "target", projectId: "project", title: "Target", sessionStatus: "idle" },
+      thread: { id: "target", projectId: "project", title: "Target", sessionStatus: "idle", runtimeMode: "auto" },
       page: { beforeCursor: "older", hasMore: true, snapshotSequence: 10, threadSequence: 9 },
       messages: [
         { role: "user", text: "question", textTruncated: false, turnId: "turn", createdAt: "2026-08-12T00:00:00Z" },

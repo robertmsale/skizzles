@@ -7,6 +7,7 @@ import {
   UNBOUND_ACCEPT_GAP,
   projectPendingApprovalList,
   providerDriversFromConfig,
+  resolveProjectedRuntimeMode,
   requireIdentifiableApproval,
   selectPendingApproval,
   threadActivities,
@@ -44,10 +45,10 @@ const thread = (overrides: Partial<T3ThreadShell> = {}): T3ThreadShell => ({
   ...overrides,
 });
 
-const snapshot = (activities: T3ThreadActivity[]): ThreadSnapshot => ({
+const snapshot = (activities: T3ThreadActivity[], threadOverrides?: Partial<T3ThreadShell>): ThreadSnapshot => ({
   snapshotSequence: 1,
   thread: {
-    ...thread(),
+    ...thread(threadOverrides),
     messages: [],
     activities,
   },
@@ -356,6 +357,43 @@ describe("pending approval projection", () => {
       createdAt: "2026-08-17T00:00:00Z",
       worktreePath: "/worktree",
     }]);
+  });
+
+  test("resolves runtimeMode from the thread snapshot when the shell omits it", () => {
+    expect(resolveProjectedRuntimeMode({ runtimeMode: undefined as unknown as string }, snapshot([], { runtimeMode: "auto" }))).toBe("auto");
+    expect(resolveProjectedRuntimeMode({ runtimeMode: undefined as unknown as string }, snapshot([], { runtimeMode: "full-access" }))).toBe("full-access");
+    expect(resolveProjectedRuntimeMode({ runtimeMode: "auto" }, snapshot([], { runtimeMode: "plan" }))).toBeNull();
+    expect(resolveProjectedRuntimeMode({ runtimeMode: "full-access" }, snapshot([], { runtimeMode: "auto" }))).toBeNull();
+
+    const omitted = thread({ runtimeMode: undefined as unknown as string });
+    const result = projectPendingApprovalList(
+      [omitted],
+      new Map([[omitted.id, snapshot([
+        activity({
+          kind: "approval.requested",
+          createdAt: "2026-08-17T01:00:00Z",
+          payload: { requestId: "req-1", requestKind: "command", data: { command: "git status" }, title: "Shell" },
+        }),
+      ], { runtimeMode: "auto" })]]),
+      new Map([["project", { title: "acme", workspaceRoot: "/repo" }]]),
+      new Map([["cursor", "cursor"]]),
+    );
+    expect(result.approvals[0]?.runtimeMode).toBe("auto");
+
+    const disagreed = thread({ runtimeMode: "auto" });
+    const disagreedResult = projectPendingApprovalList(
+      [disagreed],
+      new Map([[disagreed.id, snapshot([
+        activity({
+          kind: "approval.requested",
+          createdAt: "2026-08-17T01:00:00Z",
+          payload: { requestId: "req-1", requestKind: "command", data: { command: "git status" }, title: "Shell" },
+        }),
+      ], { runtimeMode: "plan" })]]),
+      new Map([["project", { title: "acme", workspaceRoot: "/repo" }]]),
+      new Map([["cursor", "cursor"]]),
+    );
+    expect(disagreedResult.approvals[0]?.runtimeMode).toBeNull();
   });
 
   test("maps custom instance IDs to their T3 provider driver", () => {

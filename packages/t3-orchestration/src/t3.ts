@@ -144,6 +144,7 @@ export function projectTaskHistory(result: ThreadSnapshot) {
       projectId: result.thread.projectId,
       title: result.thread.title,
       sessionStatus: result.thread.session?.status ?? null,
+      runtimeMode: result.thread.runtimeMode,
     },
     page: result.page ?? null,
     messages,
