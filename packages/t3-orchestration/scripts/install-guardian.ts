@@ -115,6 +115,7 @@ const GUARDIAN_RUNTIME_FILES = [
   "auto-guardian.ts",
   "auto-guardian-config.ts",
   "auto-guardian-policy.ts",
+  "auto-guardian-sticky.ts",
   "approval-projection.ts",
   "client.ts",
   "config.ts",

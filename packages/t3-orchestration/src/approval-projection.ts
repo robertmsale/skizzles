@@ -53,7 +53,7 @@ export type UnidentifiableApproval = {
 };
 
 export const MISSING_COMMAND_GAP =
-  "T3 did not expose the command or path for this pending approval. Refusing to approve blindly.";
+  "T3 did not expose a bindable command, path, URL, title, kind, or tool name for this pending approval. Refusing to approve blindly.";
 export const CONFLICTING_COMMAND_GAP =
   "T3 approval payload has conflicting command or path representations. Refusing to approve blindly.";
 export const APPROVAL_ACTION_CHANGED =
@@ -115,7 +115,8 @@ function requestKindFromPayload(payload: Record<string, unknown> | null): Approv
   if (payload.requestKind === "command" || payload.requestKind === "file-read" || payload.requestKind === "file-change") {
     return payload.requestKind;
   }
-  return requestKindFromRequestType(payload.requestType);
+  return requestKindFromRequestType(payload.requestType)
+    ?? requestKindFromToolKind(uniqueTypedKinds(payload)[0] ?? null);
 }
 
 function isStalePendingRequestFailureDetail(detail: string | null): boolean {
@@ -199,6 +200,86 @@ function uniqueTypedActions(payload: Record<string, unknown>): { commands: strin
   return { commands, paths };
 }
 
+const GENERIC_APPROVAL_LABELS = new Set([
+  "searched files",
+  "run requested command",
+  "run requested tool",
+  "fetch",
+  "search",
+  "read",
+  "edit",
+  "write",
+  "execute",
+  "shell",
+  "other",
+]);
+
+export function isGenericApprovalLabel(value: string | null | undefined): boolean {
+  if (value == null) return true;
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  return GENERIC_APPROVAL_LABELS.has(trimmed.toLowerCase());
+}
+
+function uniqueTypedUrls(payload: Record<string, unknown>): string[] {
+  return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
+    asLiteralString(record.url),
+    asLiteralString(record.uri),
+    asLiteralString(record.href),
+  ]));
+}
+
+function uniqueTypedQueries(payload: Record<string, unknown>): string[] {
+  return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
+    asLiteralString(record.query),
+    asLiteralString(record.pattern),
+    asLiteralString(record.search),
+  ]));
+}
+
+function uniqueTypedTitles(payload: Record<string, unknown>): string[] {
+  return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
+    asLiteralString(record.title),
+  ])).filter((value) => !isGenericApprovalLabel(value));
+}
+
+function uniqueTypedKinds(payload: Record<string, unknown>): string[] {
+  return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
+    asLiteralString(record.kind),
+  ])).filter((value) => value !== "allow_once" && value !== "allow_always" && value !== "reject_once");
+}
+
+function uniqueTypedToolCallIds(payload: Record<string, unknown>): string[] {
+  return uniqueNonEmpty(nestedActionRecords(payload).flatMap((record) => [
+    asLiteralString(record.toolCallId),
+  ]));
+}
+
+function composeKindIdentity(kind: string | null, toolCallId: string | null): string | null {
+  if (kind && toolCallId) return `${kind}:${toolCallId}`;
+  if (toolCallId) return toolCallId;
+  return kind;
+}
+
+function requestKindFromToolKind(kind: string | null): ApprovalRequestKind | null {
+  switch (kind?.trim().toLowerCase()) {
+    case "read":
+      return "file-read";
+    case "edit":
+    case "write":
+    case "delete":
+    case "move":
+      return "file-change";
+    case "execute":
+    case "fetch":
+    case "search":
+    case "other":
+      return "command";
+    default:
+      return kind ? "command" : null;
+  }
+}
+
 function uniqueNonEmpty(values: Array<string | null>): string[] {
   return [...new Set(values.filter((value): value is string => value !== null))];
 }
@@ -222,7 +303,12 @@ function uniqueTypedTools(payload: Record<string, unknown>): string[] {
       asLiteralString(record.toolName),
       asLiteralString(record.tool),
     ]),
-  ]);
+  ]).filter((value) => value.trim().toLowerCase() !== "searched files" && value.trim().toLowerCase() !== "run requested command" && value.trim().toLowerCase() !== "run requested tool");
+}
+
+function firstOrConflict(values: string[]): { value: string | null; conflict: boolean } {
+  if (values.length > 1) return { value: null, conflict: true };
+  return { value: values[0] ?? null, conflict: false };
 }
 
 function extractTypedAction(payload: Record<string, unknown> | null): {
@@ -230,41 +316,88 @@ function extractTypedAction(payload: Record<string, unknown> | null): {
   cwd: string | null;
   toolName: string | null;
   commandSource: "command" | "path" | null;
+  kind: string | null;
   reason?: string;
 } {
-  if (!payload) return { command: null, cwd: null, toolName: null, commandSource: null, reason: MISSING_COMMAND_GAP };
+  if (!payload) {
+    return { command: null, cwd: null, toolName: null, commandSource: null, kind: null, reason: MISSING_COMMAND_GAP };
+  }
   const { commands, paths } = uniqueTypedActions(payload);
-  const typed = [...new Set([...commands, ...paths])];
+  const urls = uniqueTypedUrls(payload);
+  const queries = uniqueTypedQueries(payload);
+  const titles = uniqueTypedTitles(payload);
+  const kinds = uniqueTypedKinds(payload);
+  const toolCallIds = uniqueTypedToolCallIds(payload);
   const cwds = uniqueTypedCwds(payload);
   const tools = uniqueTypedTools(payload);
-  const detail = asLiteralString(payload.detail);
-  if (typed.length > 1 || cwds.length > 1 || tools.length > 1) {
-    return { command: null, cwd: null, toolName: null, commandSource: null, reason: CONFLICTING_COMMAND_GAP };
+  const command = firstOrConflict(commands);
+  const path = firstOrConflict(paths);
+  const url = firstOrConflict(urls);
+  const query = firstOrConflict(queries);
+  const title = firstOrConflict(titles);
+  const kind = firstOrConflict(kinds);
+  const toolCallId = firstOrConflict(toolCallIds);
+  const cwd = firstOrConflict(cwds);
+  const tool = firstOrConflict(tools);
+  if (
+    command.conflict || path.conflict || url.conflict || query.conflict || title.conflict
+    || kind.conflict || toolCallId.conflict || cwd.conflict || tool.conflict
+  ) {
+    return { command: null, cwd: null, toolName: null, commandSource: null, kind: null, reason: CONFLICTING_COMMAND_GAP };
   }
-  if (typed.length === 1) {
-    if (detail !== null && detail !== typed[0]) return { command: null, cwd: null, toolName: null, commandSource: null, reason: CONFLICTING_COMMAND_GAP };
+  const identity = command.value
+    ?? path.value
+    ?? url.value
+    ?? title.value
+    ?? query.value
+    ?? composeKindIdentity(kind.value, toolCallId.value)
+    ?? tool.value;
+  const detail = asLiteralString(payload.detail);
+  if (identity && detail !== null && !isGenericApprovalLabel(detail) && detail !== identity) {
+    return { command: null, cwd: null, toolName: null, commandSource: null, kind: kind.value, reason: CONFLICTING_COMMAND_GAP };
+  }
+  if (!identity) {
     return {
-      command: typed[0]!,
-      cwd: cwds[0] ?? null,
-      toolName: tools[0] ?? null,
-      commandSource: commands.length === 1 ? "command" : "path",
+      command: null,
+      cwd: cwd.value,
+      toolName: tool.value ?? kind.value,
+      commandSource: null,
+      kind: kind.value,
+      reason: MISSING_COMMAND_GAP,
     };
   }
-  return { command: null, cwd: cwds[0] ?? null, toolName: tools[0] ?? null, commandSource: null, reason: MISSING_COMMAND_GAP };
+  return {
+    command: identity,
+    cwd: cwd.value,
+    toolName: tool.value ?? kind.value ?? toolCallId.value,
+    commandSource: command.value ? "command" : path.value ? "path" : "command",
+    kind: kind.value,
+  };
 }
 
 function extractToolName(activity: T3ThreadActivity, payload: Record<string, unknown> | null): string | null {
-  if (!payload) return asTrimmedString(activity.summary);
+  if (!payload) {
+    const summary = asTrimmedString(activity.summary);
+    return isGenericApprovalLabel(summary) ? null : summary;
+  }
   const data = asRecord(payload.data);
   const item = asRecord(data?.item);
-  const xai = xaiTool(payload) ?? xaiTool(data) ?? xaiTool(asRecord(payload.args)) ?? xaiTool(asRecord(payload.toolCall));
-  return asTrimmedString(payload.toolName)
-    ?? asTrimmedString(xai?.name)
-    ?? asTrimmedString(payload.title)
-    ?? asTrimmedString(data?.toolName)
-    ?? asTrimmedString(item?.tool)
-    ?? asTrimmedString(payload.itemType)
-    ?? asTrimmedString(activity.summary);
+  const toolCall = asRecord(payload.toolCall)
+    ?? asRecord(asRecord(payload.args)?.toolCall)
+    ?? asRecord(asRecord(payload.arguments)?.toolCall);
+  const xai = xaiTool(payload) ?? xaiTool(data) ?? xaiTool(asRecord(payload.args)) ?? xaiTool(toolCall);
+  const candidates = [
+    asTrimmedString(payload.toolName),
+    asTrimmedString(xai?.name),
+    asTrimmedString(data?.toolName),
+    asTrimmedString(item?.tool),
+    asTrimmedString(payload.title),
+    asTrimmedString(toolCall?.kind),
+    asTrimmedString(toolCall?.toolCallId),
+    asTrimmedString(payload.itemType),
+    asTrimmedString(activity.summary),
+  ];
+  return candidates.find((value) => value && value.trim().toLowerCase() !== "searched files") ?? null;
 }
 
 export function derivePendingApprovals(activities: readonly T3ThreadActivity[]): PendingApproval[] {
@@ -277,7 +410,8 @@ export function derivePendingApprovals(activities: readonly T3ThreadActivity[]):
     if (activity.kind === "approval.requested") {
       const extracted = extractTypedAction(payload);
       const requestKind = requestKindFromPayload(payload)
-        ?? (extracted.commandSource === "command" ? "command" : null);
+        ?? (extracted.commandSource === "command" ? "command" : extracted.commandSource === "path" ? "file-read" : null)
+        ?? requestKindFromToolKind(extracted.kind);
       openByRequestId.set(requestId, {
         requestId,
         requestKind,
