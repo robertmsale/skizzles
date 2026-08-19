@@ -294,9 +294,17 @@ describe("guardian eligibility filter", () => {
     expect(inferDriverFromInstanceId("personal")).toBeUndefined();
     expect(resolveGuardianProviderDriver(undefined, "cursor")).toEqual({ providerDriver: "cursor", source: "thread" });
     expect(resolveGuardianProviderDriver(null, undefined, { provider: "cursor" })).toEqual({ providerDriver: "cursor", source: "thread" });
+    expect(resolveGuardianProviderDriver(undefined, "cursor", { provider: "grok", providerDriver: "cursor" })).toEqual({
+      providerDriver: undefined,
+      source: "missing",
+    });
+    expect(resolveGuardianProviderDriver(undefined, undefined, { provider: "grok", providerDriver: "cursor" })).toEqual({
+      providerDriver: undefined,
+      source: "missing",
+    });
     expect(resolveGuardianProviderDriver(undefined, "codex", { provider: "cursor", providerDriver: "cursor" })).toEqual({
-      providerDriver: "codex",
-      source: "event",
+      providerDriver: undefined,
+      source: "missing",
     });
     expect(resolveGuardianProviderDriver(undefined, "personal", { providerDriver: "cursor" })).toEqual({
       providerDriver: undefined,
@@ -331,6 +339,25 @@ describe("guardian eligibility filter", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("does not collapse conflicting projection and session identities", () => {
+    expect(threadContextFromSqliteRows(
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "cursor" }) },
+      { runtime_mode: "full-access", instance_id: "codex" },
+    )).toEqual({ runtimeMode: undefined, provider: undefined, providerDriver: undefined });
+    expect(threadContextFromSqliteRows(
+      { runtime_mode: "auto", provider_driver: "cursor" },
+      { runtime_mode: "auto", driver: "grok" },
+    )).toEqual({ runtimeMode: "auto", provider: undefined, providerDriver: undefined });
+    expect(isGuardianEligible({
+      provider: "cursor",
+      providerDriver: resolveGuardianProviderDriver(undefined, "cursor", {
+        provider: "grok",
+        providerDriver: "cursor",
+      }).providerDriver,
+      runtimeMode: "auto",
+    }).eligible).toBe(false);
   });
 
   test("keeps unidentifiable snapshot gaps distinct from missing commands", () => {
@@ -487,8 +514,25 @@ describe("guardian cycle", () => {
     expect(report.decisions[0]).toMatchObject({
       action: "skipped_codex",
       provider: "codex",
-      providerDriver: "codex",
-      providerDriverSource: "event",
+      providerDriver: "undefined",
+      providerDriverSource: "missing",
+      responded: false,
+    });
+    expect(result.resolved).toEqual([]);
+  });
+
+  test("skips when event and thread provider identities are populated and disagree", async () => {
+    const result = fixture({
+      list: { approvals: [approval({ provider: "cursor", providerDriver: null })], unidentifiable: [] },
+      threadContext: { "cursor-task": { runtimeMode: "auto", provider: "grok", providerDriver: "cursor" } },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_codex",
+      providerDriver: "undefined",
+      providerDriverSource: "missing",
+      reason: "provider driver is unavailable (missing)",
       responded: false,
     });
     expect(result.resolved).toEqual([]);

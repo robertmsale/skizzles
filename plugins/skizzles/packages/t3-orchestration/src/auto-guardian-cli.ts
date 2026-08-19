@@ -874,25 +874,35 @@ function explicitCodexInstance(instanceId) {
   const value = instanceId?.trim().toLowerCase();
   return value === CODEX_PROVIDER_INSTANCE || inferDriverFromInstanceId(value) === CODEX_PROVIDER_INSTANCE;
 }
-function providerIdentitiesAgree(eventInstance, thread) {
-  const threadInstance = normalizeRuntimeMode(thread?.provider);
-  const threadDriver = normalizeRuntimeMode(thread?.providerDriver);
-  if (threadInstance && threadInstance.toLowerCase() === eventInstance.toLowerCase())
-    return true;
-  const eventKind = inferDriverFromInstanceId(eventInstance) ?? eventInstance.toLowerCase();
-  const threadKind = (threadDriver ?? inferDriverFromInstanceId(threadInstance))?.toLowerCase();
-  return Boolean(threadKind && eventKind === threadKind);
+function identityKey(value) {
+  return inferDriverFromInstanceId(value) ?? value.trim().toLowerCase();
+}
+function identitiesAgree(values) {
+  const keys = new Set;
+  for (const value of values) {
+    const token = normalizeRuntimeMode(value);
+    if (!token)
+      continue;
+    keys.add(identityKey(token));
+  }
+  return keys.size <= 1;
+}
+function agreedToken(...values) {
+  const tokens = values.map((value) => normalizeRuntimeMode(value)).filter((value) => Boolean(value));
+  if (tokens.length === 0 || !identitiesAgree(tokens))
+    return;
+  return tokens[0];
 }
 function resolveGuardianProviderDriver(eventDriver, eventProvider, thread) {
   const fromEvent = normalizeRuntimeMode(eventDriver);
   if (fromEvent)
     return { providerDriver: fromEvent, source: "event" };
   const eventInstance = normalizeRuntimeMode(eventProvider);
+  if (!identitiesAgree([eventInstance, thread?.provider, thread?.providerDriver])) {
+    return { providerDriver: undefined, source: "missing" };
+  }
   if (explicitCodexInstance(eventInstance)) {
     return { providerDriver: CODEX_PROVIDER_INSTANCE, source: "event" };
-  }
-  if (eventInstance && (thread?.provider || thread?.providerDriver) && !providerIdentitiesAgree(eventInstance, thread)) {
-    return { providerDriver: undefined, source: "missing" };
   }
   const fromThreadDriver = normalizeRuntimeMode(thread?.providerDriver);
   if (fromThreadDriver)
@@ -931,12 +941,13 @@ function instanceIdFromUnknown(value) {
   return firstToken(record?.instanceId, record?.instance_id);
 }
 function threadContextFromSqliteRows(thread, session) {
-  const provider = firstToken(thread?.provider_instance_id, instanceIdFromUnknown(thread?.model_selection_json), instanceIdFromUnknown(thread?.model_selection), session?.instance_id, session?.provider_instance_id);
-  return {
-    runtimeMode: firstToken(thread?.runtime_mode, thread?.runtimeMode, session?.runtime_mode, session?.runtimeMode),
-    provider,
-    providerDriver: firstToken(thread?.provider_driver, session?.driver, session?.provider_driver, inferDriverFromInstanceId(provider))
-  };
+  const runtimeMode = agreedToken(thread?.runtime_mode, thread?.runtimeMode, session?.runtime_mode, session?.runtimeMode);
+  const provider = agreedToken(thread?.provider_instance_id, instanceIdFromUnknown(thread?.model_selection_json), instanceIdFromUnknown(thread?.model_selection), session?.instance_id, session?.provider_instance_id);
+  const providerDriver = agreedToken(thread?.provider_driver, session?.driver, session?.provider_driver, inferDriverFromInstanceId(provider));
+  if (!identitiesAgree([provider, providerDriver])) {
+    return { runtimeMode };
+  }
+  return { runtimeMode, provider, providerDriver };
 }
 function defaultT3StateSqlitePath(home3 = process.env.HOME || homedir2()) {
   const t3Home = resolve3(process.env.T3_HOME?.trim() || join4(home3, ".t3"));
@@ -1047,7 +1058,7 @@ function inferredFromThread(resolved) {
 async function resolveCandidateFields(dependencies, candidate, cache) {
   const eventMode = resolveGuardianRuntimeMode(candidate.runtimeMode);
   const eventDriver = resolveGuardianProviderDriver(candidate.providerDriver, candidate.provider);
-  if (eventMode.source !== "missing" && eventDriver.source === "event") {
+  if (eventMode.source !== "missing" && normalizeRuntimeMode(candidate.providerDriver)) {
     return {
       runtimeMode: eventMode.runtimeMode,
       runtimeModeSource: eventMode.source,
