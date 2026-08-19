@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 import { encodeFrame, readFrames, writeFrame, type JsonRpcMessage } from "../src/framing.ts";
 import { STRUCTURED_ERROR_CODE, runSupervisor, type ChildHandle } from "../src/supervisor.ts";
-import { SUCCESS_TEXT, runFakeAcp, type FakeAcpMode } from "./fake-acp.ts";
+import { SUCCESS_TEXT, runFakeAcp, type FakeAcpMode, type FakeAcpRequest } from "./fake-acp.ts";
 
 const temporary: Array<() => void> = [];
 afterEach(() => {
@@ -25,6 +25,7 @@ describe("ACP supervisor", () => {
     const updates: string[] = [];
     const result = await session.prompt("try again", updates);
     expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(result.id).toBe(3);
     expect(result.result).toEqual({ stopReason: "end_turn" });
     expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
     expect(session.logs.some((line) => line.includes("replaying session/prompt"))).toBe(true);
@@ -53,9 +54,106 @@ describe("ACP supervisor", () => {
     expect(session.logs.join("\n")).not.toContain("swallowed");
     await session.close();
   });
+
+  test("does not swallow a short answer after a thought that quotes ConnectError", async () => {
+    const session = await startSession("ok", {
+      successText: "Retry the webhook.",
+      thoughtText: "The API threw Error: ConnectError: [unavailable] ECONNRESET",
+    });
+    const updates: string[] = [];
+    const result = await session.prompt("what next", updates);
+    expect(updates).toEqual(["Retry the webhook."]);
+    expect(result).toEqual({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn" } });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    await session.close();
+  });
+
+  test("respawns once when a flake turn is followed by child death", async () => {
+    const seen: Array<{ launch: number; method?: string; params?: unknown; id?: string | number | null }> = [];
+    let launches = 0;
+    const session = await startHarness({
+      handshake: "load",
+      spawn: () => {
+        launches += 1;
+        const launch = launches;
+        return fakeChild(launch === 1 ? "always-flake" : "ok", {
+          successText: SUCCESS_TEXT,
+          exitAfterPrompts: launch === 1 ? 1 : undefined,
+          onRequest: (request) => seen.push({ launch, ...request }),
+        });
+      },
+    });
+    const updates: string[] = [];
+    const result = await session.prompt("try again", updates);
+    expect(launches).toBe(2);
+    expect(result.id).toBe(3);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(session.logs.filter((line) => line.includes("replaying session/prompt")).length).toBe(1);
+    expect(session.logs.some((line) => line.includes("respawning"))).toBe(true);
+    expect(JSON.stringify(result.error ?? {})).not.toContain("after 3 attempts");
+    await session.close();
+  });
+
+  test("replays session/new deaths as session/load with cwd and mcpServers", async () => {
+    const secondChild: Array<{ method?: string; params?: unknown }> = [];
+    let launches = 0;
+    const session = await startHarness({
+      handshake: "new",
+      spawn: () => {
+        launches += 1;
+        const launch = launches;
+        return fakeChild(launch === 1 ? "always-flake" : "ok", {
+          exitAfterPrompts: launch === 1 ? 1 : undefined,
+          onRequest: (request) => {
+            if (launch === 2) secondChild.push(request);
+          },
+        });
+      },
+    });
+    const result = await session.prompt("continue", []);
+    expect(result.id).toBe(3);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(secondChild.some((request) => request.method === "session/new")).toBe(false);
+    const load = secondChild.find((request) => request.method === "session/load");
+    expect(load?.params).toEqual({
+      sessionId: "sess-1",
+      cwd: "/tmp/work",
+      mcpServers: [{ name: "docs", command: "docs" }],
+    });
+    await session.close();
+  });
+
+  test("does not swallow flake text after a tool call already started", async () => {
+    const flake = "\n\nError: ConnectError: [unavailable] HTTP/2 stream cancelled (NGHTTP2_CANCEL)";
+    const session = await startSession("ok", { successText: flake, toolCallFirst: true });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(updates).toEqual([flake]);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    await session.close();
+  });
 });
 
-async function startSession(mode: FakeAcpMode, options: { maxRetries?: number; successText?: string } = {}) {
+async function startSession(mode: FakeAcpMode, options: {
+  maxRetries?: number;
+  successText?: string;
+  thoughtText?: string;
+  toolCallFirst?: boolean;
+} = {}) {
+  return startHarness({
+    handshake: "load",
+    maxRetries: options.maxRetries,
+    spawn: () => fakeChild(mode, options),
+  });
+}
+
+async function startHarness(options: {
+  handshake: "load" | "new";
+  maxRetries?: number;
+  spawn: () => ChildHandle;
+}) {
   const t3stdin = new PassThrough();
   const t3stdout = new PassThrough();
   const t3stderr = new PassThrough();
@@ -67,7 +165,7 @@ async function startSession(mode: FakeAcpMode, options: { maxRetries?: number; s
     io: { stdin: t3stdin, stdout: t3stdout, stderr: t3stderr },
     maxRetries: options.maxRetries,
     log: (line) => logs.push(line),
-    spawn: () => fakeChild(mode, options.successText),
+    spawn: options.spawn,
   });
   temporary.push(() => {
     t3stdin.end();
@@ -75,7 +173,16 @@ async function startSession(mode: FakeAcpMode, options: { maxRetries?: number; s
 
   await send(t3stdin, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1, clientInfo: { name: "t3" } } });
   expect((await inbound.next()).id).toBe(1);
-  await send(t3stdin, { jsonrpc: "2.0", id: 2, method: "session/load", params: { sessionId: "sess-1", cwd: "/tmp" } });
+  if (options.handshake === "new") {
+    await send(t3stdin, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/new",
+      params: { cwd: "/tmp/work", mcpServers: [{ name: "docs", command: "docs" }] },
+    });
+  } else {
+    await send(t3stdin, { jsonrpc: "2.0", id: 2, method: "session/load", params: { sessionId: "sess-1", cwd: "/tmp" } });
+  }
   expect((await inbound.next()).id).toBe(2);
 
   return {
@@ -90,8 +197,8 @@ async function startSession(mode: FakeAcpMode, options: { maxRetries?: number; s
       while (true) {
         const message = await inbound.next();
         if (message.method === "session/update") {
-          const update = (message.params as { update?: { content?: { text?: string } } }).update;
-          if (update?.content?.text) updates.push(update.content.text);
+          const update = (message.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update;
+          if (update?.sessionUpdate === "agent_message_chunk" && update.content?.text) updates.push(update.content.text);
           continue;
         }
         return message;
@@ -104,7 +211,13 @@ async function startSession(mode: FakeAcpMode, options: { maxRetries?: number; s
   };
 }
 
-function fakeChild(mode: FakeAcpMode, successText?: string): ChildHandle {
+function fakeChild(mode: FakeAcpMode, options: {
+  successText?: string;
+  thoughtText?: string;
+  toolCallFirst?: boolean;
+  exitAfterPrompts?: number;
+  onRequest?: (request: FakeAcpRequest) => void;
+} = {}): ChildHandle {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -112,7 +225,10 @@ function fakeChild(mode: FakeAcpMode, successText?: string): ChildHandle {
   const exited = new Promise<number>((resolve) => {
     settle = resolve;
   });
-  void runFakeAcp({ stdin, stdout, mode, successText }).then(() => settle(0), () => settle(1));
+  void runFakeAcp({ stdin, stdout, mode, ...options }).then(() => {
+    stdout.end();
+    settle(0);
+  }, () => settle(1));
   return {
     stdin,
     stdout,

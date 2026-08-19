@@ -43,16 +43,18 @@ type HeldRequest = {
   flushed: boolean;
   sawWork: boolean;
   attempts: number;
+  replaying: boolean;
 };
 
 type Handshake = {
   initialize?: JsonRpcMessage;
   authenticate?: JsonRpcMessage;
   sessionLoad?: JsonRpcMessage;
+  sessionNew?: JsonRpcMessage;
 };
 
 const WORK_UPDATES = new Set(["tool_call", "tool_call_update", "plan"]);
-const TEXT_UPDATES = new Set(["agent_message_chunk", "agent_thought_chunk"]);
+const BUFFERED_UPDATES = new Set(["agent_message_chunk", "agent_thought_chunk"]);
 
 export async function runSupervisor(options: SupervisorOptions): Promise<number> {
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
@@ -66,7 +68,10 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   let handshakeWaiter: { id: string | number; resolve: (message: JsonRpcMessage | undefined) => void } | undefined;
   let nextSyntheticId = 1_000_000_001;
   let closedByT3 = false;
+  let childGeneration = 0;
+  let childClosed = false;
   let child = launchChild();
+  let heldLock: Promise<void> = Promise.resolve();
 
   const t3Loop = pumpT3();
   await t3Loop;
@@ -74,16 +79,30 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   child.kill("SIGTERM");
   return 0;
 
+  function withHeld(work: () => Promise<void>): Promise<void> {
+    const run = heldLock.then(work, work);
+    heldLock = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   function launchChild(): ChildHandle {
+    childGeneration += 1;
+    childClosed = false;
+    const generation = childGeneration;
     const handle = spawnChild(options.childCommand, options.childArgs);
-    void pumpChild(handle);
+    void pumpChild(handle, generation);
     handle.stderr.on("data", (chunk: Buffer | string) => {
       options.io.stderr.write(chunk);
     });
     void handle.exited.then((code) => {
-      void onChildExit(handle, code);
+      if (generation === childGeneration) childClosed = true;
+      void withHeld(() => onChildExit(handle, generation, code));
     });
     return handle;
+  }
+
+  function childAlive(): boolean {
+    return !childClosed && child.stdin.writable;
   }
 
   async function pumpT3(): Promise<void> {
@@ -93,10 +112,10 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     }
   }
 
-  async function pumpChild(handle: ChildHandle): Promise<void> {
+  async function pumpChild(handle: ChildHandle, generation: number): Promise<void> {
     try {
       for await (const frame of readFrames(handle.stdout)) {
-        if (handle !== child) continue;
+        if (generation !== childGeneration) continue;
         if (handshakeWaiter && isResponseTo(frame.message, handshakeWaiter.id)) {
           const waiter = handshakeWaiter;
           handshakeWaiter = undefined;
@@ -107,6 +126,8 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       }
     } catch (error) {
       if (!closedByT3) log(`t3-cursor-acp: child stdout closed (${errorString(error)})`);
+    } finally {
+      if (generation === childGeneration) childClosed = true;
     }
   }
 
@@ -115,6 +136,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     if (message.method === "initialize") handshake.initialize = message;
     if (message.method === "authenticate") handshake.authenticate = message;
     if (message.method === "session/load") handshake.sessionLoad = message;
+    if (message.method === "session/new") handshake.sessionNew = message;
     if (message.method === "session/cancel") {
       held = undefined;
       await writeChild(frame.bytes);
@@ -132,6 +154,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         flushed: false,
         sawWork: false,
         attempts: 1,
+        replaying: false,
       };
     }
     await writeChild(frame.bytes);
@@ -143,7 +166,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       return;
     }
     if (isResponseTo(frame.message, held.childId)) {
-      await onChildPromptResult(frame);
+      await withHeld(() => onChildPromptResult(frame));
       return;
     }
     if (frame.message.method === "session/update") {
@@ -165,8 +188,8 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       await writeFrame(options.io.stdout, frame.bytes);
       return;
     }
-    if (kind && TEXT_UPDATES.has(kind)) {
-      held.assistantText += extractAssistantText(frame.message);
+    if (kind && BUFFERED_UPDATES.has(kind)) {
+      if (kind === "agent_message_chunk") held.assistantText += extractAssistantText(frame.message);
       held.buffered.push(frame);
       if (held.assistantText.length > 1_500 && !isSpuriousNetworkDeath(held.assistantText)) {
         await flushHeld();
@@ -177,14 +200,14 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   }
 
   async function onChildPromptResult(frame: Frame): Promise<void> {
-    if (!held) {
-      await writeFrame(options.io.stdout, frame.bytes);
+    if (!held || held.replaying) {
+      if (!held) await writeFrame(options.io.stdout, frame.bytes);
       return;
     }
     const flake = !held.sawWork && !held.flushed && isSpuriousNetworkDeath(held.assistantText);
     if (flake && held.attempts <= maxRetries) {
       log(`t3-cursor-acp: swallowed spurious Cursor ACP network death; replaying session/prompt (attempt ${held.attempts + 1}/${maxRetries + 1})`);
-      await replayHeld(child.stdin.writable ? "same-child" : "respawn");
+      await replayHeld(childAlive() ? "same-child" : "respawn", true);
       return;
     }
     if (flake) {
@@ -196,34 +219,51 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     held = undefined;
   }
 
-  async function replayHeld(mode: "same-child" | "respawn"): Promise<void> {
-    if (!held) return;
-    held.attempts += 1;
-    held.assistantText = "";
-    held.buffered = [];
-    held.flushed = false;
-    held.sawWork = false;
-    if (mode === "respawn" || !child.stdin.writable) {
-      log("t3-cursor-acp: child dead or wedged; respawning and re-handshaking for replay");
-      const ok = await respawnAndHandshake();
-      if (!ok) {
-        await failHeld("Cursor ACP child died; could not restore a visible session for replay");
-        return;
-      }
-    }
-    const childId = nextSyntheticId++;
-    held.childId = childId;
-    const request: JsonRpcMessage = {
-      jsonrpc: "2.0",
-      id: childId,
-      method: held.method,
-      params: held.params,
-    };
+  async function replayHeld(mode: "same-child" | "respawn", countAttempt: boolean): Promise<void> {
+    if (!held || held.replaying) return;
+    held.replaying = true;
     try {
-      await writeChild(encodeFrame(request, held.style));
-    } catch {
-      if (held.attempts <= maxRetries) await replayHeld("respawn");
-      else await failHeld("Cursor ACP child stdin closed while replaying session/prompt");
+      let nextMode = mode;
+      let increment = countAttempt;
+      while (held) {
+        if (increment) {
+          if (held.attempts > maxRetries) {
+            await failHeld(`Cursor ACP stream failed after ${held.attempts} attempts`);
+            return;
+          }
+          held.attempts += 1;
+        }
+        increment = true;
+        held.assistantText = "";
+        held.buffered = [];
+        held.flushed = false;
+        held.sawWork = false;
+        if (nextMode === "respawn" || !childAlive()) {
+          log("t3-cursor-acp: child dead or wedged; respawning and re-handshaking for replay");
+          const ok = await respawnAndHandshake();
+          if (!ok) {
+            await failHeld("Cursor ACP child died; could not restore a visible session for replay");
+            return;
+          }
+        }
+        const childId = nextSyntheticId++;
+        held.childId = childId;
+        const request: JsonRpcMessage = {
+          jsonrpc: "2.0",
+          id: childId,
+          method: held.method,
+          params: held.params,
+        };
+        try {
+          await writeChild(encodeFrame(request, held.style));
+          return;
+        } catch {
+          nextMode = "respawn";
+          increment = false;
+        }
+      }
+    } finally {
+      if (held) held.replaying = false;
     }
   }
 
@@ -241,21 +281,28 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       const result = await roundTrip(handshake.authenticate);
       if (!result || result.error) return false;
     }
-    const sessionId = heldSessionId();
-    const load = handshake.sessionLoad ?? (sessionId
-      ? { jsonrpc: "2.0", method: "session/load", params: { sessionId } }
-      : undefined);
+    const load = sessionLoadForReplay();
     if (!load) return false;
     const loaded = await roundTrip(load);
     if (!loaded || loaded.error) return false;
     return true;
   }
 
+  function sessionLoadForReplay(): JsonRpcMessage | undefined {
+    const sessionId = heldSessionId();
+    if (!sessionId) return undefined;
+    const loadParams = asRecord(handshake.sessionLoad?.params);
+    const newParams = asRecord(handshake.sessionNew?.params);
+    const cwd = firstString(loadParams?.cwd, newParams?.cwd);
+    const mcpServers = loadParams?.mcpServers ?? newParams?.mcpServers;
+    const params: Record<string, unknown> = { sessionId };
+    if (cwd !== undefined) params.cwd = cwd;
+    if (mcpServers !== undefined) params.mcpServers = mcpServers;
+    return { jsonrpc: "2.0", method: "session/load", params };
+  }
+
   function heldSessionId(): string | undefined {
-    const params = held && held.params && typeof held.params === "object" && !Array.isArray(held.params)
-      ? held.params as Record<string, unknown>
-      : undefined;
-    return typeof params?.sessionId === "string" ? params.sessionId : undefined;
+    return firstString(asRecord(held?.params)?.sessionId);
   }
 
   async function roundTrip(template: JsonRpcMessage): Promise<JsonRpcMessage | undefined> {
@@ -283,12 +330,13 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     return result;
   }
 
-  async function onChildExit(handle: ChildHandle, code: number): Promise<void> {
-    if (handle !== child || closedByT3) return;
-    if (!held) return;
-    if (held.attempts <= maxRetries) {
+  async function onChildExit(handle: ChildHandle, generation: number, code: number): Promise<void> {
+    if (generation !== childGeneration || closedByT3) return;
+    if (!held || held.replaying) return;
+    const replayWriteLost = held.attempts > 1;
+    if (held.attempts <= maxRetries || replayWriteLost) {
       log(`t3-cursor-acp: child exited ${code} during session/prompt; respawning`);
-      await replayHeld("respawn");
+      await replayHeld("respawn", !replayWriteLost);
       return;
     }
     await failHeld(`Cursor ACP child exited (${code}) after ${held.attempts} attempts`);
@@ -343,9 +391,24 @@ export function spawnRealChild(command: string, args: string[]): ChildHandle {
 }
 
 function isResponseTo(message: JsonRpcMessage, id: string | number): boolean {
-  return message.id === id && (message.result !== undefined || message.error !== undefined);
+  return message.id !== undefined && message.id !== null
+    && String(message.id) === String(id)
+    && (message.result !== undefined || message.error !== undefined);
 }
 
 function errorString(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
 }

@@ -22,6 +22,19 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(isSpuriousNetworkDeath("")).toBe(false);
     expect(isSpuriousNetworkDeath(`Here is the HTTP/2 CANCEL handling I added to the product:\n\n${"x".repeat(200)}`)).toBe(false);
     expect(isSpuriousNetworkDeath("```\nNGHTTP2_CANCEL\n```\n" + "notes\n".repeat(40))).toBe(false);
+    expect(isSpuriousNetworkDeath("The API threw Error: ConnectError: [unavailable] ECONNRESET")).toBe(false);
+    expect(isSpuriousNetworkDeath("Retry the webhook.")).toBe(false);
+  });
+
+  test("does not treat thought-shaped quotes as visible assistant death", () => {
+    expect(extractAssistantText({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "s",
+        update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Error: ConnectError: [unavailable] ECONNRESET" } },
+      },
+    })).toBe("");
   });
 
   test("extracts ACP agent_message_chunk text", () => {

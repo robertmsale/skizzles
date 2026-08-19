@@ -6,6 +6,12 @@ export const SUCCESS_TEXT = "hello from cursor";
 
 export type FakeAcpMode = "ok" | "flake-then-ok" | "always-flake";
 
+export type FakeAcpRequest = {
+  method?: string;
+  id?: string | number | null;
+  params?: unknown;
+};
+
 export async function runFakeAcp(options: {
   stdin: NodeJS.ReadableStream;
   stdout: NodeJS.WritableStream;
@@ -13,6 +19,9 @@ export async function runFakeAcp(options: {
   flakeText?: string;
   successText?: string;
   exitAfterPrompts?: number;
+  thoughtText?: string;
+  toolCallFirst?: boolean;
+  onRequest?: (request: FakeAcpRequest) => void;
 }): Promise<void> {
   const mode = options.mode ?? (process.env.FAKE_ACP_MODE as FakeAcpMode | undefined) ?? "ok";
   const flakeText = options.flakeText ?? process.env.FAKE_ACP_FLAKE_TEXT ?? FLAKE_TEXT;
@@ -20,6 +29,7 @@ export async function runFakeAcp(options: {
   let prompts = 0;
   for await (const frame of readFrames(options.stdin as import("node:stream").Readable)) {
     const { message } = frame;
+    options.onRequest?.({ method: message.method, id: message.id, params: message.params });
     if (message.method === "initialize") {
       await reply(options.stdout, message, { protocolVersion: 1, agentCapabilities: {} });
       continue;
@@ -40,6 +50,26 @@ export async function runFakeAcp(options: {
       const text = flake ? flakeText : successText;
       const params = asRecord(message.params);
       const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
+      if (options.toolCallFirst) {
+        await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId,
+            update: { sessionUpdate: "tool_call", toolCallId: "call-1", title: "curl", kind: "execute", status: "pending" },
+          },
+        }, frame.style));
+      }
+      if (options.thoughtText) {
+        await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId,
+            update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: options.thoughtText } },
+          },
+        }, frame.style));
+      }
       await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
         jsonrpc: "2.0",
         method: "session/update",
