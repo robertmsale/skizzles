@@ -887,7 +887,16 @@ function classifiedIdentityKind(value) {
   }
   return;
 }
-function identitiesAgree(values) {
+function populatedTokensAgree(values) {
+  const keys = new Set;
+  for (const value of values) {
+    const token = normalizeRuntimeMode(value);
+    if (token)
+      keys.add(token.toLowerCase());
+  }
+  return keys.size <= 1;
+}
+function classifiedKindsAgree(values) {
   const kinds = new Set;
   for (const value of values) {
     const token = normalizeRuntimeMode(value);
@@ -899,21 +908,18 @@ function identitiesAgree(values) {
   }
   return kinds.size <= 1;
 }
+function providerAndDriverIdentitiesAgree(providers, drivers) {
+  return populatedTokensAgree(providers) && populatedTokensAgree(drivers) && classifiedKindsAgree([...providers, ...drivers]);
+}
 function runtimesAgree(values) {
-  const keys = new Set;
-  for (const value of values) {
-    const token = normalizeRuntimeMode(value);
-    if (token)
-      keys.add(token.toLowerCase());
-  }
-  return keys.size <= 1;
+  return populatedTokensAgree(values);
 }
 function resolveGuardianProviderDriver(eventDriver, eventProvider, thread) {
   if (thread?.inconsistent)
     return { providerDriver: undefined, source: "missing" };
   const fromEvent = normalizeRuntimeMode(eventDriver);
   const eventInstance = normalizeRuntimeMode(eventProvider);
-  if (!identitiesAgree([fromEvent, eventInstance, thread?.provider, thread?.providerDriver])) {
+  if (!providerAndDriverIdentitiesAgree([eventInstance, thread?.provider], [fromEvent, thread?.providerDriver])) {
     return { providerDriver: undefined, source: "missing" };
   }
   if (fromEvent)
@@ -964,17 +970,19 @@ function threadContextFromSqliteRows(thread, session) {
     session?.runtime_mode,
     session?.runtimeMode
   ];
-  const identities = [
+  const providers = [
     thread?.provider_instance_id,
     instanceIdFromUnknown(thread?.model_selection_json),
     instanceIdFromUnknown(thread?.model_selection),
-    thread?.provider_driver,
     session?.instance_id,
-    session?.provider_instance_id,
+    session?.provider_instance_id
+  ];
+  const drivers = [
+    thread?.provider_driver,
     session?.driver,
     session?.provider_driver
   ];
-  if (!runtimesAgree(runtimes) || !identitiesAgree(identities)) {
+  if (!runtimesAgree(runtimes) || !providerAndDriverIdentitiesAgree(providers, drivers)) {
     return { inconsistent: true };
   }
   const provider = firstToken(thread?.provider_instance_id, instanceIdFromUnknown(thread?.model_selection_json), instanceIdFromUnknown(thread?.model_selection), session?.instance_id, session?.provider_instance_id);

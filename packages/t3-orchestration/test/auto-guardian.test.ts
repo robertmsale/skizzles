@@ -316,6 +316,14 @@ describe("guardian eligibility filter", () => {
       source: "missing",
     });
     expect(resolveGuardianProviderDriver("grok", "cursor")).toEqual({ providerDriver: undefined, source: "missing" });
+    expect(resolveGuardianProviderDriver("cursor", "custom-a", { provider: "custom-b", providerDriver: "cursor" })).toEqual({
+      providerDriver: undefined,
+      source: "missing",
+    });
+    expect(resolveGuardianProviderDriver("cursor", "custom-a", { provider: "custom-a", providerDriver: "cursor" })).toEqual({
+      providerDriver: "cursor",
+      source: "event",
+    });
     expect(resolveGuardianProviderDriver("cursor", "cursor", { inconsistent: true })).toEqual({
       providerDriver: undefined,
       source: "missing",
@@ -363,6 +371,14 @@ describe("guardian eligibility filter", () => {
       { runtime_mode: "auto", runtimeMode: "plan" },
       { runtime_mode: "auto" },
     )).toEqual({ inconsistent: true });
+    expect(threadContextFromSqliteRows(
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }), provider_driver: "cursor" },
+      { runtime_mode: "auto", instance_id: "custom-b", driver: "cursor" },
+    )).toEqual({ inconsistent: true });
+    expect(threadContextFromSqliteRows(
+      { runtime_mode: "auto", model_selection_json: JSON.stringify({ instanceId: "custom-a" }), provider_driver: "cursor" },
+      { runtime_mode: "auto", instance_id: "custom-a", driver: "cursor" },
+    )).toEqual({ runtimeMode: "auto", provider: "custom-a", providerDriver: "cursor" });
     expect(isGuardianEligible({
       provider: "cursor",
       providerDriver: resolveGuardianProviderDriver(undefined, "cursor", {
@@ -587,6 +603,24 @@ describe("guardian cycle", () => {
       responded: true,
     });
     expect(resolved).toEqual([expect.objectContaining({ requestId: "req-1", decision: "decline", reason: UNBOUND_ACCEPT_GAP })]);
+  });
+
+  test("skips when two populated custom provider instance IDs disagree", async () => {
+    const result = fixture({
+      list: { approvals: [approval({ provider: "custom-a", providerDriver: "cursor" })], unidentifiable: [] },
+      threadContext: { "cursor-task": { runtimeMode: "auto", provider: "custom-b", providerDriver: "cursor" } },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.threadLookups).toEqual(["cursor-task"]);
+    expect(result.judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_codex",
+      providerDriver: "undefined",
+      providerDriverSource: "missing",
+      reason: "provider driver is unavailable (missing)",
+      responded: false,
+    });
+    expect(result.resolved).toEqual([]);
   });
 
   test("skips an explicit Codex provider when the driver is missing and thread context disagrees", async () => {
