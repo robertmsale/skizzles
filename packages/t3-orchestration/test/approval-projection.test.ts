@@ -363,6 +363,89 @@ describe("pending approval projection", () => {
     expect(pending[0]?.reason).toBeUndefined();
   });
 
+  test("does not treat a kind-only execute envelope as a bindable action", () => {
+    const payload = {
+      requestId: "r1",
+      requestType: "dynamic_tool_call",
+      detail: "Searched files",
+      args: { toolCall: { kind: "execute", status: "pending" } },
+    };
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-19T18:00:00Z",
+        payload,
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "r1",
+      command: null,
+      identifiable: false,
+      reason: MISSING_COMMAND_GAP,
+    });
+    expect(pending[0]?.command).not.toBe("execute");
+    expect(() => requireIdentifiableApproval(pending[0]!)).toThrow(MISSING_COMMAND_GAP);
+    const projected = projectPendingApprovalList(
+      [thread()],
+      new Map([["task", snapshot([
+        activity({
+          kind: "approval.requested",
+          createdAt: "2026-08-19T18:00:00Z",
+          payload,
+        }),
+      ])]]),
+      undefined,
+      new Map([["cursor", "cursor"]]),
+    );
+    expect(projected.approvals).toEqual([]);
+    expect(projected.unidentifiable[0]).toMatchObject({
+      requestId: "r1",
+      reason: MISSING_COMMAND_GAP,
+    });
+  });
+
+  test("does not treat a toolCallId without kind as a bindable action", () => {
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-19T18:00:00Z",
+        payload: {
+          requestId: "r-id-only",
+          requestType: "dynamic_tool_call",
+          detail: "Searched files",
+          args: { toolCall: { status: "pending", toolCallId: "call-918f3e29" } },
+        },
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "r-id-only",
+      command: null,
+      identifiable: false,
+      reason: MISSING_COMMAND_GAP,
+    });
+  });
+
+  test("binds the complete kind+toolCallId pair when no title or argv is present", () => {
+    const pending = derivePendingApprovals([
+      activity({
+        kind: "approval.requested",
+        createdAt: "2026-08-19T18:00:00Z",
+        payload: {
+          requestId: "r-pair",
+          requestType: "dynamic_tool_call",
+          detail: "Searched files",
+          args: { toolCall: { kind: "execute", status: "pending", toolCallId: "call-918f3e29" } },
+        },
+      }),
+    ]);
+    expect(pending[0]).toMatchObject({
+      requestId: "r-pair",
+      command: "execute:call-918f3e29",
+      identifiable: true,
+    });
+  });
+
+
   test("projects a Cursor execute from non-generic detail when typed data.command is missing", () => {
     const pending = derivePendingApprovals([
       activity({

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { APPROVAL_ACTION_CHANGED, MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP } from "../src/approval-projection.ts";
+import { APPROVAL_ACTION_CHANGED, derivePendingApprovals, MISSING_COMMAND_GAP, MISSING_SNAPSHOT_GAP } from "../src/approval-projection.ts";
 import { defaultGuardianConfig } from "../src/auto-guardian-config.ts";
 import {
   buildCodexJudgeCommand,
@@ -970,6 +970,49 @@ describe("guardian cycle", () => {
       responded: false,
     });
     expect(resolved).toEqual([]);
+  });
+
+  test("never ACP-responds to a kind-only execute envelope", async () => {
+    const pending = derivePendingApprovals([{
+      id: "approval.requested",
+      kind: "approval.requested",
+      createdAt: "2026-08-19T18:00:00Z",
+      payload: {
+        requestId: "r1",
+        requestType: "dynamic_tool_call",
+        detail: "Searched files",
+        args: { toolCall: { kind: "execute", status: "pending" } },
+      },
+    }]);
+    expect(pending[0]).toMatchObject({
+      requestId: "r1",
+      command: null,
+      identifiable: false,
+      reason: MISSING_COMMAND_GAP,
+    });
+    const identifiable = Boolean(pending[0]?.identifiable && pending[0]?.command);
+    const result = fixture({
+      list: identifiable
+        ? {
+          approvals: [approval({ requestId: "r1", command: pending[0]!.command!, toolName: pending[0]!.toolName })],
+          unidentifiable: [],
+        }
+        : {
+          approvals: [],
+          unidentifiable: [unidentifiable({ requestId: "r1", reason: pending[0]?.reason })],
+        },
+      judge: { ok: true, assessment: { outcome: "deny", rationale: "no bindable action" }, raw: "" },
+    });
+    const report = await runGuardianCycle(result.deps, defaultGuardianConfig());
+    expect(result.judged).toBe(0);
+    expect(report.decisions[0]).toMatchObject({
+      action: "skipped_unidentifiable",
+      requestId: "r1",
+      decision: null,
+      command: null,
+      responded: false,
+    });
+    expect(result.resolved).toEqual([]);
   });
 
   test("does not ACP-decline a leftover pending unidentifiable claim", async () => {

@@ -274,8 +274,7 @@ function uniqueTypedToolCallIds(payload: Record<string, unknown>): string[] {
 
 function composeKindIdentity(kind: string | null, toolCallId: string | null): string | null {
   if (kind && toolCallId) return `${kind}:${toolCallId}`;
-  if (toolCallId) return toolCallId;
-  return kind;
+  return null;
 }
 
 function requestKindFromToolKind(kind: string | null): ApprovalRequestKind | null {
@@ -320,7 +319,7 @@ function uniqueTypedTools(payload: Record<string, unknown>): string[] {
       asLiteralString(record.toolName),
       asLiteralString(record.tool),
     ]),
-  ]).filter((value) => value.trim().toLowerCase() !== "searched files" && value.trim().toLowerCase() !== "run requested command" && value.trim().toLowerCase() !== "run requested tool");
+  ]).filter((value) => !isGenericApprovalLabel(value));
 }
 
 function firstOrConflict(values: string[]): { value: string | null; conflict: boolean } {
