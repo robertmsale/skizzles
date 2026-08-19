@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { $ } from "bun";
-import { origin, token, taskProviderDefaults } from "./config.ts";
+import { origin, token, taskProviderDefaults, taskRuntimeMode } from "./config.ts";
 import {
   APPROVAL_ACTION_CHANGED,
   UNBOUND_ACCEPT_GAP,
@@ -392,6 +392,7 @@ async function gitBaseBranch(workspaceRoot: string): Promise<string> {
 
 export async function createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string }): Promise<{ sequence: number; threadId: string; model: ModelSelection; worktreeRequired: true }> {
   const selection = await taskProviderDefaults(input.provider);
+  const runtimeMode = taskRuntimeMode(input.provider);
   await preflightProviderSelection(selection);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
@@ -401,9 +402,9 @@ export async function createTask(input: { projectId: string; title: string; mess
   const result = await dispatch({
     type: "thread.turn.start", commandId: id(), threadId,
     message: { messageId: id(), role: "user", text: input.message, attachments: [] },
-    modelSelection: selection, runtimeMode: "auto", interactionMode: "default", createdAt,
+    modelSelection: selection, runtimeMode, interactionMode: "default", createdAt,
     bootstrap: {
-      createThread: { projectId: project.id, title: input.title, modelSelection: selection, runtimeMode: "auto", interactionMode: "default", branch: baseBranch, worktreePath: null, createdAt },
+      createThread: { projectId: project.id, title: input.title, modelSelection: selection, runtimeMode, interactionMode: "default", branch: baseBranch, worktreePath: null, createdAt },
       prepareWorktree: { projectCwd: project.workspaceRoot, baseBranch, branch: `t3code/${id().replaceAll("-", "").slice(0, 8)}`, startFromOrigin: true },
       runSetupScript: true,
     },

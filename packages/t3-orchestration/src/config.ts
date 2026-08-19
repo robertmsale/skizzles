@@ -105,3 +105,15 @@ export async function taskProviderDefaults(provider: string | undefined): Promis
       throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
   }
 }
+
+export function taskRuntimeMode(provider?: string): "auto" | "full-access" {
+  switch (provider?.trim().toLowerCase() || "codex") {
+    case "grok":
+    case "cursor":
+      return "full-access";
+    case "codex":
+    case "openai":
+    default:
+      return "auto";
+  }
+}
