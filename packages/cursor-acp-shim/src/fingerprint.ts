@@ -2,6 +2,7 @@ const MAX_DEATH_TEXT_CHARS = 1_500;
 
 const CURSOR_ADAPTER_PREFIX = /^(?:error:\s+)/i;
 const CONNECT_ERROR = /^connecterror:/i;
+const RETRIABLE_ERROR = /^retriableerror:/i;
 const GRPC_TRANSPORT = /\[(?:unavailable|aborted|internal|unknown|cancelled)\]/i;
 const HTTP2_CANCEL = /http\/2[^\n]{0,120}\bcancel\b|\bnghttp2_cancel\b|\berr_http2_(?:stream_cancel|invalid_stream|session_error)\b/i;
 const STREAM_RESET = /\b(?:stream (?:was )?reset|rst_stream|http\/2:\s*stream half-closed)\b/i;
@@ -10,9 +11,10 @@ const SHORT_SERVER_COPY = /^something went wrong(?: communicating with the serve
 const STREAM_DROPPED = /stream ended without turnended|connection likely dropped mid-stream/i;
 const AUTH_OR_PLAN = /\[unauthenticated\]|please sign in to continue|upgrade your plan to continue|add a payment method to continue/i;
 const DEBUGGING_APP = /\b(?:in the app you are debugging|handler returned|status(?: code)?\s*[1-5]\d\d)\b/i;
-const ERROR_DUMP_HEAD = /^(?:connecterror:|http\/2|stream |something went wrong|\[(?:unavailable|aborted|internal|unknown|cancelled)\])/i;
+const ERROR_DUMP_HEAD = /^(?:(?:connect|retriable)error:|http\/2|stream |something went wrong|\[(?:unavailable|aborted|internal|unknown|cancelled)\])/i;
 const DUMP_HEADS = [
   "connecterror:",
+  "retriableerror:",
   "http/2",
   "stream ",
   "something went wrong",
@@ -26,12 +28,17 @@ const DUMP_HEADS = [
 export function isSpuriousNetworkDeath(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed || trimmed.length > MAX_DEATH_TEXT_CHARS) return false;
-  if (AUTH_OR_PLAN.test(trimmed)) return false;
-  if (DEBUGGING_APP.test(trimmed)) return false;
   if (trimmed.includes("```")) return false;
-  if (SHORT_SERVER_COPY.test(trimmed)) return true;
 
   const body = CURSOR_ADAPTER_PREFIX.test(trimmed) ? trimmed.replace(CURSOR_ADAPTER_PREFIX, "").trim() : trimmed;
+  // Short ACP last-words dumps headed RetriableError: are Cursor's retriable
+  // transport class. Classify by that prefix before body-content exclusions;
+  // the remainder is irrelevant.
+  if (isErrorDumpShape(body) && RETRIABLE_ERROR.test(body)) return true;
+
+  if (AUTH_OR_PLAN.test(trimmed)) return false;
+  if (DEBUGGING_APP.test(trimmed)) return false;
+  if (SHORT_SERVER_COPY.test(trimmed)) return true;
   if (!isErrorDumpShape(body)) return false;
   if (STREAM_DROPPED.test(body)) return true;
   return CONNECT_ERROR.test(body)
@@ -52,9 +59,11 @@ export function couldBecomeSpuriousNetworkDeath(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
   if (trimmed.length > MAX_DEATH_TEXT_CHARS) return false;
+  if (trimmed.includes("```")) return false;
+  const body = CURSOR_ADAPTER_PREFIX.test(trimmed) ? trimmed.replace(CURSOR_ADAPTER_PREFIX, "").trim() : trimmed;
+  if (RETRIABLE_ERROR.test(body)) return isErrorDumpShape(body);
   if (AUTH_OR_PLAN.test(trimmed)) return false;
   if (DEBUGGING_APP.test(trimmed)) return false;
-  if (trimmed.includes("```")) return false;
   const lower = trimmed.toLowerCase();
   if (lower === "error" || "error: ".startsWith(lower)) return true;
   if (lower.startsWith("error:")) {
