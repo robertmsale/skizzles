@@ -1,0 +1,12 @@
+{
+  "name": "@skizzles/cursor-acp-shim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "t3-cursor-acp": "./src/cli.ts" },
+  "scripts": {
+    "check": "bun test",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  }
+}
