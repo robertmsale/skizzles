@@ -214,6 +214,13 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       }
     }
     if (held.flushed) {
+      if (kind === "agent_message_chunk" && !held.cancelled) {
+        if (couldBecomeSpuriousNetworkDeath(held.assistantText)) {
+          held.buffered.push(frame);
+          return;
+        }
+        await flushHeld();
+      }
       await writeFrame(options.io.stdout, frame.bytes);
       return;
     }
@@ -242,7 +249,9 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       await releaseHeld();
       return;
     }
-    const flake = !held.sawWork && !held.flushed && !held.cancelled && isSpuriousNetworkDeath(held.assistantText);
+    // Cursor ACP retriable dumps happen on a running agent, usually after work.
+    // Swallow the class matcher at any point in the turn; ignore sawWork/flushed.
+    const flake = isSpuriousNetworkDeath(held.assistantText);
     if (flake && held.attempts <= maxRetries) {
       log(`t3-cursor-acp: swallowed spurious Cursor ACP network death; replaying session/prompt (attempt ${held.attempts + 1}/${maxRetries + 1})`);
       await replayHeld(childAlive() ? "same-child" : "respawn", true);
@@ -536,10 +545,11 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   }
 
   async function flushHeld(): Promise<void> {
-    if (!held || held.flushed) return;
+    if (!held) return;
     held.flushed = true;
-    for (const frame of held.buffered) await writeFrame(options.io.stdout, frame.bytes);
+    const frames = held.buffered;
     held.buffered = [];
+    for (const frame of frames) await writeFrame(options.io.stdout, frame.bytes);
   }
 
   async function writeMappedResult(message: JsonRpcMessage, t3Id: string | number, frameStyle: FrameStyle): Promise<void> {

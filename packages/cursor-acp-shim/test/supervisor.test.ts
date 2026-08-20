@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 import { encodeFrame, readFrames, writeFrame, type JsonRpcMessage } from "../src/framing.ts";
 import { STRUCTURED_ERROR_CODE, runSupervisor, type ChildHandle } from "../src/supervisor.ts";
-import { FLAKE_TEXT, SUCCESS_TEXT, runFakeAcp, type FakeAcpMode, type FakeAcpRequest } from "./fake-acp.ts";
+import { SUCCESS_TEXT, runFakeAcp, type FakeAcpMode, type FakeAcpRequest } from "./fake-acp.ts";
 
 const temporary: Array<() => void> = [];
 afterEach(() => {
@@ -137,12 +137,46 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
-  test("does not swallow flake text after a tool call already started", async () => {
-    const flake = "\n\nError: ConnectError: [unavailable] HTTP/2 stream cancelled (NGHTTP2_CANCEL)";
-    const session = await startSession("ok", { successText: flake, toolCallFirst: true });
+  test("swallows death-as-text after a tool call and replays the same prompt", async () => {
+    const session = await startSession("flake-then-ok", { toolCallFirst: true });
     const updates: string[] = [];
     const result = await session.prompt("keep going", updates);
-    expect(updates).toEqual([flake]);
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).not.toContain("ConnectError");
+    await session.close();
+  });
+
+  test("swallows a RetriableError dump after a tool call and replays", async () => {
+    const dump = "Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    const session = await startSession("flake-then-ok", { toolCallFirst: true, flakeText: dump });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).not.toContain("RetriableError");
+    await session.close();
+  });
+
+  test("swallows an invented RetriableError body after work", async () => {
+    const dump = "Error: RetriableError: totally new wrapper text";
+    const session = await startSession("flake-then-ok", { extraUpdate: "plan_update", flakeText: dump });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).not.toContain("RetriableError");
+    await session.close();
+  });
+
+  test("passes a real assistant answer through after a tool call", async () => {
+    const session = await startSession("ok", { toolCallFirst: true });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(updates).toEqual([SUCCESS_TEXT]);
     expect(result.result).toEqual({ stopReason: "end_turn" });
     expect(session.logs.join("\n")).not.toContain("swallowed");
     await session.close();
@@ -184,8 +218,8 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
-  test("does not replay after a reverse child request has been forwarded", async () => {
-    const session = await startSession("ok", { successText: FLAKE_TEXT, reverseRequest: true });
+  test("swallows death-as-text after a reverse child request and replays", async () => {
+    const session = await startSession("flake-then-ok", { reverseRequest: true });
     const updates: string[] = [];
     const seen: JsonRpcMessage[] = [];
     await session.startPrompt("need approval");
@@ -199,9 +233,10 @@ describe("ACP supervisor", () => {
       }
       if (message.result !== undefined || message.error !== undefined) {
         expect(message.id).toBe(3);
-        expect(updates).toEqual([FLAKE_TEXT]);
+        expect(updates).toEqual([SUCCESS_TEXT]);
         expect(seen.some((item) => item.method === "session/request_permission" && item.id === 99)).toBe(true);
-        expect(session.logs.join("\n")).not.toContain("swallowed");
+        expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+        expect(JSON.stringify(seen)).not.toContain("ConnectError");
         break;
       }
     }
@@ -269,8 +304,8 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
-  test("does not replay after a plan_update has been forwarded", async () => {
-    const session = await startSession("ok", { successText: FLAKE_TEXT, extraUpdate: "plan_update" });
+  test("swallows death-as-text after a plan_update has been forwarded", async () => {
+    const session = await startSession("flake-then-ok", { extraUpdate: "plan_update" });
     const updates: string[] = [];
     const seen: JsonRpcMessage[] = [];
     await session.startPrompt("plan then flake");
@@ -284,9 +319,10 @@ describe("ACP supervisor", () => {
       }
       if (message.result !== undefined || message.error !== undefined) {
         expect(message.id).toBe(3);
-        expect(updates).toEqual([FLAKE_TEXT]);
+        expect(updates).toEqual([SUCCESS_TEXT]);
         expect(seen.some((item) => (item.params as { update?: { sessionUpdate?: string } } | undefined)?.update?.sessionUpdate === "plan_update")).toBe(true);
-        expect(session.logs.join("\n")).not.toContain("swallowed");
+        expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+        expect(JSON.stringify(seen)).not.toContain("ConnectError");
         break;
       }
     }
@@ -659,6 +695,7 @@ describe("ACP supervisor", () => {
 async function startSession(mode: FakeAcpMode, options: {
   maxRetries?: number;
   successText?: string;
+  flakeText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
@@ -758,6 +795,7 @@ async function startHarness(options: {
 
 function fakeChild(mode: FakeAcpMode, options: {
   successText?: string;
+  flakeText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
