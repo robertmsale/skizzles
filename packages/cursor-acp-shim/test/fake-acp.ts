@@ -35,6 +35,7 @@ export async function runFakeAcp(options: {
   exitAfterReverse?: boolean;
   waitForCancel?: boolean;
   holdUntilCancel?: boolean;
+  preCancelText?: string;
   cancelDeathText?: string;
   deferCancelResult?: Promise<void>;
   exitBeforeAnyFrameOnPrompt?: number;
@@ -129,14 +130,24 @@ export async function runFakeAcp(options: {
       const holdForCancel = (options.waitForCancel && prompts === 2) || options.holdUntilCancel;
       if (holdForCancel) {
         const request = message;
+        const params = asRecord(request.params);
+        const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
+        if (options.preCancelText) {
+          await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId,
+              update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: options.preCancelText } },
+            },
+          }, frame.style));
+        }
         void (async () => {
           if (!cancelled) {
             await new Promise<void>((resolve) => {
               notifyCancel = resolve;
             });
           }
-          const params = asRecord(request.params);
-          const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
           if (options.cancelDeathText) {
             await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
               jsonrpc: "2.0",

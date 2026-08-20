@@ -39,6 +39,7 @@ type HeldRequest = {
   childId: string | number;
   style: FrameStyle;
   assistantText: string;
+  cancelText: string;
   buffered: Frame[];
   flushed: boolean;
   sawWork: boolean;
@@ -147,14 +148,17 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     if (message.method === "session/load") handshake.sessionLoad = message;
     if (message.method === "session/new") handshake.sessionNew = message;
     if (message.method === "session/cancel") {
+      const cancelQueued = Boolean(held?.cancelled && pendingPrompts.length > 0);
       if (held) {
         held.cancelled = true;
         held.sawWork = true;
+        held.cancelText = "";
         held.sameChildReplayGeneration = undefined;
       }
       try {
         await writeChild(frame.bytes);
       } catch { /* child may already be gone */ }
+      if (cancelQueued) await cancelPendingPrompts();
       if (held && !held.childHasPrompt && !held.replaying) {
         await finishCancelled();
       }
@@ -195,14 +199,27 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   }
 
   async function onSessionUpdate(frame: Frame): Promise<void> {
-    if (!held || held.flushed) {
+    if (!held) {
       await writeFrame(options.io.stdout, frame.bytes);
       return;
     }
     const kind = sessionUpdateKind(frame.message);
+    if (kind === "agent_message_chunk") {
+      const chunk = extractAssistantText(frame.message);
+      if (held.cancelled) {
+        held.cancelText += chunk;
+        if (couldBecomeSpuriousNetworkDeath(held.cancelText)) return;
+      } else {
+        held.assistantText += chunk;
+      }
+    }
+    if (held.flushed) {
+      await writeFrame(options.io.stdout, frame.bytes);
+      return;
+    }
     if (kind && BUFFERED_UPDATES.has(kind)) {
-      if (kind === "agent_message_chunk") held.assistantText += extractAssistantText(frame.message);
-      const candidateDeath = couldBecomeSpuriousNetworkDeath(held.assistantText);
+      const inspect = held.cancelled ? held.cancelText : held.assistantText;
+      const candidateDeath = kind === "agent_message_chunk" && couldBecomeSpuriousNetworkDeath(inspect);
       if (held.cancelled && candidateDeath) return;
       held.buffered.push(frame);
       if (!candidateDeath) {
@@ -258,6 +275,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         if (increment) held.attempts += 1;
         increment = true;
         held.assistantText = "";
+        held.cancelText = "";
         held.buffered = [];
         held.flushed = false;
         held.sawWork = false;
@@ -449,6 +467,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       childId: message.id,
       style: frame.style,
       assistantText: "",
+      cancelText: "",
       buffered: [],
       flushed: false,
       sawWork: false,
@@ -471,6 +490,19 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     const next = pendingPrompts.shift();
     if (!next) return;
     await beginHeldPrompt(next);
+  }
+
+  async function cancelPendingPrompts(): Promise<void> {
+    const queued = pendingPrompts.splice(0);
+    for (const pending of queued) {
+      const id = pending.message.id;
+      if (id === undefined || id === null) continue;
+      await writeMappedResult({
+        jsonrpc: "2.0",
+        id,
+        result: { stopReason: "cancelled" },
+      }, id, pending.style);
+    }
   }
 
   async function closeShim(): Promise<void> {

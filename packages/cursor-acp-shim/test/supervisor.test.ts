@@ -439,6 +439,41 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("does not execute a queued prompt cancelled by a second Stop", async () => {
+    let releaseCancelResult!: () => void;
+    const deferCancelResult = new Promise<void>((resolve) => {
+      releaseCancelResult = resolve;
+    });
+    const childRequests: FakeAcpRequest[] = [];
+    const session = await startSession("ok", {
+      holdUntilCancel: true,
+      deferCancelResult,
+      onRequest: (request) => childRequests.push(request),
+    });
+    await session.startPrompt("first");
+    await waitFor(() => childRequests.some((request) => request.method === "session/prompt"));
+    await session.sendCancel();
+    await session.startPrompt("second", 4);
+    await session.sendCancel();
+    const queued = await session.next();
+    expect(queued.id).toBe(4);
+    expect(queued.result).toEqual({ stopReason: "cancelled" });
+    expect(childRequests.filter((request) => request.method === "session/prompt")).toHaveLength(1);
+    expect(childRequests.some((request) => request.id === 4)).toBe(false);
+    releaseCancelResult();
+    const first = await session.next();
+    expect(first.id).toBe(3);
+    expect(first.result).toEqual({ stopReason: "cancelled" });
+    try {
+      await waitFor(() => childRequests.some((request) => request.id === 4), 40);
+      throw new Error("cancelled queued session/prompt was forwarded to Cursor");
+    } catch (error) {
+      expect((error as Error).message).toBe("timed out waiting for replay prompt");
+    }
+    expect(childRequests.filter((request) => request.method === "session/prompt")).toHaveLength(1);
+    await session.close();
+  });
+
   test("does not forward aborted death text after session/cancel", async () => {
     const death = "\n\nError: ConnectError: [aborted] aborted";
     const session = await startSession("ok", {
@@ -460,6 +495,35 @@ describe("ACP supervisor", () => {
     expect(dumped).not.toContain("aborted");
     expect(seen.at(-1)?.id).toBe(3);
     expect(seen.at(-1)?.result).toEqual({ stopReason: "cancelled" });
+    await session.close();
+  });
+
+  test("does not forward abort death text after a visible chunk and Stop", async () => {
+    const death = "\n\nError: ConnectError: [aborted] aborted";
+    const session = await startSession("ok", {
+      holdUntilCancel: true,
+      preCancelText: SUCCESS_TEXT,
+      cancelDeathText: death,
+    });
+    await session.startPrompt("hi");
+    const first = await session.next();
+    expect(first.method).toBe("session/update");
+    expect((first.params as { update?: { content?: { text?: string } } }).update?.content?.text).toBe(SUCCESS_TEXT);
+    await session.sendCancel();
+    const seen: JsonRpcMessage[] = [first];
+    while (true) {
+      const message = await session.next();
+      seen.push(message);
+      if (message.result !== undefined || message.error !== undefined) break;
+    }
+    const dumped = JSON.stringify(seen);
+    expect(dumped).toContain(SUCCESS_TEXT);
+    expect(dumped).not.toContain("ConnectError");
+    expect(dumped).not.toContain("[aborted]");
+    expect(dumped).not.toContain("aborted");
+    expect(seen.at(-1)?.id).toBe(3);
+    expect(seen.at(-1)?.result).toEqual({ stopReason: "cancelled" });
+    expect(seen.filter((message) => message.method === "session/update")).toHaveLength(1);
     await session.close();
   });
 
@@ -522,6 +586,7 @@ async function startSession(mode: FakeAcpMode, options: {
   extraUpdate?: string;
   waitForCancel?: boolean;
   holdUntilCancel?: boolean;
+  preCancelText?: string;
   cancelDeathText?: string;
   deferCancelResult?: Promise<void>;
   deferReplayResult?: Promise<void>;
@@ -620,6 +685,7 @@ function fakeChild(mode: FakeAcpMode, options: {
   exitAfterReverse?: boolean;
   waitForCancel?: boolean;
   holdUntilCancel?: boolean;
+  preCancelText?: string;
   cancelDeathText?: string;
   deferCancelResult?: Promise<void>;
   exitBeforeAnyFrameOnPrompt?: number;
