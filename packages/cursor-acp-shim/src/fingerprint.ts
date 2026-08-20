@@ -10,9 +10,10 @@ const SHORT_SERVER_COPY = /^something went wrong(?: communicating with the serve
 const STREAM_DROPPED = /stream ended without turnended|connection likely dropped mid-stream/i;
 const AUTH_OR_PLAN = /\[unauthenticated\]|please sign in to continue|upgrade your plan to continue|add a payment method to continue/i;
 const DEBUGGING_APP = /\b(?:in the app you are debugging|handler returned|status(?: code)?\s*[1-5]\d\d)\b/i;
-const ERROR_DUMP_HEAD = /^(?:connecterror:|http\/2|stream |something went wrong|\[(?:unavailable|aborted|internal|unknown|cancelled)\])/i;
+const ERROR_DUMP_HEAD = /^(?:(?:connect|retriable)error:|http\/2|stream |something went wrong|\[(?:unavailable|aborted|internal|unknown|cancelled)\])/i;
 const DUMP_HEADS = [
   "connecterror:",
+  "retriableerror:",
   "http/2",
   "stream ",
   "something went wrong",

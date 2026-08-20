@@ -13,6 +13,13 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(isSpuriousNetworkDeath("HTTP/2 stream was reset (NGHTTP2_CANCEL)")).toBe(true);
   });
 
+  test("matches the live HTTP/1.1 RetriableError ENOTFOUND dump without swallowing every RetriableError", () => {
+    expect(isSpuriousNetworkDeath("Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh")).toBe(true);
+    expect(isSpuriousNetworkDeath("Error: RetriableError: file not found")).toBe(false);
+    expect(isSpuriousNetworkDeath("Error: RetriableError: [unauthenticated] Backend rejected authentication")).toBe(false);
+    expect(isSpuriousNetworkDeath("The API threw Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh")).toBe(false);
+  });
+
   test("does not match genuine app-under-debug HTTP failures or unrelated errors", () => {
     expect(isSpuriousNetworkDeath("The HTTP request failed in the app you are debugging because /health returned 500.")).toBe(false);
     expect(isSpuriousNetworkDeath("Error: file not found: src/http2.ts")).toBe(false);
@@ -42,6 +49,7 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(couldBecomeSpuriousNetworkDeath("E")).toBe(true);
     expect(couldBecomeSpuriousNetworkDeath("Error:")).toBe(true);
     expect(couldBecomeSpuriousNetworkDeath("Error: Con")).toBe(true);
+    expect(couldBecomeSpuriousNetworkDeath("Error: Ret")).toBe(true);
     expect(couldBecomeSpuriousNetworkDeath("hello from cursor")).toBe(false);
     expect(couldBecomeSpuriousNetworkDeath("Retry the webhook.")).toBe(false);
     expect(couldBecomeSpuriousNetworkDeath("Error: file not found: src/http2.ts")).toBe(false);
