@@ -102,7 +102,6 @@ function couldBecomeWholeMessageDump(text: string): boolean {
 }
 
 function trailingDumpRange(text: string, completeOnly: boolean): TextRange | undefined {
-  if (text.includes("```")) return undefined;
   const paragraph = lastNonEmptyParagraphRange(text);
   const line = lastNonEmptyLineRange(text);
   for (const fragment of [paragraph, line]) {

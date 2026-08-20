@@ -56,6 +56,13 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(couldBecomeSpuriousNetworkDeath(mention)).toBe(false);
   });
 
+  test("still treats a dump-shaped last line after a fenced write-up as a flake", () => {
+    const prose = "Here's the change:\n\n```ts\nexport function retry() {}\n```";
+    const dump = "Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    expect(isSpuriousNetworkDeath(`${prose}\n\n${dump}`)).toBe(true);
+    expect(stripTrailingTransportDump(`${prose}\n\n${dump}`)).toBe(prose);
+  });
+
   test("still classifies a last-line RetriableError dump before whole-message exclusions", () => {
     const mixed = "The HTTP request failed in the app you are debugging.\nError: RetriableError: upgrade your plan to continue";
     expect(isSpuriousNetworkDeath(mixed)).toBe(true);
