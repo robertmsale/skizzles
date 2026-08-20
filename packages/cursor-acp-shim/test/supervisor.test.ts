@@ -160,6 +160,47 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("strips a trailing RetriableError dump after real assistant prose and replays", async () => {
+    const prose = "Checking the adapter logs next.";
+    const dump = "Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    const session = await startSession("flake-then-ok", { flakeText: `${prose}\n\n${dump}` });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).toContain(prose);
+    expect(updates).toContain(SUCCESS_TEXT);
+    expect(updates.join("")).not.toContain("RetriableError");
+    expect(updates.join("")).not.toContain("turnEnded");
+    await session.close();
+  });
+
+  test("strips a trailing RetriableError ENOTFOUND dump on the last line and replays", async () => {
+    const prose = "Checking the adapter logs next.";
+    const dump = "Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh";
+    const session = await startSession("flake-then-ok", { flakeText: `${prose}\n${dump}` });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).toContain(prose);
+    expect(updates).toContain(SUCCESS_TEXT);
+    expect(updates.join("")).not.toContain("RetriableError");
+    expect(updates.join("")).not.toContain("ENOTFOUND");
+    await session.close();
+  });
+
+  test("does not swallow a last line that only mentions RetriableError", async () => {
+    const text = "Checking the adapter logs next.\nI hit a RetriableError in the adapter";
+    const session = await startSession("ok", { successText: text });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(updates).toEqual([text]);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    await session.close();
+  });
+
   test("swallows an invented RetriableError body after work", async () => {
     const dump = "Error: RetriableError: totally new wrapper text";
     const session = await startSession("flake-then-ok", { extraUpdate: "plan_update", flakeText: dump });
