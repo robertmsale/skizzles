@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { couldBecomeSpuriousNetworkDeath, extractAssistantText, isSpuriousNetworkDeath } from "../src/fingerprint.ts";
+import {
+  couldBecomeSpuriousNetworkDeath,
+  extractAssistantText,
+  isDumpShapedText,
+  isSpuriousNetworkDeath,
+  stripTrailingTransportDump,
+  visibleAssistantEnd,
+} from "../src/fingerprint.ts";
 
 describe("spurious Cursor ACP network death fingerprint", () => {
   test("matches the Cursor ACP adapter Error: ConnectError death-as-text class", () => {
@@ -23,6 +30,56 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(isSpuriousNetworkDeath("Error: RetriableError: status 500")).toBe(true);
     expect(isSpuriousNetworkDeath("The API threw Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh")).toBe(false);
     expect(isSpuriousNetworkDeath("Interactive cursor-agent retries them internally; we should retry too.")).toBe(false);
+  });
+
+  test("treats a dump-shaped last line or paragraph after real prose as a flake", () => {
+    const prose = "Checking the adapter logs next.";
+    const dropped = "Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    const enotfound = "Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh";
+    expect(isSpuriousNetworkDeath(`${prose}\n\n${dropped}`)).toBe(true);
+    expect(isSpuriousNetworkDeath(`${prose}\n${enotfound}`)).toBe(true);
+    expect(isSpuriousNetworkDeath(`${prose}\nError: ConnectError: [unavailable] HTTP/2 stream cancelled (NGHTTP2_CANCEL)`)).toBe(true);
+    expect(isSpuriousNetworkDeath(dropped)).toBe(true);
+    expect(isDumpShapedText(`\n\n${dropped}`)).toBe(true);
+    expect(isDumpShapedText(`${prose}\n\n${dropped}`)).toBe(false);
+    expect(isSpuriousNetworkDeath(`${prose}\n\n${dropped}`)).toBe(true);
+    expect(stripTrailingTransportDump(`${prose}\n\n${dropped}`)).toBe(prose);
+    expect(stripTrailingTransportDump(`${prose}\n${enotfound}`)).toBe(prose);
+    expect(stripTrailingTransportDump(dropped)).toBe("");
+    expect(visibleAssistantEnd(`${prose}\n\n${dropped}`)).toBe(`${prose}\n\n`.length);
+    expect(couldBecomeSpuriousNetworkDeath(`${prose}\nError: Ret`)).toBe(true);
+  });
+
+  test("does not treat a dump-shaped chunk inside a fence or mid-sentence as a flake", () => {
+    const fenced = "Here is the trace:\n```\nError: RetriableError: status 500\n```\n";
+    const sentence = "I hit a RetriableError: status 500 while testing.";
+    expect(isSpuriousNetworkDeath(fenced)).toBe(false);
+    expect(isSpuriousNetworkDeath(sentence)).toBe(false);
+    expect(isSpuriousNetworkDeath("Here is the trace:\n```\nError: RetriableError: status 500\n")).toBe(false);
+    expect(isSpuriousNetworkDeath("I hit a RetriableError: status 500")).toBe(false);
+  });
+
+  test("does not treat a last-line mention or a fenced dump in a write-up as a flake", () => {
+    const mention = "Checking the adapter logs next.\nI hit a RetriableError in the adapter";
+    const fenced = "Here is the handling I added:\n\n```\nError: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream\n```\n"
+      + "notes\n".repeat(20);
+    expect(isSpuriousNetworkDeath(mention)).toBe(false);
+    expect(isSpuriousNetworkDeath(fenced)).toBe(false);
+    expect(stripTrailingTransportDump(mention)).toBe(mention);
+    expect(couldBecomeSpuriousNetworkDeath(mention)).toBe(false);
+  });
+
+  test("still treats a dump-shaped last line after a fenced write-up as a flake", () => {
+    const prose = "Here's the change:\n\n```ts\nexport function retry() {}\n```";
+    const dump = "Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    expect(isSpuriousNetworkDeath(`${prose}\n\n${dump}`)).toBe(true);
+    expect(stripTrailingTransportDump(`${prose}\n\n${dump}`)).toBe(prose);
+  });
+
+  test("still classifies a last-line RetriableError dump before whole-message exclusions", () => {
+    const mixed = "The HTTP request failed in the app you are debugging.\nError: RetriableError: upgrade your plan to continue";
+    expect(isSpuriousNetworkDeath(mixed)).toBe(true);
+    expect(stripTrailingTransportDump(mixed)).toBe("The HTTP request failed in the app you are debugging.");
   });
 
   test("does not match genuine app-under-debug HTTP failures or unrelated errors", () => {

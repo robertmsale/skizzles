@@ -18,7 +18,7 @@ Error: RetriableError: ...
 
 plus HTTP/2 CANCEL / stream reset phrasing and "Something went wrong communicating with the server. Please try again."
 
-A genuine "HTTP failed in the app you are debugging" still goes through. Last-words dumps in that class are swallowed at any point in the turn, including after a tool call or reverse child request. Auth/plan copy that is not a `RetriableError:` dump is not swallowed.
+A genuine "HTTP failed in the app you are debugging" still goes through. Last-words dumps in that class are swallowed at any point in the turn, including after a tool call or reverse child request. A dump-shaped last line or paragraph after real assistant prose is stripped from the forwarded text and replayed the same way, including after a fenced write-up. A later dump-only `agent_message_chunk` is swallowed only while it remains the terminal last words; a dump inside a fence or in the middle of a sentence is forwarded. A successful `end_turn` a moment later does not keep a real last-words dump. Auth/plan copy that is not a `RetriableError:` dump is not swallowed.
 
 On a match the shim drops that assistant text and the matching `session/prompt` result, then replays the same prompt on the live child. If the child is dead, it respawns and re-runs `initialize` / `authenticate` / `session/load` only as far as needed, carrying `cwd` and `mcpServers` from the original `session/new` or `session/load`. It does not invent a Cursor-internal session with `session/new`. After the retry budget it returns a JSON-RPC error (`-32000`) so T3 never sees the flake as last words. Thought chunks and quoted ConnectError inside a real answer are not fingerprints.
 

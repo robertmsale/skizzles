@@ -25,7 +25,35 @@ const DUMP_HEADS = [
   "[cancelled]",
 ];
 
+type TextRange = {
+  start: number;
+  value: string;
+};
+
 export function isSpuriousNetworkDeath(text: string): boolean {
+  if (isDumpShapedText(text)) return true;
+  return trailingDumpRange(text, true) !== undefined;
+}
+
+/** True when the whole trimmed text is a Cursor ACP transport dump, not mixed prose. */
+export function isDumpShapedText(text: string): boolean {
+  return isWholeMessageDump(text);
+}
+
+export function stripTrailingTransportDump(text: string): string {
+  if (isWholeMessageDump(text)) return "";
+  const range = trailingDumpRange(text, true);
+  if (!range) return text;
+  return text.slice(0, range.start).replace(/\s+$/, "");
+}
+
+export function visibleAssistantEnd(text: string): number {
+  if (couldBecomeWholeMessageDump(text)) return 0;
+  const range = trailingDumpRange(text, false);
+  return range ? range.start : text.length;
+}
+
+function isWholeMessageDump(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed || trimmed.length > MAX_DEATH_TEXT_CHARS) return false;
   if (trimmed.includes("```")) return false;
@@ -55,7 +83,12 @@ function isErrorDumpShape(body: string): boolean {
 }
 
 export function couldBecomeSpuriousNetworkDeath(text: string): boolean {
-  if (isSpuriousNetworkDeath(text)) return true;
+  if (couldBecomeWholeMessageDump(text)) return true;
+  return trailingDumpRange(text, false) !== undefined;
+}
+
+function couldBecomeWholeMessageDump(text: string): boolean {
+  if (isWholeMessageDump(text)) return true;
   const trimmed = text.trim();
   if (!trimmed) return true;
   if (trimmed.length > MAX_DEATH_TEXT_CHARS) return false;
@@ -71,6 +104,60 @@ export function couldBecomeSpuriousNetworkDeath(text: string): boolean {
     return rest.length === 0 || matchesDumpHeadProgress(rest);
   }
   return matchesDumpHeadProgress(lower);
+}
+
+function trailingDumpRange(text: string, completeOnly: boolean): TextRange | undefined {
+  const paragraph = lastNonEmptyParagraphRange(text);
+  const line = lastNonEmptyLineRange(text);
+  for (const fragment of [paragraph, line]) {
+    if (!fragment) continue;
+    if (text.slice(0, fragment.start).trim().length === 0) continue;
+    if (insideFence(text, fragment.start)) continue;
+    const match = completeOnly
+      ? isWholeMessageDump(fragment.value)
+      : couldBecomeWholeMessageDump(fragment.value);
+    if (match) return fragment;
+  }
+  return undefined;
+}
+
+function insideFence(text: string, index: number): boolean {
+  let ticks = 0;
+  let cursor = 0;
+  const prefix = text.slice(0, index);
+  while (cursor < prefix.length) {
+    const next = prefix.indexOf("```", cursor);
+    if (next < 0) break;
+    ticks += 1;
+    cursor = next + 3;
+  }
+  return ticks % 2 === 1;
+}
+
+function lastNonEmptyLineRange(text: string): TextRange | undefined {
+  let end = text.length;
+  while (end > 0 && isLineBreakOrSpace(text.charAt(end - 1))) end--;
+  if (end === 0) return undefined;
+  let start = end;
+  while (start > 0 && text.charAt(start - 1) !== "\n") start--;
+  return { start, value: text.slice(start, end) };
+}
+
+function lastNonEmptyParagraphRange(text: string): TextRange | undefined {
+  let end = text.length;
+  while (end > 0 && isLineBreakOrSpace(text.charAt(end - 1))) end--;
+  if (end === 0) return undefined;
+  const before = text.slice(0, end);
+  const breaks = before.matchAll(/\n[ \t]*\n/g);
+  let start = 0;
+  for (const match of breaks) {
+    start = (match.index ?? 0) + match[0].length;
+  }
+  return { start, value: before.slice(start) };
+}
+
+function isLineBreakOrSpace(character: string): boolean {
+  return character === "\n" || character === "\r" || character === " " || character === "\t";
 }
 
 function matchesDumpHeadProgress(text: string): boolean {

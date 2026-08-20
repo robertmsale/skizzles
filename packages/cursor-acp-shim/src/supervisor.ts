@@ -1,6 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
-import { couldBecomeSpuriousNetworkDeath, extractAssistantText, isSpuriousNetworkDeath, sessionUpdateKind } from "./fingerprint.ts";
+import {
+  couldBecomeSpuriousNetworkDeath,
+  extractAssistantText,
+  isSpuriousNetworkDeath,
+  sessionUpdateKind,
+  visibleAssistantEnd,
+} from "./fingerprint.ts";
 import { encodeFrame, readFrames, writeFrame, type Frame, type FrameStyle, type JsonRpcMessage } from "./framing.ts";
 
 export const DEFAULT_MAX_RETRIES = 2;
@@ -41,6 +47,7 @@ type HeldRequest = {
   assistantText: string;
   cancelText: string;
   buffered: Frame[];
+  forwardedAssistantLength: number;
   flushed: boolean;
   sawWork: boolean;
   attempts: number;
@@ -211,16 +218,11 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         if (couldBecomeSpuriousNetworkDeath(held.cancelText)) return;
       } else {
         held.assistantText += chunk;
+        await emitVisibleAssistant();
+        return;
       }
     }
     if (held.flushed) {
-      if (kind === "agent_message_chunk" && !held.cancelled) {
-        if (couldBecomeSpuriousNetworkDeath(held.assistantText)) {
-          held.buffered.push(frame);
-          return;
-        }
-        await flushHeld();
-      }
       await writeFrame(options.io.stdout, frame.bytes);
       return;
     }
@@ -261,6 +263,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       await failHeld(`Cursor ACP stream failed after ${held.attempts} attempts: ${held.assistantText.trim().slice(0, 240)}`);
       return;
     }
+    await emitRemainingAssistant();
     await flushHeld();
     await writeMappedResult(frame.message, held.t3Id, held.style);
     await releaseHeld();
@@ -286,6 +289,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         held.assistantText = "";
         held.cancelText = "";
         held.buffered = [];
+        held.forwardedAssistantLength = 0;
         held.flushed = false;
         held.sawWork = false;
         held.childHasPrompt = false;
@@ -478,6 +482,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       assistantText: "",
       cancelText: "",
       buffered: [],
+      forwardedAssistantLength: 0,
       flushed: false,
       sawWork: false,
       attempts: 1,
@@ -550,6 +555,43 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     const frames = held.buffered;
     held.buffered = [];
     for (const frame of frames) await writeFrame(options.io.stdout, frame.bytes);
+  }
+
+  async function emitVisibleAssistant(): Promise<void> {
+    if (!held || held.cancelled) return;
+    const holdStart = visibleAssistantEnd(held.assistantText);
+    const delta = held.assistantText.slice(held.forwardedAssistantLength, holdStart);
+    if (delta.length === 0) return;
+    held.forwardedAssistantLength = holdStart;
+    await flushHeld();
+    await writeAssistantDelta(delta);
+    held.flushed = true;
+  }
+
+  async function emitRemainingAssistant(): Promise<void> {
+    if (!held || held.cancelled) return;
+    const delta = held.assistantText.slice(held.forwardedAssistantLength);
+    if (!delta) return;
+    held.forwardedAssistantLength = held.assistantText.length;
+    await flushHeld();
+    await writeAssistantDelta(delta);
+    held.flushed = true;
+  }
+
+  async function writeAssistantDelta(text: string): Promise<void> {
+    if (!held) return;
+    const sessionId = heldSessionId() ?? "";
+    await writeFrame(options.io.stdout, encodeFrame({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text },
+        },
+      },
+    }, held.style));
   }
 
   async function writeMappedResult(message: JsonRpcMessage, t3Id: string | number, frameStyle: FrameStyle): Promise<void> {

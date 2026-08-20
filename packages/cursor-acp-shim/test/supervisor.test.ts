@@ -160,6 +160,125 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("swallows a later dump-only chunk after flushed commentary and a tool call", async () => {
+    const prose = "Checking the adapter logs next.";
+    const dump = "\n\nError: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    const session = await startSession("flake-then-ok", {
+      toolCallFirst: true,
+      preDumpText: prose,
+      flakeText: dump,
+    });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).toContain(prose);
+    expect(updates).toContain(SUCCESS_TEXT);
+    expect(updates.join("")).not.toContain("RetriableError");
+    expect(updates.join("")).not.toContain("turnEnded");
+    await session.close();
+  });
+
+  test("strips a trailing RetriableError dump after real assistant prose and replays", async () => {
+    const prose = "Checking the adapter logs next.";
+    const dump = "Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    const session = await startSession("flake-then-ok", { flakeText: `${prose}\n\n${dump}` });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).toContain(prose);
+    expect(updates).toContain(SUCCESS_TEXT);
+    expect(updates.join("")).not.toContain("RetriableError");
+    expect(updates.join("")).not.toContain("turnEnded");
+    await session.close();
+  });
+
+  test("strips a trailing RetriableError ENOTFOUND dump on the last line and replays", async () => {
+    const prose = "Checking the adapter logs next.";
+    const dump = "Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh";
+    const session = await startSession("flake-then-ok", { flakeText: `${prose}\n${dump}` });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).toContain(prose);
+    expect(updates).toContain(SUCCESS_TEXT);
+    expect(updates.join("")).not.toContain("RetriableError");
+    expect(updates.join("")).not.toContain("ENOTFOUND");
+    await session.close();
+  });
+
+  test("strips a trailing RetriableError dump after a fenced write-up and replays", async () => {
+    const prose = "Here's the change:\n\n```ts\nexport function retry() {}\n```";
+    const dump = "Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    const session = await startSession("flake-then-ok", { flakeText: `${prose}\n\n${dump}` });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).toContain(prose);
+    expect(updates).toContain(SUCCESS_TEXT);
+    expect(updates.join("")).not.toContain("RetriableError");
+    expect(updates.join("")).not.toContain("turnEnded");
+    await session.close();
+  });
+
+  test("forwards a last line that only looked like a dump head once the turn ends", async () => {
+    const text = "Checking the adapter logs next.\nHTTP/2 notes for the client";
+    const session = await startSession("ok", { successText: text });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(updates.join("")).toBe(text);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    await session.close();
+  });
+
+  test("does not replay a dump-shaped chunk that only appears inside a fence", async () => {
+    const chunks = ["Here is the trace:\n```\n", "Error: RetriableError: status 500\n", "```\n"];
+    const session = await startSession("ok", { successChunks: chunks });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    expect(updates.join("")).toBe(chunks.join(""));
+    await session.close();
+  });
+
+  test("does not replay a dump-shaped chunk that completes as an ordinary sentence", async () => {
+    const chunks = ["I hit a ", "RetriableError: status 500", " while testing."];
+    const session = await startSession("ok", { successChunks: chunks });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    expect(updates.join("")).toBe(chunks.join(""));
+    await session.close();
+  });
+
+  test("keeps spaces when ordinary assistant prose arrives as split chunks", async () => {
+    const chunks = ["hello", " ", "world"];
+    const session = await startSession("ok", { successChunks: chunks });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    expect(updates.join("")).toBe("hello world");
+    await session.close();
+  });
+
+  test("does not swallow a last line that only mentions RetriableError", async () => {
+    const text = "Checking the adapter logs next.\nI hit a RetriableError in the adapter";
+    const session = await startSession("ok", { successText: text });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(updates).toEqual([text]);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    await session.close();
+  });
+
   test("swallows an invented RetriableError body after work", async () => {
     const dump = "Error: RetriableError: totally new wrapper text";
     const session = await startSession("flake-then-ok", { extraUpdate: "plan_update", flakeText: dump });
@@ -695,7 +814,9 @@ describe("ACP supervisor", () => {
 async function startSession(mode: FakeAcpMode, options: {
   maxRetries?: number;
   successText?: string;
+  successChunks?: string[];
   flakeText?: string;
+  preDumpText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
@@ -795,7 +916,9 @@ async function startHarness(options: {
 
 function fakeChild(mode: FakeAcpMode, options: {
   successText?: string;
+  successChunks?: string[];
   flakeText?: string;
+  preDumpText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
