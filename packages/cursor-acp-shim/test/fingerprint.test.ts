@@ -13,12 +13,13 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(isSpuriousNetworkDeath("HTTP/2 stream was reset (NGHTTP2_CANCEL)")).toBe(true);
   });
 
-  test("matches live HTTP/1.1 RetriableError transport dumps without swallowing every RetriableError", () => {
+  test("swallows any short RetriableError dump after the optional Error: prefix", () => {
     expect(isSpuriousNetworkDeath("Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh")).toBe(true);
     expect(isSpuriousNetworkDeath("Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream")).toBe(true);
-    expect(isSpuriousNetworkDeath("Error: RetriableError: file not found")).toBe(false);
+    expect(isSpuriousNetworkDeath("Error: RetriableError: totally new wrapper text")).toBe(true);
     expect(isSpuriousNetworkDeath("Error: RetriableError: [unauthenticated] Backend rejected authentication")).toBe(false);
     expect(isSpuriousNetworkDeath("The API threw Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh")).toBe(false);
+    expect(isSpuriousNetworkDeath("Interactive cursor-agent retries them internally; we should retry too.")).toBe(false);
   });
 
   test("does not match genuine app-under-debug HTTP failures or unrelated errors", () => {

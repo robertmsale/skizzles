@@ -2,6 +2,7 @@ const MAX_DEATH_TEXT_CHARS = 1_500;
 
 const CURSOR_ADAPTER_PREFIX = /^(?:error:\s+)/i;
 const CONNECT_ERROR = /^connecterror:/i;
+const RETRIABLE_ERROR = /^retriableerror:/i;
 const GRPC_TRANSPORT = /\[(?:unavailable|aborted|internal|unknown|cancelled)\]/i;
 const HTTP2_CANCEL = /http\/2[^\n]{0,120}\bcancel\b|\bnghttp2_cancel\b|\berr_http2_(?:stream_cancel|invalid_stream|session_error)\b/i;
 const STREAM_RESET = /\b(?:stream (?:was )?reset|rst_stream|http\/2:\s*stream half-closed)\b/i;
@@ -34,7 +35,9 @@ export function isSpuriousNetworkDeath(text: string): boolean {
 
   const body = CURSOR_ADAPTER_PREFIX.test(trimmed) ? trimmed.replace(CURSOR_ADAPTER_PREFIX, "").trim() : trimmed;
   if (!isErrorDumpShape(body)) return false;
-  if (STREAM_DROPPED.test(body)) return true;
+  // Short ACP last-words dumps headed RetriableError: are Cursor's retriable
+  // transport class. Match the wrapper, not a catalog of historical bodies.
+  if (RETRIABLE_ERROR.test(body) || STREAM_DROPPED.test(body)) return true;
   return CONNECT_ERROR.test(body)
     || GRPC_TRANSPORT.test(body)
     || HTTP2_CANCEL.test(body)
