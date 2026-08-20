@@ -388,6 +388,109 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("queues a second T3 prompt until the cancelled wire turn drains", async () => {
+    let releaseCancelResult!: () => void;
+    const deferCancelResult = new Promise<void>((resolve) => {
+      releaseCancelResult = resolve;
+    });
+    const childRequests: FakeAcpRequest[] = [];
+    let replayId: string | number | undefined;
+    const session = await startSession("flake-then-ok", {
+      waitForCancel: true,
+      deferCancelResult,
+      onRequest: (request) => {
+        childRequests.push(request);
+        if (request.method === "session/prompt" && request.id !== 3 && request.id != null && replayId === undefined) {
+          replayId = request.id;
+        }
+      },
+    });
+    await session.startPrompt("first");
+    await waitFor(() => replayId !== undefined);
+    await session.sendCancel();
+    await session.startPrompt("second", 4);
+    try {
+      await waitFor(() => childRequests.some((request) => request.id === 4), 40);
+      throw new Error("queued session/prompt was forwarded to Cursor before the old wire turn drained");
+    } catch (error) {
+      expect((error as Error).message).toBe("timed out waiting for replay prompt");
+    }
+    expect(childRequests.filter((request) => request.method === "session/prompt")).toHaveLength(2);
+    releaseCancelResult();
+    const cancelled = await session.next();
+    expect(cancelled.id).toBe(3);
+    expect(cancelled.id).not.toBe(replayId);
+    expect(cancelled.result).toEqual({ stopReason: "cancelled" });
+    await waitFor(() => childRequests.some((request) => request.id === 4));
+    const updates: string[] = [];
+    while (true) {
+      const message = await session.next();
+      if (message.method === "session/update") {
+        const update = (message.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update;
+        if (update?.sessionUpdate === "agent_message_chunk" && update.content?.text) updates.push(update.content.text);
+        continue;
+      }
+      expect(message.id).toBe(4);
+      expect(message.result).toEqual({ stopReason: "end_turn" });
+      expect(updates).toEqual([SUCCESS_TEXT]);
+      expect(JSON.stringify(message)).not.toContain("ConnectError");
+      break;
+    }
+    await session.close();
+  });
+
+  test("does not forward aborted death text after session/cancel", async () => {
+    const death = "\n\nError: ConnectError: [aborted] aborted";
+    const session = await startSession("ok", {
+      holdUntilCancel: true,
+      cancelDeathText: death,
+    });
+    await session.startPrompt("hi");
+    await session.sendCancel();
+    const seen: JsonRpcMessage[] = [];
+    while (true) {
+      const message = await session.next();
+      seen.push(message);
+      if (message.result !== undefined || message.error !== undefined) break;
+    }
+    const dumped = JSON.stringify(seen);
+    expect(dumped).not.toContain("ConnectError");
+    expect(dumped).not.toContain("[aborted]");
+    expect(dumped).not.toContain("[cancelled]");
+    expect(dumped).not.toContain("aborted");
+    expect(seen.at(-1)?.id).toBe(3);
+    expect(seen.at(-1)?.result).toEqual({ stopReason: "cancelled" });
+    await session.close();
+  });
+
+  test("replays a lost write of the final same-child attempt on a replacement child", async () => {
+    let launches = 0;
+    const prompts: Array<{ launch: number; id?: string | number | null }> = [];
+    const session = await startHarness({
+      handshake: "load",
+      maxRetries: 1,
+      spawn: () => {
+        launches += 1;
+        const launch = launches;
+        return fakeChild(launch === 1 ? "flake-then-ok" : "ok", {
+          exitBeforeAnyFrameOnPrompt: launch === 1 ? 2 : undefined,
+          onRequest: (request) => {
+            if (request.method === "session/prompt") prompts.push({ launch, id: request.id });
+          },
+        });
+      },
+    });
+    const updates: string[] = [];
+    const result = await session.prompt("try again", updates);
+    expect(result.id).toBe(3);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(launches).toBe(2);
+    expect(prompts).toHaveLength(3);
+    expect(prompts.filter((prompt) => prompt.launch === 2)).toHaveLength(1);
+    await session.close();
+  });
+
   test("streams a normal first chunk before the prompt result", async () => {
     let release!: () => void;
     const deferResult = new Promise<void>((resolve) => {
@@ -418,6 +521,9 @@ async function startSession(mode: FakeAcpMode, options: {
   reverseRequest?: boolean;
   extraUpdate?: string;
   waitForCancel?: boolean;
+  holdUntilCancel?: boolean;
+  cancelDeathText?: string;
+  deferCancelResult?: Promise<void>;
   deferReplayResult?: Promise<void>;
   onRequest?: (request: FakeAcpRequest) => void;
   deferResult?: Promise<void>;
@@ -472,10 +578,10 @@ async function startHarness(options: {
     async sendCancel() {
       await send(t3stdin, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "sess-1" } });
     },
-    async startPrompt(text: string) {
+    async startPrompt(text: string, id: string | number = 3) {
       await send(t3stdin, {
         jsonrpc: "2.0",
-        id: 3,
+        id,
         method: "session/prompt",
         params: { sessionId: "sess-1", prompt: [{ type: "text", text }] },
       });
@@ -513,6 +619,10 @@ function fakeChild(mode: FakeAcpMode, options: {
   crashOnPrompt?: boolean;
   exitAfterReverse?: boolean;
   waitForCancel?: boolean;
+  holdUntilCancel?: boolean;
+  cancelDeathText?: string;
+  deferCancelResult?: Promise<void>;
+  exitBeforeAnyFrameOnPrompt?: number;
   partialThenExit?: boolean;
   failLoad?: boolean;
   deferReplayResult?: Promise<void>;

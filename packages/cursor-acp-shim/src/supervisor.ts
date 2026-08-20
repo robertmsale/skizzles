@@ -67,6 +67,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   const handshake: Handshake = {};
   let style: FrameStyle = "ndjson";
   let held: HeldRequest | undefined;
+  const pendingPrompts: Frame[] = [];
   let handshakeWaiter: { id: string | number; resolve: (message: JsonRpcMessage | undefined) => void } | undefined;
   let suppressLoad: { loadId: string | number; sessionId?: string } | undefined;
   let nextSyntheticId = 1_000_000_001;
@@ -149,7 +150,6 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       if (held) {
         held.cancelled = true;
         held.sawWork = true;
-        held.flushed = true;
         held.sameChildReplayGeneration = undefined;
       }
       try {
@@ -161,22 +161,12 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       return;
     }
     if (message.method === "session/prompt" && message.id !== undefined && message.id !== null) {
-      held = {
-        method: message.method,
-        params: message.params,
-        t3Id: message.id,
-        childId: message.id,
-        style: frame.style,
-        assistantText: "",
-        buffered: [],
-        flushed: false,
-        sawWork: false,
-        attempts: 1,
-        replaying: false,
-        cancelled: false,
-        childHasPrompt: true,
-        sameChildReplayGeneration: undefined,
-      };
+      if (held) {
+        pendingPrompts.push(frame);
+        return;
+      }
+      await beginHeldPrompt(frame);
+      return;
     }
     await writeChild(frame.bytes);
   }
@@ -212,8 +202,10 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     const kind = sessionUpdateKind(frame.message);
     if (kind && BUFFERED_UPDATES.has(kind)) {
       if (kind === "agent_message_chunk") held.assistantText += extractAssistantText(frame.message);
+      const candidateDeath = couldBecomeSpuriousNetworkDeath(held.assistantText);
+      if (held.cancelled && candidateDeath) return;
       held.buffered.push(frame);
-      if (!couldBecomeSpuriousNetworkDeath(held.assistantText)) {
+      if (!candidateDeath) {
         await flushHeld();
       }
       return;
@@ -230,7 +222,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     }
     if (held.cancelled) {
       await writeMappedResult(frame.message, held.t3Id, held.style);
-      held = undefined;
+      await releaseHeld();
       return;
     }
     const flake = !held.sawWork && !held.flushed && !held.cancelled && isSpuriousNetworkDeath(held.assistantText);
@@ -245,7 +237,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     }
     await flushHeld();
     await writeMappedResult(frame.message, held.t3Id, held.style);
-    held = undefined;
+    await releaseHeld();
   }
 
   async function replayHeld(mode: "same-child" | "respawn", countAttempt: boolean): Promise<void> {
@@ -259,7 +251,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
           if (!held.childHasPrompt) await finishCancelled();
           return;
         }
-        if (held.attempts > maxRetries) {
+        if (increment && held.attempts > maxRetries) {
           await failHeld(`Cursor ACP stream failed after ${held.attempts} attempts`);
           return;
         }
@@ -444,7 +436,41 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       id: held.t3Id,
       result: { stopReason: "cancelled" },
     }, held.t3Id, held.style);
+    await releaseHeld();
+  }
+
+  async function beginHeldPrompt(frame: Frame): Promise<void> {
+    const { message } = frame;
+    if (message.id === undefined || message.id === null) return;
+    held = {
+      method: message.method ?? "session/prompt",
+      params: message.params,
+      t3Id: message.id,
+      childId: message.id,
+      style: frame.style,
+      assistantText: "",
+      buffered: [],
+      flushed: false,
+      sawWork: false,
+      attempts: 1,
+      replaying: false,
+      cancelled: false,
+      childHasPrompt: true,
+      sameChildReplayGeneration: undefined,
+    };
+    await writeChild(frame.bytes);
+  }
+
+  async function releaseHeld(): Promise<void> {
     held = undefined;
+    await promotePendingPrompt();
+  }
+
+  async function promotePendingPrompt(): Promise<void> {
+    if (held || closedByT3 || !childAlive()) return;
+    const next = pendingPrompts.shift();
+    if (!next) return;
+    await beginHeldPrompt(next);
   }
 
   async function closeShim(): Promise<void> {

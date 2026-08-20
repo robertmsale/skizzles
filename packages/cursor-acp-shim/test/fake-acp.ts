@@ -34,6 +34,10 @@ export async function runFakeAcp(options: {
   crashOnPrompt?: boolean;
   exitAfterReverse?: boolean;
   waitForCancel?: boolean;
+  holdUntilCancel?: boolean;
+  cancelDeathText?: string;
+  deferCancelResult?: Promise<void>;
+  exitBeforeAnyFrameOnPrompt?: number;
   partialThenExit?: boolean;
   failLoad?: boolean;
   deferReplayResult?: Promise<void>;
@@ -92,6 +96,7 @@ export async function runFakeAcp(options: {
     if (message.method === "session/prompt") {
       prompts += 1;
       if (options.crashOnPrompt) return;
+      if (options.exitBeforeAnyFrameOnPrompt && prompts === options.exitBeforeAnyFrameOnPrompt) return;
       const flake = mode === "always-flake" || (mode === "flake-then-ok" && prompts === 1);
       if (options.partialThenExit && prompts >= 2) {
         const params = asRecord(message.params);
@@ -121,7 +126,8 @@ export async function runFakeAcp(options: {
         await reply(options.stdout, message, { stopReason: "end_turn" });
         continue;
       }
-      if (options.waitForCancel && prompts >= 2) {
+      const holdForCancel = (options.waitForCancel && prompts === 2) || options.holdUntilCancel;
+      if (holdForCancel) {
         const request = message;
         void (async () => {
           if (!cancelled) {
@@ -129,6 +135,19 @@ export async function runFakeAcp(options: {
               notifyCancel = resolve;
             });
           }
+          const params = asRecord(request.params);
+          const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";
+          if (options.cancelDeathText) {
+            await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+              jsonrpc: "2.0",
+              method: "session/update",
+              params: {
+                sessionId,
+                update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: options.cancelDeathText } },
+              },
+            }, frame.style));
+          }
+          if (options.deferCancelResult) await options.deferCancelResult;
           await reply(options.stdout, request, { stopReason: "cancelled" });
         })();
         continue;
