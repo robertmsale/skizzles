@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   couldBecomeSpuriousNetworkDeath,
   extractAssistantText,
+  isDumpShapedText,
   isSpuriousNetworkDeath,
   stripTrailingTransportDump,
   visibleAssistantEnd,
@@ -39,6 +40,9 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(isSpuriousNetworkDeath(`${prose}\n${enotfound}`)).toBe(true);
     expect(isSpuriousNetworkDeath(`${prose}\nError: ConnectError: [unavailable] HTTP/2 stream cancelled (NGHTTP2_CANCEL)`)).toBe(true);
     expect(isSpuriousNetworkDeath(dropped)).toBe(true);
+    expect(isDumpShapedText(`\n\n${dropped}`)).toBe(true);
+    expect(isDumpShapedText(`${prose}\n\n${dropped}`)).toBe(false);
+    expect(isSpuriousNetworkDeath(`${prose}\n\n${dropped}`)).toBe(true);
     expect(stripTrailingTransportDump(`${prose}\n\n${dropped}`)).toBe(prose);
     expect(stripTrailingTransportDump(`${prose}\n${enotfound}`)).toBe(prose);
     expect(stripTrailingTransportDump(dropped)).toBe("");

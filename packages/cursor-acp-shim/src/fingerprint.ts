@@ -31,8 +31,13 @@ type TextRange = {
 };
 
 export function isSpuriousNetworkDeath(text: string): boolean {
-  if (isWholeMessageDump(text)) return true;
+  if (isDumpShapedText(text)) return true;
   return trailingDumpRange(text, true) !== undefined;
+}
+
+/** True when the whole trimmed text is a Cursor ACP transport dump, not mixed prose. */
+export function isDumpShapedText(text: string): boolean {
+  return isWholeMessageDump(text);
 }
 
 export function stripTrailingTransportDump(text: string): string {

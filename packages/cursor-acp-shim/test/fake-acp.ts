@@ -23,6 +23,7 @@ export async function runFakeAcp(options: {
   stdout: NodeJS.WritableStream;
   mode?: FakeAcpMode;
   flakeText?: string;
+  preDumpText?: string;
   successText?: string;
   exitAfterPrompts?: number;
   thoughtText?: string;
@@ -215,6 +216,16 @@ export async function runFakeAcp(options: {
           params: {
             sessionId,
             update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: options.thoughtText } },
+          },
+        }, frame.style));
+      }
+      if (flake && options.preDumpText) {
+        await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: options.preDumpText } },
           },
         }, frame.style));
       }

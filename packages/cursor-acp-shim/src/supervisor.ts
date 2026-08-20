@@ -3,6 +3,7 @@ import type { Readable, Writable } from "node:stream";
 import {
   couldBecomeSpuriousNetworkDeath,
   extractAssistantText,
+  isDumpShapedText,
   isSpuriousNetworkDeath,
   sessionUpdateKind,
   visibleAssistantEnd,
@@ -50,6 +51,7 @@ type HeldRequest = {
   forwardedAssistantLength: number;
   flushed: boolean;
   sawWork: boolean;
+  sawDumpChunk: boolean;
   attempts: number;
   replaying: boolean;
   cancelled: boolean;
@@ -215,9 +217,16 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       const chunk = extractAssistantText(frame.message);
       if (held.cancelled) {
         held.cancelText += chunk;
-        if (couldBecomeSpuriousNetworkDeath(held.cancelText)) return;
+        if (isDumpShapedText(chunk) || couldBecomeSpuriousNetworkDeath(held.cancelText)) return;
       } else {
         held.assistantText += chunk;
+        // Classify this chunk, not only the accumulated turn. A later
+        // dump-only agent_message_chunk is still ACP injection after
+        // flushed commentary and a tool_call.
+        if (isDumpShapedText(chunk)) {
+          held.sawDumpChunk = true;
+          return;
+        }
         await emitVisibleAssistant();
         return;
       }
@@ -253,7 +262,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     }
     // Cursor ACP retriable dumps happen on a running agent, usually after work.
     // Swallow the class matcher at any point in the turn; ignore sawWork/flushed.
-    const flake = isSpuriousNetworkDeath(held.assistantText);
+    const flake = held.sawDumpChunk || isSpuriousNetworkDeath(held.assistantText);
     if (flake && held.attempts <= maxRetries) {
       log(`t3-cursor-acp: swallowed spurious Cursor ACP network death; replaying session/prompt (attempt ${held.attempts + 1}/${maxRetries + 1})`);
       await replayHeld(childAlive() ? "same-child" : "respawn", true);
@@ -292,6 +301,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         held.forwardedAssistantLength = 0;
         held.flushed = false;
         held.sawWork = false;
+        held.sawDumpChunk = false;
         held.childHasPrompt = false;
         held.sameChildReplayGeneration = undefined;
         let sameChild = nextMode === "same-child" && childAlive();
@@ -485,6 +495,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       forwardedAssistantLength: 0,
       flushed: false,
       sawWork: false,
+      sawDumpChunk: false,
       attempts: 1,
       replaying: false,
       cancelled: false,

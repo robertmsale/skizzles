@@ -160,6 +160,25 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("swallows a later dump-only chunk after flushed commentary and a tool call", async () => {
+    const prose = "Checking the adapter logs next.";
+    const dump = "\n\nError: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
+    const session = await startSession("flake-then-ok", {
+      toolCallFirst: true,
+      preDumpText: prose,
+      flakeText: dump,
+    });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).toContain(prose);
+    expect(updates).toContain(SUCCESS_TEXT);
+    expect(updates.join("")).not.toContain("RetriableError");
+    expect(updates.join("")).not.toContain("turnEnded");
+    await session.close();
+  });
+
   test("strips a trailing RetriableError dump after real assistant prose and replays", async () => {
     const prose = "Checking the adapter logs next.";
     const dump = "Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream";
@@ -763,6 +782,7 @@ async function startSession(mode: FakeAcpMode, options: {
   maxRetries?: number;
   successText?: string;
   flakeText?: string;
+  preDumpText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
@@ -863,6 +883,7 @@ async function startHarness(options: {
 function fakeChild(mode: FakeAcpMode, options: {
   successText?: string;
   flakeText?: string;
+  preDumpText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
   reverseRequest?: boolean;
