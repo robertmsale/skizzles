@@ -50,6 +50,15 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(couldBecomeSpuriousNetworkDeath(`${prose}\nError: Ret`)).toBe(true);
   });
 
+  test("does not treat a dump-shaped chunk inside a fence or mid-sentence as a flake", () => {
+    const fenced = "Here is the trace:\n```\nError: RetriableError: status 500\n```\n";
+    const sentence = "I hit a RetriableError: status 500 while testing.";
+    expect(isSpuriousNetworkDeath(fenced)).toBe(false);
+    expect(isSpuriousNetworkDeath(sentence)).toBe(false);
+    expect(isSpuriousNetworkDeath("Here is the trace:\n```\nError: RetriableError: status 500\n")).toBe(false);
+    expect(isSpuriousNetworkDeath("I hit a RetriableError: status 500")).toBe(false);
+  });
+
   test("does not treat a last-line mention or a fenced dump in a write-up as a flake", () => {
     const mention = "Checking the adapter logs next.\nI hit a RetriableError in the adapter";
     const fenced = "Here is the handling I added:\n\n```\nError: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream\n```\n"

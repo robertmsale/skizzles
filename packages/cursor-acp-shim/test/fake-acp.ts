@@ -25,6 +25,7 @@ export async function runFakeAcp(options: {
   flakeText?: string;
   preDumpText?: string;
   successText?: string;
+  successChunks?: string[];
   exitAfterPrompts?: number;
   thoughtText?: string;
   toolCallFirst?: boolean;
@@ -219,24 +220,19 @@ export async function runFakeAcp(options: {
           },
         }, frame.style));
       }
-      if (flake && options.preDumpText) {
+      const chunks = flake
+        ? (options.preDumpText ? [options.preDumpText, text] : [text])
+        : (options.successChunks ?? [text]);
+      for (const chunk of chunks) {
         await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
           jsonrpc: "2.0",
           method: "session/update",
           params: {
             sessionId,
-            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: options.preDumpText } },
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: chunk } },
           },
         }, frame.style));
       }
-      await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
-        jsonrpc: "2.0",
-        method: "session/update",
-        params: {
-          sessionId,
-          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
-        },
-      }, frame.style));
       if (options.deferResult) await options.deferResult;
       await reply(options.stdout, message, { stopReason: "end_turn" });
       if (options.exitAfterPrompts && prompts >= options.exitAfterPrompts) return;

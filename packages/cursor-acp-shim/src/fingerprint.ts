@@ -112,12 +112,26 @@ function trailingDumpRange(text: string, completeOnly: boolean): TextRange | und
   for (const fragment of [paragraph, line]) {
     if (!fragment) continue;
     if (text.slice(0, fragment.start).trim().length === 0) continue;
+    if (insideFence(text, fragment.start)) continue;
     const match = completeOnly
       ? isWholeMessageDump(fragment.value)
       : couldBecomeWholeMessageDump(fragment.value);
     if (match) return fragment;
   }
   return undefined;
+}
+
+function insideFence(text: string, index: number): boolean {
+  let ticks = 0;
+  let cursor = 0;
+  const prefix = text.slice(0, index);
+  while (cursor < prefix.length) {
+    const next = prefix.indexOf("```", cursor);
+    if (next < 0) break;
+    ticks += 1;
+    cursor = next + 3;
+  }
+  return ticks % 2 === 1;
 }
 
 function lastNonEmptyLineRange(text: string): TextRange | undefined {

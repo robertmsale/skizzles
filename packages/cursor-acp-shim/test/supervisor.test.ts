@@ -235,6 +235,39 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("does not replay a dump-shaped chunk that only appears inside a fence", async () => {
+    const chunks = ["Here is the trace:\n```\n", "Error: RetriableError: status 500\n", "```\n"];
+    const session = await startSession("ok", { successChunks: chunks });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    expect(updates.join("")).toBe(chunks.join(""));
+    await session.close();
+  });
+
+  test("does not replay a dump-shaped chunk that completes as an ordinary sentence", async () => {
+    const chunks = ["I hit a ", "RetriableError: status 500", " while testing."];
+    const session = await startSession("ok", { successChunks: chunks });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    expect(updates.join("")).toBe(chunks.join(""));
+    await session.close();
+  });
+
+  test("keeps spaces when ordinary assistant prose arrives as split chunks", async () => {
+    const chunks = ["hello", " ", "world"];
+    const session = await startSession("ok", { successChunks: chunks });
+    const updates: string[] = [];
+    const result = await session.prompt("keep going", updates);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.join("\n")).not.toContain("swallowed");
+    expect(updates.join("")).toBe("hello world");
+    await session.close();
+  });
+
   test("does not swallow a last line that only mentions RetriableError", async () => {
     const text = "Checking the adapter logs next.\nI hit a RetriableError in the adapter";
     const session = await startSession("ok", { successText: text });
@@ -781,6 +814,7 @@ describe("ACP supervisor", () => {
 async function startSession(mode: FakeAcpMode, options: {
   maxRetries?: number;
   successText?: string;
+  successChunks?: string[];
   flakeText?: string;
   preDumpText?: string;
   thoughtText?: string;
@@ -882,6 +916,7 @@ async function startHarness(options: {
 
 function fakeChild(mode: FakeAcpMode, options: {
   successText?: string;
+  successChunks?: string[];
   flakeText?: string;
   preDumpText?: string;
   thoughtText?: string;
