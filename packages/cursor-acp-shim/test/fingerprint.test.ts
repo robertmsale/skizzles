@@ -17,7 +17,10 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(isSpuriousNetworkDeath("Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh")).toBe(true);
     expect(isSpuriousNetworkDeath("Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream")).toBe(true);
     expect(isSpuriousNetworkDeath("Error: RetriableError: totally new wrapper text")).toBe(true);
-    expect(isSpuriousNetworkDeath("Error: RetriableError: [unauthenticated] Backend rejected authentication")).toBe(false);
+    expect(isSpuriousNetworkDeath("RetriableError: [unauthenticated] Backend rejected authentication")).toBe(true);
+    expect(isSpuriousNetworkDeath("Error: RetriableError: [unauthenticated] Backend rejected authentication")).toBe(true);
+    expect(isSpuriousNetworkDeath("Error: RetriableError: upgrade your plan to continue")).toBe(true);
+    expect(isSpuriousNetworkDeath("Error: RetriableError: status 500")).toBe(true);
     expect(isSpuriousNetworkDeath("The API threw Error: RetriableError: [unavailable] getaddrinfo ENOTFOUND api2.cursor.sh")).toBe(false);
     expect(isSpuriousNetworkDeath("Interactive cursor-agent retries them internally; we should retry too.")).toBe(false);
   });
@@ -52,6 +55,7 @@ describe("spurious Cursor ACP network death fingerprint", () => {
     expect(couldBecomeSpuriousNetworkDeath("Error:")).toBe(true);
     expect(couldBecomeSpuriousNetworkDeath("Error: Con")).toBe(true);
     expect(couldBecomeSpuriousNetworkDeath("Error: Ret")).toBe(true);
+    expect(couldBecomeSpuriousNetworkDeath("Error: RetriableError: status 500")).toBe(true);
     expect(couldBecomeSpuriousNetworkDeath("hello from cursor")).toBe(false);
     expect(couldBecomeSpuriousNetworkDeath("Retry the webhook.")).toBe(false);
     expect(couldBecomeSpuriousNetworkDeath("Error: file not found: src/http2.ts")).toBe(false);

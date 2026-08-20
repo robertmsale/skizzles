@@ -28,16 +28,19 @@ const DUMP_HEADS = [
 export function isSpuriousNetworkDeath(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed || trimmed.length > MAX_DEATH_TEXT_CHARS) return false;
-  if (AUTH_OR_PLAN.test(trimmed)) return false;
-  if (DEBUGGING_APP.test(trimmed)) return false;
   if (trimmed.includes("```")) return false;
-  if (SHORT_SERVER_COPY.test(trimmed)) return true;
 
   const body = CURSOR_ADAPTER_PREFIX.test(trimmed) ? trimmed.replace(CURSOR_ADAPTER_PREFIX, "").trim() : trimmed;
-  if (!isErrorDumpShape(body)) return false;
   // Short ACP last-words dumps headed RetriableError: are Cursor's retriable
-  // transport class. Match the wrapper, not a catalog of historical bodies.
-  if (RETRIABLE_ERROR.test(body) || STREAM_DROPPED.test(body)) return true;
+  // transport class. Classify by that prefix before body-content exclusions;
+  // the remainder is irrelevant.
+  if (isErrorDumpShape(body) && RETRIABLE_ERROR.test(body)) return true;
+
+  if (AUTH_OR_PLAN.test(trimmed)) return false;
+  if (DEBUGGING_APP.test(trimmed)) return false;
+  if (SHORT_SERVER_COPY.test(trimmed)) return true;
+  if (!isErrorDumpShape(body)) return false;
+  if (STREAM_DROPPED.test(body)) return true;
   return CONNECT_ERROR.test(body)
     || GRPC_TRANSPORT.test(body)
     || HTTP2_CANCEL.test(body)
@@ -56,9 +59,11 @@ export function couldBecomeSpuriousNetworkDeath(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
   if (trimmed.length > MAX_DEATH_TEXT_CHARS) return false;
+  if (trimmed.includes("```")) return false;
+  const body = CURSOR_ADAPTER_PREFIX.test(trimmed) ? trimmed.replace(CURSOR_ADAPTER_PREFIX, "").trim() : trimmed;
+  if (RETRIABLE_ERROR.test(body)) return isErrorDumpShape(body);
   if (AUTH_OR_PLAN.test(trimmed)) return false;
   if (DEBUGGING_APP.test(trimmed)) return false;
-  if (trimmed.includes("```")) return false;
   const lower = trimmed.toLowerCase();
   if (lower === "error" || "error: ".startsWith(lower)) return true;
   if (lower.startsWith("error:")) {
