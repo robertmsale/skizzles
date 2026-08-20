@@ -37,6 +37,8 @@ export async function runFakeAcp(options: {
   holdUntilCancel?: boolean;
   preCancelText?: string;
   cancelDeathText?: string;
+  cancelDeathChunks?: string[];
+  onCancelDeathChunk?: (index: number) => void;
   deferCancelResult?: Promise<void>;
   exitBeforeAnyFrameOnPrompt?: number;
   partialThenExit?: boolean;
@@ -148,15 +150,22 @@ export async function runFakeAcp(options: {
               notifyCancel = resolve;
             });
           }
-          if (options.cancelDeathText) {
+          const deathChunks = options.cancelDeathChunks ?? (options.cancelDeathText ? [options.cancelDeathText] : []);
+          for (let index = 0; index < deathChunks.length; index++) {
+            if (index > 0) {
+              await new Promise<void>((resolve) => {
+                notifyCancel = resolve;
+              });
+            }
             await writeFrame(options.stdout as import("node:stream").Writable, encodeFrame({
               jsonrpc: "2.0",
               method: "session/update",
               params: {
                 sessionId,
-                update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: options.cancelDeathText } },
+                update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: deathChunks[index] } },
               },
             }, frame.style));
+            options.onCancelDeathChunk?.(index);
           }
           if (options.deferCancelResult) await options.deferCancelResult;
           await reply(options.stdout, request, { stopReason: "cancelled" });

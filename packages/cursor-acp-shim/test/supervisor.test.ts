@@ -68,6 +68,19 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("keeps thought chunks from disabling a later death-as-text replay", async () => {
+    const session = await startSession("flake-then-ok", { thoughtText: "checking..." });
+    const updates: string[] = [];
+    const result = await session.prompt("try again", updates);
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(result.id).toBe(3);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
+    expect(updates.join("")).not.toContain("ConnectError");
+    expect(JSON.stringify(result)).not.toContain("ConnectError");
+    await session.close();
+  });
+
   test("respawns once when a flake turn is followed by child death", async () => {
     const seen: Array<{ launch: number; method?: string; params?: unknown; id?: string | number | null }> = [];
     let launches = 0;
@@ -474,6 +487,43 @@ describe("ACP supervisor", () => {
     await session.close();
   });
 
+  test("forwards a queued prompt after the previous turn hits a live structured failure", async () => {
+    let release!: () => void;
+    const deferResult = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const childRequests: FakeAcpRequest[] = [];
+    const session = await startSession("flake-then-ok", {
+      maxRetries: 0,
+      deferResult,
+      onRequest: (request) => childRequests.push(request),
+    });
+    await session.startPrompt("first");
+    await waitFor(() => childRequests.some((request) => request.method === "session/prompt"));
+    await session.startPrompt("second", 4);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(childRequests.filter((request) => request.method === "session/prompt")).toHaveLength(1);
+    release();
+    const failed = await session.next();
+    expect(failed.id).toBe(3);
+    expect(failed.error && typeof failed.error === "object" && "code" in failed.error ? failed.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
+    await waitFor(() => childRequests.some((request) => request.id === 4));
+    const updates: string[] = [];
+    while (true) {
+      const message = await session.next();
+      if (message.method === "session/update") {
+        const update = (message.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update;
+        if (update?.sessionUpdate === "agent_message_chunk" && update.content?.text) updates.push(update.content.text);
+        continue;
+      }
+      expect(message.id).toBe(4);
+      expect(message.result).toEqual({ stopReason: "end_turn" });
+      expect(updates).toEqual([SUCCESS_TEXT]);
+      break;
+    }
+    await session.close();
+  });
+
   test("does not forward aborted death text after session/cancel", async () => {
     const death = "\n\nError: ConnectError: [aborted] aborted";
     const session = await startSession("ok", {
@@ -524,6 +574,35 @@ describe("ACP supervisor", () => {
     expect(seen.at(-1)?.id).toBe(3);
     expect(seen.at(-1)?.result).toEqual({ stopReason: "cancelled" });
     expect(seen.filter((message) => message.method === "session/update")).toHaveLength(1);
+    await session.close();
+  });
+
+  test("does not reset an in-progress cancel death fingerprint on a second Stop", async () => {
+    let prefixSeen = false;
+    const session = await startSession("ok", {
+      holdUntilCancel: true,
+      cancelDeathChunks: ["Error: ConnectError: [un", "available] aborted"],
+      onCancelDeathChunk: (index) => {
+        if (index === 0) prefixSeen = true;
+      },
+    });
+    await session.startPrompt("hi");
+    await session.sendCancel();
+    await waitFor(() => prefixSeen);
+    await session.sendCancel();
+    const seen: JsonRpcMessage[] = [];
+    while (true) {
+      const message = await session.next();
+      seen.push(message);
+      if (message.result !== undefined || message.error !== undefined) break;
+    }
+    const dumped = JSON.stringify(seen);
+    expect(dumped).not.toContain("ConnectError");
+    expect(dumped).not.toContain("available]");
+    expect(dumped).not.toContain("[aborted]");
+    expect(dumped).not.toContain("aborted");
+    expect(seen.at(-1)?.id).toBe(3);
+    expect(seen.at(-1)?.result).toEqual({ stopReason: "cancelled" });
     await session.close();
   });
 
@@ -588,6 +667,8 @@ async function startSession(mode: FakeAcpMode, options: {
   holdUntilCancel?: boolean;
   preCancelText?: string;
   cancelDeathText?: string;
+  cancelDeathChunks?: string[];
+  onCancelDeathChunk?: (index: number) => void;
   deferCancelResult?: Promise<void>;
   deferReplayResult?: Promise<void>;
   onRequest?: (request: FakeAcpRequest) => void;
@@ -687,6 +768,8 @@ function fakeChild(mode: FakeAcpMode, options: {
   holdUntilCancel?: boolean;
   preCancelText?: string;
   cancelDeathText?: string;
+  cancelDeathChunks?: string[];
+  onCancelDeathChunk?: (index: number) => void;
   deferCancelResult?: Promise<void>;
   exitBeforeAnyFrameOnPrompt?: number;
   partialThenExit?: boolean;

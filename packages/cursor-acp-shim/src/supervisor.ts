@@ -150,9 +150,9 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     if (message.method === "session/cancel") {
       const cancelQueued = Boolean(held?.cancelled && pendingPrompts.length > 0);
       if (held) {
+        if (!held.cancelled) held.cancelText = "";
         held.cancelled = true;
         held.sawWork = true;
-        held.cancelText = "";
         held.sameChildReplayGeneration = undefined;
       }
       try {
@@ -219,7 +219,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     }
     if (kind && BUFFERED_UPDATES.has(kind)) {
       const inspect = held.cancelled ? held.cancelText : held.assistantText;
-      const candidateDeath = kind === "agent_message_chunk" && couldBecomeSpuriousNetworkDeath(inspect);
+      const candidateDeath = couldBecomeSpuriousNetworkDeath(inspect);
       if (held.cancelled && candidateDeath) return;
       held.buffered.push(frame);
       if (!candidateDeath) {
@@ -291,7 +291,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
               await closeShim();
               return;
             }
-            await failHeld("Cursor ACP child died; could not restore a visible session for replay");
+            await failHeld("Cursor ACP child died; could not restore a visible session for replay", false);
             await closeShim();
             return;
           }
@@ -427,7 +427,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       return;
     }
     if (held.sawWork || held.flushed) {
-      await failHeld(`Cursor ACP child exited (${code}) after the turn was already visible to T3`);
+      await failHeld(`Cursor ACP child exited (${code}) after the turn was already visible to T3`, false);
       await closeShim();
       return;
     }
@@ -443,7 +443,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       await replayHeld("respawn", true);
       return;
     }
-    await failHeld(`Cursor ACP child exited (${code}) after ${held.attempts} attempts`);
+    await failHeld(`Cursor ACP child exited (${code}) after ${held.attempts} attempts`, false);
     await closeShim();
   }
 
@@ -519,7 +519,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     } catch { /* already gone */ }
   }
 
-  async function failHeld(message: string): Promise<void> {
+  async function failHeld(message: string, promote = true): Promise<void> {
     if (!held) return;
     log(`t3-cursor-acp: structured failure: ${message}`);
     const error: JsonRpcMessage = {
@@ -528,7 +528,11 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       error: { code: STRUCTURED_ERROR_CODE, message },
     };
     await writeFrame(options.io.stdout, encodeFrame(error, held.style));
-    held = undefined;
+    if (!promote) {
+      held = undefined;
+      return;
+    }
+    await releaseHeld();
   }
 
   async function flushHeld(): Promise<void> {
