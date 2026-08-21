@@ -10,12 +10,13 @@ describe("T3_CURSOR_ACP_MAX_RETRIES", () => {
     expect(parseRetries("10")).toBe(10);
   });
 
-  test("accepts 0 through 32 including the old 8 cap", () => {
+  test("accepts 0 through 10 and rejects 11", () => {
     expect(parseRetries("0")).toBe(0);
     expect(parseRetries("8")).toBe(8);
-    expect(parseRetries(String(MAX_RETRY_OVERRIDE))).toBe(32);
-    expect(() => parseRetries("33")).toThrow("0 through 32");
-    expect(() => parseRetries("-1")).toThrow("0 through 32");
-    expect(() => parseRetries("1.5")).toThrow("0 through 32");
+    expect(parseRetries(String(MAX_RETRY_OVERRIDE))).toBe(10);
+    expect(() => parseRetries("11")).toThrow("0 through 10");
+    expect(() => parseRetries("32")).toThrow("0 through 10");
+    expect(() => parseRetries("-1")).toThrow("0 through 10");
+    expect(() => parseRetries("1.5")).toThrow("0 through 10");
   });
 });

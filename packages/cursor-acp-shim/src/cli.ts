@@ -24,7 +24,7 @@ export async function cliMain(argv: string[], env = process.env): Promise<number
   });
 }
 
-export const MAX_RETRY_OVERRIDE = 32;
+export const MAX_RETRY_OVERRIDE = DEFAULT_MAX_RETRIES;
 
 export function parseRetries(value: string | undefined): number {
   if (!value?.trim()) return DEFAULT_MAX_RETRIES;
