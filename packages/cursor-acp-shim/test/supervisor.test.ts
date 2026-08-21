@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
 import { encodeFrame, readFrames, writeFrame, type JsonRpcMessage } from "../src/framing.ts";
-import { STRUCTURED_ERROR_CODE, runSupervisor, type ChildHandle } from "../src/supervisor.ts";
+import {
+  DEFAULT_MAX_RETRIES,
+  RETRY_BACKOFF_BASE_MS,
+  RETRY_BACKOFF_MAX_MS,
+  STRUCTURED_ERROR_CODE,
+  retryBackoffMs,
+  runSupervisor,
+  type ChildHandle,
+} from "../src/supervisor.ts";
 import { SUCCESS_TEXT, runFakeAcp, type FakeAcpMode, type FakeAcpRequest } from "./fake-acp.ts";
 
 const temporary: Array<() => void> = [];
@@ -28,7 +36,7 @@ describe("ACP supervisor", () => {
     expect(result.id).toBe(3);
     expect(result.result).toEqual({ stopReason: "end_turn" });
     expect(session.logs.some((line) => line.includes("swallowed spurious Cursor ACP network death"))).toBe(true);
-    expect(session.logs.some((line) => line.includes("replaying session/prompt"))).toBe(true);
+    expect(session.logs.some((line) => line.includes("retrying in 2000ms (attempt 2/11)"))).toBe(true);
     expect(updates.join("")).not.toContain("ConnectError");
     await session.close();
   });
@@ -41,6 +49,148 @@ describe("ACP supervisor", () => {
     expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
     expect(JSON.stringify(result.error)).toContain("after 2 attempts");
     expect(session.logs.some((line) => line.includes("structured failure"))).toBe(true);
+    await session.close();
+  });
+
+  test("retry backoff is 2s doubled each replay and capped at 60s", () => {
+    expect(DEFAULT_MAX_RETRIES).toBe(10);
+    expect(RETRY_BACKOFF_BASE_MS).toBe(2_000);
+    expect(RETRY_BACKOFF_MAX_MS).toBe(60_000);
+    expect([1, 2, 3, 4, 5, 6, 7, 10].map(retryBackoffMs)).toEqual([
+      2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000,
+    ]);
+  });
+
+  test("default budget is 10 retries and waits before each replay", async () => {
+    let prompts = 0;
+    const sleeps: number[] = [];
+    const session = await startSession("always-flake", {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      onRequest: (request) => {
+        if (request.method === "session/prompt") prompts += 1;
+      },
+    });
+    const result = await session.prompt("keep dying", []);
+    expect(prompts).toBe(11);
+    expect(sleeps).toEqual([2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000, 60_000, 60_000]);
+    expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
+    expect(JSON.stringify(result.error)).toContain("after 11 attempts");
+    expect(session.logs.some((line) => line.includes("retrying in 2000ms (attempt 2/11)"))).toBe(true);
+    expect(session.logs.some((line) => line.includes("retrying in 60000ms (attempt 11/11)"))).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("retrying in");
+    await session.close();
+  });
+
+  test("delays same-child replay with the injected sleeper instead of firing immediately", async () => {
+    const sleeps: number[] = [];
+    let replayed = false;
+    const session = await startSession("flake-then-ok", {
+      sleep: async (ms) => {
+        expect(replayed).toBe(false);
+        sleeps.push(ms);
+      },
+      onRequest: (request) => {
+        if (request.method === "session/prompt" && request.id !== 3) replayed = true;
+      },
+    });
+    const updates: string[] = [];
+    const result = await session.prompt("try again", updates);
+    expect(sleeps).toEqual([2_000]);
+    expect(replayed).toBe(true);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(session.logs.some((line) => line.includes("retrying in 2000ms (attempt 2/11)"))).toBe(true);
+    await session.close();
+  });
+
+  test("three rapid death-as-text dumps do not exhaust the default retry budget", async () => {
+    let prompts = 0;
+    const sleeps: number[] = [];
+    const session = await startSession("flake-then-ok", {
+      flakeCount: 3,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      onRequest: (request) => {
+        if (request.method === "session/prompt") prompts += 1;
+      },
+    });
+    const updates: string[] = [];
+    const result = await session.prompt("keep dying", updates);
+    expect(prompts).toBe(4);
+    expect(sleeps).toEqual([2_000, 4_000, 8_000]);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(session.logs.filter((line) => line.includes("retrying in")).length).toBe(3);
+    expect(JSON.stringify(result.error ?? {})).not.toContain("after 3 attempts");
+    await session.close();
+  });
+
+  test("waits before respawn replay the same way as same-child replay", async () => {
+    const sleeps: number[] = [];
+    let launches = 0;
+    const session = await startHarness({
+      handshake: "load",
+      sleep: async (ms) => {
+        expect(launches).toBe(1);
+        sleeps.push(ms);
+      },
+      spawn: () => {
+        launches += 1;
+        return fakeChild("ok", {
+          crashOnPrompt: launches === 1,
+        });
+      },
+    });
+    const updates: string[] = [];
+    const result = await session.prompt("try again", updates);
+    expect(launches).toBe(2);
+    expect(sleeps).toEqual([2_000]);
+    expect(result.result).toEqual({ stopReason: "end_turn" });
+    expect(updates).toEqual([SUCCESS_TEXT]);
+    expect(session.logs.some((line) => line.includes("retrying in 2000ms (attempt 2/11)"))).toBe(true);
+    expect(session.logs.some((line) => line.includes("child exited"))).toBe(true);
+    await session.close();
+  });
+
+  test("session/cancel during backoff aborts the wait and does not replay", async () => {
+    const prompts: FakeAcpRequest[] = [];
+    let releaseBackoff!: () => void;
+    const sawBackoff = new Promise<void>((resolve) => {
+      releaseBackoff = resolve;
+    });
+    const session = await startSession("flake-then-ok", {
+      onRequest: (request) => {
+        if (request.method === "session/prompt") prompts.push(request);
+      },
+      sleep: (_ms, signal) => {
+        releaseBackoff();
+        return new Promise((_, reject) => {
+          const fail = () => {
+            const error = new Error("This operation was aborted");
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (signal?.aborted) {
+            fail();
+            return;
+          }
+          signal?.addEventListener("abort", fail, { once: true });
+        });
+      },
+    });
+    await session.startPrompt("try again");
+    await sawBackoff;
+    expect(prompts).toHaveLength(1);
+    await session.sendCancel();
+    const result = await session.next();
+    expect(result.id).toBe(3);
+    expect(result.result).toEqual({ stopReason: "cancelled" });
+    expect(prompts).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("retrying in");
+    expect(session.logs.some((line) => line.includes("retrying in 2000ms (attempt 2/11)"))).toBe(true);
     await session.close();
   });
 
@@ -102,7 +252,7 @@ describe("ACP supervisor", () => {
     expect(result.id).toBe(3);
     expect(result.result).toEqual({ stopReason: "end_turn" });
     expect(updates).toEqual([SUCCESS_TEXT]);
-    expect(session.logs.filter((line) => line.includes("replaying session/prompt")).length).toBe(1);
+    expect(session.logs.filter((line) => line.includes("retrying in")).length).toBe(1);
     expect(session.logs.some((line) => line.includes("respawning"))).toBe(true);
     expect(JSON.stringify(result.error ?? {})).not.toContain("after 3 attempts");
     await session.close();
@@ -383,7 +533,7 @@ describe("ACP supervisor", () => {
     expect(result.id).toBe(3);
     expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
     expect(JSON.stringify(result.error)).toContain("already visible");
-    expect(session.logs.join("\n")).not.toContain("replaying session/prompt");
+    expect(session.logs.join("\n")).not.toContain("retrying in");
     release();
     await session.close();
   });
@@ -400,7 +550,7 @@ describe("ACP supervisor", () => {
     expect(result.id).toBe(3);
     expect(result.error && typeof result.error === "object" && "code" in result.error ? result.error.code : undefined).toBe(STRUCTURED_ERROR_CODE);
     expect(JSON.stringify(result.error)).toContain("already visible");
-    expect(session.logs.join("\n")).not.toContain("replaying session/prompt");
+    expect(session.logs.join("\n")).not.toContain("retrying in");
     await session.close();
   });
 
@@ -816,6 +966,7 @@ async function startSession(mode: FakeAcpMode, options: {
   successText?: string;
   successChunks?: string[];
   flakeText?: string;
+  flakeCount?: number;
   preDumpText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;
@@ -831,10 +982,12 @@ async function startSession(mode: FakeAcpMode, options: {
   deferReplayResult?: Promise<void>;
   onRequest?: (request: FakeAcpRequest) => void;
   deferResult?: Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 } = {}) {
   return startHarness({
     handshake: "load",
     maxRetries: options.maxRetries,
+    sleep: options.sleep,
     spawn: () => fakeChild(mode, options),
   });
 }
@@ -843,6 +996,7 @@ async function startHarness(options: {
   handshake: "load" | "new";
   maxRetries?: number;
   spawn: () => ChildHandle;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }) {
   const t3stdin = new PassThrough();
   const t3stdout = new PassThrough();
@@ -856,6 +1010,7 @@ async function startHarness(options: {
     maxRetries: options.maxRetries,
     log: (line) => logs.push(line),
     spawn: options.spawn,
+    sleep: options.sleep ?? (async () => {}),
   });
   temporary.push(() => {
     t3stdin.end();
@@ -918,6 +1073,7 @@ function fakeChild(mode: FakeAcpMode, options: {
   successText?: string;
   successChunks?: string[];
   flakeText?: string;
+  flakeCount?: number;
   preDumpText?: string;
   thoughtText?: string;
   toolCallFirst?: boolean;

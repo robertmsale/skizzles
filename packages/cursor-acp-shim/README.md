@@ -22,10 +22,10 @@ A genuine "HTTP failed in the app you are debugging" still goes through. Last-wo
 
 On a match the shim drops that assistant text and the matching `session/prompt` result, then replays the same prompt on the live child. If the child is dead, it respawns and re-runs `initialize` / `authenticate` / `session/load` only as far as needed, carrying `cwd` and `mcpServers` from the original `session/new` or `session/load`. It does not invent a Cursor-internal session with `session/new`. After the retry budget it returns a JSON-RPC error (`-32000`) so T3 never sees the flake as last words. Thought chunks and quoted ConnectError inside a real answer are not fingerprints.
 
-Intercepts log to stderr, never to the ACP stream:
+Intercepts log to stderr, never to the ACP stream. Each replay waits first (2s, then 4s, 8s, 16s, 32s, then 60s for the rest). `session/cancel` during that wait aborts it and does not replay.
 
 ```text
-t3-cursor-acp: swallowed spurious Cursor ACP network death; replaying session/prompt (attempt 2/3)
+t3-cursor-acp: swallowed spurious Cursor ACP network death; retrying in 2000ms (attempt 2/11)
 ```
 
 ## T3 command override
@@ -77,4 +77,4 @@ Uninstall:
 bun run packages/cursor-acp-shim/scripts/install.ts --uninstall
 ```
 
-Override the real Cursor binary with `T3_CURSOR_ACP_BIN=/absolute/path/to/cursor-agent` if the versioned `~/.local/share/cursor-agent/versions/*/cursor-agent` layout is missing. Retry budget is `T3_CURSOR_ACP_MAX_RETRIES` (default `2`, meaning three attempts).
+Override the real Cursor binary with `T3_CURSOR_ACP_BIN=/absolute/path/to/cursor-agent` if the versioned `~/.local/share/cursor-agent/versions/*/cursor-agent` layout is missing. Retry budget is `T3_CURSOR_ACP_MAX_RETRIES` (default `10`, meaning eleven attempts: the first try plus ten replays). Replays wait 2s × 2 each time, capped at 60s per wait.
