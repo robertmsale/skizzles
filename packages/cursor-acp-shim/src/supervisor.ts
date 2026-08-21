@@ -9,8 +9,15 @@ import {
 } from "./fingerprint.ts";
 import { encodeFrame, readFrames, writeFrame, type Frame, type FrameStyle, type JsonRpcMessage } from "./framing.ts";
 
-export const DEFAULT_MAX_RETRIES = 2;
+export const DEFAULT_MAX_RETRIES = 10;
+export const RETRY_BACKOFF_BASE_MS = 2_000;
+export const RETRY_BACKOFF_MAX_MS = 60_000;
 export const STRUCTURED_ERROR_CODE = -32_000;
+
+export function retryBackoffMs(failedAttemptCount: number): number {
+  const exponent = Math.max(0, Math.min(Math.trunc(failedAttemptCount) - 1, 16));
+  return Math.min(RETRY_BACKOFF_BASE_MS * (2 ** exponent), RETRY_BACKOFF_MAX_MS);
+}
 
 export type SupervisorIo = {
   stdin: Readable;
@@ -36,6 +43,7 @@ export type SupervisorOptions = {
   spawn?: SpawnChild;
   maxRetries?: number;
   log?: (line: string) => void;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 };
 
 type HeldRequest = {
@@ -55,6 +63,7 @@ type HeldRequest = {
   cancelled: boolean;
   childHasPrompt: boolean;
   sameChildReplayGeneration?: number;
+  backoffAbort?: AbortController;
 };
 
 type Handshake = {
@@ -71,6 +80,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   const log = options.log ?? ((line: string) => {
     options.io.stderr.write(`${line}\n`);
   });
+  const sleep = options.sleep ?? sleepWithAbort;
   const spawnChild = options.spawn ?? spawnRealChild;
   const handshake: Handshake = {};
   let style: FrameStyle = "ndjson";
@@ -88,6 +98,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   const t3Loop = pumpT3();
   await t3Loop;
   closedByT3 = true;
+  held?.backoffAbort?.abort();
   child.kill("SIGTERM");
   return 0;
 
@@ -161,6 +172,7 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         held.cancelled = true;
         held.sawWork = true;
         held.sameChildReplayGeneration = undefined;
+        held.backoffAbort?.abort();
       }
       try {
         await writeChild(frame.bytes);
@@ -255,7 +267,8 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
     // Swallow the class matcher at any point in the turn; ignore sawWork/flushed.
     const flake = isSpuriousNetworkDeath(held.assistantText);
     if (flake && held.attempts <= maxRetries) {
-      log(`t3-cursor-acp: swallowed spurious Cursor ACP network death; replaying session/prompt (attempt ${held.attempts + 1}/${maxRetries + 1})`);
+      const delayMs = retryBackoffMs(held.attempts);
+      log(`t3-cursor-acp: swallowed spurious Cursor ACP network death; retrying in ${delayMs}ms (attempt ${held.attempts + 1}/${maxRetries + 1})`);
       await replayHeld(childAlive() ? "same-child" : "respawn", true);
       return;
     }
@@ -284,7 +297,19 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
           await failHeld(`Cursor ACP stream failed after ${held.attempts} attempts`);
           return;
         }
-        if (increment) held.attempts += 1;
+        held.childHasPrompt = false;
+        if (increment) {
+          if (await waitForBackoff(retryBackoffMs(held.attempts)) === "cancelled") {
+            if (closedByT3) return;
+            if (held && !held.childHasPrompt) await finishCancelled();
+            return;
+          }
+          if (!held || held.cancelled) {
+            if (held && !held.childHasPrompt) await finishCancelled();
+            return;
+          }
+          held.attempts += 1;
+        }
         increment = true;
         held.assistantText = "";
         held.cancelText = "";
@@ -292,7 +317,6 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
         held.forwardedAssistantLength = 0;
         held.flushed = false;
         held.sawWork = false;
-        held.childHasPrompt = false;
         held.sameChildReplayGeneration = undefined;
         let sameChild = nextMode === "same-child" && childAlive();
         if (!sameChild) {
@@ -452,7 +476,8 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
       return;
     }
     if (held.attempts <= maxRetries) {
-      log(`t3-cursor-acp: child exited ${code} during session/prompt; respawning`);
+      const delayMs = retryBackoffMs(held.attempts);
+      log(`t3-cursor-acp: child exited ${code} during session/prompt; retrying in ${delayMs}ms (attempt ${held.attempts + 1}/${maxRetries + 1})`);
       await replayHeld("respawn", true);
       return;
     }
@@ -601,6 +626,22 @@ export async function runSupervisor(options: SupervisorOptions): Promise<number>
   async function writeChild(bytes: Buffer): Promise<void> {
     await writeFrame(child.stdin, bytes);
   }
+
+  async function waitForBackoff(delayMs: number): Promise<"ok" | "cancelled"> {
+    if (!held || held.cancelled || closedByT3) return "cancelled";
+    const controller = new AbortController();
+    held.backoffAbort = controller;
+    try {
+      await sleep(delayMs, controller.signal);
+      return held.cancelled || closedByT3 ? "cancelled" : "ok";
+    } catch (error) {
+      if (held?.cancelled || closedByT3 || isAbortError(error)) return "cancelled";
+      log(`t3-cursor-acp: retry backoff failed (${errorString(error)}); continuing replay`);
+      return "ok";
+    } finally {
+      if (held?.backoffAbort === controller) held.backoffAbort = undefined;
+    }
+  }
 }
 
 export function spawnRealChild(command: string, args: string[]): ChildHandle {
@@ -636,6 +677,31 @@ function isChildClientRequest(message: JsonRpcMessage): boolean {
     && message.id !== null
     && message.result === undefined
     && message.error === undefined;
+}
+
+async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw abortError();
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(): Error {
+  const error = new Error("This operation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function errorString(error: unknown): string {

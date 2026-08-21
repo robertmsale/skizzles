@@ -23,6 +23,7 @@ export async function runFakeAcp(options: {
   stdout: NodeJS.WritableStream;
   mode?: FakeAcpMode;
   flakeText?: string;
+  flakeCount?: number;
   preDumpText?: string;
   successText?: string;
   successChunks?: string[];
@@ -102,7 +103,7 @@ export async function runFakeAcp(options: {
       prompts += 1;
       if (options.crashOnPrompt) return;
       if (options.exitBeforeAnyFrameOnPrompt && prompts === options.exitBeforeAnyFrameOnPrompt) return;
-      const flake = mode === "always-flake" || (mode === "flake-then-ok" && prompts === 1);
+      const flake = mode === "always-flake" || (mode === "flake-then-ok" && prompts <= (options.flakeCount ?? 1));
       if (options.partialThenExit && prompts >= 2) {
         const params = asRecord(message.params);
         const sessionId = typeof params?.sessionId === "string" ? params.sessionId : "sess-1";

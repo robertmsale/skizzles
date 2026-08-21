@@ -24,11 +24,13 @@ export async function cliMain(argv: string[], env = process.env): Promise<number
   });
 }
 
-function parseRetries(value: string | undefined): number {
+export const MAX_RETRY_OVERRIDE = DEFAULT_MAX_RETRIES;
+
+export function parseRetries(value: string | undefined): number {
   if (!value?.trim()) return DEFAULT_MAX_RETRIES;
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 8) {
-    throw new Error("T3_CURSOR_ACP_MAX_RETRIES must be an integer from 0 through 8");
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > MAX_RETRY_OVERRIDE) {
+    throw new Error(`T3_CURSOR_ACP_MAX_RETRIES must be an integer from 0 through ${MAX_RETRY_OVERRIDE}`);
   }
   return parsed;
 }
