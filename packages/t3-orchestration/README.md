@@ -15,8 +15,8 @@ Optional Skizzles sidecar tooling for orchestrating T3 Code tasks through its su
 - `t3-orchestrationd` owns the least-privilege T3 bearer from macOS Keychain.
 - `t3ctl` talks to the daemon over a same-user Unix socket.
 - T3 SQLite and Codex SQLite are read-only identity/configuration sources; mutations use T3 dispatch.
-- New root tasks always use T3's worktree bootstrap. The CLI exposes a bounded provider selector, never model or reasoning flags.
-- Codex remains the default provider and uses the explicit top-level defaults in `~/.codex/config.toml`. `--provider grok` selects the installed Grok harness with Grok 4.6. `--provider cursor` selects this machine's T3 Cursor instance with catalog model `grok-4.6`, option `reasoning=high`, and `fastMode=false` (Cursor Grok 4.6 High, not Fast). Messages replay the recipient's exact saved selection. Profile/CLI model overrides are intentionally not inherited. New Cursor work requires a new task; an existing thread's provider cannot be flipped by messaging it.
+- New root tasks always use T3's worktree bootstrap. The CLI exposes a bounded provider selector and an optional per-spawn `--model` override. It does not expose reasoning flags.
+- Codex remains the default provider and uses the explicit top-level defaults in `~/.codex/config.toml`. `--provider grok` selects the installed Grok harness with Grok 4.6. `--provider cursor` selects this machine's T3 Cursor instance with catalog model `grok-4.6`, option `reasoning=high`, and `fastMode=false` (Cursor Grok 4.6 High, not Fast). `--model SLUG` replaces only the catalog model on that create/handoff; instanceId, Codex reasoning effort / service tier from `config.toml`, and Cursor reasoning/fastMode defaults stay as they are today. The override still fails closed if the T3 catalog does not expose that slug. Messages replay the recipient's exact saved selection. Profile/CLI model overrides are intentionally not inherited. New Cursor work requires a new task; an existing thread's provider cannot be flipped by messaging it.
 
 ## First-time setup
 
@@ -160,7 +160,7 @@ Pinned tasks are always included first and do not consume the recent-task limit.
 For an explicitly authorized one-time ingress from an external Codex client:
 
 ```sh
-t3ctl handoff create --project <id> --title <title> --message <handoff> [--provider grok|cursor]
+t3ctl handoff create --project <id> --title <title> --message <handoff> [--provider grok|cursor] [--model SLUG]
 ```
 
 Tasks can read a bounded window of another task's conversation in the same T3 installation, including across projects. The default is three user-anchored turns and the hard maximum is ten:

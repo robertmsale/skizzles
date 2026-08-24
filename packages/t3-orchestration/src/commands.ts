@@ -8,7 +8,7 @@ export type CommandDependencies = {
   projectList(): Promise<unknown>;
   taskList(options: TaskListOptions): Promise<unknown>;
   taskWait(input: TaskWaitInput): Promise<unknown>;
-  createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string }): Promise<unknown>;
+  createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string }): Promise<unknown>;
   sendTask(threadId: string, message: string): Promise<unknown>;
   taskStatus(threadId: string): Promise<unknown>;
   taskHistory(threadId: string, turns: number, before?: string): Promise<unknown>;
@@ -67,6 +67,7 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
       message: String(command.message),
       ...(command.baseBranch ? { baseBranch: String(command.baseBranch) } : {}),
       ...(command.provider ? { provider: String(command.provider) } : {}),
+      ...(command.model ? { model: String(command.model) } : {}),
     });
     case "tasks.create": return dependencies.createTask({
       projectId: String(projectId),
@@ -74,6 +75,7 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
       message: String(command.message),
       ...(command.baseBranch ? { baseBranch: String(command.baseBranch) } : {}),
       ...(command.provider ? { provider: String(command.provider) } : {}),
+      ...(command.model ? { model: String(command.model) } : {}),
     });
     case "tasks.list": return dependencies.taskList({
       limit: Number(command.limit),

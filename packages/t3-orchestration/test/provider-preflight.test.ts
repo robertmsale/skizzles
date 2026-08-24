@@ -47,4 +47,34 @@ describe("task provider preflight", () => {
       }],
     }, selection)).toThrow("does not expose model 'grok-4.6'");
   });
+
+  test("preflights an explicit Codex model override against the live catalog slug", () => {
+    const overridden = {
+      instanceId: "codex",
+      model: "xai/grok-4.6",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    };
+    expect(requireAvailableProviderSelection({
+      providers: [{
+        instanceId: "codex",
+        driver: "codex",
+        enabled: true,
+        installed: true,
+        status: "ready",
+        availability: "available",
+        models: [{ slug: "xai/grok-4.6" }],
+      }],
+    }, overridden)).toBe("codex");
+    expect(() => requireAvailableProviderSelection({
+      providers: [{
+        instanceId: "codex",
+        driver: "codex",
+        enabled: true,
+        installed: true,
+        status: "ready",
+        availability: "available",
+        models: [{ slug: "gpt-5.4" }],
+      }],
+    }, overridden)).toThrow("T3 provider 'codex' does not expose model 'xai/grok-4.6'");
+  });
 });
