@@ -42,7 +42,7 @@ describe("task provider defaults", () => {
     );
   });
 
-  test("overrides only the model slug and keeps provider option defaults", async () => {
+  test("overrides only the model slug and keeps Grok/Cursor option defaults", async () => {
     expect(await taskProviderDefaults("grok", "xai/grok-4.6")).toEqual({
       instanceId: "grok",
       model: "xai/grok-4.6",
@@ -82,11 +82,11 @@ describe("task provider defaults", () => {
     });
   });
 
-  test("reads Codex defaults from an isolated config.toml and overrides only the model", async () => {
+  test("omit --model still reads Codex defaults from an isolated config.toml", async () => {
     const root = await mkdtemp("/tmp/t3-codex-defaults-");
     const configPath = join(root, "config.toml");
     const config = [
-      'model = "gpt-5.4"',
+      'model = "gpt-5.6-sol"',
       'model_reasoning_effort = "xhigh"',
       'model_provider = "openai"',
       'service_tier = "flex"',
@@ -97,8 +97,7 @@ describe("task provider defaults", () => {
       const script = `
         const { taskProviderDefaults } = await import(${JSON.stringify(resolve(import.meta.dir, "../src/config.ts"))});
         const omitted = await taskProviderDefaults("codex");
-        const overridden = await taskProviderDefaults("codex", "xai/grok-4.6");
-        console.log(JSON.stringify({ omitted, overridden }));
+        console.log(JSON.stringify(omitted));
       `;
       const process = Bun.spawn(["bun", "-e", script], {
         env: { ...Bun.env, CODEX_HOME: root },
@@ -113,26 +112,90 @@ describe("task provider defaults", () => {
       expect(stderr).toBe("");
       expect(exitCode).toBe(0);
       expect(JSON.parse(stdout)).toEqual({
-        omitted: {
-          instanceId: "codex",
-          model: "gpt-5.4",
-          options: [
-            { id: "reasoningEffort", value: "xhigh" },
-            { id: "serviceTier", value: "flex" },
-          ],
-        },
-        overridden: {
-          instanceId: "codex",
-          model: "xai/grok-4.6",
-          options: [
-            { id: "reasoningEffort", value: "xhigh" },
-            { id: "serviceTier", value: "flex" },
-          ],
-        },
+        instanceId: "codex",
+        model: "gpt-5.6-sol",
+        options: [
+          { id: "reasoningEffort", value: "xhigh" },
+          { id: "serviceTier", value: "flex" },
+        ],
       });
       expect(await Bun.file(configPath).text()).toBe(config);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Codex --model never reads or writes config.toml", async () => {
+    const missing = await mkdtemp("/tmp/t3-codex-missing-");
+    const broken = await mkdtemp("/tmp/t3-codex-broken-");
+    const brokenPath = join(broken, "config.toml");
+    const brokenConfig = [
+      "model = 123",
+      'other = "not-enough"',
+      "",
+    ].join("\n");
+    await writeFile(brokenPath, brokenConfig);
+    try {
+      const script = `
+        const { taskProviderDefaults } = await import(${JSON.stringify(resolve(import.meta.dir, "../src/config.ts"))});
+        const missingHome = process.env.CODEX_HOME;
+        const missingSelection = await taskProviderDefaults("codex", "xai/grok-4.6");
+        const openaiSelection = await taskProviderDefaults("openai", "xai/grok-4.6");
+        console.log(JSON.stringify({ missingHome, missingSelection, openaiSelection }));
+      `;
+      const omitScript = `
+        const { taskProviderDefaults } = await import(${JSON.stringify(resolve(import.meta.dir, "../src/config.ts"))});
+        await taskProviderDefaults("codex");
+      `;
+      const missingProcess = Bun.spawn(["bun", "-e", script], {
+        env: { ...Bun.env, CODEX_HOME: missing },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const brokenProcess = Bun.spawn(["bun", "-e", script], {
+        env: { ...Bun.env, CODEX_HOME: broken },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const omitBroken = Bun.spawn(["bun", "-e", omitScript], {
+        env: { ...Bun.env, CODEX_HOME: broken },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const expected = {
+        instanceId: "codex",
+        model: "xai/grok-4.6",
+        options: [],
+      };
+      for (const child of [missingProcess, brokenProcess]) {
+        const [exitCode, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        expect(stderr).toBe("");
+        expect(exitCode).toBe(0);
+        const result = JSON.parse(stdout) as {
+          missingHome: string;
+          missingSelection: unknown;
+          openaiSelection: unknown;
+        };
+        expect(result.missingSelection).toEqual(expected);
+        expect(result.openaiSelection).toEqual(expected);
+      }
+      const [omitExit, omitStdout, omitStderr] = await Promise.all([
+        omitBroken.exited,
+        new Response(omitBroken.stdout).text(),
+        new Response(omitBroken.stderr).text(),
+      ]);
+      expect(omitExit).not.toBe(0);
+      expect(omitStdout).toBe("");
+      expect(omitStderr).toContain("config.toml must define model, model_reasoning_effort, and model_provider");
+      expect(await Bun.file(join(missing, "config.toml")).exists()).toBe(false);
+      expect(await Bun.file(brokenPath).text()).toBe(brokenConfig);
+    } finally {
+      await rm(missing, { recursive: true, force: true });
+      await rm(broken, { recursive: true, force: true });
     }
   });
 });
