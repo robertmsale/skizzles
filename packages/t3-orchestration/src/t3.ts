@@ -376,10 +376,11 @@ function catalogReasoningEffort(model: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-// Hypothesis (verified against T3 contracts + CodexSessionRuntime): T3 accepts
-// a Codex ModelSelection with no options and applies catalog current/default,
-// then "medium". Fill only missing reasoningEffort from the catalog so spawn
-// never reads config.toml and never invents a Skizzles default.
+// T3 CodexSessionRuntime uses catalog current/default, then "medium". Persist
+// that same fallback so the saved thread can pass requireSelection on follow-up
+// send. Never read config.toml for this value.
+const T3_CODEX_SESSION_REASONING_FALLBACK = "medium";
+
 export function applyCatalogSelectionDefaults(config: unknown, selection: ModelSelection): ModelSelection {
   if (selection.instanceId !== "codex" || selection.options.some((entry) => entry.id === "reasoningEffort")) {
     return selection;
@@ -387,8 +388,7 @@ export function applyCatalogSelectionDefaults(config: unknown, selection: ModelS
   const model = catalogModels(config, selection.instanceId).find((entry) =>
     Boolean(entry && typeof entry === "object" && (entry as { slug?: unknown }).slug === selection.model)
   );
-  const effort = catalogReasoningEffort(model);
-  if (!effort) return selection;
+  const effort = catalogReasoningEffort(model) ?? T3_CODEX_SESSION_REASONING_FALLBACK;
   return { ...selection, options: [...selection.options, { id: "reasoningEffort", value: effort }] };
 }
 

@@ -1586,14 +1586,13 @@ function catalogReasoningEffort(model) {
   const value = catalogOptionCurrentValue(reasoning);
   return typeof value === "string" && value.trim() ? value : undefined;
 }
+var T3_CODEX_SESSION_REASONING_FALLBACK = "medium";
 function applyCatalogSelectionDefaults(config, selection) {
   if (selection.instanceId !== "codex" || selection.options.some((entry) => entry.id === "reasoningEffort")) {
     return selection;
   }
   const model = catalogModels(config, selection.instanceId).find((entry) => Boolean(entry && typeof entry === "object" && entry.slug === selection.model));
-  const effort = catalogReasoningEffort(model);
-  if (!effort)
-    return selection;
+  const effort = catalogReasoningEffort(model) ?? T3_CODEX_SESSION_REASONING_FALLBACK;
   return { ...selection, options: [...selection.options, { id: "reasoningEffort", value: effort }] };
 }
 async function preflightProviderSelection(selection) {

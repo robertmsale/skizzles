@@ -91,10 +91,10 @@ export async function taskProviderDefaults(provider: string | undefined, model?:
     case "openai":
       // `--model` tells T3 to use that catalog slug. Do not open
       // CODEX_HOME/config.toml to copy reasoningEffort or serviceTier.
-      // Hypothesis (verified against T3 contracts): ModelSelection.options is
-      // optional; Codex session runtime falls back to catalog current/default,
-      // then "medium". applyCatalogSelectionDefaults fills catalog currents
-      // during preflight. Omit --model keeps Rob's config.toml defaults.
+      // applyCatalogSelectionDefaults fills missing reasoningEffort from the
+      // T3 catalog current/default, else T3's session fallback "medium", so
+      // follow-up send can pass requireSelection. Omit --model keeps Rob's
+      // config.toml defaults.
       if (override) {
         return { instanceId: "codex", model: override, options: [] };
       }

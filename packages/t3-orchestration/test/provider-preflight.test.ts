@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { applyCatalogSelectionDefaults, requireAvailableProviderSelection } from "../src/t3.ts";
+import { requireSelection } from "../src/protocol.ts";
+import { applyCatalogSelectionDefaults, requireAvailableProviderSelection, taskTurnCommand } from "../src/t3.ts";
 
 const selection = { instanceId: "grok", model: "grok-4.6", options: [] };
 
@@ -125,12 +126,29 @@ describe("task provider preflight", () => {
       model: "xai/grok-4.6",
       options: [{ id: "reasoningEffort", value: "medium" }],
     });
-    expect(applyCatalogSelectionDefaults({
+    const withoutDescriptor = applyCatalogSelectionDefaults({
       providers: [{
         instanceId: "codex",
         models: [{ slug: "xai/grok-4.6" }],
       }],
-    }, requested)).toEqual(requested);
+    }, requested);
+    expect(withoutDescriptor).toEqual({
+      instanceId: "codex",
+      model: "xai/grok-4.6",
+      options: [{ id: "reasoningEffort", value: "medium" }],
+    });
+    expect(requireSelection(withoutDescriptor)).toEqual(withoutDescriptor);
+    expect(taskTurnCommand({
+      id: "target",
+      projectId: "project",
+      title: "Target",
+      modelSelection: withoutDescriptor,
+      runtimeMode: "auto",
+      interactionMode: "default",
+      worktreePath: "/tmp/worktree",
+      branch: "t3code/target",
+      session: null,
+    }, "continue").modelSelection).toEqual(withoutDescriptor);
     expect(applyCatalogSelectionDefaults({
       providers: [{
         instanceId: "codex",
