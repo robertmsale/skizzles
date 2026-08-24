@@ -122,10 +122,14 @@ function applyTaskModelOverride(selection, model) {
   return requireSelection({ ...selection, model: override });
 }
 async function taskProviderDefaults(provider, model) {
+  const override = model?.trim();
   switch (provider?.trim().toLowerCase() || "codex") {
     case "codex":
     case "openai":
-      return applyTaskModelOverride(await codexDefaults(), model);
+      if (override) {
+        return { instanceId: "codex", model: override, options: [] };
+      }
+      return codexDefaults();
     case "grok":
       return applyTaskModelOverride(requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] }), model);
     case "cursor":
