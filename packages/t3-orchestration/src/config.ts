@@ -78,29 +78,38 @@ export async function codexDefaults(): Promise<ModelSelection> {
   return selection;
 }
 
-export async function taskProviderDefaults(provider: string | undefined): Promise<ModelSelection> {
+export function applyTaskModelOverride(selection: ModelSelection, model?: string): ModelSelection {
+  const override = model?.trim();
+  if (!override) return selection;
+  return requireSelection({ ...selection, model: override });
+}
+
+export async function taskProviderDefaults(provider: string | undefined, model?: string): Promise<ModelSelection> {
   switch (provider?.trim().toLowerCase() || "codex") {
     case "codex":
     case "openai":
-      return codexDefaults();
+      return applyTaskModelOverride(await codexDefaults(), model);
     case "grok":
       // T3's Grok ACP provider currently exposes no model option descriptors.
       // Reasoning is owned by the installed Grok harness, not by task creators.
-      return requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] });
+      return applyTaskModelOverride(
+        requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] }),
+        model,
+      );
     case "cursor":
       // Discovered from this machine's live T3 catalog: instanceId `cursor`,
       // model slug `grok-4.6` ("Cursor Grok 4.6"), option id `reasoning`
       // value `high`, and boolean `fastMode`. Catalog currentValue for
       // fastMode is true; pin false so `--provider cursor` is Grok 4.6 High,
       // not High Fast.
-      return requireSelection({
+      return applyTaskModelOverride(requireSelection({
         instanceId: CURSOR_INSTANCE_ID,
         model: CURSOR_DEFAULT_MODEL,
         options: [
           { id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH },
           { id: CURSOR_FAST_MODE_OPTION_ID, value: false },
         ],
-      });
+      }), model);
     default:
       throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
   }

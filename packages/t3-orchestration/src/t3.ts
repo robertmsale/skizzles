@@ -390,8 +390,8 @@ async function gitBaseBranch(workspaceRoot: string): Promise<string> {
   return branch;
 }
 
-export async function createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string }): Promise<{ sequence: number; threadId: string; model: ModelSelection; worktreeRequired: true }> {
-  const selection = await taskProviderDefaults(input.provider);
+export async function createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string }): Promise<{ sequence: number; threadId: string; model: ModelSelection; worktreeRequired: true }> {
+  const selection = await taskProviderDefaults(input.provider, input.model);
   const runtimeMode = taskRuntimeMode(input.provider);
   await preflightProviderSelection(selection);
   const projects = await snapshot();

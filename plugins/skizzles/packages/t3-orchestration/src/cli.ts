@@ -49,10 +49,12 @@ function requireSelection(value, providerDriver) {
 var exports_config = {};
 __export(exports_config, {
   token: () => token,
+  taskRuntimeMode: () => taskRuntimeMode,
   taskProviderDefaults: () => taskProviderDefaults,
   parseTailscaleGatewayPort: () => parseTailscaleGatewayPort,
   origin: () => origin,
   codexDefaults: () => codexDefaults,
+  applyTaskModelOverride: () => applyTaskModelOverride,
   TAILSCALE_GATEWAY_PORT: () => TAILSCALE_GATEWAY_PORT,
   TAILSCALE_ALLOWED_USERS: () => TAILSCALE_ALLOWED_USERS,
   T3_HOME: () => T3_HOME,
@@ -113,24 +115,41 @@ async function codexDefaults() {
   }
   return selection;
 }
-async function taskProviderDefaults(provider) {
+function applyTaskModelOverride(selection, model) {
+  const override = model?.trim();
+  if (!override)
+    return selection;
+  return requireSelection({ ...selection, model: override });
+}
+async function taskProviderDefaults(provider, model) {
   switch (provider?.trim().toLowerCase() || "codex") {
     case "codex":
     case "openai":
-      return codexDefaults();
+      return applyTaskModelOverride(await codexDefaults(), model);
     case "grok":
-      return requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] });
+      return applyTaskModelOverride(requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] }), model);
     case "cursor":
-      return requireSelection({
+      return applyTaskModelOverride(requireSelection({
         instanceId: CURSOR_INSTANCE_ID,
         model: CURSOR_DEFAULT_MODEL,
         options: [
           { id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH },
           { id: CURSOR_FAST_MODE_OPTION_ID, value: false }
         ]
-      });
+      }), model);
     default:
       throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
+  }
+}
+function taskRuntimeMode(provider) {
+  switch (provider?.trim().toLowerCase() || "codex") {
+    case "grok":
+    case "cursor":
+      return "full-access";
+    case "codex":
+    case "openai":
+    default:
+      return "auto";
   }
 }
 var home, CODEX_HOME, T3_HOME, SOCKET_PATH, DEFAULT_TAILSCALE_GATEWAY_PORT = 43773, TAILSCALE_GATEWAY_PORT, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, GROK_DEFAULT_MODEL = "grok-4.6", CURSOR_INSTANCE_ID = "cursor", CURSOR_DEFAULT_MODEL = "grok-4.6", CURSOR_REASONING_OPTION_ID = "reasoning", CURSOR_REASONING_HIGH = "high", CURSOR_FAST_MODE_OPTION_ID = "fastMode", SUPPORTED_PROVIDERS = "codex, grok, cursor";
@@ -2476,8 +2495,8 @@ var clientDeadlineMs = resolveClientDeadlineMs();
 var maxWaitMs = maxWaitTimeoutMs(clientDeadlineMs);
 var USAGE = `t3ctl remote {configure --url HTTPS_URL|status|clear}
 t3ctl projects {list|import}
-t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor]
-t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor]
+t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG]
+t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG]
 t3ctl tasks list [--project ID] [--limit 1..200] [--include-settled] [--include-archived]
 t3ctl tasks {read|history|status} ID
 t3ctl tasks wait ID [ID ...] [--timeout-ms 0..${maxWaitMs}] [--after ID=CURSOR]
@@ -2609,7 +2628,7 @@ var waitIds = () => {
   return ids;
 };
 var callerThreadId = process.env.CODEX_THREAD_ID?.trim();
-var payload = group === "projects" && action === "import" ? { op: "projects.import" } : group === "projects" && action === "list" ? { op: "projects.list" } : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider") } : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" } : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3600000), clientDeadlineMs), after: waitAfter() } : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") } : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") } : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") } : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() } : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() } : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() } : group === "worktrees" && action === "clean-settled" ? { op: "worktrees.clean-settled", dryRun: option("dry-run") === "true" } : (() => {
+var payload = group === "projects" && action === "import" ? { op: "projects.import" } : group === "projects" && action === "list" ? { op: "projects.list" } : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model") } : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model") } : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" } : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3600000), clientDeadlineMs), after: waitAfter() } : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") } : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") } : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") } : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() } : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() } : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() } : group === "worktrees" && action === "clean-settled" ? { op: "worktrees.clean-settled", dryRun: option("dry-run") === "true" } : (() => {
   throw new Error(`Usage:
   ${USAGE.replaceAll(`
 `, `

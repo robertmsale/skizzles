@@ -108,24 +108,41 @@ async function codexDefaults() {
   }
   return selection;
 }
-async function taskProviderDefaults(provider) {
+function applyTaskModelOverride(selection, model) {
+  const override = model?.trim();
+  if (!override)
+    return selection;
+  return requireSelection({ ...selection, model: override });
+}
+async function taskProviderDefaults(provider, model) {
   switch (provider?.trim().toLowerCase() || "codex") {
     case "codex":
     case "openai":
-      return codexDefaults();
+      return applyTaskModelOverride(await codexDefaults(), model);
     case "grok":
-      return requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] });
+      return applyTaskModelOverride(requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] }), model);
     case "cursor":
-      return requireSelection({
+      return applyTaskModelOverride(requireSelection({
         instanceId: CURSOR_INSTANCE_ID,
         model: CURSOR_DEFAULT_MODEL,
         options: [
           { id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH },
           { id: CURSOR_FAST_MODE_OPTION_ID, value: false }
         ]
-      });
+      }), model);
     default:
       throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
+  }
+}
+function taskRuntimeMode(provider) {
+  switch (provider?.trim().toLowerCase() || "codex") {
+    case "grok":
+    case "cursor":
+      return "full-access";
+    case "codex":
+    case "openai":
+    default:
+      return "auto";
   }
 }
 
@@ -1600,7 +1617,8 @@ async function gitBaseBranch(workspaceRoot) {
   return branch;
 }
 async function createTask(input) {
-  const selection = await taskProviderDefaults(input.provider);
+  const selection = await taskProviderDefaults(input.provider, input.model);
+  const runtimeMode = taskRuntimeMode(input.provider);
   await preflightProviderSelection(selection);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
@@ -1614,11 +1632,11 @@ async function createTask(input) {
     threadId,
     message: { messageId: id(), role: "user", text: input.message, attachments: [] },
     modelSelection: selection,
-    runtimeMode: "auto",
+    runtimeMode,
     interactionMode: "default",
     createdAt,
     bootstrap: {
-      createThread: { projectId: project.id, title: input.title, modelSelection: selection, runtimeMode: "auto", interactionMode: "default", branch: baseBranch, worktreePath: null, createdAt },
+      createThread: { projectId: project.id, title: input.title, modelSelection: selection, runtimeMode, interactionMode: "default", branch: baseBranch, worktreePath: null, createdAt },
       prepareWorktree: { projectCwd: project.workspaceRoot, baseBranch, branch: `t3code/${id().replaceAll("-", "").slice(0, 8)}`, startFromOrigin: true },
       runSetupScript: true
     }
@@ -1806,7 +1824,8 @@ async function executeCommand(command, dependencies) {
         title: String(command.title),
         message: String(command.message),
         ...command.baseBranch ? { baseBranch: String(command.baseBranch) } : {},
-        ...command.provider ? { provider: String(command.provider) } : {}
+        ...command.provider ? { provider: String(command.provider) } : {},
+        ...command.model ? { model: String(command.model) } : {}
       });
     case "tasks.create":
       return dependencies.createTask({
@@ -1814,7 +1833,8 @@ async function executeCommand(command, dependencies) {
         title: String(command.title),
         message: String(command.message),
         ...command.baseBranch ? { baseBranch: String(command.baseBranch) } : {},
-        ...command.provider ? { provider: String(command.provider) } : {}
+        ...command.provider ? { provider: String(command.provider) } : {},
+        ...command.model ? { model: String(command.model) } : {}
       });
     case "tasks.list":
       return dependencies.taskList({

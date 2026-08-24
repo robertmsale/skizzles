@@ -45,7 +45,8 @@ describe("cross-project collaboration CLI", () => {
     ]);
     expect(exitCode).toBe(0);
     const help = JSON.parse(stdout) as { help: string };
-    expect(help.help).toContain("t3ctl tasks create");
+    expect(help.help).toContain("t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG]");
+    expect(help.help).toContain("t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG]");
     expect(help.help).toContain("t3ctl tasks approvals");
     expect(help.help).toContain("t3ctl tasks approve ID [REQUEST_ID]");
     expect(help.help).toContain("t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]");
@@ -269,6 +270,39 @@ describe("cross-project collaboration CLI", () => {
       title: "Cursor task",
       message: "work",
       provider: "cursor",
+    });
+  });
+
+  test("forwards an optional per-spawn model override on create and handoff", async () => {
+    expect(await captureCli([
+      "tasks", "create",
+      "--title", "Codex grok",
+      "--message", "work",
+      "--provider", "codex",
+      "--model", "xai/grok-4.6",
+    ])).toEqual({
+      op: "tasks.create",
+      callerThreadId: "desktop-root",
+      projectId: "current",
+      title: "Codex grok",
+      message: "work",
+      provider: "codex",
+      model: "xai/grok-4.6",
+    });
+    expect(await captureCli([
+      "handoff", "create",
+      "--project", "destination",
+      "--title", "Ingress",
+      "--message", "work",
+      "--provider", "codex",
+      "--model", "xai/grok-4.6",
+    ])).toEqual({
+      op: "handoff.create",
+      projectId: "destination",
+      title: "Ingress",
+      message: "work",
+      provider: "codex",
+      model: "xai/grok-4.6",
     });
   });
 

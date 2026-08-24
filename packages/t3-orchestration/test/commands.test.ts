@@ -55,6 +55,21 @@ describe("daemon command routing", () => {
       message: "work",
       provider: "grok",
     });
+    expect(await executeCommand({
+      op: "tasks.create",
+      callerThreadId: "codex",
+      projectId: "current",
+      title: "Child",
+      message: "work",
+      provider: "codex",
+      model: "xai/grok-4.6",
+    }, deps)).toEqual({
+      projectId: "own-project",
+      title: "Child",
+      message: "work",
+      provider: "codex",
+      model: "xai/grok-4.6",
+    });
     await expect(executeCommand({ op: "tasks.create", callerThreadId: "codex", projectId: "other-project", title: "Child", message: "work" }, deps)).rejects.toThrow("only in its own T3 project");
   });
 
@@ -63,6 +78,20 @@ describe("daemon command routing", () => {
       projectId: "destination",
       title: "Ingress",
       message: "work",
+    });
+    expect(await executeCommand({
+      op: "handoff.create",
+      projectId: "destination",
+      title: "Ingress",
+      message: "work",
+      provider: "codex",
+      model: "xai/grok-4.6",
+    }, dependencies())).toEqual({
+      projectId: "destination",
+      title: "Ingress",
+      message: "work",
+      provider: "codex",
+      model: "xai/grok-4.6",
     });
   });
 
