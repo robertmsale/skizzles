@@ -85,10 +85,20 @@ export function applyTaskModelOverride(selection: ModelSelection, model?: string
 }
 
 export async function taskProviderDefaults(provider: string | undefined, model?: string): Promise<ModelSelection> {
+  const override = model?.trim();
   switch (provider?.trim().toLowerCase() || "codex") {
     case "codex":
     case "openai":
-      return applyTaskModelOverride(await codexDefaults(), model);
+      // `--model` tells T3 to use that catalog slug. Do not open
+      // CODEX_HOME/config.toml to copy reasoningEffort or serviceTier.
+      // applyCatalogSelectionDefaults fills missing reasoningEffort from the
+      // T3 catalog current/default, else T3's session fallback "medium", so
+      // follow-up send can pass requireSelection. Omit --model keeps Rob's
+      // config.toml defaults.
+      if (override) {
+        return { instanceId: "codex", model: override, options: [] };
+      }
+      return codexDefaults();
     case "grok":
       // T3's Grok ACP provider currently exposes no model option descriptors.
       // Reasoning is owned by the installed Grok harness, not by task creators.

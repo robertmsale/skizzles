@@ -115,10 +115,14 @@ function applyTaskModelOverride(selection, model) {
   return requireSelection({ ...selection, model: override });
 }
 async function taskProviderDefaults(provider, model) {
+  const override = model?.trim();
   switch (provider?.trim().toLowerCase() || "codex") {
     case "codex":
     case "openai":
-      return applyTaskModelOverride(await codexDefaults(), model);
+      if (override) {
+        return { instanceId: "codex", model: override, options: [] };
+      }
+      return codexDefaults();
     case "grok":
       return applyTaskModelOverride(requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] }), model);
     case "cursor":
@@ -1556,9 +1560,49 @@ function requireAvailableProviderSelection(config, selection) {
     throw new Error(`T3 provider '${selection.instanceId}' does not expose model '${selection.model}'`);
   return provider.driver;
 }
+function catalogModels(config, instanceId) {
+  const providers = config && typeof config === "object" && "providers" in config ? config.providers : undefined;
+  if (!Array.isArray(providers))
+    return [];
+  const provider = providers.find((entry) => Boolean(entry && typeof entry === "object" && entry.instanceId === instanceId));
+  return Array.isArray(provider?.models) ? provider.models : [];
+}
+function catalogOptionCurrentValue(descriptor) {
+  if (!descriptor || typeof descriptor !== "object")
+    return;
+  const current = descriptor.currentValue;
+  if (typeof current === "string" || typeof current === "boolean" || typeof current === "number")
+    return current;
+  const choices = descriptor.options;
+  if (!Array.isArray(choices))
+    return;
+  const fallback = choices.find((choice) => Boolean(choice && typeof choice === "object" && choice.isDefault === true && typeof choice.id === "string"));
+  return fallback?.id;
+}
+function catalogReasoningEffort(model) {
+  const capabilities = model && typeof model === "object" && "capabilities" in model ? model.capabilities : undefined;
+  const descriptors = Array.isArray(capabilities?.optionDescriptors) ? capabilities.optionDescriptors : [];
+  const reasoning = descriptors.find((descriptor) => Boolean(descriptor && typeof descriptor === "object" && descriptor.id === "reasoningEffort"));
+  const value = catalogOptionCurrentValue(reasoning);
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+var T3_CODEX_SESSION_REASONING_FALLBACK = "medium";
+function applyCatalogSelectionDefaults(config, selection) {
+  if (selection.instanceId !== "codex" || selection.options.some((entry) => entry.id === "reasoningEffort")) {
+    return selection;
+  }
+  const model = catalogModels(config, selection.instanceId).find((entry) => Boolean(entry && typeof entry === "object" && entry.slug === selection.model));
+  const effort = catalogReasoningEffort(model) ?? T3_CODEX_SESSION_REASONING_FALLBACK;
+  return { ...selection, options: [...selection.options, { id: "reasoningEffort", value: effort }] };
+}
 async function preflightProviderSelection(selection) {
   const config = await requestRpc("server.getConfig", {});
   return requireAvailableProviderSelection(config, selection);
+}
+async function resolveCreateTaskSelection(selection) {
+  const config = await requestRpc("server.getConfig", {});
+  requireAvailableProviderSelection(config, selection);
+  return applyCatalogSelectionDefaults(config, selection);
 }
 function now() {
   return new Date().toISOString();
@@ -1617,9 +1661,8 @@ async function gitBaseBranch(workspaceRoot) {
   return branch;
 }
 async function createTask(input) {
-  const selection = await taskProviderDefaults(input.provider, input.model);
+  const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model));
   const runtimeMode = taskRuntimeMode(input.provider);
-  await preflightProviderSelection(selection);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
   if (!project)

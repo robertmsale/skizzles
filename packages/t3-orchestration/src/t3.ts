@@ -341,9 +341,66 @@ export function requireAvailableProviderSelection(
   return provider.driver;
 }
 
+function catalogModels(config: unknown, instanceId: string): unknown[] {
+  const providers = config && typeof config === "object" && "providers" in config
+    ? (config as { providers?: unknown }).providers
+    : undefined;
+  if (!Array.isArray(providers)) return [];
+  const provider = providers.find((entry) =>
+    Boolean(entry && typeof entry === "object" && (entry as ProviderCatalogEntry).instanceId === instanceId)
+  ) as ProviderCatalogEntry | undefined;
+  return Array.isArray(provider?.models) ? provider.models : [];
+}
+
+function catalogOptionCurrentValue(descriptor: unknown): string | boolean | number | undefined {
+  if (!descriptor || typeof descriptor !== "object") return undefined;
+  const current = (descriptor as { currentValue?: unknown }).currentValue;
+  if (typeof current === "string" || typeof current === "boolean" || typeof current === "number") return current;
+  const choices = (descriptor as { options?: unknown }).options;
+  if (!Array.isArray(choices)) return undefined;
+  const fallback = choices.find((choice) =>
+    Boolean(choice && typeof choice === "object" && (choice as { isDefault?: unknown }).isDefault === true && typeof (choice as { id?: unknown }).id === "string")
+  ) as { id: string } | undefined;
+  return fallback?.id;
+}
+
+function catalogReasoningEffort(model: unknown): string | undefined {
+  const capabilities = model && typeof model === "object" && "capabilities" in model
+    ? (model as { capabilities?: { optionDescriptors?: unknown } }).capabilities
+    : undefined;
+  const descriptors = Array.isArray(capabilities?.optionDescriptors) ? capabilities.optionDescriptors : [];
+  const reasoning = descriptors.find((descriptor) =>
+    Boolean(descriptor && typeof descriptor === "object" && (descriptor as { id?: unknown }).id === "reasoningEffort")
+  );
+  const value = catalogOptionCurrentValue(reasoning);
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+// T3 CodexSessionRuntime uses catalog current/default, then "medium". Persist
+// that same fallback so the saved thread can pass requireSelection on follow-up
+// send. Never read config.toml for this value.
+const T3_CODEX_SESSION_REASONING_FALLBACK = "medium";
+
+export function applyCatalogSelectionDefaults(config: unknown, selection: ModelSelection): ModelSelection {
+  if (selection.instanceId !== "codex" || selection.options.some((entry) => entry.id === "reasoningEffort")) {
+    return selection;
+  }
+  const model = catalogModels(config, selection.instanceId).find((entry) =>
+    Boolean(entry && typeof entry === "object" && (entry as { slug?: unknown }).slug === selection.model)
+  );
+  const effort = catalogReasoningEffort(model) ?? T3_CODEX_SESSION_REASONING_FALLBACK;
+  return { ...selection, options: [...selection.options, { id: "reasoningEffort", value: effort }] };
+}
+
 async function preflightProviderSelection(selection: ModelSelection): Promise<string> {
   const config = await requestRpc("server.getConfig", {});
   return requireAvailableProviderSelection(config, selection);
+}
+
+async function resolveCreateTaskSelection(selection: ModelSelection): Promise<ModelSelection> {
+  const config = await requestRpc("server.getConfig", {});
+  requireAvailableProviderSelection(config, selection);
+  return applyCatalogSelectionDefaults(config, selection);
 }
 
 function now() { return new Date().toISOString(); }
@@ -391,9 +448,8 @@ async function gitBaseBranch(workspaceRoot: string): Promise<string> {
 }
 
 export async function createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string }): Promise<{ sequence: number; threadId: string; model: ModelSelection; worktreeRequired: true }> {
-  const selection = await taskProviderDefaults(input.provider, input.model);
+  const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model));
   const runtimeMode = taskRuntimeMode(input.provider);
-  await preflightProviderSelection(selection);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
   if (!project) throw new Error(`Active T3 project not found: ${input.projectId}`);
