@@ -42,3 +42,7 @@ the other native state fields before reading updated history.
 This package only makes HTTP requests to the configured ompweb URL. It never
 talks to T3, starts an OMP ACP process, changes OMP settings, or configures a
 reverse proxy, VPN, or Tailscale Serve route.
+
+The Skizzles Grok harness installer carries this package in its receipt-owned
+runtime directory and installs an `ompctl` convenience binary. Both source-link
+and copy installs therefore work without a separately installed global package.

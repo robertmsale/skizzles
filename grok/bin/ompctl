@@ -1,0 +1,31 @@
+#!/usr/bin/env bun
+
+import { lstatSync, realpathSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+
+const launcherDir = dirname(realpathSync(import.meta.path));
+const runtimeCandidates = [
+  resolve(launcherDir, "../../packages/ompweb-orchestrator/src/cli.ts"),
+  resolve(launcherDir, "../.skizzles/runtime/ompweb-orchestrator/src/cli.ts"),
+];
+
+function runtime(): string | undefined {
+  for (const candidate of runtimeCandidates) {
+    try {
+      if (lstatSync(candidate).isFile()) return candidate;
+    } catch {}
+  }
+}
+
+const entrypoint = runtime();
+if (!entrypoint) {
+  console.error("Skizzles Grok ompweb orchestrator runtime is unavailable; reinstall the Skizzles Grok harness.");
+  process.exit(1);
+}
+
+const child = Bun.spawn([process.execPath, entrypoint, ...process.argv.slice(2)], {
+  stdin: "inherit",
+  stdout: "inherit",
+  stderr: "inherit",
+});
+process.exit(await child.exited);

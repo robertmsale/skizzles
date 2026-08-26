@@ -12,8 +12,9 @@ directory and invoke its literal launcher path:
 /absolute/path/to/skills/ompweb-orchestrator/scripts/ompctl --help
 ```
 
-The full Skizzles plugin and a source checkout bundle the client runtime. A
-skill-only copy falls back to a distinct `ompctl` already on `PATH`.
+The full Skizzles plugin, source checkout, and Grok harness installation bundle
+the client runtime. A standalone skill-only copy falls back to a distinct
+`ompctl` already on `PATH`.
 
 ## Commands
 

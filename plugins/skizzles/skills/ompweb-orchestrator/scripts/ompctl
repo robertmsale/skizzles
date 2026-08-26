@@ -8,6 +8,7 @@ const launcherDir = dirname(launcherPath);
 const runtimeCandidates = [
   resolve(launcherDir, "../../../packages/ompweb-orchestrator/src/cli.ts"),
   resolve(launcherDir, "../../packages/ompweb-orchestrator/src/cli.ts"),
+  resolve(launcherDir, "../../../.skizzles/runtime/ompweb-orchestrator/src/cli.ts"),
 ];
 
 function bundledRuntime(): string | undefined {

@@ -115,6 +115,20 @@ function plannedEntries(options: GrokHarnessOptions): InstalledEntry[] {
       fingerprint: "",
     },
     {
+      source: join(sourceRoot, "grok/bin/ompctl"),
+      target: join(grokHome, "bin/ompctl"),
+      kind: "file",
+      transfer: "copy-only",
+      fingerprint: "",
+    },
+    {
+      source: join(sourceRoot, "packages/ompweb-orchestrator"),
+      target: join(grokHome, ".skizzles/runtime/ompweb-orchestrator"),
+      kind: "directory",
+      transfer: options.transfer,
+      fingerprint: "",
+    },
+    {
       source: join(hookRoot, "skizzles-subagent-guard.json"),
       target: join(grokHome, "hooks", "skizzles-subagent-guard.json"),
       kind: "file",
@@ -190,6 +204,24 @@ function validateReceiptEntries(receipt: GrokHarnessReceipt, grokHome: string): 
       },
     ],
     [
+      join(grokHome, "bin", "ompctl"),
+      {
+        source: join(sourceRoot, "grok/bin/ompctl"),
+        target: join(grokHome, "bin", "ompctl"),
+        kind: "file" as const,
+        transfer: "copy-only" as const,
+      },
+    ],
+    [
+      join(grokHome, ".skizzles/runtime/ompweb-orchestrator"),
+      {
+        source: join(sourceRoot, "packages/ompweb-orchestrator"),
+        target: join(grokHome, ".skizzles/runtime/ompweb-orchestrator"),
+        kind: "directory" as const,
+        transfer: receipt.transfer,
+      },
+    ],
+    [
       join(grokHome, "hooks", "skizzles-subagent-guard.json"),
       {
         source: join(sourceRoot, "grok/hooks/skizzles-subagent-guard.json"),
@@ -254,7 +286,7 @@ function validateReceiptEntries(receipt: GrokHarnessReceipt, grokHome: string): 
 export function installGrokHarness(options: GrokHarnessOptions): GrokHarnessReceipt {
   const grokHome = resolve(options.grokHome);
   const sourceRoot = resolve(options.sourceRoot);
-  assertManagedParentsAreReal(grokHome, ["agents", "bin", "hooks", "hooks/bin", "skills", ".skizzles"]);
+  assertManagedParentsAreReal(grokHome, ["agents", "bin", "hooks", "hooks/bin", "skills", ".skizzles", ".skizzles/runtime"]);
   const receiptPath = grokHarnessReceiptPath(grokHome);
   if (pathEntryExists(receiptPath)) throw new Error(`Skizzles Grok harness receipt already exists: ${receiptPath}`);
   const entries = plannedEntries({ ...options, grokHome, sourceRoot });
@@ -291,7 +323,7 @@ export function uninstallGrokHarness(
   move: (from: string, to: string) => void = renameSync,
 ): GrokHarnessReceipt {
   const grokHome = resolve(grokHomeInput);
-  assertManagedParentsAreReal(grokHome, ["agents", "bin", "hooks", "hooks/bin", "skills", ".skizzles"]);
+  assertManagedParentsAreReal(grokHome, ["agents", "bin", "hooks", "hooks/bin", "skills", ".skizzles", ".skizzles/runtime"]);
   const receipt = readReceipt(grokHome);
   if (resolve(receipt.grokHome) !== grokHome) throw new Error("Grok harness receipt belongs to a different GROK_HOME");
   validateReceiptEntries(receipt, grokHome);
