@@ -1,0 +1,14 @@
+{
+  "name": "@skizzles/ompweb-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ompctl": "./src/cli.ts"
+  },
+  "scripts": {
+    "check": "bun run typecheck && bun test",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  }
+}

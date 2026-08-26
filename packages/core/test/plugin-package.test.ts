@@ -29,6 +29,9 @@ describe("deterministic plugin packaging", () => {
     expect(await readFile(join(repoRoot, "bun.lock"), "utf8")).toContain(
       '"@skizzles/t3-orchestration@workspace:packages/t3-orchestration"',
     );
+    expect(await readFile(join(repoRoot, "bun.lock"), "utf8")).toContain(
+      '"@skizzles/ompweb-orchestrator@workspace:packages/ompweb-orchestrator"',
+    );
   });
 
   test("canonical hook discovery contract uses plugin-root commands", async () => {
@@ -258,6 +261,49 @@ esac
     expect(JSON.parse(reaperInstall.stdout.toString())).toMatchObject({
       launchAgentLabel: "io.github.skizzles.t3-worktree-reaper",
     });
+  });
+
+  test("ships a runnable dependency-self-contained ompweb orchestrator bundle", async () => {
+    const repoRoot = resolve(import.meta.dir, "../../..");
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "skizzles-ompweb-orchestrator-plugin-"));
+    temporaryRoots.push(temporaryRoot);
+    const stagedPlugin = join(temporaryRoot, "staged");
+    const isolatedPlugin = join(temporaryRoot, "isolated");
+    await stagePlugin(repoRoot, stagedPlugin);
+    await cp(stagedPlugin, isolatedPlugin, { recursive: true });
+
+    const runtimeRoot = join(isolatedPlugin, "packages/ompweb-orchestrator");
+    expect(await filesUnder(runtimeRoot)).toEqual([
+      "README.md",
+      "package.json",
+      "src/cli.ts",
+    ]);
+    expect(await Bun.file(join(isolatedPlugin, "node_modules")).exists()).toBe(false);
+    expect((await stat(join(runtimeRoot, "src/cli.ts"))).mode & 0o111).not.toBe(0);
+
+    const result = Bun.spawnSync([process.execPath, join(runtimeRoot, "src/cli.ts"), "--help"], {
+      cwd: isolatedPlugin,
+      env: { PATH: process.env.PATH ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+    expect(typeof (JSON.parse(result.stdout.toString()) as { help?: unknown }).help).toBe("string");
+    expect(result.stderr.toString()).toBe("");
+
+    const launcher = Bun.spawnSync([
+      process.execPath,
+      join(isolatedPlugin, "skills/ompweb-orchestrator/scripts/ompctl"),
+      "--help",
+    ], {
+      cwd: isolatedPlugin,
+      env: { PATH: process.env.PATH ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(launcher.exitCode).toBe(0);
+    expect(typeof (JSON.parse(launcher.stdout.toString()) as { help?: unknown }).help).toBe("string");
+    expect(launcher.stderr.toString()).toBe("");
   });
 
   test("exercises bundled YAML manifest configuration with a fake Docker binary", async () => {
@@ -555,6 +601,13 @@ async function fixture(): Promise<string> {
   await write(root, "packages/t3-orchestration/scripts/host-gateway.ts", "export const fixture = 'host-gateway';\n");
   await write(root, "packages/t3-orchestration/README.md", "# Fixture T3 orchestration\n");
   await write(root, "packages/t3-orchestration/package.json", JSON.stringify({ name: "@skizzles/t3-orchestration", version: "0.1.0" }));
+  await write(
+    root,
+    "packages/ompweb-orchestrator/src/cli.ts",
+    "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture ompctl' }));\n",
+  );
+  await write(root, "packages/ompweb-orchestrator/README.md", "# Fixture ompweb orchestrator\n");
+  await write(root, "packages/ompweb-orchestrator/package.json", JSON.stringify({ name: "@skizzles/ompweb-orchestrator", version: "0.1.0" }));
   await write(root, "skills/t3-orchestration/scripts/t3ctl", "#!/usr/bin/env bun\nconsole.log('fixture');\n");
   await chmod(join(root, "skills/t3-orchestration/scripts/t3ctl"), 0o755);
   await write(root, "integrations/t3-orchestration.json", JSON.stringify({

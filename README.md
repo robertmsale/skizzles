@@ -13,6 +13,7 @@ Skizzles also includes a Grok Build harness with full root/Worker/Explorer/Revie
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **T3 Code orchestration** — a worktree-first task collaboration skill plus bundled CLI/daemon for local or private-tailnet coordination across T3 projects, with an optional host-only settled-worktree artifact reaper. 🌳
+- **ompweb orchestration** — a small `ompctl` HTTP client for listing, creating, messaging, reading, and checking default OMP sessions through an existing community ompweb server. 🥧
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
 - **Durable role brains** — tiny generated Default/Worker/Explorer/Reviewer overlays bind each duty to a configured model and reasoning effort that survives eviction and rework. 🧠✨
 - **A practical skill shelf** — auth semantics, Cargo optimization, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
@@ -47,7 +48,7 @@ cd skizzles
 bunx skills add ./skills --skill install-skizzles
 ```
 
-Container Lab and T3 orchestration are fully included in this repository—not merely documented here. A source-linked installation runs the canonical runtimes directly from the checkout, while the stable plugin carries dependency-self-contained bundles. If you install only a copied skill, `install-skizzles` guides Codex through obtaining a selected Skizzles version and installing the complete surface; launchers can also use existing distinct PATH commands. Host PATH, LaunchAgent, Keychain, and Tailscale wiring are optional, explicit, and machine-local.
+Container Lab, T3 orchestration, and the ompweb orchestration client are fully included in this repository—not merely documented here. A source-linked installation runs the canonical runtimes directly from the checkout, while the stable plugin carries dependency-self-contained bundles. If you install only a copied skill, `install-skizzles` guides Codex through obtaining a selected Skizzles version and installing the complete surface; launchers can also use existing distinct PATH commands. Host PATH, LaunchAgent, Keychain, and Tailscale wiring are optional, explicit, and machine-local.
 
 After installing the complete plugin surface, Skizzles can safely finish the Codex-side handshake:
 

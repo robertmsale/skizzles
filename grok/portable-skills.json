@@ -8,6 +8,7 @@
     "design-proof-gate",
     "designer-runtime",
     "no-legacy-cleanup",
+    "ompweb-orchestrator",
     "rinf-boundary"
   ]
 }

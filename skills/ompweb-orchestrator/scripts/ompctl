@@ -1,0 +1,49 @@
+#!/usr/bin/env bun
+
+import { accessSync, constants, lstatSync, realpathSync } from "node:fs";
+import { delimiter, dirname, resolve } from "node:path";
+
+const launcherPath = realpathSync(import.meta.path);
+const launcherDir = dirname(launcherPath);
+const runtimeCandidates = [
+  resolve(launcherDir, "../../../packages/ompweb-orchestrator/src/cli.ts"),
+  resolve(launcherDir, "../../packages/ompweb-orchestrator/src/cli.ts"),
+];
+
+function bundledRuntime(): string | undefined {
+  for (const entrypoint of runtimeCandidates) {
+    try {
+      if (lstatSync(entrypoint).isFile()) return entrypoint;
+    } catch {}
+  }
+  return undefined;
+}
+
+function pathBinary(): string | undefined {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = resolve(directory, "ompctl");
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (realpathSync(candidate) !== launcherPath) return candidate;
+    } catch {}
+  }
+}
+
+export async function runOmpctl(args = process.argv.slice(2)): Promise<number> {
+  const runtime = bundledRuntime();
+  const binary = runtime === undefined ? pathBinary() : undefined;
+  const command = runtime ? [process.execPath, runtime] : binary ? [binary] : undefined;
+  if (!command) {
+    console.error("Skizzles ompweb orchestrator runtime is unavailable: install the full Skizzles plugin, use a Skizzles checkout, or install a distinct ompctl PATH binary.");
+    return 1;
+  }
+  const child = Bun.spawn([...command, ...args], {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  return child.exited;
+}
+
+if (import.meta.main) process.exit(await runOmpctl());
