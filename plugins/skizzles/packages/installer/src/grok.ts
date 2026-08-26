@@ -240,6 +240,10 @@ function validateReceiptEntries(receipt: GrokHarnessReceipt, grokHome: string): 
       },
     ],
   ]);
+  const ompctlTargets = new Set([
+    join(grokHome, "bin", "ompctl"),
+    join(grokHome, ".skizzles/runtime/ompweb-orchestrator"),
+  ]);
   const seen = new Set<string>();
   for (const entry of receipt.entries) {
     if (
@@ -278,8 +282,11 @@ function validateReceiptEntries(receipt: GrokHarnessReceipt, grokHome: string): 
       throw new Error(`Grok harness receipt contains an unexpected target: ${target}`);
     }
   }
+  const hasModernOmpctlEntry = [...ompctlTargets].some((target) => seen.has(target));
   for (const target of fixedEntries.keys()) {
-    if (!seen.has(target)) throw new Error(`Grok harness receipt is missing an owned target: ${target}`);
+    if (!seen.has(target) && (!ompctlTargets.has(target) || hasModernOmpctlEntry)) {
+      throw new Error(`Grok harness receipt is missing an owned target: ${target}`);
+    }
   }
 }
 

@@ -137,6 +137,39 @@ describe("Grok harness installer", () => {
     expect(existsSync(grokHarnessReceiptPath(f.grokHome))).toBe(false);
   });
 
+  test("uninstall accepts a receipt from before the receipt-owned ompctl pair", () => {
+    const f = fixture();
+    installGrokHarness({ ...f, transfer: "copy" });
+    const receiptPath = grokHarnessReceiptPath(f.grokHome);
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+    const legacyTargets = new Set([
+      join(f.grokHome, "bin/ompctl"),
+      join(f.grokHome, ".skizzles/runtime/ompweb-orchestrator"),
+    ]);
+    receipt.entries = receipt.entries.filter((entry: { target: string }) => !legacyTargets.has(entry.target));
+    rmSync(join(f.grokHome, "bin/ompctl"));
+    rmSync(join(f.grokHome, ".skizzles/runtime/ompweb-orchestrator"), { recursive: true });
+    writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`);
+
+    uninstallGrokHarness(f.grokHome);
+
+    expect(existsSync(join(f.grokHome, "agents/skizzles-root.md"))).toBe(false);
+    expect(existsSync(grokHarnessReceiptPath(f.grokHome))).toBe(false);
+  });
+
+  test("uninstall rejects a partial receipt-owned ompctl pair", () => {
+    const f = fixture();
+    installGrokHarness({ ...f, transfer: "copy" });
+    const receiptPath = grokHarnessReceiptPath(f.grokHome);
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+    receipt.entries = receipt.entries.filter((entry: { target: string }) => entry.target !== join(f.grokHome, "bin/ompctl"));
+    rmSync(join(f.grokHome, "bin/ompctl"));
+    writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`);
+
+    expect(() => uninstallGrokHarness(f.grokHome)).toThrow("missing an owned target");
+    expect(existsSync(grokHarnessReceiptPath(f.grokHome))).toBe(true);
+  });
+
   test("uninstall rejects receipt targets outside the owned Grok surface", () => {
     const f = fixture();
     installGrokHarness({ ...f, transfer: "copy" });
