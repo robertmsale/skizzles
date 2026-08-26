@@ -42,6 +42,9 @@ const T3_ORCHESTRATION_PROVENANCE = "11fd830798e512466ceb1a6ca1187b0f3f41acbd";
 const T3_ORCHESTRATION_ENTRYPOINTS = ["src/cli.ts", "src/daemon.ts", "src/auto-guardian-cli.ts", "src/worktree-reaper-cli.ts"] as const;
 const T3_ORCHESTRATION_STATIC_INPUTS = ["package.json", "README.md", "scripts/install.ts", "scripts/install-guardian.ts", "scripts/install-reaper.ts", "scripts/host-gateway.ts"] as const;
 const T3_ORCHESTRATION_LAUNCHER = "skills/t3-orchestration/scripts/t3ctl";
+const OMPWEB_ORCHESTRATOR_SOURCE_PATH = "packages/ompweb-orchestrator";
+const OMPWEB_ORCHESTRATOR_ENTRYPOINTS = ["src/cli.ts"] as const;
+const OMPWEB_ORCHESTRATOR_STATIC_INPUTS = ["package.json", "README.md"] as const;
 const INSTALLER_INPUTS = [
   "package.json",
   "src/cli.ts",
@@ -132,6 +135,7 @@ export async function stagePlugin(repoRoot: string, destination: string): Promis
 
   await stageContainerLabRuntime(paths.repoRoot, destination);
   await stageT3OrchestrationRuntime(paths.repoRoot, destination);
+  await stageOmpwebOrchestratorRuntime(paths.repoRoot, destination);
 
   await validateGeneratedPlugin(paths.repoRoot, destination, paths.marketplacePath);
 }
@@ -235,6 +239,7 @@ async function validateGeneratedPlugin(
   await validateContainerLabDescriptor(repoRoot, pluginRoot);
   await validateT3OrchestrationRuntime(pluginRoot);
   await validateT3OrchestrationDescriptor(repoRoot, pluginRoot);
+  await validateOmpwebOrchestratorRuntime(pluginRoot);
   await rejectForbiddenDistributableContent(pluginRoot);
 }
 
@@ -355,6 +360,65 @@ async function validateT3OrchestrationRuntime(pluginRoot: string): Promise<void>
   for (const path of T3_ORCHESTRATION_STATIC_INPUTS) {
     if (!(await exists(join(runtimeRoot, path)))) {
       throw new PackagingError(`T3 orchestration runtime is missing ${path}.`);
+    }
+  }
+}
+
+async function stageOmpwebOrchestratorRuntime(repoRoot: string, pluginRoot: string): Promise<void> {
+  const sourceRoot = join(repoRoot, OMPWEB_ORCHESTRATOR_SOURCE_PATH);
+  const destinationRoot = join(pluginRoot, OMPWEB_ORCHESTRATOR_SOURCE_PATH);
+  await mkdir(join(destinationRoot, "src"), { recursive: true });
+
+  for (const path of OMPWEB_ORCHESTRATOR_ENTRYPOINTS) {
+    const destination = join(destinationRoot, path);
+    const build = Bun.spawnSync([
+      process.execPath,
+      "build",
+      join(OMPWEB_ORCHESTRATOR_SOURCE_PATH, path),
+      "--target=bun",
+      "--format=esm",
+      `--outfile=${destination}`,
+    ], {
+      cwd: repoRoot,
+      env: { PATH: process.env.PATH ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (build.exitCode !== 0) {
+      const details = Buffer.concat([Buffer.from(build.stdout), Buffer.from(build.stderr)]).toString("utf8").trim();
+      throw new PackagingError(`Unable to bundle ompweb orchestrator runtime ${path}:\n${details}`);
+    }
+    await chmod(destination, 0o755);
+  }
+
+  for (const path of OMPWEB_ORCHESTRATOR_STATIC_INPUTS) {
+    await copyCanonicalFile(
+      join(sourceRoot, path),
+      join(destinationRoot, path),
+      `${OMPWEB_ORCHESTRATOR_SOURCE_PATH}/${path}`,
+    );
+  }
+}
+
+async function validateOmpwebOrchestratorRuntime(pluginRoot: string): Promise<void> {
+  const runtimeRoot = join(pluginRoot, OMPWEB_ORCHESTRATOR_SOURCE_PATH);
+  for (const path of OMPWEB_ORCHESTRATOR_ENTRYPOINTS) {
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(join(runtimeRoot, path));
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        throw new PackagingError(`ompweb orchestrator runtime is missing ${path}.`);
+      }
+      throw error;
+    }
+    if (!metadata.isFile() || (metadata.mode & 0o111) === 0) {
+      throw new PackagingError(`ompweb orchestrator runtime ${path} must be an executable regular file.`);
+    }
+  }
+  for (const path of OMPWEB_ORCHESTRATOR_STATIC_INPUTS) {
+    if (!(await exists(join(runtimeRoot, path)))) {
+      throw new PackagingError(`ompweb orchestrator runtime is missing ${path}.`);
     }
   }
 }

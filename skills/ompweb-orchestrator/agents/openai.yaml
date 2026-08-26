@@ -1,0 +1,4 @@
+interface:
+  display_name: "ompweb Orchestrator"
+  short_description: "Drive OMP sessions through ompweb"
+  default_prompt: "Use $ompweb-orchestrator to list, create, message, and inspect OMP sessions through ompweb."

@@ -1,7 +1,7 @@
 {
   "name": "skizzles",
   "version": "0.1.0",
-  "description": "Portable Codex harness skills, hooks, maintenance tooling, and bundled Container Lab and T3 orchestration runtimes.",
+  "description": "Portable Codex harness skills, hooks, maintenance tooling, and bundled Container Lab, T3, and ompweb orchestration runtimes.",
   "author": {
     "name": "Robert Sale"
   },
@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "Skizzles",
     "shortDescription": "A portable Codex harness with bundled development and orchestration tooling.",
-    "longDescription": "Skizzles packages reusable skills, hooks, maintenance tooling, and runnable Container Lab and T3 orchestration bundles for a consistent Codex development environment.",
+    "longDescription": "Skizzles packages reusable skills, hooks, maintenance tooling, and runnable Container Lab, T3, and ompweb orchestration bundles for a consistent Codex development environment.",
     "developerName": "Robert Sale",
     "category": "Developer Tools",
     "capabilities": [
@@ -26,7 +26,8 @@
       "Hooks",
       "Developer tooling",
       "Container Lab CLI and reaper",
-      "T3 Code orchestration CLI and daemon"
+      "T3 Code orchestration CLI and daemon",
+      "ompweb orchestration CLI"
     ],
     "defaultPrompt": [
       "Check this workspace with the Skizzles harness.",
