@@ -140,6 +140,105 @@ describe("Codex app-server aggregation", () => {
     ].sort());
     await harness.aggregator.close();
   });
+
+  test("does not let an archive notification overtake its backend response", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    const threadId = harness.factory.threadId(0);
+    harness.factory.archiveMode = "notificationFirst";
+
+    await harness.aggregator.handle({ method: "thread/archive", id: 3, params: { threadId } });
+    expect(resultFor(harness.output.messages, 3)).toEqual({});
+    expect(harness.factory.transports[0]!.destroyed).toBe(true);
+    await harness.aggregator.close();
+  });
+
+  test("retries a failed transport teardown during aggregate close", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    const transport = harness.factory.transports[0]!;
+    transport.destroyFailures = 1;
+
+    await expect(harness.aggregator.handle({
+      method: "thread/archive",
+      id: 3,
+      params: { threadId: harness.factory.threadId(0) },
+    })).rejects.toThrow("fake destroy failure");
+    expect(transport.destroyCalls).toBe(1);
+    await harness.aggregator.close();
+    expect(transport.destroyCalls).toBe(2);
+    expect(transport.destroyed).toBe(true);
+  });
+
+  test("returns a backend error without stranding a timed pending call when transport write fails", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    harness.factory.transports[0]!.writeFailures = 1;
+
+    await harness.aggregator.handle({
+      method: "turn/start",
+      id: 3,
+      params: { threadId: harness.factory.threadId(0), input: [] },
+    });
+    expect(errorFor(harness.output.messages, 3)).toEqual({
+      code: -32003,
+      message: "backend request failed: turn/start",
+    });
+    await harness.aggregator.close();
+  });
+
+  test("includes non-interactive descendants when a relation filter supplies the topology", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    const parentId = harness.factory.threadId(0);
+    const childId = `${parentId}-child`;
+    harness.factory.transports[0]!.emit({
+      method: "thread/started",
+      params: {
+        thread: {
+          ...threadSnapshot(childId, 1),
+          parentThreadId: parentId,
+          source: { subAgent: { thread_spawn: { parent_thread_id: parentId, depth: 1 } } },
+        },
+      },
+    });
+    await waitFor(() => harness.output.messages.some((message) =>
+      "method" in message && message.method === "thread/started"
+      && (message.params as { thread?: { id?: string } } | undefined)?.thread?.id === childId));
+
+    await harness.aggregator.handle({ method: "thread/list", id: 3, params: {} });
+    expect((resultFor(harness.output.messages, 3) as { data: Array<{ id: string }> }).data)
+      .toEqual([expect.objectContaining({ id: parentId })]);
+    await harness.aggregator.handle({
+      method: "thread/list",
+      id: 4,
+      params: { ancestorThreadId: parentId },
+    });
+    expect(resultFor(harness.output.messages, 4)).toMatchObject({ data: [{ id: childId }] });
+    await harness.aggregator.close();
+  });
+
+  test("coalesces concurrent representative-backend provisioning", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({
+      method: "thread/archive",
+      id: 3,
+      params: { threadId: harness.factory.threadId(0) },
+    });
+
+    await Promise.all([
+      harness.aggregator.handle({ method: "model/list", id: 4, params: {} }),
+      harness.aggregator.handle({ method: "config/read", id: 5, params: {} }),
+    ]);
+    expect(harness.factory.transports).toHaveLength(2);
+    await harness.aggregator.close();
+  });
 });
 
 class CaptureSink implements MessageSink {
@@ -152,7 +251,7 @@ class CaptureSink implements MessageSink {
 
 class FakeFactory implements BackendFactory {
   readonly transports: FakeTransport[] = [];
-  archiveMode: "missing" | "cascade" = "missing";
+  archiveMode: "missing" | "cascade" | "notificationFirst" = "missing";
 
   async create(): Promise<BackendTransport> {
     const index = this.transports.length;
@@ -200,6 +299,12 @@ class FakeFactory implements BackendFactory {
     }
     if (message.method === "thread/archive" || message.method === "thread/delete") {
       const threadId = (message.params as { threadId: string }).threadId;
+      if (this.archiveMode === "notificationFirst") {
+        transport.emit({ method: "thread/archived", params: { threadId } });
+        await Bun.sleep(0);
+        transport.emit({ id: message.id, result: {} });
+        return;
+      }
       if (this.archiveMode === "cascade") {
         transport.emit({ id: message.id, result: {} });
         transport.emit({ method: "thread/archived", params: { threadId } });
@@ -223,6 +328,9 @@ class FakeTransport implements BackendTransport {
   readonly stdout: ReadableStream<Uint8Array>;
   readonly writes: RpcMessage[] = [];
   destroyed = false;
+  destroyCalls = 0;
+  destroyFailures = 0;
+  writeFailures = 0;
   private controller!: ReadableStreamDefaultController<Uint8Array>;
 
   constructor(readonly index: number, private readonly onWrite: (message: RpcMessage) => Promise<void>) {
@@ -232,6 +340,10 @@ class FakeTransport implements BackendTransport {
   }
 
   async write(line: string): Promise<void> {
+    if (this.writeFailures > 0) {
+      this.writeFailures--;
+      throw new Error("fake write failure");
+    }
     const message = JSON.parse(line) as RpcMessage;
     this.writes.push(structuredClone(message));
     await this.onWrite(message);
@@ -242,6 +354,11 @@ class FakeTransport implements BackendTransport {
   }
 
   async destroy(): Promise<void> {
+    this.destroyCalls++;
+    if (this.destroyFailures > 0) {
+      this.destroyFailures--;
+      throw new Error("fake destroy failure");
+    }
     if (this.destroyed) return;
     this.destroyed = true;
     this.controller.close();

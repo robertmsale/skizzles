@@ -90,7 +90,9 @@ class DockerTransport implements BackendTransport {
   readonly workspace: string;
   readonly stdout: ReadableStream<Uint8Array>;
   readonly stderr: ReadableStream<Uint8Array>;
+  private destroyPromise: Promise<void> | undefined;
   private destroyed = false;
+  private inputEnded = false;
 
   constructor(private readonly values: {
     machineId: string;
@@ -107,17 +109,30 @@ class DockerTransport implements BackendTransport {
   }
 
   write(line: string): void {
-    if (this.destroyed) throw new Error(`container ${this.containerId} is closed`);
+    if (this.destroyed || this.inputEnded) throw new Error(`container ${this.containerId} is closed`);
     this.values.process.stdin.write(line);
     this.values.process.stdin.flush();
   }
 
   async destroy(): Promise<void> {
     if (this.destroyed) return;
-    this.destroyed = true;
-    this.values.process.stdin.end();
-    await removeContainer(this.values.dockerBinary, this.containerId);
-    await Promise.race([this.values.process.exited, Bun.sleep(2_000).then(() => this.values.process.kill())]);
+    if (this.destroyPromise) return this.destroyPromise;
+    const attempt = (async () => {
+      if (!this.inputEnded) {
+        this.inputEnded = true;
+        this.values.process.stdin.end();
+      }
+      await removeContainer(this.values.dockerBinary, this.containerId);
+      this.destroyed = true;
+      await Promise.race([this.values.process.exited, Bun.sleep(2_000).then(() => this.values.process.kill())]);
+    })();
+    this.destroyPromise = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      if (this.destroyPromise === attempt) this.destroyPromise = undefined;
+      throw error;
+    }
   }
 }
 
@@ -133,8 +148,12 @@ async function runDocker(binary: string, args: string[]): Promise<string> {
 }
 
 async function removeContainer(binary: string, containerId: string): Promise<void> {
-  const process = Bun.spawn([binary, "rm", "--force", containerId], { stdout: "ignore", stderr: "ignore" });
-  await process.exited;
+  const process = Bun.spawn([binary, "rm", "--force", containerId], { stdout: "ignore", stderr: "pipe" });
+  const [stderr, exitCode] = await Promise.all([
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`docker rm failed: ${stderr.trim() || `exit ${exitCode}`}`);
 }
 
 function validateText(label: string, value: string): void {

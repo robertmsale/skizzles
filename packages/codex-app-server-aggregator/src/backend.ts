@@ -42,6 +42,7 @@ export class BackendConnection {
   private readonly pending = new Map<string, Pending>();
   private readonly consumePromise: Promise<void>;
   private readonly stderrPromise: Promise<void> | undefined;
+  private closePromise: Promise<void> | undefined;
   private closed = false;
 
   constructor(readonly transport: BackendTransport, private readonly handlers: BackendHandlers) {
@@ -67,7 +68,15 @@ export class BackendConnection {
       }, 60_000);
       this.pending.set(idKey(id), { resolve, timeout });
     });
-    await this.send({ method, id, params });
+    try {
+      await this.send({ method, id, params });
+    } catch (error) {
+      const pending = this.pending.get(idKey(id));
+      if (pending) clearTimeout(pending.timeout);
+      this.pending.delete(idKey(id));
+      this.handlers.onLog?.(this, error instanceof Error ? error.message : String(error));
+      return errorOutcome(-32003, `backend request failed: ${method}`);
+    }
     return outcome;
   }
 
@@ -84,15 +93,26 @@ export class BackendConnection {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timeout);
-      pending.resolve(errorOutcome(-32003, `backend ${this.machineId} closed`));
+    if (this.closePromise) return this.closePromise;
+    if (!this.closed) {
+      this.closed = true;
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timeout);
+        pending.resolve(errorOutcome(-32003, `backend ${this.machineId} closed`));
+      }
+      this.pending.clear();
     }
-    this.pending.clear();
-    await this.transport.destroy();
-    await Promise.allSettled([this.consumePromise, ...(this.stderrPromise ? [this.stderrPromise] : [])]);
+    const attempt = (async () => {
+      await this.transport.destroy();
+      await Promise.allSettled([this.consumePromise, ...(this.stderrPromise ? [this.stderrPromise] : [])]);
+    })();
+    this.closePromise = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      if (this.closePromise === attempt) this.closePromise = undefined;
+      throw error;
+    }
   }
 
   private async send(message: RpcMessage): Promise<void> {

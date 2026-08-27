@@ -106,7 +106,11 @@ export class Topology {
       .filter((entry) => !entry.deleted && entry.archived === archived && entry.snapshot)
       .map((entry) => entry.snapshot!)
       .filter((thread) => !providers || providers.has(String(thread.modelProvider ?? "")))
-      .filter((thread) => matchesSourceKinds(thread.source, params.sourceKinds))
+      .filter((thread) => matchesSourceKinds(
+        thread.source,
+        params.sourceKinds,
+        params.parentThreadId != null || params.ancestorThreadId != null,
+      ))
       .filter((thread) => !cwds?.length || cwds.includes(String(thread.cwd ?? "")))
       .filter((thread) => !("sectionId" in params) || sectionId(thread.section) === params.sectionId)
       .filter((thread) => !("projectId" in params) || (thread.projectId ?? null) === params.projectId)
@@ -164,7 +168,12 @@ function isDescendant(thread: ThreadSnapshot, ancestorId: string, entries: Map<s
   return false;
 }
 
-function matchesSourceKinds(source: unknown, requested: ThreadSourceKind[] | null | undefined): boolean {
+function matchesSourceKinds(
+  source: unknown,
+  requested: ThreadSourceKind[] | null | undefined,
+  hasRelationFilter: boolean,
+): boolean {
+  if (hasRelationFilter && requested == null) return true;
   if (!requested?.length) {
     if (source === "cli" || source === "vscode") return true;
     const custom = objectMember(source, "custom");

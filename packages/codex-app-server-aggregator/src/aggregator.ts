@@ -27,6 +27,7 @@ export class AppServerAggregator {
   private readonly topology = new Topology();
   private readonly backends = new Map<string, BackendConnection>();
   private readonly reverseRequests = new Map<string, ReverseRequest>();
+  private readonly lifecycleCalls = new Map<BackendConnection, number>();
   private readonly factory: BackendFactory;
   private readonly output: MessageSink;
   private readonly log: (message: string) => void;
@@ -34,6 +35,7 @@ export class AppServerAggregator {
   private initialActivation: (() => Promise<void>) | undefined;
   private initializeParams?: unknown;
   private warmBackend: BackendConnection | undefined;
+  private globalBackendCreation: Promise<BackendConnection | undefined> | undefined;
   private initialized = false;
   private closed = false;
 
@@ -59,9 +61,17 @@ export class AppServerAggregator {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    await Promise.allSettled([...this.backends.values()].map((backend) => backend.close()));
+    const backends = [...this.backends.values()];
+    const results = await Promise.allSettled(backends.map((backend) => backend.close()));
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        this.log(`failed to close backend ${backends[index]!.machineId}: ${reason}`);
+      }
+    });
     this.backends.clear();
     this.reverseRequests.clear();
+    this.lifecycleCalls.clear();
   }
 
   private async handleClientRequest(request: RpcRequest): Promise<void> {
@@ -124,9 +134,17 @@ export class AppServerAggregator {
       return;
     }
 
-    let outcome = await backend.call(request.method, request.params);
+    const lifecycleRequest = threadId !== undefined
+      && (request.method === "thread/archive" || request.method === "thread/delete");
+    if (lifecycleRequest) this.beginLifecycleCall(backend);
+    let outcome: RpcOutcome;
+    try {
+      outcome = await backend.call(request.method, request.params);
+    } finally {
+      if (lifecycleRequest) this.endLifecycleCall(backend);
+    }
     const synthesizedLifecycle = threadId !== undefined
-      && (request.method === "thread/archive" || request.method === "thread/delete")
+      && lifecycleRequest
       && isMissingRollout(outcome, threadId);
     if (synthesizedLifecycle) outcome = { result: {} };
     this.topology.observe(backend.machineId, response(request.id, outcome));
@@ -250,15 +268,24 @@ export class AppServerAggregator {
     if (this.warmBackend) return this.warmBackend;
     const running = this.backends.values().next().value as BackendConnection | undefined;
     if (running) return running;
-    const created = await this.createInitializedBackend();
-    if ("error" in created.outcome) {
-      await created.connection.close();
-      this.backends.delete(created.connection.machineId);
-      return undefined;
+    if (!this.globalBackendCreation) {
+      const attempt = (async () => {
+        const created = await this.createInitializedBackend();
+        if ("error" in created.outcome) {
+          await created.connection.close();
+          this.backends.delete(created.connection.machineId);
+          return undefined;
+        }
+        if (this.initialized) await created.connection.notify("initialized");
+        this.warmBackend = created.connection;
+        return created.connection;
+      })();
+      this.globalBackendCreation = attempt;
+      attempt.finally(() => {
+        if (this.globalBackendCreation === attempt) this.globalBackendCreation = undefined;
+      }).catch(() => undefined);
     }
-    if (this.initialized) await created.connection.notify("initialized");
-    this.warmBackend = created.connection;
-    return created.connection;
+    return this.globalBackendCreation;
   }
 
   private backendForThread(threadId: string): BackendConnection | undefined {
@@ -277,13 +304,25 @@ export class AppServerAggregator {
   }
 
   private async removeIfDrained(backend: BackendConnection): Promise<void> {
+    if ((this.lifecycleCalls.get(backend) ?? 0) > 0) return;
     if (this.topology.hasLiveThreads(backend.machineId)) return;
     await backend.close();
     this.backends.delete(backend.machineId);
+    this.lifecycleCalls.delete(backend);
     for (const [key, reverse] of this.reverseRequests) {
       if (reverse.backend === backend) this.reverseRequests.delete(key);
     }
     if (this.warmBackend === backend) this.warmBackend = undefined;
+  }
+
+  private beginLifecycleCall(backend: BackendConnection): void {
+    this.lifecycleCalls.set(backend, (this.lifecycleCalls.get(backend) ?? 0) + 1);
+  }
+
+  private endLifecycleCall(backend: BackendConnection): void {
+    const remaining = (this.lifecycleCalls.get(backend) ?? 1) - 1;
+    if (remaining > 0) this.lifecycleCalls.set(backend, remaining);
+    else this.lifecycleCalls.delete(backend);
   }
 }
 
