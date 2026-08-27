@@ -1,0 +1,24 @@
+{
+  "codexVersion": "codex-cli 0.149.1",
+  "generator": "codex app-server generate-ts --experimental",
+  "selected": [
+    "AbsolutePathBuf.ts",
+    "ClientInfo.ts",
+    "ClientNotification.ts",
+    "InitializeCapabilities.ts",
+    "InitializeParams.ts",
+    "InitializeResponse.ts",
+    "RequestId.ts",
+    "serde_json/JsonValue.ts",
+    "v2/SortDirection.ts",
+    "v2/ThreadArchiveParams.ts",
+    "v2/ThreadArchiveResponse.ts",
+    "v2/ThreadDeleteParams.ts",
+    "v2/ThreadDeleteResponse.ts",
+    "v2/ThreadListParams.ts",
+    "v2/ThreadLoadedListParams.ts",
+    "v2/ThreadLoadedListResponse.ts",
+    "v2/ThreadSortKey.ts",
+    "v2/ThreadSourceKind.ts"
+  ]
+}

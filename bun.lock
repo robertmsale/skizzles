@@ -9,6 +9,13 @@
         "typescript": "5.9.3",
       },
     },
+    "packages/codex-app-server-aggregator": {
+      "name": "@skizzles/codex-app-server-aggregator",
+      "version": "0.1.0",
+      "bin": {
+        "codex-app-server-aggregator": "./src/cli.ts",
+      },
+    },
     "packages/codex-container-lab/cli": {
       "name": "codex-container-lab",
       "version": "0.1.0",
@@ -56,6 +63,8 @@
     },
   },
   "packages": {
+    "@skizzles/codex-app-server-aggregator": ["@skizzles/codex-app-server-aggregator@workspace:packages/codex-app-server-aggregator"],
+
     "@skizzles/core": ["@skizzles/core@workspace:packages/core"],
 
     "@skizzles/cursor-acp-shim": ["@skizzles/cursor-acp-shim@workspace:packages/cursor-acp-shim"],

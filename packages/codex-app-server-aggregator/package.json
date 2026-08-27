@@ -1,0 +1,15 @@
+{
+  "name": "@skizzles/codex-app-server-aggregator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "codex-app-server-aggregator": "./src/cli.ts"
+  },
+  "scripts": {
+    "check": "bun run typecheck && bun test",
+    "protocol:generate": "bun run scripts/generate-protocol.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  }
+}
