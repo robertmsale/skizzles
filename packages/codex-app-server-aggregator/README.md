@@ -21,7 +21,7 @@ bun run packages/codex-app-server-aggregator/src/cli.ts \
   --repo https://github.com/owner/repository.git
 ```
 
-The client then speaks the normal app-server protocol on stdin/stdout. `initialize` provisions a warm container so its returned `codexHome`, platform, and user agent are real in-container values. The first `thread/start` consumes that container; later starts provision another container.
+The client then speaks the normal app-server protocol on stdin/stdout. `initialize` provisions a warm container so its returned `codexHome`, platform, and user agent are real in-container values. The cloned workspace is trusted inside that disposable container so its repo-local Codex config, hooks, and exec policy load. The first `thread/start` consumes that container; later starts provision another container.
 
 Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every isolated `/codex-home`. Keep session rollouts out of this seed; it should contain only intentional shared config/auth material. A custom image can include an OpenCodex-compatible provider, started with `--provider-command`; use `--provider-ready-url` to gate app-server startup until it is ready. `--pass-env NAME` passes selected provider credentials by name without putting their values in this repository.
 
@@ -32,12 +32,17 @@ Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every 
 | `initialize`, `initialized` | Initialize every real backend with the client's DTO; return the warm Linux backend's response. |
 | `thread/start` | Clone/provision first, force `cwd` to `/workspace/repo`, then preserve the real returned thread id. |
 | `thread/list`, `thread/loaded/list` | Answer from aggregate bookkeeping across containers. |
+| `thread/read` after teardown | Return the retained snapshot when turns are not requested. |
 | Thread-scoped requests | Route by the real Codex thread id. Fork/review ids observed in responses or `thread/started` bind to the same container. |
 | Backend approvals and other requests | Rewrite only the JSON-RPC request id for collision-free correlation, then route the client response back to the originating backend. Payloads are untouched. |
 | `thread/archive`, `thread/delete` | Pass through; if the real backend has not materialized a rollout yet, synthesize the normal lifecycle success for its already-minted thread. Remove the container when no mapped live threads remain. |
-| Other global requests | Route to the warm backend or an existing backend. |
+| Project/section/search topology | Reject as not yet implemented instead of returning one backend's false partial view. |
+| Homogeneous global reads | Route to the warm backend or an existing representative. |
+| Other unkeyed requests | Reject until an aggregate, broadcast, or seed-owned meaning exists. |
 
 This is not production-ready. Bookkeeping is in memory, stdio backends cannot be reattached after an aggregator crash, and an archived container's rollout is destroyed with the container. Those are protocol/process questions the spike is intended to expose, not paper over.
+
+See [PROTOCOL.md](PROTOCOL.md) for the runtime probes, counterfactuals, interception boundary, and known breaks.
 
 ## Protocol lock
 

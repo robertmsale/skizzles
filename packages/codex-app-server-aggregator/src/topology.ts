@@ -58,6 +58,11 @@ export class Topology {
     return entry && !entry.deleted ? entry.machineId : undefined;
   }
 
+  snapshot(threadId: string): ThreadSnapshot | undefined {
+    const entry = this.threads.get(threadId);
+    return entry && !entry.deleted && entry.snapshot ? structuredClone(entry.snapshot) : undefined;
+  }
+
   markArchived(threadId: string): void {
     const entry = this.threads.get(threadId);
     if (!entry) return;
@@ -101,7 +106,7 @@ export class Topology {
       .filter((entry) => !entry.deleted && entry.archived === archived && entry.snapshot)
       .map((entry) => entry.snapshot!)
       .filter((thread) => !providers || providers.has(String(thread.modelProvider ?? "")))
-      .filter((thread) => !params.sourceKinds?.length || params.sourceKinds.includes(sourceKind(thread.source)))
+      .filter((thread) => matchesSourceKinds(thread.source, params.sourceKinds))
       .filter((thread) => !cwds?.length || cwds.includes(String(thread.cwd ?? "")))
       .filter((thread) => !("sectionId" in params) || sectionId(thread.section) === params.sectionId)
       .filter((thread) => !("projectId" in params) || (thread.projectId ?? null) === params.projectId)
@@ -159,14 +164,32 @@ function isDescendant(thread: ThreadSnapshot, ancestorId: string, entries: Map<s
   return false;
 }
 
-function sourceKind(source: unknown): ThreadSourceKind {
-  if (source === "cli" || source === "vscode" || source === "exec") return source;
-  if (source !== null && typeof source === "object" && !Array.isArray(source)) {
-    const record = source as Record<string, unknown>;
-    if ("subagent" in record) return "subAgent";
-    if ("custom" in record) return "appServer";
+function matchesSourceKinds(source: unknown, requested: ThreadSourceKind[] | null | undefined): boolean {
+  if (!requested?.length) {
+    if (source === "cli" || source === "vscode") return true;
+    const custom = objectMember(source, "custom");
+    return custom === "atlas" || custom === "chatgpt";
   }
-  return "unknown";
+  return requested.some((kind) => sourceMatchesKind(source, kind));
+}
+
+function sourceMatchesKind(source: unknown, kind: ThreadSourceKind): boolean {
+  if (kind === "cli" || kind === "vscode" || kind === "exec" || kind === "appServer" || kind === "unknown") {
+    return source === kind;
+  }
+  const subAgent = objectMember(source, "subAgent");
+  if (subAgent === undefined) return false;
+  if (kind === "subAgent") return true;
+  if (kind === "subAgentReview") return subAgent === "review";
+  if (kind === "subAgentCompact") return subAgent === "compact";
+  if (kind === "subAgentThreadSpawn") return objectMember(subAgent, "thread_spawn") !== undefined;
+  return kind === "subAgentOther" && objectMember(subAgent, "other") !== undefined;
+}
+
+function objectMember(value: unknown, key: string): unknown {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
 }
 
 function sectionId(section: unknown): string | null {

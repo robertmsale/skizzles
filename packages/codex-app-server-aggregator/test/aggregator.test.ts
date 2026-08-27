@@ -20,7 +20,11 @@ describe("Codex app-server aggregation", () => {
     expect(harness.factory.transports[0]!.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
     expect(harness.factory.transports[1]!.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
 
-    await harness.aggregator.handle({ method: "thread/list", id: 4, params: { limit: 10 } });
+    await harness.aggregator.handle({
+      method: "thread/list",
+      id: 4,
+      params: { limit: 10 },
+    });
     const listed = resultFor(harness.output.messages, 4) as { data: Array<{ id: string }> };
     expect(listed.data.map((thread) => thread.id).sort()).toEqual([firstId, secondId].sort());
     expect(harness.factory.transports.every((transport) => transport.request("thread/list") === undefined)).toBe(true);
@@ -40,6 +44,17 @@ describe("Codex app-server aggregation", () => {
     await initialize(harness);
     expect(harness.output.messages[0]).toMatchObject({ id: 1, result: { platformOs: "linux" } });
     expect(harness.output.messages[1]).toMatchObject({ method: "configWarning" });
+    await harness.aggregator.close();
+  });
+
+  test("does not route aggregate or mutating global requests to an arbitrary container", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+
+    await harness.aggregator.handle({ method: "project/list", id: 2, params: {} });
+    expect(errorFor(harness.output.messages, 2)?.message).toContain("aggregate topology method");
+    await harness.aggregator.handle({ method: "config/value/write", id: 3, params: {} });
+    expect(errorFor(harness.output.messages, 3)?.message).toContain("no thread routing key");
     await harness.aggregator.close();
   });
 
@@ -90,10 +105,39 @@ describe("Codex app-server aggregation", () => {
     }));
     expect(harness.factory.transports[0]!.destroyed).toBe(true);
 
-    await harness.aggregator.handle({ method: "thread/list", id: 4, params: { archived: true } });
+    await harness.aggregator.handle({
+      method: "thread/list",
+      id: 4,
+      params: { archived: true },
+    });
     expect(resultFor(harness.output.messages, 4)).toMatchObject({
       data: [{ id: threadId, status: { type: "notLoaded" } }],
     });
+    await harness.aggregator.handle({ method: "thread/read", id: 5, params: { threadId, includeTurns: false } });
+    expect(resultFor(harness.output.messages, 5)).toMatchObject({ thread: { id: threadId } });
+    await harness.aggregator.close();
+  });
+
+  test("waits for backend cascade notifications before removing a fork-bearing container", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    const threadId = harness.factory.threadId(0);
+    await harness.aggregator.handle({ method: "thread/fork", id: 3, params: { threadId } });
+    harness.factory.archiveMode = "cascade";
+
+    await harness.aggregator.handle({ method: "thread/archive", id: 4, params: { threadId } });
+    await waitFor(() => harness.factory.transports[0]!.destroyed);
+    await harness.aggregator.handle({
+      method: "thread/list",
+      id: 5,
+      params: { archived: true },
+    });
+    const listed = resultFor(harness.output.messages, 5) as { data: Array<{ id: string }> };
+    expect(listed.data.map((thread) => thread.id).sort()).toEqual([
+      threadId,
+      harness.factory.forkId(0),
+    ].sort());
     await harness.aggregator.close();
   });
 });
@@ -108,6 +152,7 @@ class CaptureSink implements MessageSink {
 
 class FakeFactory implements BackendFactory {
   readonly transports: FakeTransport[] = [];
+  archiveMode: "missing" | "cascade" = "missing";
 
   async create(): Promise<BackendTransport> {
     const index = this.transports.length;
@@ -155,6 +200,12 @@ class FakeFactory implements BackendFactory {
     }
     if (message.method === "thread/archive" || message.method === "thread/delete") {
       const threadId = (message.params as { threadId: string }).threadId;
+      if (this.archiveMode === "cascade") {
+        transport.emit({ id: message.id, result: {} });
+        transport.emit({ method: "thread/archived", params: { threadId } });
+        transport.emit({ method: "thread/archived", params: { threadId: this.forkId(index) } });
+        return;
+      }
       transport.emit({
         id: message.id,
         error: { code: -32600, message: `no rollout found for thread id ${threadId}` },
@@ -239,6 +290,7 @@ function threadSnapshot(id: string, index: number) {
     recencyAt: index + 1,
     status: { type: "idle" },
     cwd: CONTAINER_WORKSPACE,
+    source: "vscode",
     turns: [],
   };
 }
@@ -247,6 +299,11 @@ function resultFor(messages: RpcMessage[], id: RpcId): unknown {
   const message = messages.find((candidate) => !("method" in candidate) && "id" in candidate && candidate.id === id);
   if (!message || !("result" in message)) throw new Error(`missing result for ${String(id)}`);
   return message.result;
+}
+
+function errorFor(messages: RpcMessage[], id: RpcId): { code: number; message: string } | undefined {
+  const message = messages.find((candidate) => !("method" in candidate) && "id" in candidate && candidate.id === id);
+  return message && "error" in message ? message.error : undefined;
 }
 
 function approvalRequests(messages: RpcMessage[]) {

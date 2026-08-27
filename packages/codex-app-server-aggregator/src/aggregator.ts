@@ -89,6 +89,13 @@ export class AppServerAggregator {
       await this.output.send(response(request.id, { result }));
       return;
     }
+    if (isAggregateTopologyMethod(request.method)) {
+      await this.output.send(response(request.id, errorOutcome(
+        -32004,
+        `aggregate topology method is not implemented by this spike: ${request.method}`,
+      )));
+      return;
+    }
     if (request.method === "thread/start") {
       await this.handleThreadStart(request);
       return;
@@ -96,8 +103,22 @@ export class AppServerAggregator {
 
     const params = asRecord(request.params);
     const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (!threadId && !REPRESENTATIVE_GLOBAL_READS.has(request.method)) {
+      await this.output.send(response(request.id, errorOutcome(
+        -32004,
+        `request has no thread routing key and no aggregate behavior: ${request.method}`,
+      )));
+      return;
+    }
     const backend = threadId ? this.backendForThread(threadId) : await this.globalBackend();
     if (!backend) {
+      if (request.method === "thread/read" && threadId && params.includeTurns !== true) {
+        const thread = this.topology.snapshot(threadId);
+        if (thread) {
+          await this.output.send(response(request.id, { result: { thread } }));
+          return;
+        }
+      }
       const message = threadId ? `unknown or unavailable thread: ${threadId}` : "no app-server backend is available";
       await this.output.send(response(request.id, errorOutcome(-32004, message)));
       return;
@@ -197,6 +218,13 @@ export class AppServerAggregator {
       onNotification: (backend, notification) => forward(async () => {
         this.topology.observe(backend.machineId, notification);
         await this.output.send(notification);
+        if (notification.method === "thread/archived" || notification.method === "thread/deleted") {
+          queueMicrotask(() => {
+            this.removeIfDrained(backend).catch((error) => {
+              this.log(`failed to remove drained backend ${backend.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+            });
+          });
+        }
       }),
       onServerRequest: (backend, serverRequest) => forward(async () => {
         const outerId = `agg/server/${crypto.randomUUID()}`;
@@ -252,6 +280,9 @@ export class AppServerAggregator {
     if (this.topology.hasLiveThreads(backend.machineId)) return;
     await backend.close();
     this.backends.delete(backend.machineId);
+    for (const [key, reverse] of this.reverseRequests) {
+      if (reverse.backend === backend) this.reverseRequests.delete(key);
+    }
     if (this.warmBackend === backend) this.warmBackend = undefined;
   }
 }
@@ -267,3 +298,40 @@ function isMissingRollout(outcome: RpcOutcome, threadId: string): boolean {
     && outcome.error.code === -32600
     && outcome.error.message === `no rollout found for thread id ${threadId}`;
 }
+
+function isAggregateTopologyMethod(method: string): boolean {
+  return method === "thread/search"
+    || method === "thread/searchOccurrences"
+    || method.startsWith("project/")
+    || method.startsWith("threadSection/");
+}
+
+const REPRESENTATIVE_GLOBAL_READS = new Set([
+  "account/read",
+  "account/rateLimits/read",
+  "account/usage/read",
+  "account/workspaceMessages/read",
+  "app/installed",
+  "app/list",
+  "app/read",
+  "collaborationMode/list",
+  "config/read",
+  "configRequirements/read",
+  "experimentalFeature/list",
+  "externalAgentConfig/detect",
+  "externalAgentConfig/import/readHistories",
+  "getAuthStatus",
+  "hooks/list",
+  "mcpServerStatus/list",
+  "model/list",
+  "modelProvider/capabilities/read",
+  "permissionProfile/list",
+  "plugin/installed",
+  "plugin/list",
+  "plugin/read",
+  "plugin/search",
+  "plugin/share/list",
+  "plugin/skill/read",
+  "server/diagnostics",
+  "skills/list",
+]);

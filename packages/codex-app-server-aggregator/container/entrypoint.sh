@@ -33,4 +33,4 @@ if [ -n "${CODEX_AGGREGATOR_PROVIDER_READY_URL:-}" ]; then
 fi
 
 cd "$workspace"
-exec codex app-server --stdio
+exec codex --config "projects={\"$workspace\"={trust_level=\"trusted\"}}" app-server --stdio
