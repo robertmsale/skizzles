@@ -232,11 +232,14 @@ describe("Codex app-server aggregation", () => {
       params: { threadId: harness.factory.threadId(0) },
     });
 
-    await Promise.all([
-      harness.aggregator.handle({ method: "model/list", id: 4, params: {} }),
-      harness.aggregator.handle({ method: "config/read", id: 5, params: {} }),
-    ]);
+    harness.factory.initializeDelayMs = 5;
+    const modelList = harness.aggregator.handle({ method: "model/list", id: 4, params: {} });
+    await waitFor(() => harness.factory.transports[1]?.request("initialize") !== undefined);
+    const configRead = harness.aggregator.handle({ method: "config/read", id: 5, params: {} });
+    await Promise.all([modelList, configRead]);
     expect(harness.factory.transports).toHaveLength(2);
+    expect(resultFor(harness.output.messages, 4)).toEqual({});
+    expect(resultFor(harness.output.messages, 5)).toEqual({});
     await harness.aggregator.close();
   });
 });
@@ -252,6 +255,7 @@ class CaptureSink implements MessageSink {
 class FakeFactory implements BackendFactory {
   readonly transports: FakeTransport[] = [];
   archiveMode: "missing" | "cascade" | "notificationFirst" = "missing";
+  initializeDelayMs = 0;
 
   async create(): Promise<BackendTransport> {
     const index = this.transports.length;
@@ -272,6 +276,8 @@ class FakeFactory implements BackendFactory {
     if (!("method" in message) || !("id" in message)) return;
     const transport = this.transports[index]!;
     if (message.method === "initialize") {
+      if (this.initializeDelayMs > 0) await Bun.sleep(this.initializeDelayMs);
+      transport.initialized = true;
       transport.emit({
         id: message.id,
         result: {
@@ -282,6 +288,10 @@ class FakeFactory implements BackendFactory {
         },
       });
       transport.emit({ method: "configWarning", params: { summary: "fake warning", details: null } });
+      return;
+    }
+    if (!transport.initialized) {
+      transport.emit({ id: message.id, error: { code: -32000, message: "Not initialized" } });
       return;
     }
     if (message.method === "thread/start") {
@@ -330,6 +340,7 @@ class FakeTransport implements BackendTransport {
   destroyed = false;
   destroyCalls = 0;
   destroyFailures = 0;
+  initialized = false;
   writeFailures = 0;
   private controller!: ReadableStreamDefaultController<Uint8Array>;
 

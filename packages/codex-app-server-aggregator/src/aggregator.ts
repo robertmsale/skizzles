@@ -26,6 +26,7 @@ export type AggregatorOptions = {
 export class AppServerAggregator {
   private readonly topology = new Topology();
   private readonly backends = new Map<string, BackendConnection>();
+  private readonly readyBackends = new Set<BackendConnection>();
   private readonly reverseRequests = new Map<string, ReverseRequest>();
   private readonly lifecycleCalls = new Map<BackendConnection, number>();
   private readonly factory: BackendFactory;
@@ -70,6 +71,7 @@ export class AppServerAggregator {
       }
     });
     this.backends.clear();
+    this.readyBackends.clear();
     this.reverseRequests.clear();
     this.lifecycleCalls.clear();
   }
@@ -92,7 +94,7 @@ export class AppServerAggregator {
     }
     if (request.method === "thread/loaded/list") {
       const params = asRecord(request.params);
-      const result = this.topology.loaded(new Set(this.backends.keys()), {
+      const result = this.topology.loaded(new Set([...this.readyBackends].map((backend) => backend.machineId)), {
         cursor: typeof params.cursor === "string" ? params.cursor : null,
         limit: typeof params.limit === "number" ? params.limit : null,
       });
@@ -218,6 +220,7 @@ export class AppServerAggregator {
     this.topology.observe(backend.machineId, response(request.id, outcome));
     await this.output.send(response(request.id, outcome));
     if ("error" in outcome && !this.topology.hasLiveThreads(backend.machineId)) {
+      this.readyBackends.delete(backend);
       await backend.close();
       this.backends.delete(backend.machineId);
     }
@@ -253,6 +256,7 @@ export class AppServerAggregator {
     });
     this.backends.set(connection.machineId, connection);
     const outcome = await connection.initialize(this.initializeParams);
+    if ("result" in outcome) this.readyBackends.add(connection);
     return {
       connection,
       outcome,
@@ -266,7 +270,8 @@ export class AppServerAggregator {
 
   private async globalBackend(): Promise<BackendConnection | undefined> {
     if (this.warmBackend) return this.warmBackend;
-    const running = this.backends.values().next().value as BackendConnection | undefined;
+    if (this.globalBackendCreation) return this.globalBackendCreation;
+    const running = this.readyBackends.values().next().value as BackendConnection | undefined;
     if (running) return running;
     if (!this.globalBackendCreation) {
       const attempt = (async () => {
@@ -290,7 +295,8 @@ export class AppServerAggregator {
 
   private backendForThread(threadId: string): BackendConnection | undefined {
     const machineId = this.topology.machineFor(threadId);
-    return machineId ? this.backends.get(machineId) : undefined;
+    const backend = machineId ? this.backends.get(machineId) : undefined;
+    return backend && this.readyBackends.has(backend) ? backend : undefined;
   }
 
   private async handleClientResponse(id: RpcId, outcome: RpcOutcome): Promise<void> {
@@ -306,6 +312,7 @@ export class AppServerAggregator {
   private async removeIfDrained(backend: BackendConnection): Promise<void> {
     if ((this.lifecycleCalls.get(backend) ?? 0) > 0) return;
     if (this.topology.hasLiveThreads(backend.machineId)) return;
+    this.readyBackends.delete(backend);
     await backend.close();
     this.backends.delete(backend.machineId);
     this.lifecycleCalls.delete(backend);
