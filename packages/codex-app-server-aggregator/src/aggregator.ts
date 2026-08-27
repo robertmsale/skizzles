@@ -15,6 +15,7 @@ import {
 import { Topology, type ThreadListParams } from "./topology.ts";
 
 type ReverseRequest = { backend: BackendConnection; backendId: RpcId };
+type CreatedBackend = { connection: BackendConnection; outcome: RpcOutcome; activate: () => Promise<void> };
 
 export type AggregatorOptions = {
   factory: BackendFactory;
@@ -30,6 +31,7 @@ export class AppServerAggregator {
   private readonly output: MessageSink;
   private readonly log: (message: string) => void;
   private initialization?: Promise<RpcOutcome>;
+  private initialActivation: (() => Promise<void>) | undefined;
   private initializeParams?: unknown;
   private warmBackend: BackendConnection | undefined;
   private initialized = false;
@@ -101,15 +103,25 @@ export class AppServerAggregator {
       return;
     }
 
-    const outcome = await backend.call(request.method, request.params);
+    let outcome = await backend.call(request.method, request.params);
+    const synthesizedLifecycle = threadId !== undefined
+      && (request.method === "thread/archive" || request.method === "thread/delete")
+      && isMissingRollout(outcome, threadId);
+    if (synthesizedLifecycle) outcome = { result: {} };
     this.topology.observe(backend.machineId, response(request.id, outcome));
     await this.output.send(response(request.id, outcome));
 
     if ("result" in outcome && threadId && request.method === "thread/archive") {
       this.topology.markArchived(threadId);
+      if (synthesizedLifecycle) {
+        await this.output.send({ method: "thread/archived", params: { threadId }, emittedAtMs: Date.now() });
+      }
       await this.removeIfDrained(backend);
     } else if ("result" in outcome && threadId && request.method === "thread/delete") {
       this.topology.markDeleted(threadId);
+      if (synthesizedLifecycle) {
+        await this.output.send({ method: "thread/deleted", params: { threadId }, emittedAtMs: Date.now() });
+      }
       await this.removeIfDrained(backend);
     }
   }
@@ -120,17 +132,19 @@ export class AppServerAggregator {
       return;
     }
     this.initializeParams = request.params;
-    this.initialization = this.createInitializedBackend().then(async (backend) => {
+    this.initialization = this.createInitializedBackend(true).then(async (backend) => {
       if ("error" in backend.outcome) {
         await backend.connection.close();
         this.backends.delete(backend.connection.machineId);
       } else {
         this.warmBackend = backend.connection;
+        this.initialActivation = backend.activate;
       }
       return backend.outcome;
     }).catch((error) => errorOutcome(-32603, error instanceof Error ? error.message : String(error)));
     const outcome = await this.initialization;
     await this.output.send(response(request.id, outcome));
+    if ("result" in outcome) await this.initialActivation?.();
   }
 
   private async handleClientNotification(method: string, params: unknown): Promise<void> {
@@ -170,23 +184,38 @@ export class AppServerAggregator {
     }
   }
 
-  private async createInitializedBackend(): Promise<{ connection: BackendConnection; outcome: RpcOutcome }> {
+  private async createInitializedBackend(deferEvents = false): Promise<CreatedBackend> {
     const transport = await this.factory.create();
+    let active = !deferEvents;
+    const queued: Array<() => Promise<void>> = [];
+    const forward = (operation: () => Promise<void>): Promise<void> => {
+      if (active) return operation();
+      queued.push(operation);
+      return Promise.resolve();
+    };
     const connection = new BackendConnection(transport, {
-      onNotification: async (backend, notification) => {
+      onNotification: (backend, notification) => forward(async () => {
         this.topology.observe(backend.machineId, notification);
         await this.output.send(notification);
-      },
-      onServerRequest: async (backend, serverRequest) => {
+      }),
+      onServerRequest: (backend, serverRequest) => forward(async () => {
         const outerId = `agg/server/${crypto.randomUUID()}`;
         this.reverseRequests.set(idKey(outerId), { backend, backendId: serverRequest.id });
         await this.output.send({ ...serverRequest, id: outerId });
-      },
+      }),
       onLog: (backend, text) => this.log(`[${backend.machineId}] ${text.trimEnd()}`),
     });
     this.backends.set(connection.machineId, connection);
     const outcome = await connection.initialize(this.initializeParams);
-    return { connection, outcome };
+    return {
+      connection,
+      outcome,
+      activate: async () => {
+        if (active) return;
+        active = true;
+        for (const operation of queued.splice(0)) await operation();
+      },
+    };
   }
 
   private async globalBackend(): Promise<BackendConnection | undefined> {
@@ -231,4 +260,10 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function isMissingRollout(outcome: RpcOutcome, threadId: string): boolean {
+  return "error" in outcome
+    && outcome.error.code === -32600
+    && outcome.error.message === `no rollout found for thread id ${threadId}`;
 }

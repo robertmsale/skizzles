@@ -15,6 +15,7 @@ export type RpcRequest = {
 export type RpcNotification = {
   method: string;
   params?: unknown;
+  emittedAtMs?: number;
 };
 
 export type RpcOutcome = { result: unknown } | { error: RpcError };

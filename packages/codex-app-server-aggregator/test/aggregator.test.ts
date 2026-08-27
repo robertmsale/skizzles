@@ -35,6 +35,14 @@ describe("Codex app-server aggregation", () => {
     await harness.aggregator.close();
   });
 
+  test("does not reorder backend initialization notifications ahead of the initialize result", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    expect(harness.output.messages[0]).toMatchObject({ id: 1, result: { platformOs: "linux" } });
+    expect(harness.output.messages[1]).toMatchObject({ method: "configWarning" });
+    await harness.aggregator.close();
+  });
+
   test("correlates colliding backend approval ids without changing approval payloads", async () => {
     const harness = createHarness();
     await initialize(harness);
@@ -75,6 +83,11 @@ describe("Codex app-server aggregation", () => {
     const threadId = harness.factory.threadId(0);
 
     await harness.aggregator.handle({ method: "thread/archive", id: 3, params: { threadId } });
+    expect(resultFor(harness.output.messages, 3)).toEqual({});
+    expect(harness.output.messages).toContainEqual(expect.objectContaining({
+      method: "thread/archived",
+      params: { threadId },
+    }));
     expect(harness.factory.transports[0]!.destroyed).toBe(true);
 
     await harness.aggregator.handle({ method: "thread/list", id: 4, params: { archived: true } });
@@ -124,6 +137,7 @@ class FakeFactory implements BackendFactory {
           platformOs: "linux",
         },
       });
+      transport.emit({ method: "configWarning", params: { summary: "fake warning", details: null } });
       return;
     }
     if (message.method === "thread/start") {
@@ -137,6 +151,14 @@ class FakeFactory implements BackendFactory {
       const thread = { ...threadSnapshot(this.forkId(index), index), forkedFromId: sourceId };
       transport.emit({ id: message.id, result: { thread, cwd: CONTAINER_WORKSPACE } });
       transport.emit({ method: "thread/started", params: { thread } });
+      return;
+    }
+    if (message.method === "thread/archive" || message.method === "thread/delete") {
+      const threadId = (message.params as { threadId: string }).threadId;
+      transport.emit({
+        id: message.id,
+        error: { code: -32600, message: `no rollout found for thread id ${threadId}` },
+      });
       return;
     }
     transport.emit({ id: message.id, result: {} });

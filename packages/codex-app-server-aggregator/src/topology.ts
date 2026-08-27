@@ -1,5 +1,6 @@
 import type { RpcMessage } from "./protocol.ts";
 import type { ThreadListParams } from "./generated/v2/ThreadListParams.ts";
+import type { ThreadSourceKind } from "./generated/v2/ThreadSourceKind.ts";
 
 export type { ThreadListParams } from "./generated/v2/ThreadListParams.ts";
 
@@ -43,6 +44,13 @@ export class Topology {
     if (method === "thread/archived" && threadId) this.markArchived(threadId);
     if (method === "thread/unarchived" && threadId) this.markUnarchived(threadId);
     if (method === "thread/deleted" && threadId) this.markDeleted(threadId);
+    if (method === "thread/closed" && threadId) this.patchSnapshot(threadId, { status: { type: "notLoaded" } });
+    if (method === "thread/status/changed" && threadId && params?.status) {
+      this.patchSnapshot(threadId, { status: params.status });
+    }
+    if (method === "thread/name/updated" && threadId && typeof params?.threadName === "string") {
+      this.patchSnapshot(threadId, { name: params.threadName });
+    }
   }
 
   machineFor(threadId: string): string | undefined {
@@ -93,7 +101,10 @@ export class Topology {
       .filter((entry) => !entry.deleted && entry.archived === archived && entry.snapshot)
       .map((entry) => entry.snapshot!)
       .filter((thread) => !providers || providers.has(String(thread.modelProvider ?? "")))
+      .filter((thread) => !params.sourceKinds?.length || params.sourceKinds.includes(sourceKind(thread.source)))
       .filter((thread) => !cwds?.length || cwds.includes(String(thread.cwd ?? "")))
+      .filter((thread) => !("sectionId" in params) || sectionId(thread.section) === params.sectionId)
+      .filter((thread) => !("projectId" in params) || (thread.projectId ?? null) === params.projectId)
       .filter((thread) => matchesSearch(thread, params.searchTerm))
       .filter((thread) => params.parentThreadId == null || thread.parentThreadId === params.parentThreadId)
       .filter((thread) => params.ancestorThreadId == null || isDescendant(thread, params.ancestorThreadId, this.threads))
@@ -107,6 +118,11 @@ export class Topology {
       nextCursor: offset + data.length < records.length ? encodeCursor(offset + data.length) : null,
       backwardsCursor: offset > 0 ? encodeCursor(Math.max(0, offset - limit)) : null,
     };
+  }
+
+  private patchSnapshot(threadId: string, patch: Record<string, unknown>): void {
+    const entry = this.threads.get(threadId);
+    if (entry?.snapshot) entry.snapshot = { ...entry.snapshot, ...patch };
   }
 }
 
@@ -141,6 +157,23 @@ function isDescendant(thread: ThreadSnapshot, ancestorId: string, entries: Map<s
     parent = snapshot && typeof snapshot.parentThreadId === "string" ? snapshot.parentThreadId : undefined;
   }
   return false;
+}
+
+function sourceKind(source: unknown): ThreadSourceKind {
+  if (source === "cli" || source === "vscode" || source === "exec") return source;
+  if (source !== null && typeof source === "object" && !Array.isArray(source)) {
+    const record = source as Record<string, unknown>;
+    if ("subagent" in record) return "subAgent";
+    if ("custom" in record) return "appServer";
+  }
+  return "unknown";
+}
+
+function sectionId(section: unknown): string | null {
+  return section !== null && typeof section === "object" && !Array.isArray(section)
+    && typeof (section as Record<string, unknown>).id === "string"
+    ? (section as Record<string, unknown>).id as string
+    : null;
 }
 
 function compareThreads(key: NonNullable<ThreadListParams["sortKey"]>, direction: "asc" | "desc") {

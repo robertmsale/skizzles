@@ -22,7 +22,7 @@ fi
 
 if [ -n "${CODEX_AGGREGATOR_PROVIDER_READY_URL:-}" ]; then
   attempt=0
-  until curl --fail --silent --show-error "$CODEX_AGGREGATOR_PROVIDER_READY_URL" >/dev/null; do
+  until curl --fail --silent "$CODEX_AGGREGATOR_PROVIDER_READY_URL" >/dev/null; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 60 ]; then
       echo "provider did not become ready: $CODEX_AGGREGATOR_PROVIDER_READY_URL" >&2

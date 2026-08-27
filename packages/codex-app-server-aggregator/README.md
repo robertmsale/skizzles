@@ -34,7 +34,7 @@ Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every 
 | `thread/list`, `thread/loaded/list` | Answer from aggregate bookkeeping across containers. |
 | Thread-scoped requests | Route by the real Codex thread id. Fork/review ids observed in responses or `thread/started` bind to the same container. |
 | Backend approvals and other requests | Rewrite only the JSON-RPC request id for collision-free correlation, then route the client response back to the originating backend. Payloads are untouched. |
-| `thread/archive`, `thread/delete` | Pass through; remove the container when no mapped live threads remain. |
+| `thread/archive`, `thread/delete` | Pass through; if the real backend has not materialized a rollout yet, synthesize the normal lifecycle success for its already-minted thread. Remove the container when no mapped live threads remain. |
 | Other global requests | Route to the warm backend or an existing backend. |
 
 This is not production-ready. Bookkeeping is in memory, stdio backends cannot be reattached after an aggregator crash, and an archived container's rollout is destroyed with the container. Those are protocol/process questions the spike is intended to expose, not paper over.
