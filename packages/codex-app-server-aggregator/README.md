@@ -23,7 +23,7 @@ bun run packages/codex-app-server-aggregator/src/cli.ts \
 
 The client then speaks the normal app-server protocol on stdin/stdout. `initialize` provisions a warm container so its returned `codexHome`, platform, and user agent are real in-container values. Container startup emits an internal readiness marker only after clone and provider readiness; the transport strips it before starting the app-server RPC timeout. The cloned workspace is trusted inside that disposable container so its repo-local Codex config, hooks, and exec policy load. The first `thread/start` consumes that container; later starts provision another container. A failed later provision returns a JSON-RPC error for that `thread/start` instead of stranding its request ID.
 
-Client notification opt-outs still apply on the outer connection. The aggregator removes `thread/started`, `thread/archived`, and `thread/deleted` from the capabilities sent to each backend so it can maintain routing and lifecycle state internally, then suppresses those notifications before forwarding when the client opted out.
+Client notification opt-outs still apply on the outer connection. The aggregator removes the thread lifecycle, status, and turn/item activity methods needed for aggregate bookkeeping from the capabilities sent to each backend, observes them internally, then suppresses them before forwarding when the client opted out.
 
 Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every isolated `/codex-home`. Keep session rollouts out of this seed; it should contain only intentional shared config/auth material. A custom image can include an OpenCodex-compatible provider, started with `--provider-command`; use `--provider-ready-url` to gate app-server startup until it is ready. `--pass-env NAME` passes selected provider credentials by name without putting their values in this repository.
 
@@ -33,7 +33,7 @@ Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every 
 | --- | --- |
 | `initialize`, `initialized` | Initialize every real backend with the client's DTO, except topology-critical notification opt-outs retained only at the outer boundary; return the warm Linux backend's response. |
 | `thread/start` | Clone/provision first, force `cwd` to `/workspace/repo`, then preserve the real returned thread id. |
-| `thread/list`, `thread/loaded/list` | Answer from aggregate bookkeeping across containers. |
+| `thread/list`, `thread/loaded/list` | Answer from aggregate bookkeeping across containers. Turn/item activity refreshes preview and ordering timestamps; close/status notifications maintain per-thread loaded state independently of container readiness. |
 | `thread/read` after teardown | Return the retained snapshot when turns are not requested. |
 | Thread-scoped requests | Route by the real Codex thread id. Fork/review ids observed in responses or `thread/started` bind to the same container. |
 | Backend approvals and other requests | Rewrite only the JSON-RPC request id for collision-free correlation, then route the client response back to the originating backend. Payloads are untouched. |

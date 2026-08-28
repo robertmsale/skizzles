@@ -22,7 +22,7 @@ and reject unkeyed operations that have no honest aggregate meaning.
 | `initialize` | Provision and initialize a warm backend, return its real Linux `codexHome`, platform, and user agent, then release queued backend events. Keep topology-critical notifications enabled on the inner connection while applying the client's opt-outs on the outer connection. | The response describes a concrete backend. Holding its early notifications prevents them from overtaking the outer initialize response; observing thread lifecycle events is required for routing and teardown. |
 | `initialized` | Fan out to every initialized backend, including later backends. | Each app-server connection has its own initialization state. |
 | `thread/start` | Allocate a container, force `cwd` (and caller-supplied runtime roots) to `/workspace/repo`, pass through, then bind the returned thread ID to that container. | `thread/start` has no caller-supplied ID. The real backend remains the ID authority. |
-| `thread/list`, `thread/loaded/list` | Answer from aggregate in-memory topology; never delegate to one backend. | A backend only knows its own Codex home and loaded threads. |
+| `thread/list`, `thread/loaded/list` | Answer from aggregate in-memory topology; derive mutable preview/activity metadata and per-thread loaded state from backend notifications. Never delegate to one backend. | A backend only knows its own Codex home and loaded threads, while container readiness alone does not mean every mapped thread remains loaded. |
 | `thread/read` after teardown | Return the retained snapshot when `includeTurns` is not true. | The container and rollout no longer exist; turns cannot honestly be supplied. |
 | Requests with `params.threadId` | Route to the mapped backend and pass payload/result through. | The existing protocol field is a sufficient routing key. |
 | `thread/fork`, detached `review/start`, and new `thread/started` notifications | Pass through and bind every returned/announced ID to the same backend. | These operations mint extra real thread IDs inside the existing writer process. |
@@ -67,6 +67,21 @@ history. For an ID the shim saw the backend mint, the spike also treats that exa
 archive/delete error as lifecycle success, emits the normal lifecycle notification, and removes a
 drained container. It does not synthesize success for unknown IDs or other backend errors.
 
+### Aggregate snapshots are derived state
+
+`thread/started` supplies the initial full DTO, but creation precedes the first persisted user
+message. The 0.149.1 notification schema then supplies the missing mutable facts: `turn/started`
+carries the turn's start time, user-message item lifecycle carries canonical input content, and
+`turn/completed` carries completion time. The shim uses those events to fill an empty preview and
+monotonically advance `updatedAt` and `recencyAt` before applying search filters or activity sorts.
+Its preview derivation follows Codex's text concatenation, request-prefix stripping, and image-only
+fallback instead of treating an arbitrary agent item as the thread preview.
+
+Loaded state is per thread, not per process. `thread/closed` and a `notLoaded` status remove only
+that ID from `thread/loaded/list`; sibling fork/review IDs may remain loaded on the same ready
+container. Archive and delete also clear loaded state without conflating unload with lifecycle
+completion.
+
 ### Bidirectional traffic is connection-scoped
 
 The generated server-request union includes command/file approvals, user input, MCP elicitation,
@@ -83,11 +98,11 @@ single response that can describe a heterogeneous backend fleet; this spike assu
 image and returns its warm representative.
 
 Initialization capabilities describe the client-facing connection, but the aggregator is also an
-app-server client on every inner connection. If it forwarded an opt-out for `thread/started`,
-`thread/archived`, or `thread/deleted`, Codex would suppress the events required to bind autonomous
-children and release drained containers. The spike removes those three methods from each inner
-initialize request, observes them for bookkeeping, and independently honors the original opt-out
-when forwarding notifications to the outer client.
+app-server client on every inner connection. Forwarding opt-outs for lifecycle, status, or
+turn/item activity would suppress events required to bind autonomous children, track loaded state,
+refresh list metadata, and release drained containers. The spike keeps those methods enabled on
+each inner connection, observes them for bookkeeping, and independently honors the original
+opt-out when forwarding notifications to the outer client.
 
 Provisioning is also part of the outer request contract. Docker create/start failures are caught at
 the `thread/start` boundary, partial transports are closed, and the original JSON-RPC ID receives an
@@ -125,6 +140,7 @@ auth seed is mechanism, not a credential-security design.
 | --- | --- | --- |
 | Let the caller choose a routing ID. | Generated DTO plus direct start. | Rejected: no input ID; preserve the backend's UUIDv7. |
 | Ask one backend for global thread topology. | Immediate start/list/loaded probes and two-backend unit test. | Rejected: the view is partial and may lag rollout creation. |
+| Refresh aggregate lists from every backend on demand. | Runtime notification schema plus post-turn search/sort and unload tests. | Rejected: it turns an aggregate-owned read into an N-backend partial-failure fanout. Derive the mutable projection from inner events instead. |
 | Give every fork/review ID a new process. | Fork, detached review, and competing resume probe. | Rejected: child IDs are minted by the current writer; competing writers are refused. |
 | Always trust backend archive immediately after start. | Start then archive before a first turn. | Rejected: the ID exists before its rollout does. Narrow synthesis is required to release that machine. |
 | Use direct stdio per container. | Real Docker initialization, start, turn, archive, and removal. | Selected for the spike: simple and fully bidirectional, but not reattachable. |

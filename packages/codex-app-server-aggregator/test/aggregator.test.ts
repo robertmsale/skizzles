@@ -243,15 +243,108 @@ describe("Codex app-server aggregation", () => {
     await harness.aggregator.close();
   });
 
+  test("excludes a closed thread from loaded topology while its backend remains ready", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    const parentId = harness.factory.threadId(0);
+    await harness.aggregator.handle({ method: "thread/fork", id: 3, params: { threadId: parentId } });
+    const forkId = harness.factory.forkId(0);
+
+    await harness.aggregator.handle({ method: "thread/loaded/list", id: 4, params: {} });
+    expect(resultFor(harness.output.messages, 4)).toEqual({
+      data: [parentId, forkId].sort(),
+      nextCursor: null,
+    });
+
+    harness.factory.transports[0]!.emit({ method: "thread/closed", params: { threadId: parentId } });
+    await waitFor(() => harness.output.messages.some((message) =>
+      "method" in message && message.method === "thread/closed"));
+    await harness.aggregator.handle({ method: "thread/loaded/list", id: 5, params: {} });
+    expect(resultFor(harness.output.messages, 5)).toEqual({ data: [forkId], nextCursor: null });
+    expect(harness.factory.transports[0]!.destroyed).toBe(false);
+    await harness.aggregator.close();
+  });
+
+  test("refreshes preview and activity timestamps before aggregate list filtering and sorting", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 3, params: {} });
+    const activeId = harness.factory.threadId(0);
+    const otherId = harness.factory.threadId(1);
+    harness.factory.transports[0]!.emit({
+      method: "thread/started",
+      params: { thread: { ...threadSnapshot(activeId, 0), preview: "" } },
+    });
+    harness.factory.transports[0]!.emit({
+      method: "turn/started",
+      params: {
+        threadId: activeId,
+        turn: { id: "turn-1", items: [], startedAt: 100, completedAt: null },
+      },
+      emittedAtMs: 100_000,
+    });
+    harness.factory.transports[0]!.emit({
+      method: "item/completed",
+      params: {
+        threadId: activeId,
+        turnId: "turn-1",
+        completedAtMs: 110_000,
+        item: {
+          type: "userMessage",
+          id: "user-1",
+          clientId: null,
+          content: [{
+            type: "text",
+            text: "ignored model context\n## My request for Codex: fresh searchable request",
+            text_elements: [],
+          }],
+        },
+      },
+      emittedAtMs: 110_000,
+    });
+    harness.factory.transports[0]!.emit({
+      method: "turn/completed",
+      params: {
+        threadId: activeId,
+        turn: { id: "turn-1", items: [], startedAt: 100, completedAt: 120 },
+      },
+      emittedAtMs: 120_000,
+    });
+    harness.factory.transports[0]!.emit({
+      method: "item/started",
+      params: {
+        threadId: activeId,
+        turnId: "turn-1",
+        startedAtMs: 90_000,
+        item: { type: "plan", id: "late-item", text: "out-of-order event" },
+      },
+      emittedAtMs: 90_000,
+    });
+    await waitFor(() => harness.output.messages.some((message) =>
+      "method" in message && message.method === "item/started"
+      && (message.params as { item?: { id?: string } } | undefined)?.item?.id === "late-item"));
+
+    await harness.aggregator.handle({ method: "thread/list", id: 4, params: { searchTerm: "searchable" } });
+    expect(resultFor(harness.output.messages, 4)).toMatchObject({
+      data: [{ id: activeId, preview: "fresh searchable request", updatedAt: 120, recencyAt: 100 }],
+    });
+    await harness.aggregator.handle({ method: "thread/list", id: 5, params: { sortKey: "updated_at" } });
+    expect((resultFor(harness.output.messages, 5) as { data: Array<{ id: string }> }).data[0]?.id).toBe(activeId);
+    await harness.aggregator.handle({ method: "thread/list", id: 6, params: { sortKey: "recency_at" } });
+    expect((resultFor(harness.output.messages, 6) as { data: Array<{ id: string }> }).data.map((thread) => thread.id))
+      .toEqual([activeId, otherId]);
+    await harness.aggregator.close();
+  });
+
   test("keeps topology notifications enabled internally while honoring the client opt-out", async () => {
     const harness = createHarness();
     await initialize(harness, {
       experimentalApi: true,
       optOutNotificationMethods: [
         "configWarning",
-        "thread/started",
-        "thread/archived",
-        "thread/deleted",
+        ...TOPOLOGY_NOTIFICATION_METHODS,
       ],
     });
 
@@ -304,8 +397,16 @@ describe("Codex app-server aggregation", () => {
 
 const TOPOLOGY_NOTIFICATION_METHODS = new Set([
   "thread/started",
+  "thread/status/changed",
   "thread/archived",
+  "thread/unarchived",
   "thread/deleted",
+  "thread/closed",
+  "thread/name/updated",
+  "turn/started",
+  "turn/completed",
+  "item/started",
+  "item/completed",
 ]);
 
 class CaptureSink implements MessageSink {

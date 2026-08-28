@@ -453,8 +453,16 @@ function isAggregateTopologyMethod(method: string): boolean {
 
 const TOPOLOGY_NOTIFICATION_METHODS = new Set([
   "thread/started",
+  "thread/status/changed",
   "thread/archived",
+  "thread/unarchived",
   "thread/deleted",
+  "thread/closed",
+  "thread/name/updated",
+  "turn/started",
+  "turn/completed",
+  "item/started",
+  "item/completed",
 ]);
 
 const REPRESENTATIVE_GLOBAL_READS = new Set([

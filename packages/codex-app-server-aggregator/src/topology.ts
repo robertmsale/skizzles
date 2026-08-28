@@ -9,6 +9,7 @@ export type ThreadSnapshot = Record<string, unknown> & { id: string };
 type ThreadEntry = {
   machineId: string;
   snapshot: ThreadSnapshot | undefined;
+  loaded: boolean;
   archived: boolean;
   deleted: boolean;
 };
@@ -24,6 +25,7 @@ export class Topology {
     this.threads.set(threadId, {
       machineId,
       snapshot: snapshot ?? current?.snapshot,
+      loaded: loadedFromStatus(snapshot?.status) ?? current?.loaded ?? true,
       archived: current?.archived ?? false,
       deleted: current?.deleted ?? false,
     });
@@ -44,13 +46,19 @@ export class Topology {
     if (method === "thread/archived" && threadId) this.markArchived(threadId);
     if (method === "thread/unarchived" && threadId) this.markUnarchived(threadId);
     if (method === "thread/deleted" && threadId) this.markDeleted(threadId);
-    if (method === "thread/closed" && threadId) this.patchSnapshot(threadId, { status: { type: "notLoaded" } });
+    if (method === "thread/closed" && threadId) {
+      this.patchSnapshot(threadId, { status: { type: "notLoaded" } });
+      this.setLoaded(threadId, false);
+    }
     if (method === "thread/status/changed" && threadId && params?.status) {
       this.patchSnapshot(threadId, { status: params.status });
+      const loaded = loadedFromStatus(params.status);
+      if (loaded !== undefined) this.setLoaded(threadId, loaded);
     }
     if (method === "thread/name/updated" && threadId && typeof params?.threadName === "string") {
       this.patchSnapshot(threadId, { name: params.threadName });
     }
+    if (threadId && params) this.observeActivity(threadId, method, params, envelope.emittedAtMs);
   }
 
   machineFor(threadId: string): string | undefined {
@@ -67,6 +75,7 @@ export class Topology {
     const entry = this.threads.get(threadId);
     if (!entry) return;
     entry.archived = true;
+    entry.loaded = false;
     if (entry.snapshot) entry.snapshot = { ...entry.snapshot, status: { type: "notLoaded" } };
   }
 
@@ -77,7 +86,10 @@ export class Topology {
 
   markDeleted(threadId: string): void {
     const entry = this.threads.get(threadId);
-    if (entry) entry.deleted = true;
+    if (entry) {
+      entry.deleted = true;
+      entry.loaded = false;
+    }
   }
 
   hasLiveThreads(machineId: string): boolean {
@@ -133,10 +145,125 @@ export class Topology {
     const entry = this.threads.get(threadId);
     if (entry?.snapshot) entry.snapshot = { ...entry.snapshot, ...patch };
   }
+
+  private setLoaded(threadId: string, loaded: boolean): void {
+    const entry = this.threads.get(threadId);
+    if (entry) entry.loaded = loaded;
+  }
+
+  private observeActivity(
+    threadId: string,
+    method: string | undefined,
+    params: Record<string, unknown>,
+    emittedAtMs: unknown,
+  ): void {
+    const entry = this.threads.get(threadId);
+    if (!entry?.snapshot || !method) return;
+    const activity = activityMetadata(method, params, emittedAtMs);
+    if (!activity) return;
+
+    const snapshot = entry.snapshot;
+    const patch: Record<string, unknown> = {};
+    if (activity.preview && String(snapshot.preview ?? "").trim() === "") patch.preview = activity.preview;
+    if (activity.updatedAt !== undefined && activity.updatedAt >= numericTimestamp(snapshot.updatedAt)) {
+      patch.updatedAt = activity.updatedAt;
+    }
+    if (activity.recencyAt !== undefined && activity.recencyAt >= numericTimestamp(snapshot.recencyAt)) {
+      patch.recencyAt = activity.recencyAt;
+    }
+    if (Object.keys(patch).length) entry.snapshot = { ...snapshot, ...patch };
+  }
 }
 
 function loadedMachine(entry: ThreadEntry, machineIds: ReadonlySet<string>): boolean {
-  return !entry.deleted && !entry.archived && machineIds.has(entry.machineId);
+  return entry.loaded && !entry.deleted && !entry.archived && machineIds.has(entry.machineId);
+}
+
+type ActivityMetadata = {
+  preview?: string | undefined;
+  updatedAt?: number;
+  recencyAt?: number;
+};
+
+function activityMetadata(
+  method: string,
+  params: Record<string, unknown>,
+  emittedAtMs: unknown,
+): ActivityMetadata | undefined {
+  const turn = asRecord(params.turn);
+  const fallback = millisecondsAsSeconds(emittedAtMs);
+  if (method === "turn/started") {
+    const timestamp = secondsTimestamp(turn?.startedAt) ?? fallback;
+    return {
+      preview: previewFromTurn(turn),
+      ...(timestamp === undefined ? {} : { updatedAt: timestamp, recencyAt: timestamp }),
+    };
+  }
+  if (method === "turn/completed") {
+    const timestamp = secondsTimestamp(turn?.completedAt) ?? fallback;
+    return {
+      preview: previewFromTurn(turn),
+      ...(timestamp === undefined ? {} : { updatedAt: timestamp }),
+    };
+  }
+  if (method === "item/started") {
+    const timestamp = millisecondsAsSeconds(params.startedAtMs) ?? fallback;
+    return {
+      preview: previewFromItem(params.item),
+      ...(timestamp === undefined ? {} : { updatedAt: timestamp }),
+    };
+  }
+  if (method === "item/completed") {
+    const timestamp = millisecondsAsSeconds(params.completedAtMs) ?? fallback;
+    return {
+      preview: previewFromItem(params.item),
+      ...(timestamp === undefined ? {} : { updatedAt: timestamp }),
+    };
+  }
+  return undefined;
+}
+
+function previewFromTurn(turn: Record<string, unknown> | undefined): string | undefined {
+  if (!Array.isArray(turn?.items)) return undefined;
+  for (const item of turn.items) {
+    const preview = previewFromItem(item);
+    if (preview) return preview;
+  }
+  return undefined;
+}
+
+function previewFromItem(value: unknown): string | undefined {
+  const item = asRecord(value);
+  if (item?.type !== "userMessage" || !Array.isArray(item.content)) return undefined;
+  let text = "";
+  let hasImage = false;
+  for (const value of item.content) {
+    const content = asRecord(value);
+    if (content?.type === "text" && typeof content.text === "string") text += content.text;
+    if (content?.type === "image" || content?.type === "localImage") hasImage = true;
+  }
+  const marker = "## My request for Codex:";
+  const markerIndex = text.indexOf(marker);
+  const preview = (markerIndex >= 0 ? text.slice(markerIndex + marker.length) : text).trim();
+  return preview || (hasImage ? "[Image]" : undefined);
+}
+
+function loadedFromStatus(value: unknown): boolean | undefined {
+  const type = asRecord(value)?.type;
+  return typeof type === "string" ? type !== "notLoaded" : undefined;
+}
+
+function secondsTimestamp(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function millisecondsAsSeconds(value: unknown): number | undefined {
+  const milliseconds = secondsTimestamp(value);
+  return milliseconds === undefined ? undefined : Math.floor(milliseconds / 1_000);
+}
+
+function numericTimestamp(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
