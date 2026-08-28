@@ -26,7 +26,6 @@ import { withFileLock } from "./locks";
 import { runCommand } from "./process";
 import { redactPublicText } from "./public-output";
 import {
-  acquireSharedImageLease,
   releaseLabSharedImageLeases,
 } from "./shared-image-state";
 import {
@@ -451,15 +450,9 @@ export class ContainerLabService {
             repoHash: lab.repoHash,
             docker: this.docker,
             signal,
+            owner: this.owner,
+            labId: lab.id,
           });
-          for (const profile of config.sharedImages) {
-            const reference = references.find((item) => item.profile === profile.name);
-            if (!reference) throw new Error(`shared image profile was not ensured: ${profile.name}`);
-            await acquireSharedImageLease(this.roots.stateRoot, reference, this.owner, lab.id, {
-              repoHash: lab.repoHash,
-              platform: profile.platform,
-            });
-          }
           lab = await this.updateProvisioning(id, (current) => {
             current.sharedImages = references;
           });

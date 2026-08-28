@@ -11,7 +11,7 @@ import {
   gcSharedImages,
   inventorySharedImages,
 } from "./shared-image-docker";
-import { acquireSharedImageLease, releaseAllLeasesForLab } from "./shared-image-state";
+import { acquireSharedImageLease, readSharedImageRecord, releaseAllLeasesForLab } from "./shared-image-state";
 import { ensureOwner, ownerKey, writeLab, type StateRoots } from "./state";
 import type { LabMetadata } from "./types";
 
@@ -112,6 +112,44 @@ describe.skipIf(!enabled)("shared image docker acceptance", () => {
 
     await docker.run(["image", "rm", "--no-prune", foreignTag], { allowFailure: true, timeoutMs: 10_000 });
     await releaseAllLeasesForLab(roots.stateRoot, owner, "lab-1");
+  }, 180_000);
+
+  test("ensure leases atomically so immediate apply GC cannot remove the image", async () => {
+    const repo = await environmentRepo();
+    const roots = await stateRoots();
+    const profile = {
+      name: "toolchain" as const,
+      context: join(repo, "environment"),
+      dockerfile: join(repo, "environment", "Dockerfile"),
+      platform,
+      buildArgs: { TOOLCHAIN: "1" },
+      services: ["app"],
+    };
+    const owner = "thread-shared-image-lease";
+    const before = await resourceSnapshot();
+    const reference = await ensureSharedEnvironmentImage({
+      stateRoot: roots.stateRoot,
+      repoHash: "123456789abc",
+      profile,
+      repoRoot: repo,
+      docker,
+      lease: { owner, labId: "lab-1" },
+    });
+    expect((await readSharedImageRecord(roots.stateRoot, reference.digest))?.leases).toHaveLength(1);
+    const applied = await gcSharedImages(roots, docker, { mode: "apply", maxAgeMs: 0 });
+    expect(applied.removed).toBe(0);
+    const stillThere = await docker.run(["image", "inspect", "-f", "{{.Id}}", reference.imageId], {
+      allowFailure: true, timeoutMs: 10_000,
+    });
+    expect(stillThere.code).toBe(0);
+    expect(stillThere.stdout.toString().trim()).toBe(reference.imageId);
+    expectPreserved(before, await resourceSnapshot());
+    await releaseAllLeasesForLab(roots.stateRoot, owner, "lab-1");
+    const removed = await gcSharedImages(roots, docker, { mode: "apply", maxAgeMs: 0 });
+    expect(removed.removed).toBe(1);
+    const gone = await docker.run(["image", "inspect", reference.imageId], { allowFailure: true, timeoutMs: 10_000 });
+    expect(gone.code).not.toBe(0);
+    expectPreserved(before, await resourceSnapshot());
   }, 180_000);
 });
 

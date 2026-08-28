@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -8,6 +8,7 @@ import type { DockerRunner } from "./docker";
 import type { CommandResult, RunOptions } from "./process";
 import {
   SHARED_IMAGE_BUILDER_NAME,
+  fingerprintSharedImage,
   sharedImageLabels,
 } from "./shared-image";
 import {
@@ -82,6 +83,71 @@ describe("shared image ensure", () => {
     ]);
     expect(left.imageId).toBe(right.imageId);
     expect(docker.builds).toBe(1);
+  });
+
+  test("builds from a snapshot so later live-tree mutations are not consumed", async () => {
+    const repo = await environmentRepo();
+    const roots = await stateRoots();
+    const docker = new ScriptedDocker();
+    docker.inspectMissingOnce = true;
+    docker.builderPresent = true;
+    const profile = testProfile(repo);
+    const original = await readFile(profile.dockerfile, "utf8");
+    docker.onBuild = async (args) => {
+      const contextArg = args.at(-1)!;
+      const dockerfileArg = args[args.indexOf("--file") + 1]!;
+      expect(contextArg).not.toBe(profile.context);
+      expect(dockerfileArg).not.toBe(profile.dockerfile);
+      expect(await readFile(dockerfileArg, "utf8")).toBe(original);
+      await writeFile(join(profile.context, ".env"), "TOKEN=1\n");
+      await writeFile(profile.dockerfile, "FROM alpine:3.20\nRUN echo mutated\n");
+      expect(await readFile(dockerfileArg, "utf8")).toBe(original);
+      expect(await Bun.file(join(contextArg, ".env")).exists()).toBe(false);
+    };
+    await ensureSharedEnvironmentImage({
+      stateRoot: roots.stateRoot,
+      repoHash: "123456789abc",
+      profile,
+      repoRoot: repo,
+      docker,
+    });
+    expect(docker.builds).toBe(1);
+    expect(docker.buildArgs.at(-1)).not.toBe(profile.context);
+  });
+
+  test("ensure leases inside the digest lock so apply GC cannot yank the image", async () => {
+    const repo = await environmentRepo();
+    const roots = await stateRoots();
+    const docker = new ScriptedDocker();
+    docker.inspectMissingOnce = true;
+    docker.builderPresent = true;
+    docker.buildDelayMs = 150;
+    const profile = testProfile(repo);
+    const fingerprint = await fingerprintSharedImage(repo, profile);
+    const ensure = ensureSharedEnvironmentImage({
+      stateRoot: roots.stateRoot,
+      repoHash: "123456789abc",
+      profile,
+      repoRoot: repo,
+      docker,
+      lease: { owner: "thread-a", labId: "lab-1" },
+    });
+    const started = Date.now();
+    while (!(await readSharedImageRecord(roots.stateRoot, fingerprint.digest))) {
+      if (Date.now() - started > 2_000) throw new Error("shared image record was not created");
+      await Bun.sleep(5);
+    }
+    const gc = gcSharedImages(roots, docker, {
+      mode: "apply",
+      maxAgeMs: 0,
+      now: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    });
+    const [reference, collected] = await Promise.all([ensure, gc]);
+    expect(reference.digest).toBe(fingerprint.digest);
+    expect(collected.removed).toBe(0);
+    expect((await readSharedImageRecord(roots.stateRoot, fingerprint.digest))?.leases).toHaveLength(1);
+    expect(docker.removals).toEqual([]);
+    expect(docker.images.has(reference.imageId)).toBe(true);
   });
 });
 
@@ -225,6 +291,8 @@ class ScriptedDocker implements DockerRunner {
   builderName = SHARED_IMAGE_BUILDER_NAME;
   builderDriver = "docker-container";
   buildDelayMs = 0;
+  buildArgs: string[] = [];
+  onBuild?: (args: string[]) => Promise<void>;
   images = new Map<string, { id: string; labels: Record<string, string>; size: number; repotags: string[] }>();
   untrackedIds: string[] = [];
   removals: string[][] = [];
@@ -278,6 +346,8 @@ class ScriptedDocker implements DockerRunner {
     }
     if (args[0] === "buildx" && args[1] === "build") {
       this.builds += 1;
+      this.buildArgs = args;
+      if (this.onBuild) await this.onBuild(args);
       if (this.buildDelayMs) await Bun.sleep(this.buildDelayMs);
       const iidIndex = args.indexOf("--iidfile");
       if (iidIndex >= 0) await writeFile(args[iidIndex + 1]!, IMAGE_ID);

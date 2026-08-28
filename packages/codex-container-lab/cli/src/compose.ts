@@ -70,7 +70,10 @@ export function generateOverrideCompose(
   const services = Object.fromEntries(serviceNames.map((name) => {
     const override: Record<string, unknown> = { labels };
     const shared = sharedImageByService.get(name);
-    if (shared) override.image = shared.imageId;
+    if (shared) {
+      override.image = shared.imageId;
+      override.pull_policy = "never";
+    }
     if (name === config.mode.commandService) {
       override.init = true;
       override.working_dir = config.runtime.workspace;
@@ -182,6 +185,9 @@ export function assertMappedServicesConsumeSharedImages(
     }
     if (definition.image !== reference.imageId && definition.image !== reference.tag) {
       throw new Error(`mapped service does not consume the ensured shared image: ${service}`);
+    }
+    if (definition.pull_policy === "always" || definition.pull_policy === "build") {
+      throw new Error(`mapped service keeps a pull policy that would not consume the ensured image: ${service}`);
     }
   }
 }

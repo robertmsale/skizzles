@@ -49,16 +49,19 @@ shared_images:
 ```
 
 The digest hashes everything Docker may read for that context: Dockerfile,
-`.dockerignore`, selected files, target, platform, profile name, and declared
+the ignore file Docker will apply (`<Dockerfile>.dockerignore` next to the
+Dockerfile if that file exists, otherwise context-root `.dockerignore`),
+selected files, target, platform, profile name, and declared
 build arguments. It does not include owner, Lab id, worktree, host path,
 Compose project, or random identity. Secret mounts, SSH forwarding, host
 network, remote `ADD`, and Dockerfile `ARG` values that are not literal
 `build_args` fail closed.
 
 After ensure, mapped services in the effective Compose model reference the
-exact content-addressed image and have no remaining project-scoped `build`.
-Unmapped project builds remain allowed and are reported as `project-build`
-findings. Copy `examples/shared-image` for a minimal layout.
+exact content-addressed image, have no remaining project-scoped `build`,
+and do not keep a source `pull_policy` that would rebuild or pull away from
+that image. Unmapped project builds remain allowed and are reported as
+`project-build` findings. Copy `examples/shared-image` for a minimal layout.
 
 ### Optional shared compiler cache
 

@@ -6,6 +6,8 @@ import { parseLabConfig } from "./config";
 import {
   fingerprintSharedImage,
   hasExactSharedImageLabels,
+  isDockerignored,
+  parseDockerignore,
   rejectUnaccountedBuildArgs,
   rejectUnsafeDockerfile,
   sharedImageLabels,
@@ -98,6 +100,38 @@ describe("shared image digest", () => {
     await writeFile(join(root, "environment", "keepdir", "drop.txt"), "drop-two\n");
     expect((await fingerprintSharedImage(root, testProfile(root))).digest).toBe(afterKeep.digest);
   });
+
+  test("Dockerfile-specific ignore files take precedence over context .dockerignore", async () => {
+    const root = await environmentRepo("dockerfile-ignore");
+    await writeFile(join(root, "environment", "packages.txt"), "git\n");
+    await writeFile(join(root, "environment", ".dockerignore"), "packages.txt\n");
+    await writeFile(join(root, "environment", "Dockerfile.dockerignore"), "# specific\n");
+    const withSpecific = await fingerprintSharedImage(root, testProfile(root));
+    expect(withSpecific.dockerignoreKind).toBe("dockerfile");
+    expect(withSpecific.files.some((file) => file.path === "packages.txt")).toBe(true);
+
+    const omitted = await environmentRepo("context-ignore");
+    await writeFile(join(omitted, "environment", "packages.txt"), "git\n");
+    await writeFile(join(omitted, "environment", ".dockerignore"), "packages.txt\n");
+    const withContext = await fingerprintSharedImage(omitted, testProfile(omitted));
+    expect(withContext.dockerignoreKind).toBe("context");
+    expect(withContext.files.some((file) => file.path === "packages.txt")).toBe(false);
+
+    await writeFile(join(root, "environment", ".env"), "TOKEN=1\n");
+    await expect(fingerprintSharedImage(root, testProfile(root))).rejects.toThrow("secret or mutable input");
+  });
+
+  test("character-class ignore exceptions un-ignore files Docker would send", async () => {
+    const patterns = parseDockerignore("*\n![.]env\n!Dockerfile\n");
+    expect(isDockerignored(".env", false, patterns)).toBe(false);
+    expect(isDockerignored("Dockerfile", false, patterns)).toBe(false);
+    expect(isDockerignored("other.txt", false, patterns)).toBe(true);
+
+    const root = await environmentRepo("character-class");
+    await writeFile(join(root, "environment", ".dockerignore"), "*\n![.]env\n!Dockerfile\n");
+    await writeFile(join(root, "environment", ".env"), "TOKEN=1\n");
+    await expect(fingerprintSharedImage(root, testProfile(root))).rejects.toThrow("secret or mutable input");
+  });
 });
 
 describe("shared image safety", () => {
@@ -112,6 +146,13 @@ describe("shared image safety", () => {
       .toThrow("secret mount");
     expect(() => rejectUnsafeDockerfile("toolchain", "ADD https://example.com/rootfs.tgz /opt\n"))
       .toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile("toolchain", 'ADD ["https://example.invalid/rootfs.tgz", "/opt/"]\n'))
+      .toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile("toolchain", 'ADD "https://example.invalid/rootfs.tgz" /opt/\n'))
+      .toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile("toolchain", "ADD --checksum=sha256:deadbeef git@example.invalid:repo.git /opt/\n"))
+      .toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile("toolchain", "ADD ./local.tgz /opt/\n")).not.toThrow();
     expect(() => rejectUnaccountedBuildArgs("toolchain", "ARG TOKEN\nFROM alpine\n", {}))
       .toThrow("ARG TOKEN");
     expect(() => rejectUnaccountedBuildArgs("toolchain", "ARG TOKEN=dev\nFROM alpine\n", {})).not.toThrow();

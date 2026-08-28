@@ -207,6 +207,7 @@ shared_images:
     expect(yaml).toContain("!reset");
     expect(yaml).toContain(imageId);
     expect(yaml).toMatch(new RegExp(`image:\\s*${imageId}`));
+    expect(yaml).toMatch(/pull_policy:\s*never/);
     expect(inspectProjectScopedBuilds({ services: { app: { build: "." }, worker: { build: "." } } }, new Set(["app"])))
       .toEqual([{ service: "worker", surface: "project-build", detail: "service keeps a project-scoped Compose build" }]);
     expect(() => assertMappedServicesConsumeSharedImages({
@@ -215,6 +216,12 @@ shared_images:
     expect(() => assertMappedServicesConsumeSharedImages({
       services: { app: { image: imageId, build: "." } },
     }, config, [reference])).toThrow("project-scoped build path");
+    expect(() => assertMappedServicesConsumeSharedImages({
+      services: { app: { image: imageId, pull_policy: "always" } },
+    }, config, [reference])).toThrow("pull policy");
+    expect(() => assertMappedServicesConsumeSharedImages({
+      services: { app: { image: imageId, pull_policy: "build" } },
+    }, config, [reference])).toThrow("pull policy");
   });
 });
 

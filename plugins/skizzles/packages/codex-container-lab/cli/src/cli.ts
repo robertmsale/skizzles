@@ -6949,7 +6949,7 @@ import { StringDecoder } from "string_decoder";
 
 // packages/codex-container-lab/cli/src/service.ts
 import { createHash as createHash4 } from "crypto";
-import { lstat as lstat8, mkdir as mkdir6, readdir as readdir4, readFile as readFile7, realpath as realpath5, stat as stat2 } from "fs/promises";
+import { lstat as lstat8, mkdir as mkdir7, readdir as readdir4, readFile as readFile7, realpath as realpath5, stat as stat2 } from "fs/promises";
 import { join as join6, resolve as resolve4 } from "path";
 
 // packages/codex-container-lab/cli/src/config.ts
@@ -7004,8 +7004,9 @@ var $visitAsync = visit.visitAsync;
 
 // packages/codex-container-lab/cli/src/shared-image.ts
 import { createHash } from "crypto";
-import { lstat, readFile, readdir, realpath, readlink } from "fs/promises";
-import { isAbsolute, join, posix, relative, resolve, sep } from "path";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, readlink, rm, symlink, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "path";
 var SHARED_IMAGE_SCHEMA = "v1";
 var SHARED_IMAGE_KIND = "environment";
 var SHARED_IMAGE_NAME = "skizzles-shared-image";
@@ -7093,31 +7094,75 @@ async function fingerprintSharedImage(repoRoot, profile) {
   rejectUnsafeDockerfile(profile.name, dockerfileText);
   rejectUnaccountedBuildArgs(profile.name, dockerfileText, profile.buildArgs);
   const dockerfileSha256 = sha256Hex(dockerfileBytes);
-  const dockerignorePath = join(context, ".dockerignore");
-  let dockerignoreText;
-  let dockerignoreSha256 = null;
-  try {
-    const ignoreInfo = await lstat(dockerignorePath);
-    if (ignoreInfo.isSymbolicLink() || !ignoreInfo.isFile()) {
-      throw new Error(`shared image ${profile.name}: .dockerignore must be a regular file`);
-    }
-    const ignoreBytes = await readFile(dockerignorePath);
-    dockerignoreText = ignoreBytes.toString("utf8");
-    dockerignoreSha256 = sha256Hex(ignoreBytes);
-  } catch (error) {
-    if (error.code !== "ENOENT")
-      throw error;
-  }
-  const ignore = parseDockerignore(dockerignoreText ?? "");
+  const dockerignore = await resolveDockerignore(profile.name, context, dockerfile);
+  const ignore = parseDockerignore(dockerignore.text);
   const files = await collectContextFiles(profile.name, root, context, dockerfile, ignore);
   const digest = computeSharedImageDigest({
     profile,
     dockerfileRelative,
     dockerfileSha256,
-    dockerignoreSha256,
+    dockerignoreSha256: dockerignore.sha256,
     files
   });
-  return { digest, tag: sharedImageTag(digest), dockerfileRelative, files };
+  return {
+    digest,
+    tag: sharedImageTag(digest),
+    dockerfileRelative,
+    dockerfileSha256,
+    files,
+    dockerignoreKind: dockerignore.kind,
+    dockerignoreBytes: dockerignore.bytes
+  };
+}
+async function materializeSharedImageSnapshot(profile, fingerprint) {
+  const root = await mkdtemp(join(tmpdir(), "skizzles-shared-image-ctx-"));
+  try {
+    const dockerfileInside = isPathInside(profile.context, profile.dockerfile);
+    const context = dockerfileInside ? root : join(root, "context");
+    await mkdir(context, { recursive: true, mode: 448 });
+    for (const file of fingerprint.files) {
+      const destination = snapshotJoin(context, file.path);
+      await mkdir(dirname(destination), { recursive: true, mode: 448 });
+      const live = snapshotJoin(profile.context, file.path);
+      if (file.kind === "symlink") {
+        if (!file.target) {
+          throw new Error(`shared image ${profile.name}: context symlink is missing a target: ${file.path}`);
+        }
+        const target = await readlink(live);
+        if (target !== file.target || sha256Hex(target) !== file.sha256) {
+          throw new Error(`shared image ${profile.name}: context changed after fingerprint: ${file.path}`);
+        }
+        await symlink(file.target, destination);
+        continue;
+      }
+      const bytes = await readFile(live);
+      if (sha256Hex(bytes) !== file.sha256) {
+        throw new Error(`shared image ${profile.name}: context changed after fingerprint: ${file.path}`);
+      }
+      await writeFile(destination, bytes, { mode: 384 });
+      await chmod(destination, file.mode);
+    }
+    let dockerfile;
+    if (dockerfileInside) {
+      dockerfile = snapshotJoin(context, posixRelative(profile.context, profile.dockerfile));
+      const bytes = await readFile(dockerfile);
+      if (sha256Hex(bytes) !== fingerprint.dockerfileSha256) {
+        throw new Error(`shared image ${profile.name}: Dockerfile changed after fingerprint`);
+      }
+    } else {
+      dockerfile = join(root, "Dockerfile");
+      const bytes = await readFile(profile.dockerfile);
+      if (sha256Hex(bytes) !== fingerprint.dockerfileSha256) {
+        throw new Error(`shared image ${profile.name}: Dockerfile changed after fingerprint`);
+      }
+      await writeFile(dockerfile, bytes, { mode: 384 });
+    }
+    await writeSnapshotDockerignore(context, dockerfile, fingerprint);
+    return { root, context, dockerfile };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 function rejectUnsafeDockerfile(profile, source) {
   const normalized = source.replace(/\r\n/g, `
@@ -7136,7 +7181,8 @@ function rejectUnsafeDockerfile(profile, source) {
     reasons.push("build SSH forwarding");
   if (/(?:^|\s)--network\s*=\s*host(?:\s|$)/im.test(compact))
     reasons.push("host network");
-  if (/^\s*ADD\s+(?:--[^\s]+\s+)*(?:https?:\/\/|git@|git:\/\/)/im.test(compact)) {
+  const addSources = dockerfileAddSources(compact);
+  if (addSources === undefined || addSources.some(isRemoteAddSource)) {
     reasons.push("remote ADD");
   }
   if (/\$\{[A-Za-z_][A-Za-z0-9_]*\}|(?:^|[^A-Za-z0-9_])\$[A-Za-z_][A-Za-z0-9_]*/m.test(compact) && /(?:^|\s)--mount\s*=/im.test(compact) === false) {}
@@ -7157,6 +7203,42 @@ function rejectUnaccountedBuildArgs(profile, source, buildArgs) {
   if (missing.length > 0) {
     throw new Error(`shared image ${profile}: Dockerfile ARG ${missing.join(", ")} is not covered by a literal build argument`);
   }
+}
+async function resolveDockerignore(profile, context, dockerfile) {
+  const specific = await readOptionalRegularFile(`${dockerfile}.dockerignore`, `shared image ${profile}: Dockerfile-specific dockerignore`);
+  if (specific) {
+    return { kind: "dockerfile", sha256: sha256Hex(specific), text: specific.toString("utf8"), bytes: specific };
+  }
+  const rootIgnore = await readOptionalRegularFile(join(context, ".dockerignore"), `shared image ${profile}: .dockerignore`);
+  if (rootIgnore) {
+    return { kind: "context", sha256: sha256Hex(rootIgnore), text: rootIgnore.toString("utf8"), bytes: rootIgnore };
+  }
+  return { kind: "none", sha256: null, text: "", bytes: null };
+}
+async function readOptionalRegularFile(path, label) {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isFile())
+      throw new Error(`${label} must be a regular file`);
+    return await readFile(path);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return;
+    throw error;
+  }
+}
+async function writeSnapshotDockerignore(context, dockerfile, fingerprint) {
+  if (fingerprint.dockerignoreKind === "none" || !fingerprint.dockerignoreBytes)
+    return;
+  const destination = fingerprint.dockerignoreKind === "dockerfile" ? `${dockerfile}.dockerignore` : join(context, ".dockerignore");
+  await mkdir(dirname(destination), { recursive: true, mode: 448 });
+  await writeFile(destination, fingerprint.dockerignoreBytes, { mode: 384 });
+}
+function snapshotJoin(root, relativePath) {
+  if (isAbsolute(relativePath) || relativePath.split("/").some((part) => part === ".." || part === "")) {
+    throw new Error("shared image context path is invalid");
+  }
+  return join(root, ...relativePath.split("/"));
 }
 function parseDockerignore(source) {
   const patterns = [];
@@ -7316,7 +7398,22 @@ function dockerignoreToRegExp(pattern) {
       source += "[^/]";
       continue;
     }
-    if ("\\^$+()[]{}|.".includes(char))
+    if (char === "[") {
+      const characterClass = readDockerignoreCharacterClass(pattern, index);
+      if (characterClass === undefined) {
+        source += "\\[";
+        continue;
+      }
+      source += characterClass.regex;
+      index = characterClass.end;
+      continue;
+    }
+    if (char === "\\" && index + 1 < pattern.length) {
+      source += escapeRegex(pattern[index + 1]);
+      index += 1;
+      continue;
+    }
+    if ("\\^$+(){}|.".includes(char))
       source += `\\${char}`;
     else
       source += char;
@@ -7363,6 +7460,195 @@ function isTimestamp(value) {
   } catch {
     return false;
   }
+}
+function readDockerignoreCharacterClass(pattern, start) {
+  let index = start + 1;
+  if (index >= pattern.length)
+    return;
+  let content = "";
+  if (pattern[index] === "!" || pattern[index] === "^") {
+    content += "^";
+    index += 1;
+  }
+  if (pattern[index] === "]") {
+    content += "\\]";
+    index += 1;
+  }
+  while (index < pattern.length) {
+    const char = pattern[index];
+    if (char === "]") {
+      if (content === "" || content === "^") {
+        content += "\\]";
+        index += 1;
+        continue;
+      }
+      return { regex: `[${content}]`, end: index };
+    }
+    if (char === "\\" && index + 1 < pattern.length) {
+      content += escapeRegexInClass(pattern[index + 1]);
+      index += 2;
+      continue;
+    }
+    if (char === "-")
+      content += "-";
+    else if (char === "^")
+      content += "\\^";
+    else
+      content += escapeRegexInClass(char);
+    index += 1;
+  }
+  return;
+}
+function dockerfileAddSources(source) {
+  const sources = [];
+  for (const raw of source.split(`
+`)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#"))
+      continue;
+    const match = /^ADD\s+(.*)$/i.exec(line);
+    if (!match)
+      continue;
+    const body = match[1] ?? "";
+    if (/(?:^|\s)<<[-]?["']?\w+["']?/.test(body))
+      continue;
+    const parsed = parseAddSources(body);
+    if (parsed === undefined)
+      return;
+    sources.push(...parsed);
+  }
+  return sources;
+}
+function parseAddSources(body) {
+  const tokens = tokenizeDockerfileArgs(body);
+  if (tokens === undefined)
+    return;
+  let index = 0;
+  while (index < tokens.length && tokens[index].startsWith("--"))
+    index += 1;
+  const rest = tokens.slice(index);
+  if (rest.length === 0)
+    return [];
+  if (rest.length === 1 && rest[0].startsWith("[")) {
+    let parsed;
+    try {
+      parsed = JSON.parse(rest[0]);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(parsed) || parsed.length < 2 || parsed.some((item) => typeof item !== "string")) {
+      return;
+    }
+    return parsed.slice(0, -1);
+  }
+  if (rest.length < 2)
+    return [];
+  return rest.slice(0, -1);
+}
+function tokenizeDockerfileArgs(body) {
+  const tokens = [];
+  let index = 0;
+  while (index < body.length) {
+    while (index < body.length && /\s/.test(body[index]))
+      index += 1;
+    if (index >= body.length)
+      break;
+    const char = body[index];
+    if (char === "#")
+      break;
+    if (char === "[") {
+      const end = jsonArrayEnd(body, index);
+      if (end === undefined)
+        return;
+      tokens.push(body.slice(index, end + 1));
+      index = end + 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      const quoted = readQuotedToken(body, index);
+      if (quoted === undefined)
+        return;
+      tokens.push(quoted.value);
+      index = quoted.end;
+      continue;
+    }
+    const start = index;
+    while (index < body.length && !/\s/.test(body[index]) && body[index] !== "#")
+      index += 1;
+    tokens.push(body.slice(start, index));
+  }
+  return tokens;
+}
+function jsonArrayEnd(source, start) {
+  let depth = 0;
+  let quote;
+  let escape = false;
+  for (let index = start;index < source.length; index++) {
+    const char = source[index];
+    if (quote) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === quote)
+        quote = undefined;
+      continue;
+    }
+    if (char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char === "]") {
+      depth -= 1;
+      if (depth === 0)
+        return index;
+    }
+  }
+  return;
+}
+function readQuotedToken(source, start) {
+  const quote = source[start];
+  let index = start + 1;
+  let value = "";
+  while (index < source.length) {
+    const char = source[index];
+    if (char === "\\" && quote === '"' && index + 1 < source.length) {
+      value += source[index + 1];
+      index += 2;
+      continue;
+    }
+    if (char === quote)
+      return { value, end: index + 1 };
+    value += char;
+    index += 1;
+  }
+  return;
+}
+function isRemoteAddSource(source) {
+  const value = source.trim();
+  if (value.length === 0)
+    return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value))
+    return true;
+  if (value.startsWith("git@"))
+    return true;
+  return /^[A-Za-z0-9._-]+@[^/:]+?:/.test(value);
+}
+function escapeRegex(value) {
+  return value.replace(/[\\^$+*?()[\]{}|.]/g, "\\$&");
+}
+function escapeRegexInClass(value) {
+  if (value === "]" || value === "\\" || value === "^" || value === "-")
+    return `\\${value}`;
+  return value;
 }
 
 // packages/codex-container-lab/cli/src/config.ts
@@ -7814,8 +8100,10 @@ function generateOverrideCompose(config, model, context, sharedImages = []) {
   const services = Object.fromEntries(serviceNames.map((name) => {
     const override = { labels };
     const shared = sharedImageByService.get(name);
-    if (shared)
+    if (shared) {
       override.image = shared.imageId;
+      override.pull_policy = "never";
+    }
     if (name === config.mode.commandService) {
       override.init = true;
       override.working_dir = config.runtime.workspace;
@@ -7906,6 +8194,9 @@ function assertMappedServicesConsumeSharedImages(model, config, sharedImages) {
     }
     if (definition.image !== reference.imageId && definition.image !== reference.tag) {
       throw new Error(`mapped service does not consume the ensured shared image: ${service}`);
+    }
+    if (definition.pull_policy === "always" || definition.pull_policy === "build") {
+      throw new Error(`mapped service keeps a pull policy that would not consume the ensured image: ${service}`);
     }
   }
 }
@@ -8132,7 +8423,7 @@ function isRecord2(value) {
 // packages/codex-container-lab/cli/src/docker.ts
 import { randomUUID } from "crypto";
 import { spawn as spawn2 } from "child_process";
-import { lstat as lstat2, mkdir, rename, rm, writeFile } from "fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, rename, rm as rm2, writeFile as writeFile2 } from "fs/promises";
 import { join as join2, posix as posix3 } from "path";
 
 // packages/codex-container-lab/cli/src/process.ts
@@ -8667,13 +8958,13 @@ function isNodeError(value) {
   return value instanceof Error && "code" in value && typeof value.code === "string";
 }
 async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner, environment = process.env) {
-  await mkdir(metadata.runtimeRoot, { recursive: true, mode: 448 });
+  await mkdir2(metadata.runtimeRoot, { recursive: true, mode: 448 });
   const base = generateBaseCompose(config);
   const baseFile = base === undefined ? undefined : join2(metadata.runtimeRoot, "base.compose.yaml");
   if (baseFile && base !== undefined)
-    await writeFile(baseFile, base, { mode: 384 });
+    await writeFile2(baseFile, base, { mode: 384 });
   const overrideFile = join2(metadata.runtimeRoot, "override.compose.yaml");
-  await writeFile(overrideFile, `{}
+  await writeFile2(overrideFile, `{}
 `, { mode: 384 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
   const composeEnvironment = secretComposeEnvironment(config.secretEnvironment, environment);
@@ -8693,7 +8984,7 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
     await ensureSharedCompilerCache(scrubDockerRunnerEnvironment(runner, config.secretEnvironment, environment));
     findings.push({ surface: "shared-cache", detail: "shared compiler cache enabled" });
   }
-  await writeFile(overrideFile, override, { mode: 384 });
+  await writeFile2(overrideFile, override, { mode: 384 });
   const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
   validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
   assertMappedServicesConsumeSharedImages(finalModel, config, sharedImages);
@@ -9024,10 +9315,10 @@ async function writeFailureTranscript(runtimeRoot, text) {
   const destination = join2(runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
   const temporary = `${destination}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, text, { mode: 384, flag: "wx" });
+    await writeFile2(temporary, text, { mode: 384, flag: "wx" });
     await rename(temporary, destination);
   } finally {
-    await rm(temporary, { force: true });
+    await rm2(temporary, { force: true });
   }
 }
 function declaredSecretValues(runtime, environment) {
@@ -9381,7 +9672,7 @@ function isRecord3(value) {
 // packages/codex-container-lab/cli/src/files.ts
 import { createHash as createHash2, randomUUID as randomUUID2 } from "crypto";
 import { createReadStream } from "fs";
-import { lstat as lstat3, mkdir as mkdir2, readFile as readFile3, readlink as readlink2, realpath as realpath3, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
+import { lstat as lstat3, mkdir as mkdir3, readFile as readFile3, readlink as readlink2, realpath as realpath3, rename as rename2, rm as rm3, writeFile as writeFile3 } from "fs/promises";
 import path from "path";
 var MAX_SYNC_FILE_BYTES = 64 * 1024 * 1024;
 function safeRelativePath(value) {
@@ -9424,7 +9715,7 @@ async function guardedPath(root, relative3, createParents = false) {
         throw error;
       if (!createParents)
         break;
-      await mkdir2(parent);
+      await mkdir3(parent);
     }
   }
   const result = path.join(canonical, ...parts);
@@ -9458,31 +9749,31 @@ async function readJson(file) {
   return JSON.parse(await readFile3(file, "utf8"));
 }
 async function writeJsonAtomic(file, value) {
-  await mkdir2(path.dirname(file), { recursive: true, mode: 448 });
+  await mkdir3(path.dirname(file), { recursive: true, mode: 448 });
   const temporary = `${file}.${randomUUID2()}.tmp`;
-  await writeFile2(temporary, `${JSON.stringify(value)}
+  await writeFile3(temporary, `${JSON.stringify(value)}
 `, { mode: 384 });
   await rename2(temporary, file);
 }
 async function removeIfPresent(file, options = {}) {
-  await rm2(file, { force: true, recursive: options.recursive ?? false });
+  await rm3(file, { force: true, recursive: options.recursive ?? false });
 }
 
 // packages/codex-container-lab/cli/src/locks.ts
-import { link, lstat as lstat4, mkdir as mkdir3, open, readFile as readFile4, rm as rm3, writeFile as writeFile3 } from "fs/promises";
-import { dirname } from "path";
+import { link, lstat as lstat4, mkdir as mkdir4, open, readFile as readFile4, rm as rm4, writeFile as writeFile4 } from "fs/promises";
+import { dirname as dirname2 } from "path";
 async function withFileLock(path2, operation, options = {}) {
   const attempts = options.attempts ?? 100;
   const delayMs = options.delayMs ?? 50;
   const staleMs = options.staleMs ?? 5 * 60000;
-  await mkdir3(dirname(path2), { recursive: true, mode: 448 });
+  await mkdir4(dirname2(path2), { recursive: true, mode: 448 });
   for (let attempt = 0;attempt < attempts; attempt++) {
     if (options.signal?.aborted)
       throw new Error("operation was cancelled while waiting for a state lock");
     const candidate = `${path2}.candidate-${process.pid}-${crypto.randomUUID()}`;
     let acquired = false;
     try {
-      await writeFile3(candidate, JSON.stringify({
+      await writeFile4(candidate, JSON.stringify({
         pid: process.pid,
         createdAt: new Date().toISOString()
       }), { mode: 384, flag: "wx" });
@@ -9503,7 +9794,7 @@ async function withFileLock(path2, operation, options = {}) {
         }
       }
     } finally {
-      await rm3(candidate, { force: true });
+      await rm4(candidate, { force: true });
     }
     await removeConfirmedStaleLock(path2, staleMs, options.processProbe ?? probeProcess);
     if (attempt + 1 < attempts) {
@@ -9560,14 +9851,14 @@ async function removeConfirmedStaleLock(path2, staleMs, processProbe) {
 async function reclaimSameLock(path2, inspected, staleMs, processProbe) {
   const candidate = `${path2}.reclaim-candidate-${process.pid}-${crypto.randomUUID()}`;
   try {
-    await writeFile3(candidate, JSON.stringify({
+    await writeFile4(candidate, JSON.stringify({
       pid: process.pid,
       createdAt: new Date().toISOString()
     }), { mode: 384, flag: "wx" });
     const candidateIdentity = identity2(await lstat4(candidate, { bigint: true }));
     await claimAndRemoveLock(path2, inspected, candidate, candidateIdentity, staleMs, processProbe);
   } finally {
-    await rm3(candidate, { force: true });
+    await rm4(candidate, { force: true });
   }
 }
 async function claimAndRemoveLock(path2, inspected, claimSource, claimIdentity, staleMs, processProbe) {
@@ -9592,7 +9883,7 @@ async function claimAndRemoveLock(path2, inspected, claimSource, claimIdentity, 
       return;
     if (!await hasIdentity(claimPath, claimIdentity) || !await hasIdentity(path2, inspected))
       return;
-    await rm3(path2, { recursive: true, force: true });
+    await rm4(path2, { recursive: true, force: true });
   } finally {
     if (claimed)
       await removeIfSamePath(claimPath, claimIdentity);
@@ -9653,7 +9944,7 @@ async function hasIdentity(path2, expected) {
 async function removeIfSamePath(path2, inspected) {
   if (!await hasIdentity(path2, inspected))
     return;
-  await rm3(path2, { recursive: true, force: true });
+  await rm4(path2, { recursive: true, force: true });
 }
 function identity2(info) {
   if (info.dev < 0n || info.ino <= 0n)
@@ -9715,9 +10006,9 @@ import { join as join4 } from "path";
 
 // packages/codex-container-lab/cli/src/state.ts
 import { createHash as createHash3 } from "crypto";
-import { homedir, tmpdir } from "os";
+import { homedir, tmpdir as tmpdir2 } from "os";
 import { basename, isAbsolute as isAbsolute3, join as join3, parse, posix as posix4, relative as relative3, resolve as resolve3, sep as sep2 } from "path";
-import { lstat as lstat5, mkdir as mkdir4, readdir as readdir2, realpath as realpath4, rm as rm4 } from "fs/promises";
+import { lstat as lstat5, mkdir as mkdir5, readdir as readdir2, realpath as realpath4, rm as rm5 } from "fs/promises";
 var LAB_STATES = new Set(["provisioning", "ready", "failed", "destroying"]);
 var FINDING_SURFACES = new Set([
   "host-bind",
@@ -9737,7 +10028,7 @@ function defaultStateRoot() {
   return join3(homedir(), "Library", "Application Support", "OpenAI", "codex-container-lab");
 }
 function defaultRuntimeRoot() {
-  return join3(tmpdir(), "codex-container-lab");
+  return join3(tmpdir2(), "codex-container-lab");
 }
 function resolveRoots(options = {}) {
   return {
@@ -9802,7 +10093,7 @@ function expectedLabRuntimeRoot(roots, owner, labId) {
 async function ensureOwner(stateRoot, owner) {
   resolveOwner(owner, {});
   const directory = ownerDirectory(stateRoot, owner);
-  await mkdir4(join3(directory, "labs"), { recursive: true, mode: 448 });
+  await mkdir5(join3(directory, "labs"), { recursive: true, mode: 448 });
   const path2 = ownerManifestPath(stateRoot, owner);
   try {
     const existing = await readOwnerManifest(path2);
@@ -9882,7 +10173,7 @@ async function listLabs(roots, owner) {
   return labs;
 }
 async function removeLabState(stateRoot, owner, labId) {
-  await rm4(labManifestPath(stateRoot, owner, labId), { force: true });
+  await rm5(labManifestPath(stateRoot, owner, labId), { force: true });
 }
 async function assertReadyLabFilesystem(roots, lab) {
   if (lab.state !== "ready" || !lab.runtime)
@@ -10257,28 +10548,26 @@ async function ensureSharedImageRecord(stateRoot, reference, now = new Date) {
   await writeSharedImageRecord(stateRoot, created);
   return created;
 }
-async function acquireSharedImageLease(stateRoot, reference, owner, labId, extras, now = new Date) {
+async function recordSharedImageLease(stateRoot, reference, owner, labId, extras, now = new Date) {
   safeStateName(labId, "lab id");
   const timestamp = now.toISOString();
   const key = ownerKey(owner);
-  return await withSharedImageDigestLock(stateRoot, reference.digest, async () => {
-    const record = await ensureSharedImageRecord(stateRoot, {
-      digest: reference.digest,
-      profile: reference.profile,
-      repoHash: extras.repoHash,
-      platform: extras.platform,
-      tag: reference.tag,
-      imageId: reference.imageId
-    }, now);
-    if (record.imageId !== reference.imageId || record.tag !== reference.tag) {
-      throw new Error("shared image lease identity does not match the ensured image");
-    }
-    const leases = record.leases.filter((lease) => !(lease.ownerKey === key && lease.labId === labId));
-    leases.push({ ownerKey: key, labId, acquiredAt: timestamp });
-    const next = { ...record, leases, lastUsedAt: timestamp, imageId: reference.imageId };
-    await writeSharedImageRecord(stateRoot, next);
-    return next;
-  });
+  const record = await ensureSharedImageRecord(stateRoot, {
+    digest: reference.digest,
+    profile: reference.profile,
+    repoHash: extras.repoHash,
+    platform: extras.platform,
+    tag: reference.tag,
+    imageId: reference.imageId
+  }, now);
+  if (record.imageId !== reference.imageId || record.tag !== reference.tag) {
+    throw new Error("shared image lease identity does not match the ensured image");
+  }
+  const leases = record.leases.filter((lease) => !(lease.ownerKey === key && lease.labId === labId));
+  leases.push({ ownerKey: key, labId, acquiredAt: timestamp });
+  const next = { ...record, leases, lastUsedAt: timestamp, imageId: reference.imageId };
+  await writeSharedImageRecord(stateRoot, next);
+  return next;
 }
 async function releaseLabSharedImageLeases(stateRoot, lab, now = new Date) {
   await releaseAllLeasesForLab(stateRoot, lab.owner, lab.id, now);
@@ -10381,8 +10670,8 @@ function isRecord6(value) {
 }
 
 // packages/codex-container-lab/cli/src/shared-image-docker.ts
-import { mkdtemp, readFile as readFile5, rm as rm5 } from "fs/promises";
-import { tmpdir as tmpdir2 } from "os";
+import { mkdtemp as mkdtemp2, readFile as readFile5, rm as rm6 } from "fs/promises";
+import { tmpdir as tmpdir3 } from "os";
 import { join as join5 } from "path";
 var BUILD_TIMEOUT_MS = 30 * 60000;
 var DEFAULT_IMAGE_MAX_AGE_MS = 168 * 60 * 60 * 1000;
@@ -10414,12 +10703,13 @@ async function ensureSharedEnvironmentImage(options) {
         tag: fingerprint.tag,
         imageId: existing.imageId
       }, now);
-      return existing;
+      return await finishEnsuredSharedImage(options, existing, now);
     }
     await ensureSharedImageBuilder(options.docker, options.stateRoot, builderName);
     const createdAt = now.toISOString();
     const imageId = await buildSharedImage(options.docker, {
       profile: options.profile,
+      fingerprint,
       digest: fingerprint.digest,
       repoHash: options.repoHash,
       tag: fingerprint.tag,
@@ -10444,8 +10734,14 @@ async function ensureSharedEnvironmentImage(options) {
       tag: fingerprint.tag,
       imageId
     }, now);
-    return verified;
+    return await finishEnsuredSharedImage(options, verified, now);
   }, options.signal);
+}
+async function finishEnsuredSharedImage(options, reference, now) {
+  if (options.lease) {
+    await recordSharedImageLease(options.stateRoot, reference, options.lease.owner, options.lease.labId, { repoHash: options.repoHash, platform: options.profile.platform }, now);
+  }
+  return reference;
 }
 async function ensureLabSharedImages(config, options) {
   const references = [];
@@ -10458,7 +10754,8 @@ async function ensureLabSharedImages(config, options) {
       docker: options.docker,
       builderName: options.builderName,
       now: options.now,
-      signal: options.signal
+      signal: options.signal,
+      lease: { owner: options.owner, labId: options.labId }
     }));
   }
   return references;
@@ -10730,9 +11027,11 @@ ${inspected.stderr.toString()}`;
   return "matching";
 }
 async function buildSharedImage(docker, options) {
-  const directory = await mkdtemp(join5(tmpdir2(), "skizzles-shared-image-"));
+  const directory = await mkdtemp2(join5(tmpdir3(), "skizzles-shared-image-"));
   const iidFile = join5(directory, "iid");
+  let snapshot;
   try {
+    snapshot = await materializeSharedImageSnapshot(options.profile, options.fingerprint);
     const labels = sharedImageLabels({
       profile: options.profile.name,
       digest: options.digest,
@@ -10749,7 +11048,7 @@ async function buildSharedImage(docker, options) {
       "--platform",
       options.profile.platform,
       "--file",
-      options.profile.dockerfile,
+      snapshot.dockerfile,
       "--tag",
       options.tag,
       "--iidfile",
@@ -10761,7 +11060,7 @@ async function buildSharedImage(docker, options) {
     ];
     if (options.profile.target)
       args.push("--target", options.profile.target);
-    args.push(options.profile.context);
+    args.push(snapshot.context);
     const built = await docker.run(args, {
       allowFailure: true,
       timeoutMs: BUILD_TIMEOUT_MS,
@@ -10781,7 +11080,9 @@ async function buildSharedImage(docker, options) {
     }
     return imageId.startsWith("sha256:") ? imageId : `sha256:${imageId}`;
   } finally {
-    await rm5(directory, { recursive: true, force: true });
+    if (snapshot)
+      await rm6(snapshot.root, { recursive: true, force: true });
+    await rm6(directory, { recursive: true, force: true });
   }
 }
 async function inspectImageById(docker, record) {
@@ -10845,7 +11146,7 @@ async function rmCatalogIfUnleased(stateRoot, digest) {
   const current = await readSharedImageRecord(stateRoot, digest);
   if (!current || current.leases.length > 0)
     return;
-  await rm5(sharedImageRecordPath(stateRoot, digest), { force: true });
+  await rm6(sharedImageRecordPath(stateRoot, digest), { force: true });
 }
 function isEligibleForGc(record, labs, policy, now) {
   if (record.leases.length > 0)
@@ -10973,7 +11274,7 @@ function isRecord7(value) {
 
 // packages/codex-container-lab/cli/src/sync.ts
 import { randomBytes, randomUUID as randomUUID3 } from "crypto";
-import { chmod, copyFile, lstat as lstat7, mkdir as mkdir5, readlink as readlink3, rename as rename3, rm as rm6, symlink } from "fs/promises";
+import { chmod as chmod2, copyFile, lstat as lstat7, mkdir as mkdir6, readlink as readlink3, rename as rename3, rm as rm7, symlink as symlink2 } from "fs/promises";
 import path2 from "path";
 
 // packages/codex-container-lab/cli/src/git-manifest.ts
@@ -11157,17 +11458,17 @@ async function applySync(options) {
   const journalId = randomUUID3();
   const backupDir = path2.join(state.backups, journalId);
   const journalPath = path2.join(state.journals, `${journalId}.json`);
-  await mkdir5(backupDir, { recursive: true });
+  await mkdir6(backupDir, { recursive: true });
   const stagedRoot = path2.join(backupDir, "source");
   const targetBackups = path2.join(backupDir, "target");
-  await mkdir5(stagedRoot);
+  await mkdir6(stagedRoot);
   await stageSources(sourceRoot, preview.changes, stagedRoot);
-  await mkdir5(targetBackups);
+  await mkdir6(targetBackups);
   let backups;
   try {
     backups = await backupTargets(targetRoot, preview.changes, preview.expectedTargets, targetBackups);
   } catch (error) {
-    await rm6(backupDir, { recursive: true, force: true });
+    await rm7(backupDir, { recursive: true, force: true });
     throw error;
   }
   const journal = {
@@ -11200,14 +11501,14 @@ async function applySync(options) {
     journal.state = "applied";
     await writeJsonAtomic(journalPath, journal);
     await writeJsonAtomic(state.baseline, journal.newBaseline);
-    await rm6(journalPath, { force: true });
-    await rm6(backupDir, { recursive: true, force: true });
+    await rm7(journalPath, { force: true });
+    await rm7(backupDir, { recursive: true, force: true });
     return { applied: preview.changes.length };
   } catch (error) {
     try {
       await rollbackJournalSafely(targetRoot, journal);
-      await rm6(journalPath, { force: true });
-      await rm6(backupDir, { recursive: true, force: true });
+      await rm7(journalPath, { force: true });
+      await rm7(backupDir, { recursive: true, force: true });
     } catch (rollbackError) {
       throw new Error(`Synchronization apply failed and recovery state was retained: ${rollbackError instanceof Error ? rollbackError.message : rollbackError}`, { cause: error });
     }
@@ -11234,8 +11535,8 @@ async function recoverSyncTransactions(options) {
       await writeJsonAtomic(state.baseline, journal.newBaseline);
     else
       await rollbackJournalSafely(targetRoot, journal);
-    await rm6(journalPath, { force: true });
-    await rm6(path2.join(state.backups, path2.basename(name, ".json")), { recursive: true, force: true });
+    await rm7(journalPath, { force: true });
+    await rm7(path2.join(state.backups, path2.basename(name, ".json")), { recursive: true, force: true });
     recovered++;
   }
   return recovered;
@@ -11245,7 +11546,7 @@ function sameFile(a, b) {
 }
 async function statePaths(identity3) {
   safeStateName(identity3.labId, "lab id");
-  await mkdir5(identity3.stateRoot, { recursive: true, mode: 448 });
+  await mkdir6(identity3.stateRoot, { recursive: true, mode: 448 });
   const stateRoot = await canonicalRoot(identity3.stateRoot);
   const root = path2.join(stateRoot, "sync", identity3.labId);
   const previews = path2.join(root, "previews");
@@ -11259,7 +11560,7 @@ async function statePaths(identity3) {
 }
 async function ensureStateDirectory(stateRoot, relative4) {
   const directory = await guardedPath(stateRoot, relative4, true);
-  await mkdir5(directory, { mode: 448 }).catch((error) => {
+  await mkdir6(directory, { mode: 448 }).catch((error) => {
     if (error.code !== "EEXIST")
       throw error;
   });
@@ -11308,7 +11609,7 @@ async function backupTargets(targetRoot, changes, expected, backupDir) {
       const stat2 = await lstat7(target);
       const backup = path2.join(backupDir, String(index));
       if (stat2.isSymbolicLink()) {
-        await symlink(await readlink3(target), backup);
+        await symlink2(await readlink3(target), backup);
         records.push({ path: change.path, existed: true, kind: "symlink", mode: stat2.mode & 511, backup, original: expected[change.path] ?? null });
       } else if (stat2.isFile()) {
         await copyFile(target, backup);
@@ -11338,10 +11639,10 @@ async function stageSources(sourceRoot, changes, stagedRoot) {
       const bytes = Buffer.from(link2);
       if (bytes.byteLength !== change.file.size || sha256(bytes) !== change.file.sha256)
         throw new Error("Synchronization preview is stale; source changed");
-      await symlink(link2, target);
+      await symlink2(link2, target);
     } else if (change.file.kind === "file" && stat2.isFile()) {
       await copyFile(source, target);
-      await chmod(target, change.file.mode);
+      await chmod2(target, change.file.mode);
       const staged = await describeSyncFile(stagedRoot, change.path);
       if (!sameFile(staged, change.file))
         throw new Error("Synchronization preview is stale; source changed");
@@ -11352,16 +11653,16 @@ async function stageSources(sourceRoot, changes, stagedRoot) {
 }
 async function applyChange(sourceRoot, targetRoot, change) {
   const target = await guardedPath(targetRoot, change.path, true);
-  await rm6(target, { force: true, recursive: false });
+  await rm7(target, { force: true, recursive: false });
   if (change.action === "delete")
     return;
   const source = await guardedPath(sourceRoot, change.path);
   const stat2 = await lstat7(source);
   if (change.file?.kind === "symlink" && stat2.isSymbolicLink()) {
-    await symlink(await readlink3(source), target);
+    await symlink2(await readlink3(source), target);
   } else if (change.file?.kind === "file" && stat2.isFile()) {
     await copyFile(source, target);
-    await chmod(target, change.file.mode);
+    await chmod2(target, change.file.mode);
   } else {
     throw new Error(`Synchronization source changed type during apply: ${change.path}`);
   }
@@ -11380,17 +11681,17 @@ async function assertExpectedEntry(root, relative4, expected, side) {
 async function restoreBackups(targetRoot, backups) {
   for (const record of backups) {
     const target = await guardedPath(targetRoot, record.path, true);
-    await rm6(target, { force: true, recursive: false });
+    await rm7(target, { force: true, recursive: false });
     if (!record.existed)
       continue;
     if (!record.backup)
       throw new Error(`Missing synchronization backup for ${record.path}`);
     if (record.kind === "symlink")
-      await symlink(await readlink3(record.backup), target);
+      await symlink2(await readlink3(record.backup), target);
     else {
       await copyFile(record.backup, target);
       if (record.mode !== undefined)
-        await chmod(target, record.mode);
+        await chmod2(target, record.mode);
     }
   }
 }
@@ -11779,7 +12080,7 @@ class ContainerLabService {
     let failure;
     try {
       await this.assertProvisioning(id, signal);
-      await mkdir6(lab.runtimeRoot, { recursive: true, mode: 448 });
+      await mkdir7(lab.runtimeRoot, { recursive: true, mode: 448 });
       const config = await loadLabConfig(lab.sourceRoot);
       secretEnvironmentNames = [...config.secretEnvironment];
       lab.manifestPath = config.manifestPath;
@@ -11800,17 +12101,10 @@ class ContainerLabService {
           stateRoot: this.roots.stateRoot,
           repoHash: lab.repoHash,
           docker: this.docker,
-          signal
+          signal,
+          owner: this.owner,
+          labId: lab.id
         });
-        for (const profile of config.sharedImages) {
-          const reference = references.find((item) => item.profile === profile.name);
-          if (!reference)
-            throw new Error(`shared image profile was not ensured: ${profile.name}`);
-          await acquireSharedImageLease(this.roots.stateRoot, reference, this.owner, lab.id, {
-            repoHash: lab.repoHash,
-            platform: profile.platform
-          });
-        }
         lab = await this.updateProvisioning(id, (current) => {
           current.sharedImages = references;
         });

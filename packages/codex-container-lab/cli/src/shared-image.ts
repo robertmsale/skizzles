@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, readdir, realpath, readlink } from "node:fs/promises";
-import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 
 export const SHARED_IMAGE_SCHEMA = "v1";
 export const SHARED_IMAGE_KIND = "environment";
@@ -63,8 +64,13 @@ export type SharedImageFingerprint = {
   digest: string;
   tag: string;
   dockerfileRelative: string;
+  dockerfileSha256: string;
   files: SharedImageContextFile[];
+  dockerignoreKind: SharedImageDockerignoreKind;
+  dockerignoreBytes: Uint8Array | null;
 };
+
+export type SharedImageDockerignoreKind = "none" | "context" | "dockerfile";
 
 const UNSAFE_SENT_PATHS = /(?:^|\/)(?:\.git|\.ssh)(?:\/|$)/;
 const UNSAFE_SENT_FILES = /(?:^|\/)(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|\.netrc|\.env|\.env\.[^/]+|credentials)$/;
@@ -161,30 +167,79 @@ export async function fingerprintSharedImage(
   rejectUnaccountedBuildArgs(profile.name, dockerfileText, profile.buildArgs);
   const dockerfileSha256 = sha256Hex(dockerfileBytes);
 
-  const dockerignorePath = join(context, ".dockerignore");
-  let dockerignoreText: string | undefined;
-  let dockerignoreSha256: string | null = null;
-  try {
-    const ignoreInfo = await lstat(dockerignorePath);
-    if (ignoreInfo.isSymbolicLink() || !ignoreInfo.isFile()) {
-      throw new Error(`shared image ${profile.name}: .dockerignore must be a regular file`);
-    }
-    const ignoreBytes = await readFile(dockerignorePath);
-    dockerignoreText = ignoreBytes.toString("utf8");
-    dockerignoreSha256 = sha256Hex(ignoreBytes);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const ignore = parseDockerignore(dockerignoreText ?? "");
+  const dockerignore = await resolveDockerignore(profile.name, context, dockerfile);
+  const ignore = parseDockerignore(dockerignore.text);
   const files = await collectContextFiles(profile.name, root, context, dockerfile, ignore);
   const digest = computeSharedImageDigest({
     profile,
     dockerfileRelative,
     dockerfileSha256,
-    dockerignoreSha256,
+    dockerignoreSha256: dockerignore.sha256,
     files,
   });
-  return { digest, tag: sharedImageTag(digest), dockerfileRelative, files };
+  return {
+    digest,
+    tag: sharedImageTag(digest),
+    dockerfileRelative,
+    dockerfileSha256,
+    files,
+    dockerignoreKind: dockerignore.kind,
+    dockerignoreBytes: dockerignore.bytes,
+  };
+}
+
+export async function materializeSharedImageSnapshot(
+  profile: SharedImageProfile,
+  fingerprint: SharedImageFingerprint,
+): Promise<{ root: string; context: string; dockerfile: string }> {
+  const root = await mkdtemp(join(tmpdir(), "skizzles-shared-image-ctx-"));
+  try {
+    const dockerfileInside = isPathInside(profile.context, profile.dockerfile);
+    const context = dockerfileInside ? root : join(root, "context");
+    await mkdir(context, { recursive: true, mode: 0o700 });
+    for (const file of fingerprint.files) {
+      const destination = snapshotJoin(context, file.path);
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      const live = snapshotJoin(profile.context, file.path);
+      if (file.kind === "symlink") {
+        if (!file.target) {
+          throw new Error(`shared image ${profile.name}: context symlink is missing a target: ${file.path}`);
+        }
+        const target = await readlink(live);
+        if (target !== file.target || sha256Hex(target) !== file.sha256) {
+          throw new Error(`shared image ${profile.name}: context changed after fingerprint: ${file.path}`);
+        }
+        await symlink(file.target, destination);
+        continue;
+      }
+      const bytes = await readFile(live);
+      if (sha256Hex(bytes) !== file.sha256) {
+        throw new Error(`shared image ${profile.name}: context changed after fingerprint: ${file.path}`);
+      }
+      await writeFile(destination, bytes, { mode: 0o600 });
+      await chmod(destination, file.mode);
+    }
+    let dockerfile: string;
+    if (dockerfileInside) {
+      dockerfile = snapshotJoin(context, posixRelative(profile.context, profile.dockerfile));
+      const bytes = await readFile(dockerfile);
+      if (sha256Hex(bytes) !== fingerprint.dockerfileSha256) {
+        throw new Error(`shared image ${profile.name}: Dockerfile changed after fingerprint`);
+      }
+    } else {
+      dockerfile = join(root, "Dockerfile");
+      const bytes = await readFile(profile.dockerfile);
+      if (sha256Hex(bytes) !== fingerprint.dockerfileSha256) {
+        throw new Error(`shared image ${profile.name}: Dockerfile changed after fingerprint`);
+      }
+      await writeFile(dockerfile, bytes, { mode: 0o600 });
+    }
+    await writeSnapshotDockerignore(context, dockerfile, fingerprint);
+    return { root, context, dockerfile };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export function rejectUnsafeDockerfile(profile: string, source: string): void {
@@ -197,7 +252,8 @@ export function rejectUnsafeDockerfile(profile: string, source: string): void {
   if (/(?:^|\s)--secret(?:\s|=)/im.test(compact)) reasons.push("build secret");
   if (/(?:^|\s)--ssh(?:\s|=)/im.test(compact)) reasons.push("build SSH forwarding");
   if (/(?:^|\s)--network\s*=\s*host(?:\s|$)/im.test(compact)) reasons.push("host network");
-  if (/^\s*ADD\s+(?:--[^\s]+\s+)*(?:https?:\/\/|git@|git:\/\/)/im.test(compact)) {
+  const addSources = dockerfileAddSources(compact);
+  if (addSources === undefined || addSources.some(isRemoteAddSource)) {
     reasons.push("remote ADD");
   }
   if (/\$\{[A-Za-z_][A-Za-z0-9_]*\}|(?:^|[^A-Za-z0-9_])\$[A-Za-z_][A-Za-z0-9_]*/m.test(compact) &&
@@ -228,6 +284,64 @@ export function rejectUnaccountedBuildArgs(
       `shared image ${profile}: Dockerfile ARG ${missing.join(", ")} is not covered by a literal build argument`,
     );
   }
+}
+
+async function resolveDockerignore(
+  profile: string,
+  context: string,
+  dockerfile: string,
+): Promise<{
+  kind: SharedImageDockerignoreKind;
+  sha256: string | null;
+  text: string;
+  bytes: Uint8Array | null;
+}> {
+  const specific = await readOptionalRegularFile(
+    `${dockerfile}.dockerignore`,
+    `shared image ${profile}: Dockerfile-specific dockerignore`,
+  );
+  if (specific) {
+    return { kind: "dockerfile", sha256: sha256Hex(specific), text: specific.toString("utf8"), bytes: specific };
+  }
+  const rootIgnore = await readOptionalRegularFile(
+    join(context, ".dockerignore"),
+    `shared image ${profile}: .dockerignore`,
+  );
+  if (rootIgnore) {
+    return { kind: "context", sha256: sha256Hex(rootIgnore), text: rootIgnore.toString("utf8"), bytes: rootIgnore };
+  }
+  return { kind: "none", sha256: null, text: "", bytes: null };
+}
+
+async function readOptionalRegularFile(path: string, label: string): Promise<Buffer | undefined> {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isFile()) throw new Error(`${label} must be a regular file`);
+    return await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function writeSnapshotDockerignore(
+  context: string,
+  dockerfile: string,
+  fingerprint: SharedImageFingerprint,
+): Promise<void> {
+  if (fingerprint.dockerignoreKind === "none" || !fingerprint.dockerignoreBytes) return;
+  const destination = fingerprint.dockerignoreKind === "dockerfile"
+    ? `${dockerfile}.dockerignore`
+    : join(context, ".dockerignore");
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+  await writeFile(destination, fingerprint.dockerignoreBytes, { mode: 0o600 });
+}
+
+function snapshotJoin(root: string, relativePath: string): string {
+  if (isAbsolute(relativePath) || relativePath.split("/").some((part) => part === ".." || part === "")) {
+    throw new Error("shared image context path is invalid");
+  }
+  return join(root, ...relativePath.split("/"));
 }
 
 export function parseDockerignore(source: string): string[] {
@@ -401,7 +515,22 @@ function dockerignoreToRegExp(pattern: string): RegExp {
       source += "[^/]";
       continue;
     }
-    if ("\\^$+()[]{}|.".includes(char)) source += `\\${char}`;
+    if (char === "[") {
+      const characterClass = readDockerignoreCharacterClass(pattern, index);
+      if (characterClass === undefined) {
+        source += "\\[";
+        continue;
+      }
+      source += characterClass.regex;
+      index = characterClass.end;
+      continue;
+    }
+    if (char === "\\" && index + 1 < pattern.length) {
+      source += escapeRegex(pattern[index + 1]!);
+      index += 1;
+      continue;
+    }
+    if ("\\^$+(){}|.".includes(char)) source += `\\${char}`;
     else source += char;
   }
   source += "$";
@@ -447,4 +576,173 @@ function sha256Hex(value: Uint8Array | string): string {
 
 function isTimestamp(value: string): boolean {
   try { return new Date(value).toISOString() === value; } catch { return false; }
+}
+
+function readDockerignoreCharacterClass(pattern: string, start: number): { regex: string; end: number } | undefined {
+  let index = start + 1;
+  if (index >= pattern.length) return undefined;
+  let content = "";
+  if (pattern[index] === "!" || pattern[index] === "^") {
+    content += "^";
+    index += 1;
+  }
+  if (pattern[index] === "]") {
+    content += "\\]";
+    index += 1;
+  }
+  while (index < pattern.length) {
+    const char = pattern[index]!;
+    if (char === "]") {
+      if (content === "" || content === "^") {
+        content += "\\]";
+        index += 1;
+        continue;
+      }
+      return { regex: `[${content}]`, end: index };
+    }
+    if (char === "\\" && index + 1 < pattern.length) {
+      content += escapeRegexInClass(pattern[index + 1]!);
+      index += 2;
+      continue;
+    }
+    if (char === "-") content += "-";
+    else if (char === "^") content += "\\^";
+    else content += escapeRegexInClass(char);
+    index += 1;
+  }
+  return undefined;
+}
+
+function dockerfileAddSources(source: string): string[] | undefined {
+  const sources: string[] = [];
+  for (const raw of source.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = /^ADD\s+(.*)$/i.exec(line);
+    if (!match) continue;
+    const body = match[1] ?? "";
+    if (/(?:^|\s)<<[-]?["']?\w+["']?/.test(body)) continue;
+    const parsed = parseAddSources(body);
+    if (parsed === undefined) return undefined;
+    sources.push(...parsed);
+  }
+  return sources;
+}
+
+function parseAddSources(body: string): string[] | undefined {
+  const tokens = tokenizeDockerfileArgs(body);
+  if (tokens === undefined) return undefined;
+  let index = 0;
+  while (index < tokens.length && tokens[index]!.startsWith("--")) index += 1;
+  const rest = tokens.slice(index);
+  if (rest.length === 0) return [];
+  if (rest.length === 1 && rest[0]!.startsWith("[")) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(rest[0]!); }
+    catch { return undefined; }
+    if (!Array.isArray(parsed) || parsed.length < 2 || parsed.some((item) => typeof item !== "string")) {
+      return undefined;
+    }
+    return parsed.slice(0, -1);
+  }
+  if (rest.length < 2) return [];
+  return rest.slice(0, -1);
+}
+
+function tokenizeDockerfileArgs(body: string): string[] | undefined {
+  const tokens: string[] = [];
+  let index = 0;
+  while (index < body.length) {
+    while (index < body.length && /\s/.test(body[index]!)) index += 1;
+    if (index >= body.length) break;
+    const char = body[index]!;
+    if (char === "#") break;
+    if (char === "[") {
+      const end = jsonArrayEnd(body, index);
+      if (end === undefined) return undefined;
+      tokens.push(body.slice(index, end + 1));
+      index = end + 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      const quoted = readQuotedToken(body, index);
+      if (quoted === undefined) return undefined;
+      tokens.push(quoted.value);
+      index = quoted.end;
+      continue;
+    }
+    const start = index;
+    while (index < body.length && !/\s/.test(body[index]!) && body[index] !== "#") index += 1;
+    tokens.push(body.slice(start, index));
+  }
+  return tokens;
+}
+
+function jsonArrayEnd(source: string, start: number): number | undefined {
+  let depth = 0;
+  let quote: string | undefined;
+  let escape = false;
+  for (let index = start; index < source.length; index++) {
+    const char = source[index]!;
+    if (quote) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' ) {
+      quote = char;
+      continue;
+    }
+    if (char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char === "]") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return undefined;
+}
+
+function readQuotedToken(source: string, start: number): { value: string; end: number } | undefined {
+  const quote = source[start]!;
+  let index = start + 1;
+  let value = "";
+  while (index < source.length) {
+    const char = source[index]!;
+    if (char === "\\" && quote === '"' && index + 1 < source.length) {
+      value += source[index + 1]!;
+      index += 2;
+      continue;
+    }
+    if (char === quote) return { value, end: index + 1 };
+    value += char;
+    index += 1;
+  }
+  return undefined;
+}
+
+function isRemoteAddSource(source: string): boolean {
+  const value = source.trim();
+  if (value.length === 0) return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) return true;
+  if (value.startsWith("git@")) return true;
+  return /^[A-Za-z0-9._-]+@[^/:]+?:/.test(value);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[\\^$+*?()[\]{}|.]/g, "\\$&");
+}
+
+function escapeRegexInClass(value: string): string {
+  if (value === "]" || value === "\\" || value === "^" || value === "-") return `\\${value}`;
+  return value;
 }

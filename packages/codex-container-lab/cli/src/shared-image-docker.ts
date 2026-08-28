@@ -10,7 +10,9 @@ import {
   SHARED_IMAGE_BUILDER_NAME,
   fingerprintSharedImage,
   hasExactSharedImageLabels,
+  materializeSharedImageSnapshot,
   sharedImageLabels,
+  type SharedImageFingerprint,
 } from "./shared-image";
 import {
   ensureSharedImageRecord,
@@ -19,6 +21,7 @@ import {
   listAllLabManifests,
   listSharedImageRecords,
   readSharedImageRecord,
+  recordSharedImageLease,
   sharedImageBuilderLockPath,
   sharedImageGcLockPath,
   sharedImageRecordPath,
@@ -41,6 +44,7 @@ export type SharedImageEnsureOptions = {
   builderName?: string;
   now?: Date;
   signal?: AbortSignal;
+  lease?: { owner: string; labId: string };
 };
 
 export type SharedImageGcMode = "plan" | "apply";
@@ -106,12 +110,13 @@ export async function ensureSharedEnvironmentImage(options: SharedImageEnsureOpt
         tag: fingerprint.tag,
         imageId: existing.imageId,
       }, now);
-      return existing;
+      return await finishEnsuredSharedImage(options, existing, now);
     }
     await ensureSharedImageBuilder(options.docker, options.stateRoot, builderName);
     const createdAt = now.toISOString();
     const imageId = await buildSharedImage(options.docker, {
       profile: options.profile,
+      fingerprint,
       digest: fingerprint.digest,
       repoHash: options.repoHash,
       tag: fingerprint.tag,
@@ -136,8 +141,26 @@ export async function ensureSharedEnvironmentImage(options: SharedImageEnsureOpt
       tag: fingerprint.tag,
       imageId,
     }, now);
-    return verified;
+    return await finishEnsuredSharedImage(options, verified, now);
   }, options.signal);
+}
+
+async function finishEnsuredSharedImage(
+  options: SharedImageEnsureOptions,
+  reference: SharedImageReference,
+  now: Date,
+): Promise<SharedImageReference> {
+  if (options.lease) {
+    await recordSharedImageLease(
+      options.stateRoot,
+      reference,
+      options.lease.owner,
+      options.lease.labId,
+      { repoHash: options.repoHash, platform: options.profile.platform },
+      now,
+    );
+  }
+  return reference;
 }
 
 export async function ensureLabSharedImages(
@@ -149,6 +172,8 @@ export async function ensureLabSharedImages(
     builderName?: string;
     now?: Date;
     signal?: AbortSignal;
+    owner: string;
+    labId: string;
   },
 ): Promise<SharedImageReference[]> {
   const references: SharedImageReference[] = [];
@@ -162,6 +187,7 @@ export async function ensureLabSharedImages(
       builderName: options.builderName,
       now: options.now,
       signal: options.signal,
+      lease: { owner: options.owner, labId: options.labId },
     }));
   }
   return references;
@@ -454,6 +480,7 @@ async function buildSharedImage(
   docker: DockerRunner,
   options: {
     profile: SharedImageProfile;
+    fingerprint: SharedImageFingerprint;
     digest: string;
     repoHash: string;
     tag: string;
@@ -464,7 +491,9 @@ async function buildSharedImage(
 ): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "skizzles-shared-image-"));
   const iidFile = join(directory, "iid");
+  let snapshot: { root: string; context: string; dockerfile: string } | undefined;
   try {
+    snapshot = await materializeSharedImageSnapshot(options.profile, options.fingerprint);
     const labels = sharedImageLabels({
       profile: options.profile.name,
       digest: options.digest,
@@ -477,7 +506,7 @@ async function buildSharedImage(
       "--builder", options.builderName,
       "--load",
       "--platform", options.profile.platform,
-      "--file", options.profile.dockerfile,
+      "--file", snapshot.dockerfile,
       "--tag", options.tag,
       "--iidfile", iidFile,
       "--provenance=false",
@@ -486,7 +515,7 @@ async function buildSharedImage(
       ...Object.entries(options.profile.buildArgs).flatMap(([key, value]) => ["--build-arg", `${key}=${value}`]),
     ];
     if (options.profile.target) args.push("--target", options.profile.target);
-    args.push(options.profile.context);
+    args.push(snapshot.context);
     const built = await docker.run(args, {
       allowFailure: true,
       timeoutMs: BUILD_TIMEOUT_MS,
@@ -504,6 +533,7 @@ async function buildSharedImage(
     }
     return imageId.startsWith("sha256:") ? imageId : `sha256:${imageId}`;
   } finally {
+    if (snapshot) await rm(snapshot.root, { recursive: true, force: true });
     await rm(directory, { recursive: true, force: true });
   }
 }

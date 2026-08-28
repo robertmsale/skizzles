@@ -157,26 +157,39 @@ export async function acquireSharedImageLease(
   now = new Date(),
 ): Promise<SharedImageRecord> {
   safeStateName(labId, "lab id");
+  return await withSharedImageDigestLock(stateRoot, reference.digest, async () => {
+    return await recordSharedImageLease(stateRoot, reference, owner, labId, extras, now);
+  });
+}
+
+/** Caller must already hold the digest lock for `reference.digest`. */
+export async function recordSharedImageLease(
+  stateRoot: string,
+  reference: SharedImageReference,
+  owner: string,
+  labId: string,
+  extras: { repoHash: string; platform: string },
+  now = new Date(),
+): Promise<SharedImageRecord> {
+  safeStateName(labId, "lab id");
   const timestamp = now.toISOString();
   const key = ownerKey(owner);
-  return await withSharedImageDigestLock(stateRoot, reference.digest, async () => {
-    const record = await ensureSharedImageRecord(stateRoot, {
-      digest: reference.digest,
-      profile: reference.profile,
-      repoHash: extras.repoHash,
-      platform: extras.platform,
-      tag: reference.tag,
-      imageId: reference.imageId,
-    }, now);
-    if (record.imageId !== reference.imageId || record.tag !== reference.tag) {
-      throw new Error("shared image lease identity does not match the ensured image");
-    }
-    const leases = record.leases.filter((lease) => !(lease.ownerKey === key && lease.labId === labId));
-    leases.push({ ownerKey: key, labId, acquiredAt: timestamp });
-    const next: SharedImageRecord = { ...record, leases, lastUsedAt: timestamp, imageId: reference.imageId };
-    await writeSharedImageRecord(stateRoot, next);
-    return next;
-  });
+  const record = await ensureSharedImageRecord(stateRoot, {
+    digest: reference.digest,
+    profile: reference.profile,
+    repoHash: extras.repoHash,
+    platform: extras.platform,
+    tag: reference.tag,
+    imageId: reference.imageId,
+  }, now);
+  if (record.imageId !== reference.imageId || record.tag !== reference.tag) {
+    throw new Error("shared image lease identity does not match the ensured image");
+  }
+  const leases = record.leases.filter((lease) => !(lease.ownerKey === key && lease.labId === labId));
+  leases.push({ ownerKey: key, labId, acquiredAt: timestamp });
+  const next: SharedImageRecord = { ...record, leases, lastUsedAt: timestamp, imageId: reference.imageId };
+  await writeSharedImageRecord(stateRoot, next);
+  return next;
 }
 
 export async function releaseSharedImageLease(
