@@ -33,4 +33,5 @@ if [ -n "${CODEX_AGGREGATOR_PROVIDER_READY_URL:-}" ]; then
 fi
 
 cd "$workspace"
+printf '%s\n' '__SKIZZLES_CODEX_APP_SERVER_READY__'
 exec codex --config "projects={\"$workspace\"={trust_level=\"trusted\"}}" app-server --stdio

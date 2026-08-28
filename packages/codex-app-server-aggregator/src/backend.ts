@@ -17,6 +17,7 @@ export interface BackendTransport {
   readonly machineId: string;
   readonly containerId: string;
   readonly workspace: string;
+  readonly ready: Promise<void>;
   readonly stdout: ReadableStream<Uint8Array>;
   readonly stderr?: ReadableStream<Uint8Array>;
   write(line: string): void | Promise<void>;
@@ -38,14 +39,27 @@ type Pending = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+export type BackendConnectionOptions = {
+  requestTimeoutMs?: number;
+};
+
 export class BackendConnection {
   private readonly pending = new Map<string, Pending>();
   private readonly consumePromise: Promise<void>;
   private readonly stderrPromise: Promise<void> | undefined;
+  private readonly requestTimeoutMs: number;
   private closePromise: Promise<void> | undefined;
   private closed = false;
 
-  constructor(readonly transport: BackendTransport, private readonly handlers: BackendHandlers) {
+  constructor(
+    readonly transport: BackendTransport,
+    private readonly handlers: BackendHandlers,
+    options: BackendConnectionOptions = {},
+  ) {
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 60_000;
+    if (!Number.isFinite(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
+      throw new Error("backend request timeout must be a positive finite number");
+    }
     this.consumePromise = this.consume();
     this.stderrPromise = transport.stderr ? this.consumeStderr(transport.stderr) : undefined;
   }
@@ -65,7 +79,7 @@ export class BackendConnection {
       const timeout = setTimeout(() => {
         this.pending.delete(idKey(id));
         resolve(errorOutcome(-32002, `backend request timed out: ${method}`));
-      }, 60_000);
+      }, this.requestTimeoutMs);
       this.pending.set(idKey(id), { resolve, timeout });
     });
     try {
@@ -89,6 +103,12 @@ export class BackendConnection {
   }
 
   async initialize(params: unknown): Promise<RpcOutcome> {
+    try {
+      await this.transport.ready;
+    } catch (error) {
+      this.handlers.onLog?.(this, error instanceof Error ? error.message : String(error));
+      return errorOutcome(-32003, "backend exited before app-server readiness");
+    }
     return this.call("initialize", params);
   }
 

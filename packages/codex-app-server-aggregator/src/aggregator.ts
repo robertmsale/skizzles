@@ -1,4 +1,4 @@
-import { BackendConnection, type BackendFactory } from "./backend.ts";
+import { BackendConnection, type BackendFactory, type BackendTransport } from "./backend.ts";
 import type { MessageSink } from "./jsonl.ts";
 import {
   errorOutcome,
@@ -9,6 +9,7 @@ import {
   response,
   type RpcId,
   type RpcMessage,
+  type RpcNotification,
   type RpcOutcome,
   type RpcRequest,
 } from "./protocol.ts";
@@ -37,6 +38,7 @@ export class AppServerAggregator {
   private initializeParams?: unknown;
   private warmBackend: BackendConnection | undefined;
   private globalBackendCreation: Promise<BackendConnection | undefined> | undefined;
+  private readonly clientOptOutNotifications = new Set<string>();
   private initialized = false;
   private closed = false;
 
@@ -155,13 +157,13 @@ export class AppServerAggregator {
     if ("result" in outcome && threadId && request.method === "thread/archive") {
       this.topology.markArchived(threadId);
       if (synthesizedLifecycle) {
-        await this.output.send({ method: "thread/archived", params: { threadId }, emittedAtMs: Date.now() });
+        await this.sendClientNotification({ method: "thread/archived", params: { threadId }, emittedAtMs: Date.now() });
       }
       await this.removeIfDrained(backend);
     } else if ("result" in outcome && threadId && request.method === "thread/delete") {
       this.topology.markDeleted(threadId);
       if (synthesizedLifecycle) {
-        await this.output.send({ method: "thread/deleted", params: { threadId }, emittedAtMs: Date.now() });
+        await this.sendClientNotification({ method: "thread/deleted", params: { threadId }, emittedAtMs: Date.now() });
       }
       await this.removeIfDrained(backend);
     }
@@ -173,10 +175,15 @@ export class AppServerAggregator {
       return;
     }
     this.initializeParams = request.params;
+    for (const method of initializeOptOutMethods(request.params)) this.clientOptOutNotifications.add(method);
     this.initialization = this.createInitializedBackend(true).then(async (backend) => {
       if ("error" in backend.outcome) {
-        await backend.connection.close();
         this.backends.delete(backend.connection.machineId);
+        try {
+          await backend.connection.close();
+        } catch (error) {
+          this.log(`failed to clean initialization backend ${backend.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       } else {
         this.warmBackend = backend.connection;
         this.initialActivation = backend.activate;
@@ -204,15 +211,41 @@ export class AppServerAggregator {
     let backend = this.warmBackend;
     this.warmBackend = undefined;
     if (!backend) {
-      const created = await this.createInitializedBackend();
+      let created: CreatedBackend;
+      try {
+        created = await this.createInitializedBackend();
+      } catch (error) {
+        this.log(`failed to provision backend: ${error instanceof Error ? error.message : String(error)}`);
+        await this.output.send(response(request.id, errorOutcome(-32603, "failed to provision app-server backend")));
+        return;
+      }
       if ("error" in created.outcome) {
-        await created.connection.close();
         this.backends.delete(created.connection.machineId);
+        try {
+          await created.connection.close();
+        } catch (error) {
+          this.log(`failed to clean rejected backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
         await this.output.send(response(request.id, created.outcome));
         return;
       }
       backend = created.connection;
-      if (this.initialized) await backend.notify("initialized");
+      if (this.initialized) {
+        try {
+          await backend.notify("initialized");
+        } catch (error) {
+          this.readyBackends.delete(backend);
+          this.backends.delete(backend.machineId);
+          try {
+            await backend.close();
+          } catch (closeError) {
+            this.log(`failed to clean unnotified backend ${backend.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
+          }
+          this.log(`failed to notify provisioned backend ${backend.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+          await this.output.send(response(request.id, errorOutcome(-32603, "failed to provision app-server backend")));
+          return;
+        }
+      }
     }
     const params: Record<string, unknown> = { ...asRecord(request.params), cwd: backend.workspace };
     if (Array.isArray(params.runtimeWorkspaceRoots)) params.runtimeWorkspaceRoots = [backend.workspace];
@@ -227,45 +260,66 @@ export class AppServerAggregator {
   }
 
   private async createInitializedBackend(deferEvents = false): Promise<CreatedBackend> {
-    const transport = await this.factory.create();
-    let active = !deferEvents;
-    const queued: Array<() => Promise<void>> = [];
-    const forward = (operation: () => Promise<void>): Promise<void> => {
-      if (active) return operation();
-      queued.push(operation);
-      return Promise.resolve();
-    };
-    const connection = new BackendConnection(transport, {
-      onNotification: (backend, notification) => forward(async () => {
-        this.topology.observe(backend.machineId, notification);
-        await this.output.send(notification);
-        if (notification.method === "thread/archived" || notification.method === "thread/deleted") {
-          queueMicrotask(() => {
-            this.removeIfDrained(backend).catch((error) => {
-              this.log(`failed to remove drained backend ${backend.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+    let transport: BackendTransport | undefined;
+    let connection: BackendConnection | undefined;
+    try {
+      transport = await this.factory.create();
+      let active = !deferEvents;
+      const queued: Array<() => Promise<void>> = [];
+      const forward = (operation: () => Promise<void>): Promise<void> => {
+        if (active) return operation();
+        queued.push(operation);
+        return Promise.resolve();
+      };
+      connection = new BackendConnection(transport, {
+        onNotification: (backend, notification) => forward(async () => {
+          this.topology.observe(backend.machineId, notification);
+          await this.sendClientNotification(notification);
+          if (notification.method === "thread/archived" || notification.method === "thread/deleted") {
+            queueMicrotask(() => {
+              this.removeIfDrained(backend).catch((error) => {
+                this.log(`failed to remove drained backend ${backend.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+              });
             });
-          });
+          }
+        }),
+        onServerRequest: (backend, serverRequest) => forward(async () => {
+          const outerId = `agg/server/${crypto.randomUUID()}`;
+          this.reverseRequests.set(idKey(outerId), { backend, backendId: serverRequest.id });
+          await this.output.send({ ...serverRequest, id: outerId });
+        }),
+        onLog: (backend, text) => this.log(`[${backend.machineId}] ${text.trimEnd()}`),
+      });
+      this.backends.set(connection.machineId, connection);
+      const outcome = await connection.initialize(backendInitializeParams(this.initializeParams));
+      if ("result" in outcome) this.readyBackends.add(connection);
+      return {
+        connection,
+        outcome,
+        activate: async () => {
+          if (active) return;
+          active = true;
+          for (const operation of queued.splice(0)) await operation();
+        },
+      };
+    } catch (error) {
+      if (connection) {
+        this.readyBackends.delete(connection);
+        this.backends.delete(connection.machineId);
+        try {
+          await connection.close();
+        } catch (closeError) {
+          this.log(`failed to clean partial backend ${connection.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
         }
-      }),
-      onServerRequest: (backend, serverRequest) => forward(async () => {
-        const outerId = `agg/server/${crypto.randomUUID()}`;
-        this.reverseRequests.set(idKey(outerId), { backend, backendId: serverRequest.id });
-        await this.output.send({ ...serverRequest, id: outerId });
-      }),
-      onLog: (backend, text) => this.log(`[${backend.machineId}] ${text.trimEnd()}`),
-    });
-    this.backends.set(connection.machineId, connection);
-    const outcome = await connection.initialize(this.initializeParams);
-    if ("result" in outcome) this.readyBackends.add(connection);
-    return {
-      connection,
-      outcome,
-      activate: async () => {
-        if (active) return;
-        active = true;
-        for (const operation of queued.splice(0)) await operation();
-      },
-    };
+      } else if (transport) {
+        try {
+          await transport.destroy();
+        } catch (closeError) {
+          this.log(`failed to clean partial transport ${transport.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
+        }
+      }
+      throw error;
+    }
   }
 
   private async globalBackend(): Promise<BackendConnection | undefined> {
@@ -275,13 +329,37 @@ export class AppServerAggregator {
     if (running) return running;
     if (!this.globalBackendCreation) {
       const attempt = (async () => {
-        const created = await this.createInitializedBackend();
-        if ("error" in created.outcome) {
-          await created.connection.close();
-          this.backends.delete(created.connection.machineId);
+        let created: CreatedBackend;
+        try {
+          created = await this.createInitializedBackend();
+        } catch (error) {
+          this.log(`failed to provision representative backend: ${error instanceof Error ? error.message : String(error)}`);
           return undefined;
         }
-        if (this.initialized) await created.connection.notify("initialized");
+        if ("error" in created.outcome) {
+          this.backends.delete(created.connection.machineId);
+          try {
+            await created.connection.close();
+          } catch (error) {
+            this.log(`failed to clean representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          return undefined;
+        }
+        if (this.initialized) {
+          try {
+            await created.connection.notify("initialized");
+          } catch (error) {
+            this.readyBackends.delete(created.connection);
+            this.backends.delete(created.connection.machineId);
+            try {
+              await created.connection.close();
+            } catch (closeError) {
+              this.log(`failed to clean unnotified representative backend ${created.connection.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
+            }
+            this.log(`failed to notify representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+            return undefined;
+          }
+        }
         this.warmBackend = created.connection;
         return created.connection;
       })();
@@ -331,12 +409,33 @@ export class AppServerAggregator {
     if (remaining > 0) this.lifecycleCalls.set(backend, remaining);
     else this.lifecycleCalls.delete(backend);
   }
+
+  private async sendClientNotification(notification: RpcNotification): Promise<void> {
+    if (this.clientOptOutNotifications.has(notification.method)) return;
+    await this.output.send(notification);
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function initializeOptOutMethods(params: unknown): string[] {
+  const capabilities = asRecord(asRecord(params).capabilities);
+  const methods = capabilities.optOutNotificationMethods;
+  return Array.isArray(methods) ? methods.filter((method): method is string => typeof method === "string") : [];
+}
+
+function backendInitializeParams(params: unknown): unknown {
+  const root = asRecord(params);
+  const capabilities = asRecord(root.capabilities);
+  const methods = capabilities.optOutNotificationMethods;
+  if (!Array.isArray(methods)) return params;
+  const filtered = methods.filter((method) => typeof method !== "string" || !TOPOLOGY_NOTIFICATION_METHODS.has(method));
+  if (filtered.length === methods.length) return params;
+  return { ...root, capabilities: { ...capabilities, optOutNotificationMethods: filtered } };
 }
 
 function isMissingRollout(outcome: RpcOutcome, threadId: string): boolean {
@@ -351,6 +450,12 @@ function isAggregateTopologyMethod(method: string): boolean {
     || method.startsWith("project/")
     || method.startsWith("threadSection/");
 }
+
+const TOPOLOGY_NOTIFICATION_METHODS = new Set([
+  "thread/started",
+  "thread/archived",
+  "thread/deleted",
+]);
 
 const REPRESENTATIVE_GLOBAL_READS = new Set([
   "account/read",

@@ -242,7 +242,71 @@ describe("Codex app-server aggregation", () => {
     expect(resultFor(harness.output.messages, 5)).toEqual({});
     await harness.aggregator.close();
   });
+
+  test("keeps topology notifications enabled internally while honoring the client opt-out", async () => {
+    const harness = createHarness();
+    await initialize(harness, {
+      experimentalApi: true,
+      optOutNotificationMethods: [
+        "configWarning",
+        "thread/started",
+        "thread/archived",
+        "thread/deleted",
+      ],
+    });
+
+    expect(harness.factory.transports[0]!.request("initialize")?.params).toMatchObject({
+      capabilities: { optOutNotificationMethods: ["configWarning"] },
+    });
+    expect(harness.output.messages.some((message) => "method" in message && message.method === "configWarning")).toBe(false);
+
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    const parentId = harness.factory.threadId(0);
+    const childId = `${parentId}-child`;
+    harness.factory.transports[0]!.emit({
+      method: "thread/started",
+      params: {
+        thread: {
+          ...threadSnapshot(childId, 1),
+          parentThreadId: parentId,
+          source: { subAgent: { thread_spawn: { parent_thread_id: parentId, depth: 1 } } },
+        },
+      },
+    });
+    await waitForThread(harness, parentId, childId);
+    await harness.aggregator.handle({ method: "turn/start", id: 3, params: { threadId: childId, input: [] } });
+    expect(resultFor(harness.output.messages, 3)).toEqual({});
+
+    harness.factory.archiveMode = "cascade";
+    await harness.aggregator.handle({ method: "thread/archive", id: 4, params: { threadId: parentId } });
+    harness.factory.transports[0]!.emit({ method: "thread/archived", params: { threadId: childId } });
+    await waitFor(() => harness.factory.transports[0]!.destroyed);
+    expect(harness.output.messages.some((message) =>
+      "method" in message && TOPOLOGY_NOTIFICATION_METHODS.has(message.method))).toBe(false);
+    await harness.aggregator.close();
+  });
+
+  test("answers thread/start when later backend provisioning rejects", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    harness.factory.createFailures = 1;
+
+    await harness.aggregator.handle({ method: "thread/start", id: 3, params: {} });
+    expect(errorFor(harness.output.messages, 3)).toEqual({
+      code: -32603,
+      message: "failed to provision app-server backend",
+    });
+    expect(harness.factory.transports).toHaveLength(1);
+    await harness.aggregator.close();
+  });
 });
+
+const TOPOLOGY_NOTIFICATION_METHODS = new Set([
+  "thread/started",
+  "thread/archived",
+  "thread/deleted",
+]);
 
 class CaptureSink implements MessageSink {
   readonly messages: RpcMessage[] = [];
@@ -256,8 +320,13 @@ class FakeFactory implements BackendFactory {
   readonly transports: FakeTransport[] = [];
   archiveMode: "missing" | "cascade" | "notificationFirst" = "missing";
   initializeDelayMs = 0;
+  createFailures = 0;
 
   async create(): Promise<BackendTransport> {
+    if (this.createFailures > 0) {
+      this.createFailures--;
+      throw new Error("fake provisioning failure");
+    }
     const index = this.transports.length;
     const transport = new FakeTransport(index, (message) => this.handle(index, message));
     this.transports.push(transport);
@@ -335,6 +404,7 @@ class FakeTransport implements BackendTransport {
   readonly machineId: string;
   readonly containerId: string;
   readonly workspace = CONTAINER_WORKSPACE;
+  readonly ready = Promise.resolve();
   readonly stdout: ReadableStream<Uint8Array>;
   readonly writes: RpcMessage[] = [];
   destroyed = false;
@@ -392,17 +462,35 @@ function createHarness() {
   return { factory, output, aggregator };
 }
 
-async function initialize(harness: ReturnType<typeof createHarness>): Promise<void> {
+async function initialize(
+  harness: ReturnType<typeof createHarness>,
+  capabilities: Record<string, unknown> = { experimentalApi: true },
+): Promise<void> {
   await harness.aggregator.handle({
     method: "initialize",
     id: 1,
     params: {
       clientInfo: { name: "test", title: "Test", version: "0.1.0" },
-      capabilities: { experimentalApi: true },
+      capabilities,
     },
   });
   expect(resultFor(harness.output.messages, 1)).toMatchObject({ codexHome: "/codex-home", platformOs: "linux" });
   await harness.aggregator.handle({ method: "initialized" });
+}
+
+async function waitForThread(
+  harness: ReturnType<typeof createHarness>,
+  ancestorThreadId: string,
+  threadId: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const id = `list-${attempt}`;
+    await harness.aggregator.handle({ method: "thread/list", id, params: { ancestorThreadId } });
+    const result = resultFor(harness.output.messages, id) as { data: Array<{ id: string }> };
+    if (result.data.some((thread) => thread.id === threadId)) return;
+    await Bun.sleep(1);
+  }
+  throw new Error(`timed out waiting for topology thread ${threadId}`);
 }
 
 function threadSnapshot(id: string, index: number) {

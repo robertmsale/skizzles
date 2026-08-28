@@ -19,7 +19,7 @@ and reject unkeyed operations that have no honest aggregate meaning.
 
 | Surface | Spike behavior | Why |
 | --- | --- | --- |
-| `initialize` | Provision and initialize a warm backend, return its real Linux `codexHome`, platform, and user agent, then release queued backend events. | The response describes a concrete backend. Holding its early notifications prevents them from overtaking the outer initialize response. |
+| `initialize` | Provision and initialize a warm backend, return its real Linux `codexHome`, platform, and user agent, then release queued backend events. Keep topology-critical notifications enabled on the inner connection while applying the client's opt-outs on the outer connection. | The response describes a concrete backend. Holding its early notifications prevents them from overtaking the outer initialize response; observing thread lifecycle events is required for routing and teardown. |
 | `initialized` | Fan out to every initialized backend, including later backends. | Each app-server connection has its own initialization state. |
 | `thread/start` | Allocate a container, force `cwd` (and caller-supplied runtime roots) to `/workspace/repo`, pass through, then bind the returned thread ID to that container. | `thread/start` has no caller-supplied ID. The real backend remains the ID authority. |
 | `thread/list`, `thread/loaded/list` | Answer from aggregate in-memory topology; never delegate to one backend. | A backend only knows its own Codex home and loaded threads. |
@@ -82,6 +82,17 @@ initialization data would be a lie. Conversely, there is no
 single response that can describe a heterogeneous backend fleet; this spike assumes one pinned
 image and returns its warm representative.
 
+Initialization capabilities describe the client-facing connection, but the aggregator is also an
+app-server client on every inner connection. If it forwarded an opt-out for `thread/started`,
+`thread/archived`, or `thread/deleted`, Codex would suppress the events required to bind autonomous
+children and release drained containers. The spike removes those three methods from each inner
+initialize request, observes them for bookkeeping, and independently honors the original opt-out
+when forwarding notifications to the outer client.
+
+Provisioning is also part of the outer request contract. Docker create/start failures are caught at
+the `thread/start` boundary, partial transports are closed, and the original JSON-RPC ID receives an
+error. Logging an exception without a response is not a valid app-server outcome.
+
 ## Container and provider proof
 
 The end-to-end run built the pinned image, created a labeled container, cloned the requested Git
@@ -89,6 +100,13 @@ repository into `/workspace/repo`, started app-server there, and showed the clon
 instruction source in `thread/start`. The fixed workspace is trusted only inside the disposable
 container so repo-local Codex config, hooks, and exec policy can load. No host worktree was mounted
 as the agent workspace.
+
+Docker attach succeeds before the entrypoint finishes cloning or waiting for its provider. The
+entrypoint now writes a private readiness line immediately before `exec codex ... app-server`; the
+transport consumes and strips that line before sending `initialize`. Thus clone/provider startup is
+outside the 60-second JSON-RPC timeout, while the initialize response itself remains bounded. A
+committed subprocess-boundary test delays readiness beyond a deliberately short RPC timeout and
+proves both the gate and normal post-readiness timeout behavior.
 
 A disposable Codex-home seed selected a mock Responses-compatible provider at
 `127.0.0.1:8787`. The image's provider hook started that process inside the same container, waited
@@ -110,6 +128,7 @@ auth seed is mechanism, not a credential-security design.
 | Give every fork/review ID a new process. | Fork, detached review, and competing resume probe. | Rejected: child IDs are minted by the current writer; competing writers are refused. |
 | Always trust backend archive immediately after start. | Start then archive before a first turn. | Rejected: the ID exists before its rollout does. Narrow synthesis is required to release that machine. |
 | Use direct stdio per container. | Real Docker initialization, start, turn, archive, and removal. | Selected for the spike: simple and fully bidirectional, but not reattachable. |
+| Increase the universal RPC timeout to cover cloning. | Delayed attached-process test with a short request timeout. | Rejected: attachment is not readiness, and any fixed increase preserves the race. Gate the first request instead. |
 | Use experimental listen-WebSocket instead. | Generated/runtime CLI surface and official transport contract. | Viable later for reconnect, but deliberately not the baseline while the transport is experimental. |
 | Use `app-server daemon` plus `proxy`. | Disposable npm-installed runtime probe. | Rejected for this image: daemon demanded the managed standalone layout; an unsupported symlink experiment started it, but proxy relay failed with a broken pipe. This is not proof of an upstream defect. |
 | Keep the provider on the host. | In-container mock provider and loopback request. | Rejected as unnecessary: the same provider config and process can live beside Codex in the container. |

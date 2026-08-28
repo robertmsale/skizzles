@@ -4,6 +4,7 @@ import type { BackendFactory, BackendTransport } from "./backend.ts";
 
 export const CONTAINER_WORKSPACE = "/workspace/repo";
 export const DEFAULT_IMAGE = "skizzles/codex-app-server:0.149.1";
+export const APP_SERVER_READY_MARKER = "__SKIZZLES_CODEX_APP_SERVER_READY__";
 
 export type DockerBackendOptions = {
   repoUrl: string;
@@ -88,6 +89,7 @@ class DockerTransport implements BackendTransport {
   readonly machineId: string;
   readonly containerId: string;
   readonly workspace: string;
+  readonly ready: Promise<void>;
   readonly stdout: ReadableStream<Uint8Array>;
   readonly stderr: ReadableStream<Uint8Array>;
   private destroyPromise: Promise<void> | undefined;
@@ -104,7 +106,9 @@ class DockerTransport implements BackendTransport {
     this.machineId = values.machineId;
     this.containerId = values.containerId;
     this.workspace = values.workspace;
-    this.stdout = values.process.stdout;
+    const gated = gateOnReady(values.process.stdout);
+    this.ready = gated.ready;
+    this.stdout = gated.stdout;
     this.stderr = values.process.stderr;
   }
 
@@ -134,6 +138,73 @@ class DockerTransport implements BackendTransport {
       throw error;
     }
   }
+}
+
+function gateOnReady(source: ReadableStream<Uint8Array>): {
+  ready: Promise<void>;
+  stdout: ReadableStream<Uint8Array>;
+} {
+  const expected = new TextEncoder().encode(`${APP_SERVER_READY_MARKER}\n`);
+  const reader = source.getReader();
+  let offset = 0;
+  let settled = false;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const fail = (reason: unknown): Error => {
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    if (!settled) {
+      settled = true;
+      rejectReady(error);
+    }
+    return error;
+  };
+
+  const stdout = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            if (offset !== expected.length) {
+              controller.error(fail("container exited before app-server readiness"));
+            } else {
+              controller.close();
+            }
+            return;
+          }
+
+          let index = 0;
+          while (offset < expected.length && index < value.length) {
+            if (value[index] !== expected[offset]) {
+              controller.error(fail("container stdout did not begin with the app-server readiness marker"));
+              await reader.cancel().catch(() => undefined);
+              return;
+            }
+            offset++;
+            index++;
+          }
+          if (offset !== expected.length) continue;
+          if (!settled) {
+            settled = true;
+            resolveReady();
+          }
+          if (index < value.length) controller.enqueue(value.slice(index));
+          return;
+        }
+      } catch (error) {
+        controller.error(fail(error));
+      }
+    },
+    async cancel(reason) {
+      fail(reason ?? "container stdout was cancelled before app-server readiness");
+      await reader.cancel(reason);
+    },
+  });
+  return { ready, stdout };
 }
 
 async function runDocker(binary: string, args: string[]): Promise<string> {
