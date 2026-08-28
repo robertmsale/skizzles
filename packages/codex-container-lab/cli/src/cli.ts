@@ -131,6 +131,34 @@ async function dispatch(service: ContainerLabService, args: string[], signal?: A
     }
     throw new UsageError("sync requires preview or apply");
   }
+  if (noun === "system") {
+    if (verb === "inventory") {
+      const flags = parseFlags(rest, new Set(["--max-age-hours", "--budget-bytes"]));
+      return await service.systemInventory({
+        maxAgeHours: optionalInteger(flags.one("--max-age-hours"), "--max-age-hours"),
+        budgetBytes: optionalInteger(flags.one("--budget-bytes"), "--budget-bytes"),
+      });
+    }
+    if (verb === "gc") {
+      const flags = parseFlags(rest, new Set(["--resource", "--mode", "--max-age-hours", "--budget-bytes"]));
+      const resource = flags.required("--resource");
+      const mode = flags.required("--mode");
+      if (mode !== "plan" && mode !== "apply") throw new UsageError("--mode must be plan or apply");
+      if (resource === "images") {
+        return await service.gcSharedImages(mode, {
+          maxAgeHours: optionalInteger(flags.one("--max-age-hours"), "--max-age-hours"),
+          budgetBytes: optionalInteger(flags.one("--budget-bytes"), "--budget-bytes"),
+        });
+      }
+      if (resource === "cache") {
+        return await service.gcSharedImageCache(mode, {
+          budgetBytes: optionalInteger(flags.one("--budget-bytes"), "--budget-bytes"),
+        });
+      }
+      throw new UsageError("--resource must be images or cache");
+    }
+    throw new UsageError("system requires inventory or gc");
+  }
   throw new UsageError(`unknown command: ${noun}`);
 }
 
@@ -227,6 +255,12 @@ function integerFlag(value: string | undefined, flag: string, fallback: number):
   return Number(value);
 }
 
+function optionalInteger(value: string | undefined, flag: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[0-9]+$/.test(value)) throw new UsageError(`${flag} must be an integer`);
+  return Number(value);
+}
+
 function direction(value: string): "push" | "pull" {
   if (value !== "push" && value !== "pull") throw new UsageError("--direction must be push or pull");
   return value;
@@ -253,6 +287,8 @@ function helpText(): string {
     "logs --lab ID --service SERVICE [--tail-lines N]",
     "sync preview --lab ID --direction push|pull",
     "sync apply --lab ID --direction push|pull --token TOKEN",
+    "system inventory [--max-age-hours N] [--budget-bytes N]",
+    "system gc --resource images|cache --mode plan|apply [--max-age-hours N] [--budget-bytes N]",
   ].join("\n");
 }
 

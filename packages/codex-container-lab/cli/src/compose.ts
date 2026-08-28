@@ -1,5 +1,6 @@
-import { stringify as stringifyYaml } from "yaml";
+import { Scalar, parseDocument, stringify as stringifyYaml } from "yaml";
 import type { LabConfig } from "./config";
+import type { SharedImageReference } from "./types";
 
 /** Stable names for the opt-in, Skizzles-owned compiler cache resources. */
 export const SHARED_COMPILER_CACHE_CONTAINER = "skizzles-sccache-redis";
@@ -45,7 +46,12 @@ export function generateBaseCompose(config: LabConfig): string | undefined {
   return stringifyYaml({ services: { [config.mode.commandService]: service } });
 }
 
-export function generateOverrideCompose(config: LabConfig, model: ComposeModel, context: LabComposeContext): string {
+export function generateOverrideCompose(
+  config: LabConfig,
+  model: ComposeModel,
+  context: LabComposeContext,
+  sharedImages: readonly SharedImageReference[] = [],
+): string {
   const labels = managementLabels(context);
   const serviceNames = Object.keys(model.services ?? {});
   if (!serviceNames.includes(config.mode.commandService)) {
@@ -59,8 +65,12 @@ export function generateOverrideCompose(config: LabConfig, model: ComposeModel, 
     if (existing) throw new Error(`declared port ${port.name} overlaps a project publication for ${port.service}:${port.target}`);
   }
 
+  const sharedImageByService = mappedSharedImages(config, sharedImages, serviceNames);
+
   const services = Object.fromEntries(serviceNames.map((name) => {
     const override: Record<string, unknown> = { labels };
+    const shared = sharedImageByService.get(name);
+    if (shared) override.image = shared.imageId;
     if (name === config.mode.commandService) {
       override.init = true;
       override.working_dir = config.runtime.workspace;
@@ -111,11 +121,12 @@ export function generateOverrideCompose(config: LabConfig, model: ComposeModel, 
       name: SHARED_COMPILER_CACHE_NETWORK,
     };
   }
-  return stringifyYaml({
+  const yaml = stringifyYaml({
     services,
     ...(Object.keys(volumes).length > 0 ? { volumes } : {}),
     ...(Object.keys(networks).length > 0 ? { networks } : {}),
   });
+  return resetMappedServiceBuilds(yaml, [...sharedImageByService.keys()]);
 }
 
 function managementLabels(context: LabComposeContext): Record<string, string> {
@@ -124,6 +135,68 @@ function managementLabels(context: LabComposeContext): Record<string, string> {
     [`${labelPrefix}.owner`]: context.owner,
     [`${labelPrefix}.lab`]: context.labId,
   };
+}
+
+function mappedSharedImages(
+  config: LabConfig,
+  sharedImages: readonly SharedImageReference[],
+  serviceNames: string[],
+): Map<string, SharedImageReference> {
+  const byProfile = new Map(sharedImages.map((reference) => [reference.profile, reference]));
+  const mapped = new Map<string, SharedImageReference>();
+  for (const profile of config.sharedImages) {
+    const reference = byProfile.get(profile.name);
+    if (!reference) throw new Error(`shared image profile was not ensured: ${profile.name}`);
+    for (const service of profile.services) {
+      if (!serviceNames.includes(service)) {
+        throw new Error(`shared image ${profile.name} maps absent service: ${service}`);
+      }
+      mapped.set(service, reference);
+    }
+  }
+  return mapped;
+}
+
+function resetMappedServiceBuilds(yaml: string, services: readonly string[]): string {
+  if (services.length === 0) return yaml;
+  const document = parseDocument(yaml);
+  for (const service of services) {
+    const reset = new Scalar(null);
+    reset.tag = "!reset";
+    document.setIn(["services", service, "build"], reset);
+  }
+  return String(document);
+}
+
+export function assertMappedServicesConsumeSharedImages(
+  model: ComposeModel,
+  config: LabConfig,
+  sharedImages: readonly SharedImageReference[],
+): void {
+  const mapped = mappedSharedImages(config, sharedImages, Object.keys(model.services ?? {}));
+  for (const [service, reference] of mapped) {
+    const definition = model.services?.[service];
+    if (!isRecord(definition)) throw new Error(`shared image mapping is absent from the effective Compose model: ${service}`);
+    if (Object.hasOwn(definition, "build")) {
+      throw new Error(`mapped service still has a project-scoped build path: ${service}`);
+    }
+    if (definition.image !== reference.imageId && definition.image !== reference.tag) {
+      throw new Error(`mapped service does not consume the ensured shared image: ${service}`);
+    }
+  }
+}
+
+export function inspectProjectScopedBuilds(model: ComposeModel, mappedServices: ReadonlySet<string> = new Set()): ComposeInspectionFinding[] {
+  const findings: ComposeInspectionFinding[] = [];
+  for (const [service, definition] of Object.entries(model.services ?? {})) {
+    if (!isRecord(definition) || !Object.hasOwn(definition, "build") || mappedServices.has(service)) continue;
+    findings.push({
+      service,
+      surface: "project-build",
+      detail: "service keeps a project-scoped Compose build",
+    });
+  }
+  return findings;
 }
 
 function labelTopLevelResources(
@@ -169,7 +242,8 @@ export type PrivilegeSurface =
   | "config"
   | "fixed-port"
   | "non-loopback-port"
-  | "shared-cache";
+  | "shared-cache"
+  | "project-build";
 
 export interface ComposeInspectionFinding {
   service?: string;

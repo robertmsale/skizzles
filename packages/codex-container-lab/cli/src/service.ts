@@ -5,6 +5,7 @@ import { loadLabConfig } from "./config";
 import { internalImageTag } from "./compose";
 import {
   cleanupLabLabels,
+  countManagedLabResources,
   defaultDockerRunner,
   type DockerAvailabilityDiagnostic,
   DockerProvisioningFailure,
@@ -25,11 +26,24 @@ import { withFileLock } from "./locks";
 import { runCommand } from "./process";
 import { redactPublicText } from "./public-output";
 import {
+  acquireSharedImageLease,
+  releaseLabSharedImageLeases,
+} from "./shared-image-state";
+import {
+  ensureLabSharedImages,
+  gcSharedImageCache,
+  gcSharedImages,
+  inventorySharedImageBuilderCache,
+  inventorySharedImages,
+  type SharedImageGcMode,
+} from "./shared-image-docker";
+import {
   ensureOwner,
   assertReadyLabFilesystem,
   expectedLabRuntimeRoot,
   labManifestPath,
   listLabs,
+  listOwnerManifests,
   ownerDirectory,
   ownerLockPath,
   ownerRuntimeDirectory,
@@ -78,6 +92,62 @@ export class ContainerLabService {
       labs: labs.length,
       ...(!docker.available ? { dockerDiagnostic: docker.diagnostic } : {}),
     };
+  }
+
+  async systemInventory(options: { maxAgeHours?: number; budgetBytes?: number } = {}): Promise<unknown> {
+    await this.reconcileOwner();
+    const owned = (await listLabs(this.roots, this.owner)).length;
+    let other = 0;
+    for (const owner of await listOwnerManifests(this.roots.stateRoot)) {
+      if (owner.manifest.owner === this.owner) continue;
+      other += (await listLabs(this.roots, owner.manifest.owner)).length;
+    }
+    const docker = await dockerAvailable(this.docker, [], this.environment);
+    const labResources = docker.available
+      ? await countManagedLabResources(this.docker)
+      : { containers: 0, volumes: 0, networks: 0 };
+    const shared = docker.available
+      ? await inventorySharedImages(this.roots, this.docker, {
+        maxAgeMs: (options.maxAgeHours ?? 168) * 3_600_000,
+        budgetBytes: options.budgetBytes,
+      })
+      : { cataloged: 0, present: 0, activeLeases: 0, eligible: 0, bytes: 0, reclaimableBytes: 0, untracked: 0 };
+    const builderCache = docker.available
+      ? await inventorySharedImageBuilderCache(this.docker)
+      : { present: false, namespaceOwned: false, bytes: 0 };
+    return {
+      ok: true,
+      labs: { owned, other },
+      labResources,
+      sharedImages: shared,
+      builderCache,
+      dockerAvailable: docker.available,
+      ...(!docker.available ? { dockerDiagnostic: docker.diagnostic } : {}),
+    };
+  }
+
+  async gcSharedImages(
+    mode: SharedImageGcMode,
+    options: { maxAgeHours?: number; budgetBytes?: number } = {},
+  ): Promise<unknown> {
+    await this.reconcileOwner();
+    return await gcSharedImages(this.roots, this.docker, {
+      mode,
+      maxAgeMs: options.maxAgeHours === undefined ? undefined : options.maxAgeHours * 3_600_000,
+      budgetBytes: options.budgetBytes,
+    });
+  }
+
+  async gcSharedImageCache(
+    mode: SharedImageGcMode,
+    options: { budgetBytes?: number } = {},
+  ): Promise<unknown> {
+    await this.reconcileOwner();
+    return await gcSharedImageCache(this.docker, {
+      stateRoot: this.roots.stateRoot,
+      mode,
+      budgetBytes: options.budgetBytes,
+    });
   }
 
   async createLab(name = "lab", source = process.cwd(), signal?: AbortSignal): Promise<{ labId: string; state: LabMetadata["state"] }> {
@@ -337,6 +407,7 @@ export class ContainerLabService {
       if (!await exactDirectoryChain(this.roots.stateRoot, ["owners", lab.ownerKey], "owner state directory")) {
         throw new Error("owner state directory changed during cleanup");
       }
+      await releaseLabSharedImageLeases(this.roots.stateRoot, lab);
       await removeLabState(this.roots.stateRoot, this.owner, id);
       return { labId: id, destroyed: true };
     }, { attempts: 600, delayMs: 50 }), { attempts: 600, delayMs: 50 });
@@ -374,6 +445,25 @@ export class ContainerLabService {
           current.secretEnvironment = [...lab!.secretEnvironment];
           current.managedImage = lab!.managedImage;
         });
+        if (config.sharedImages.length > 0) {
+          const references = await ensureLabSharedImages(config, {
+            stateRoot: this.roots.stateRoot,
+            repoHash: lab.repoHash,
+            docker: this.docker,
+            signal,
+          });
+          for (const profile of config.sharedImages) {
+            const reference = references.find((item) => item.profile === profile.name);
+            if (!reference) throw new Error(`shared image profile was not ensured: ${profile.name}`);
+            await acquireSharedImageLease(this.roots.stateRoot, reference, this.owner, lab.id, {
+              repoHash: lab.repoHash,
+              platform: profile.platform,
+            });
+          }
+          lab = await this.updateProvisioning(id, (current) => {
+            current.sharedImages = references;
+          });
+        }
         provisioningEnvironment = resolveProvisioningEnvironment(secretEnvironmentNames, this.environment);
         await this.assertProvisioning(id, signal);
         const head = (await runCommand("git", ["-C", lab.sourceRoot, "rev-parse", "HEAD"], { timeoutMs: 10_000, signal })).stdout.toString().trim();
@@ -430,13 +520,19 @@ export class ContainerLabService {
             current.provisioningFailure = provisioningFailure;
           }).catch(() => undefined);
         }
-        if (runtime) await destroyLabStack(runtime, this.docker).catch(() => undefined);
-        else if (dockerMaterializationStarted) await cleanupLabLabels(
-          lab,
-          lab.modeKind === "dockerfile",
-          this.docker,
-          provisioningEnvironment,
-        ).catch(() => undefined);
+        let cleaned = true;
+        try {
+          if (runtime) await destroyLabStack(runtime, this.docker);
+          else if (dockerMaterializationStarted) await cleanupLabLabels(
+            lab,
+            lab.modeKind === "dockerfile",
+            this.docker,
+            provisioningEnvironment,
+          );
+        } catch {
+          cleaned = false;
+        }
+        if (cleaned) await releaseLabSharedImageLeases(this.roots.stateRoot, lab).catch(() => undefined);
       }
     await withFileLock(this.labLock(id), async () => {
       let current: LabMetadata;

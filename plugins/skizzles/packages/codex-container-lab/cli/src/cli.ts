@@ -4,7 +4,7 @@ var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, 
 var __require = import.meta.require;
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/identity.js
-var require_identity = __commonJS((exports) => {
+var require_identity = __commonJS(function(exports) {
   var ALIAS = Symbol.for("yaml.alias");
   var DOC = Symbol.for("yaml.document");
   var MAP = Symbol.for("yaml.map");
@@ -58,7 +58,7 @@ var require_identity = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/visit.js
-var require_visit = __commonJS((exports) => {
+var require_visit = __commonJS(function(exports) {
   var identity = require_identity();
   var BREAK = Symbol("break visit");
   var SKIP = Symbol("skip children");
@@ -213,7 +213,7 @@ var require_visit = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/directives.js
-var require_directives = __commonJS((exports) => {
+var require_directives = __commonJS(function(exports) {
   var identity = require_identity();
   var visit = require_visit();
   var escapeChars = {
@@ -365,7 +365,7 @@ var require_directives = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/anchors.js
-var require_anchors = __commonJS((exports) => {
+var require_anchors = __commonJS(function(exports) {
   var identity = require_identity();
   var visit = require_visit();
   function anchorIsValid(anchor) {
@@ -427,7 +427,7 @@ var require_anchors = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/applyReviver.js
-var require_applyReviver = __commonJS((exports) => {
+var require_applyReviver = __commonJS(function(exports) {
   function applyReviver(reviver, obj, key, val) {
     if (val && typeof val === "object") {
       if (Array.isArray(val)) {
@@ -474,7 +474,7 @@ var require_applyReviver = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/toJS.js
-var require_toJS = __commonJS((exports) => {
+var require_toJS = __commonJS(function(exports) {
   var identity = require_identity();
   function toJS(value, arg, ctx) {
     if (Array.isArray(value))
@@ -501,7 +501,7 @@ var require_toJS = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Node.js
-var require_Node = __commonJS((exports) => {
+var require_Node = __commonJS(function(exports) {
   var applyReviver = require_applyReviver();
   var identity = require_identity();
   var toJS = require_toJS();
@@ -538,7 +538,7 @@ var require_Node = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Alias.js
-var require_Alias = __commonJS((exports) => {
+var require_Alias = __commonJS(function(exports) {
   var anchors = require_anchors();
   var visit = require_visit();
   var identity = require_identity();
@@ -648,7 +648,7 @@ var require_Alias = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Scalar.js
-var require_Scalar = __commonJS((exports) => {
+var require_Scalar = __commonJS(function(exports) {
   var identity = require_identity();
   var Node = require_Node();
   var toJS = require_toJS();
@@ -676,7 +676,7 @@ var require_Scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/createNode.js
-var require_createNode = __commonJS((exports) => {
+var require_createNode = __commonJS(function(exports) {
   var Alias = require_Alias();
   var identity = require_identity();
   var Scalar = require_Scalar();
@@ -748,7 +748,7 @@ var require_createNode = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Collection.js
-var require_Collection = __commonJS((exports) => {
+var require_Collection = __commonJS(function(exports) {
   var createNode = require_createNode();
   var identity = require_identity();
   var Node = require_Node();
@@ -863,7 +863,7 @@ var require_Collection = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyComment.js
-var require_stringifyComment = __commonJS((exports) => {
+var require_stringifyComment = __commonJS(function(exports) {
   var stringifyComment = (str) => str.replace(/^(?!$)(?: $)?/gm, "#");
   function indentComment(comment, indent) {
     if (/^\n+$/.test(comment))
@@ -880,7 +880,7 @@ var require_stringifyComment = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/foldFlowLines.js
-var require_foldFlowLines = __commonJS((exports) => {
+var require_foldFlowLines = __commonJS(function(exports) {
   var FOLD_FLOW = "flow";
   var FOLD_BLOCK = "block";
   var FOLD_QUOTED = "quoted";
@@ -1017,7 +1017,7 @@ ${indent}${text.slice(fold + 1, end2)}`;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyString.js
-var require_stringifyString = __commonJS((exports) => {
+var require_stringifyString = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var foldFlowLines = require_foldFlowLines();
   var getFoldOptions = (ctx, isBlock) => ({
@@ -1315,7 +1315,7 @@ ${indent}`);
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringify.js
-var require_stringify = __commonJS((exports) => {
+var require_stringify = __commonJS(function(exports) {
   var anchors = require_anchors();
   var identity = require_identity();
   var stringifyComment = require_stringifyComment();
@@ -1436,7 +1436,7 @@ ${ctx.indent}${str}`;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyPair.js
-var require_stringifyPair = __commonJS((exports) => {
+var require_stringifyPair = __commonJS(function(exports) {
   var identity = require_identity();
   var Scalar = require_Scalar();
   var stringify = require_stringify();
@@ -1572,7 +1572,7 @@ ${ctx.indent}`;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/log.js
-var require_log = __commonJS((exports) => {
+var require_log = __commonJS(function(exports) {
   var node_process = __require("process");
   function debug(logLevel, ...messages) {
     if (logLevel === "debug")
@@ -1591,7 +1591,7 @@ var require_log = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/merge.js
-var require_merge = __commonJS((exports) => {
+var require_merge = __commonJS(function(exports) {
   var identity = require_identity();
   var Scalar = require_Scalar();
   var MERGE_KEY = "<<";
@@ -1648,7 +1648,7 @@ var require_merge = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/addPairToJSMap.js
-var require_addPairToJSMap = __commonJS((exports) => {
+var require_addPairToJSMap = __commonJS(function(exports) {
   var log = require_log();
   var merge = require_merge();
   var stringify = require_stringify();
@@ -1709,7 +1709,7 @@ var require_addPairToJSMap = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Pair.js
-var require_Pair = __commonJS((exports) => {
+var require_Pair = __commonJS(function(exports) {
   var createNode = require_createNode();
   var stringifyPair = require_stringifyPair();
   var addPairToJSMap = require_addPairToJSMap();
@@ -1747,7 +1747,7 @@ var require_Pair = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyCollection.js
-var require_stringifyCollection = __commonJS((exports) => {
+var require_stringifyCollection = __commonJS(function(exports) {
   var identity = require_identity();
   var stringify = require_stringify();
   var stringifyComment = require_stringifyComment();
@@ -1899,7 +1899,7 @@ ${indent}${end}`;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/YAMLMap.js
-var require_YAMLMap = __commonJS((exports) => {
+var require_YAMLMap = __commonJS(function(exports) {
   var stringifyCollection = require_stringifyCollection();
   var addPairToJSMap = require_addPairToJSMap();
   var Collection = require_Collection();
@@ -2026,7 +2026,7 @@ var require_YAMLMap = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/common/map.js
-var require_map = __commonJS((exports) => {
+var require_map = __commonJS(function(exports) {
   var identity = require_identity();
   var YAMLMap = require_YAMLMap();
   var map = {
@@ -2045,7 +2045,7 @@ var require_map = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/YAMLSeq.js
-var require_YAMLSeq = __commonJS((exports) => {
+var require_YAMLSeq = __commonJS(function(exports) {
   var createNode = require_createNode();
   var stringifyCollection = require_stringifyCollection();
   var Collection = require_Collection();
@@ -2138,7 +2138,7 @@ var require_YAMLSeq = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/common/seq.js
-var require_seq = __commonJS((exports) => {
+var require_seq = __commonJS(function(exports) {
   var identity = require_identity();
   var YAMLSeq = require_YAMLSeq();
   var seq = {
@@ -2157,7 +2157,7 @@ var require_seq = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/common/string.js
-var require_string = __commonJS((exports) => {
+var require_string = __commonJS(function(exports) {
   var stringifyString = require_stringifyString();
   var string = {
     identify: (value) => typeof value === "string",
@@ -2173,7 +2173,7 @@ var require_string = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/common/null.js
-var require_null = __commonJS((exports) => {
+var require_null = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var nullTag = {
     identify: (value) => value == null,
@@ -2188,7 +2188,7 @@ var require_null = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/core/bool.js
-var require_bool = __commonJS((exports) => {
+var require_bool = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var boolTag = {
     identify: (value) => typeof value === "boolean",
@@ -2209,7 +2209,7 @@ var require_bool = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyNumber.js
-var require_stringifyNumber = __commonJS((exports) => {
+var require_stringifyNumber = __commonJS(function(exports) {
   function stringifyNumber({ format, minFractionDigits, tag, value }) {
     if (typeof value === "bigint")
       return String(value);
@@ -2233,7 +2233,7 @@ var require_stringifyNumber = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/core/float.js
-var require_float = __commonJS((exports) => {
+var require_float = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var stringifyNumber = require_stringifyNumber();
   var floatNaN = {
@@ -2276,7 +2276,7 @@ var require_float = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/core/int.js
-var require_int = __commonJS((exports) => {
+var require_int = __commonJS(function(exports) {
   var stringifyNumber = require_stringifyNumber();
   var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
   var intResolve = (str, offset, radix, { intAsBigInt }) => intAsBigInt ? BigInt(str) : parseInt(str.substring(offset), radix);
@@ -2318,7 +2318,7 @@ var require_int = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/core/schema.js
-var require_schema = __commonJS((exports) => {
+var require_schema = __commonJS(function(exports) {
   var map = require_map();
   var _null = require_null();
   var seq = require_seq();
@@ -2343,7 +2343,7 @@ var require_schema = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/json/schema.js
-var require_schema2 = __commonJS((exports) => {
+var require_schema2 = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var map = require_map();
   var seq = require_seq();
@@ -2407,7 +2407,7 @@ var require_schema2 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/binary.js
-var require_binary = __commonJS((exports) => {
+var require_binary = __commonJS(function(exports) {
   var node_buffer = __require("buffer");
   var Scalar = require_Scalar();
   var stringifyString = require_stringifyString();
@@ -2462,7 +2462,7 @@ var require_binary = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/pairs.js
-var require_pairs = __commonJS((exports) => {
+var require_pairs = __commonJS(function(exports) {
   var identity = require_identity();
   var Pair = require_Pair();
   var Scalar = require_Scalar();
@@ -2537,7 +2537,7 @@ ${cn.comment}` : item.comment;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/omap.js
-var require_omap = __commonJS((exports) => {
+var require_omap = __commonJS(function(exports) {
   var identity = require_identity();
   var toJS = require_toJS();
   var YAMLMap = require_YAMLMap();
@@ -2609,7 +2609,7 @@ var require_omap = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/bool.js
-var require_bool2 = __commonJS((exports) => {
+var require_bool2 = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   function boolStringify({ value, source }, ctx) {
     const boolObj = value ? trueTag : falseTag;
@@ -2638,7 +2638,7 @@ var require_bool2 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/float.js
-var require_float2 = __commonJS((exports) => {
+var require_float2 = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var stringifyNumber = require_stringifyNumber();
   var floatNaN = {
@@ -2684,7 +2684,7 @@ var require_float2 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/int.js
-var require_int2 = __commonJS((exports) => {
+var require_int2 = __commonJS(function(exports) {
   var stringifyNumber = require_stringifyNumber();
   var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
   function intResolve(str, offset, radix, { intAsBigInt }) {
@@ -2760,7 +2760,7 @@ var require_int2 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/set.js
-var require_set = __commonJS((exports) => {
+var require_set = __commonJS(function(exports) {
   var identity = require_identity();
   var Pair = require_Pair();
   var YAMLMap = require_YAMLMap();
@@ -2843,7 +2843,7 @@ var require_set = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/timestamp.js
-var require_timestamp = __commonJS((exports) => {
+var require_timestamp = __commonJS(function(exports) {
   var stringifyNumber = require_stringifyNumber();
   function parseSexagesimal(str, asBigInt) {
     const sign = str[0];
@@ -2925,7 +2925,7 @@ var require_timestamp = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/schema.js
-var require_schema3 = __commonJS((exports) => {
+var require_schema3 = __commonJS(function(exports) {
   var map = require_map();
   var _null = require_null();
   var seq = require_seq();
@@ -2966,7 +2966,7 @@ var require_schema3 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/tags.js
-var require_tags = __commonJS((exports) => {
+var require_tags = __commonJS(function(exports) {
   var map = require_map();
   var _null = require_null();
   var seq = require_seq();
@@ -3057,7 +3057,7 @@ var require_tags = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/Schema.js
-var require_Schema = __commonJS((exports) => {
+var require_Schema = __commonJS(function(exports) {
   var identity = require_identity();
   var map = require_map();
   var seq = require_seq();
@@ -3087,7 +3087,7 @@ var require_Schema = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyDocument.js
-var require_stringifyDocument = __commonJS((exports) => {
+var require_stringifyDocument = __commonJS(function(exports) {
   var identity = require_identity();
   var stringify = require_stringify();
   var stringifyComment = require_stringifyComment();
@@ -3167,7 +3167,7 @@ var require_stringifyDocument = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/Document.js
-var require_Document = __commonJS((exports) => {
+var require_Document = __commonJS(function(exports) {
   var Alias = require_Alias();
   var Collection = require_Collection();
   var identity = require_identity();
@@ -3402,7 +3402,7 @@ var require_Document = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/errors.js
-var require_errors = __commonJS((exports) => {
+var require_errors = __commonJS(function(exports) {
   class YAMLError extends Error {
     constructor(name, pos, code, message) {
       super();
@@ -3467,7 +3467,7 @@ ${pointer}
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-props.js
-var require_resolve_props = __commonJS((exports) => {
+var require_resolve_props = __commonJS(function(exports) {
   function resolveProps(tokens, { flow, indicator, next, offset, onError, parentIndent, startOnNewline }) {
     let spaceBefore = false;
     let atNewline = startOnNewline;
@@ -3597,7 +3597,7 @@ var require_resolve_props = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/util-contains-newline.js
-var require_util_contains_newline = __commonJS((exports) => {
+var require_util_contains_newline = __commonJS(function(exports) {
   function containsNewline(key) {
     if (!key)
       return null;
@@ -3637,7 +3637,7 @@ var require_util_contains_newline = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/util-flow-indent-check.js
-var require_util_flow_indent_check = __commonJS((exports) => {
+var require_util_flow_indent_check = __commonJS(function(exports) {
   var utilContainsNewline = require_util_contains_newline();
   function flowIndentCheck(indent, fc, onError) {
     if (fc?.type === "flow-collection") {
@@ -3652,7 +3652,7 @@ var require_util_flow_indent_check = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/util-map-includes.js
-var require_util_map_includes = __commonJS((exports) => {
+var require_util_map_includes = __commonJS(function(exports) {
   var identity = require_identity();
   function mapIncludes(ctx, items, search) {
     const { uniqueKeys } = ctx.options;
@@ -3665,7 +3665,7 @@ var require_util_map_includes = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-map.js
-var require_resolve_block_map = __commonJS((exports) => {
+var require_resolve_block_map = __commonJS(function(exports) {
   var Pair = require_Pair();
   var YAMLMap = require_YAMLMap();
   var resolveProps = require_resolve_props();
@@ -3772,7 +3772,7 @@ var require_resolve_block_map = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-seq.js
-var require_resolve_block_seq = __commonJS((exports) => {
+var require_resolve_block_seq = __commonJS(function(exports) {
   var YAMLSeq = require_YAMLSeq();
   var resolveProps = require_resolve_props();
   var utilFlowIndentCheck = require_util_flow_indent_check();
@@ -3820,7 +3820,7 @@ var require_resolve_block_seq = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-end.js
-var require_resolve_end = __commonJS((exports) => {
+var require_resolve_end = __commonJS(function(exports) {
   function resolveEnd(end, offset, reqSpace, onError) {
     let comment = "";
     if (end) {
@@ -3860,7 +3860,7 @@ var require_resolve_end = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-flow-collection.js
-var require_resolve_flow_collection = __commonJS((exports) => {
+var require_resolve_flow_collection = __commonJS(function(exports) {
   var identity = require_identity();
   var Pair = require_Pair();
   var YAMLMap = require_YAMLMap();
@@ -4051,7 +4051,7 @@ var require_resolve_flow_collection = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/compose-collection.js
-var require_compose_collection = __commonJS((exports) => {
+var require_compose_collection = __commonJS(function(exports) {
   var identity = require_identity();
   var Scalar = require_Scalar();
   var YAMLMap = require_YAMLMap();
@@ -4113,7 +4113,7 @@ var require_compose_collection = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-scalar.js
-var require_resolve_block_scalar = __commonJS((exports) => {
+var require_resolve_block_scalar = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   function resolveBlockScalar(ctx, scalar, onError) {
     const start = scalar.offset;
@@ -4306,7 +4306,7 @@ var require_resolve_block_scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-flow-scalar.js
-var require_resolve_flow_scalar = __commonJS((exports) => {
+var require_resolve_flow_scalar = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var resolveEnd = require_resolve_end();
   function resolveFlowScalar(scalar, strict, onError) {
@@ -4523,7 +4523,7 @@ var require_resolve_flow_scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/compose-scalar.js
-var require_compose_scalar = __commonJS((exports) => {
+var require_compose_scalar = __commonJS(function(exports) {
   var identity = require_identity();
   var Scalar = require_Scalar();
   var resolveBlockScalar = require_resolve_block_scalar();
@@ -4601,7 +4601,7 @@ var require_compose_scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/util-empty-scalar-position.js
-var require_util_empty_scalar_position = __commonJS((exports) => {
+var require_util_empty_scalar_position = __commonJS(function(exports) {
   function emptyScalarPosition(offset, before, pos) {
     if (before) {
       pos ?? (pos = before.length);
@@ -4628,7 +4628,7 @@ var require_util_empty_scalar_position = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/compose-node.js
-var require_compose_node = __commonJS((exports) => {
+var require_compose_node = __commonJS(function(exports) {
   var Alias = require_Alias();
   var identity = require_identity();
   var composeCollection = require_compose_collection();
@@ -4731,7 +4731,7 @@ var require_compose_node = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/compose-doc.js
-var require_compose_doc = __commonJS((exports) => {
+var require_compose_doc = __commonJS(function(exports) {
   var Document = require_Document();
   var composeNode = require_compose_node();
   var resolveEnd = require_resolve_end();
@@ -4771,7 +4771,7 @@ var require_compose_doc = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/composer.js
-var require_composer = __commonJS((exports) => {
+var require_composer = __commonJS(function(exports) {
   var node_process = __require("process");
   var directives = require_directives();
   var Document = require_Document();
@@ -4962,7 +4962,7 @@ ${end.comment}` : end.comment;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/cst-scalar.js
-var require_cst_scalar = __commonJS((exports) => {
+var require_cst_scalar = __commonJS(function(exports) {
   var resolveBlockScalar = require_resolve_block_scalar();
   var resolveFlowScalar = require_resolve_flow_scalar();
   var errors = require_errors();
@@ -5152,7 +5152,7 @@ var require_cst_scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/cst-stringify.js
-var require_cst_stringify = __commonJS((exports) => {
+var require_cst_stringify = __commonJS(function(exports) {
   var stringify = (cst) => ("type" in cst) ? stringifyToken(cst) : stringifyItem(cst);
   function stringifyToken(token) {
     switch (token.type) {
@@ -5210,7 +5210,7 @@ var require_cst_stringify = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/cst-visit.js
-var require_cst_visit = __commonJS((exports) => {
+var require_cst_visit = __commonJS(function(exports) {
   var BREAK = Symbol("break visit");
   var SKIP = Symbol("skip children");
   var REMOVE = Symbol("remove item");
@@ -5269,7 +5269,7 @@ var require_cst_visit = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/cst.js
-var require_cst = __commonJS((exports) => {
+var require_cst = __commonJS(function(exports) {
   var cstScalar = require_cst_scalar();
   var cstStringify = require_cst_stringify();
   var cstVisit = require_cst_visit();
@@ -5370,7 +5370,7 @@ var require_cst = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/lexer.js
-var require_lexer = __commonJS((exports) => {
+var require_lexer = __commonJS(function(exports) {
   var cst = require_cst();
   function isEmpty(ch) {
     switch (ch) {
@@ -5967,7 +5967,7 @@ var require_lexer = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/line-counter.js
-var require_line_counter = __commonJS((exports) => {
+var require_line_counter = __commonJS(function(exports) {
   class LineCounter {
     constructor() {
       this.lineStarts = [];
@@ -5995,7 +5995,7 @@ var require_line_counter = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/parser.js
-var require_parser = __commonJS((exports) => {
+var require_parser = __commonJS(function(exports) {
   var node_process = __require("process");
   var cst = require_cst();
   var lexer = require_lexer();
@@ -6851,7 +6851,7 @@ var require_parser = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/public-api.js
-var require_public_api = __commonJS((exports) => {
+var require_public_api = __commonJS(function(exports) {
   var composer = require_composer();
   var Document = require_Document();
   var errors = require_errors();
@@ -6948,13 +6948,13 @@ var require_public_api = __commonJS((exports) => {
 import { StringDecoder } from "string_decoder";
 
 // packages/codex-container-lab/cli/src/service.ts
-import { createHash as createHash3 } from "crypto";
-import { lstat as lstat7, mkdir as mkdir6, readdir as readdir2, readFile as readFile5, realpath as realpath4, stat as stat2 } from "fs/promises";
-import { join as join3, resolve as resolve3 } from "path";
+import { createHash as createHash4 } from "crypto";
+import { lstat as lstat8, mkdir as mkdir6, readdir as readdir4, readFile as readFile7, realpath as realpath5, stat as stat2 } from "fs/promises";
+import { join as join6, resolve as resolve4 } from "path";
 
 // packages/codex-container-lab/cli/src/config.ts
-import { readFile, realpath, stat } from "fs/promises";
-import { isAbsolute, posix, relative, resolve } from "path";
+import { readFile as readFile2, realpath as realpath2, stat } from "fs/promises";
+import { isAbsolute as isAbsolute2, posix as posix2, relative as relative2, resolve as resolve2 } from "path";
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/index.js
 var composer = require_composer();
@@ -7002,12 +7002,375 @@ var $stringify = publicApi.stringify;
 var $visit = visit.visit;
 var $visitAsync = visit.visitAsync;
 
+// packages/codex-container-lab/cli/src/shared-image.ts
+import { createHash } from "crypto";
+import { lstat, readFile, readdir, realpath, readlink } from "fs/promises";
+import { isAbsolute, join, posix, relative, resolve, sep } from "path";
+var SHARED_IMAGE_SCHEMA = "v1";
+var SHARED_IMAGE_KIND = "environment";
+var SHARED_IMAGE_NAME = "skizzles-shared-image";
+var SHARED_IMAGE_BUILDER_NAME = "skizzles-shared-image";
+var SHARED_IMAGE_BUILDER_DRIVER = "docker-container";
+var SHARED_IMAGE_LABEL_MANAGED = "io.openai.skizzles.shared-image.managed";
+var SHARED_IMAGE_LABEL_SCHEMA = "io.openai.skizzles.shared-image.schema";
+var SHARED_IMAGE_LABEL_KIND = "io.openai.skizzles.shared-image.kind";
+var SHARED_IMAGE_LABEL_PROFILE = "io.openai.skizzles.shared-image.profile";
+var SHARED_IMAGE_LABEL_DIGEST = "io.openai.skizzles.shared-image.digest";
+var SHARED_IMAGE_LABEL_REPO = "io.openai.skizzles.shared-image.repo";
+var SHARED_IMAGE_LABEL_PLATFORM = "io.openai.skizzles.shared-image.platform";
+var SHARED_IMAGE_LABEL_CREATED_AT = "io.openai.skizzles.shared-image.created-at";
+var SHARED_IMAGE_LABELS_REQUIRED = [
+  SHARED_IMAGE_LABEL_MANAGED,
+  SHARED_IMAGE_LABEL_SCHEMA,
+  SHARED_IMAGE_LABEL_KIND,
+  SHARED_IMAGE_LABEL_PROFILE,
+  SHARED_IMAGE_LABEL_DIGEST,
+  SHARED_IMAGE_LABEL_REPO,
+  SHARED_IMAGE_LABEL_PLATFORM,
+  SHARED_IMAGE_LABEL_CREATED_AT
+];
+var MAX_CONTEXT_WALK_ENTRIES = 20000;
+var MAX_SENT_FILES = 4096;
+var MAX_SENT_BYTES = 256 * 1024 * 1024;
+var MAX_DOCKERFILE_BYTES = 1024 * 1024;
+var UNSAFE_SENT_PATHS = /(?:^|\/)(?:\.git|\.ssh)(?:\/|$)/;
+var UNSAFE_SENT_FILES = /(?:^|\/)(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|\.netrc|\.env|\.env\.[^/]+|credentials)$/;
+function sharedImageTag(digest) {
+  return `${SHARED_IMAGE_NAME}:env-${digest}`;
+}
+function isPlatform(value) {
+  return /^[a-z0-9]+\/[a-z0-9_]+(?:\/[a-z0-9_]+)?$/.test(value);
+}
+function sharedImageLabels(input) {
+  return {
+    [SHARED_IMAGE_LABEL_MANAGED]: "true",
+    [SHARED_IMAGE_LABEL_SCHEMA]: SHARED_IMAGE_SCHEMA,
+    [SHARED_IMAGE_LABEL_KIND]: SHARED_IMAGE_KIND,
+    [SHARED_IMAGE_LABEL_PROFILE]: input.profile,
+    [SHARED_IMAGE_LABEL_DIGEST]: input.digest,
+    [SHARED_IMAGE_LABEL_REPO]: input.repoHash,
+    [SHARED_IMAGE_LABEL_PLATFORM]: input.platform,
+    [SHARED_IMAGE_LABEL_CREATED_AT]: input.createdAt
+  };
+}
+function hasExactSharedImageLabels(labels, expected) {
+  if (!labels)
+    return false;
+  const extraNamespace = Object.keys(labels).filter((key) => key.startsWith("io.openai.skizzles.shared-image.") && !SHARED_IMAGE_LABELS_REQUIRED.includes(key));
+  if (extraNamespace.length > 0)
+    return false;
+  return labels[SHARED_IMAGE_LABEL_MANAGED] === "true" && labels[SHARED_IMAGE_LABEL_SCHEMA] === SHARED_IMAGE_SCHEMA && labels[SHARED_IMAGE_LABEL_KIND] === SHARED_IMAGE_KIND && labels[SHARED_IMAGE_LABEL_PROFILE] === expected.profile && labels[SHARED_IMAGE_LABEL_DIGEST] === expected.digest && typeof labels[SHARED_IMAGE_LABEL_REPO] === "string" && /^[a-f0-9]{12}$/.test(labels[SHARED_IMAGE_LABEL_REPO]) && (expected.repoHash === undefined || labels[SHARED_IMAGE_LABEL_REPO] === expected.repoHash) && labels[SHARED_IMAGE_LABEL_PLATFORM] === expected.platform && typeof labels[SHARED_IMAGE_LABEL_CREATED_AT] === "string" && isTimestamp(labels[SHARED_IMAGE_LABEL_CREATED_AT]);
+}
+function computeSharedImageDigest(input) {
+  const canonical = {
+    v: 1,
+    kind: SHARED_IMAGE_KIND,
+    profile: input.profile.name,
+    dockerfile: {
+      path: input.dockerfileRelative,
+      sha256: input.dockerfileSha256
+    },
+    context: {
+      dockerignore: input.dockerignoreSha256,
+      files: [...input.files].sort((left, right) => left.path.localeCompare(right.path))
+    },
+    target: input.profile.target ?? null,
+    platform: input.profile.platform,
+    buildArgs: Object.fromEntries(Object.entries(input.profile.buildArgs).sort(([left], [right]) => left.localeCompare(right)))
+  };
+  return sha256Hex(JSON.stringify(canonical));
+}
+async function fingerprintSharedImage(repoRoot, profile) {
+  const root = await realpath(resolve(repoRoot));
+  const context = await realDirectoryInside(root, profile.context, "shared image context");
+  const dockerfile = await realFileInside(root, profile.dockerfile, "shared image Dockerfile");
+  const dockerfileRelative = posixRelative(root, dockerfile);
+  const dockerfileBytes = await readFile(dockerfile);
+  if (dockerfileBytes.byteLength > MAX_DOCKERFILE_BYTES) {
+    throw new Error(`shared image ${profile.name}: Dockerfile exceeds ${MAX_DOCKERFILE_BYTES} bytes`);
+  }
+  const dockerfileText = dockerfileBytes.toString("utf8");
+  rejectUnsafeDockerfile(profile.name, dockerfileText);
+  rejectUnaccountedBuildArgs(profile.name, dockerfileText, profile.buildArgs);
+  const dockerfileSha256 = sha256Hex(dockerfileBytes);
+  const dockerignorePath = join(context, ".dockerignore");
+  let dockerignoreText;
+  let dockerignoreSha256 = null;
+  try {
+    const ignoreInfo = await lstat(dockerignorePath);
+    if (ignoreInfo.isSymbolicLink() || !ignoreInfo.isFile()) {
+      throw new Error(`shared image ${profile.name}: .dockerignore must be a regular file`);
+    }
+    const ignoreBytes = await readFile(dockerignorePath);
+    dockerignoreText = ignoreBytes.toString("utf8");
+    dockerignoreSha256 = sha256Hex(ignoreBytes);
+  } catch (error) {
+    if (error.code !== "ENOENT")
+      throw error;
+  }
+  const ignore = parseDockerignore(dockerignoreText ?? "");
+  const files = await collectContextFiles(profile.name, root, context, dockerfile, ignore);
+  const digest = computeSharedImageDigest({
+    profile,
+    dockerfileRelative,
+    dockerfileSha256,
+    dockerignoreSha256,
+    files
+  });
+  return { digest, tag: sharedImageTag(digest), dockerfileRelative, files };
+}
+function rejectUnsafeDockerfile(profile, source) {
+  const normalized = source.replace(/\r\n/g, `
+`);
+  const compact = normalized.replace(/\\\n/g, " ");
+  const reasons = [];
+  if (/--mount\s*=[^\s]*type\s*=\s*["']?secret["']?/im.test(compact))
+    reasons.push("secret mount");
+  if (/--mount\s*=[^\s]*type\s*=\s*["']?ssh["']?/im.test(compact))
+    reasons.push("SSH mount");
+  if (/--mount\s*=[^\s]*type\s*=\s*["']?bind["']?/im.test(compact))
+    reasons.push("bind mount");
+  if (/(?:^|\s)--secret(?:\s|=)/im.test(compact))
+    reasons.push("build secret");
+  if (/(?:^|\s)--ssh(?:\s|=)/im.test(compact))
+    reasons.push("build SSH forwarding");
+  if (/(?:^|\s)--network\s*=\s*host(?:\s|$)/im.test(compact))
+    reasons.push("host network");
+  if (/^\s*ADD\s+(?:--[^\s]+\s+)*(?:https?:\/\/|git@|git:\/\/)/im.test(compact)) {
+    reasons.push("remote ADD");
+  }
+  if (/\$\{[A-Za-z_][A-Za-z0-9_]*\}|(?:^|[^A-Za-z0-9_])\$[A-Za-z_][A-Za-z0-9_]*/m.test(compact) && /(?:^|\s)--mount\s*=/im.test(compact) === false) {}
+  if (reasons.length > 0) {
+    throw new Error(`shared image ${profile}: Dockerfile uses unaccounted inputs (${reasons.join(", ")})`);
+  }
+}
+function rejectUnaccountedBuildArgs(profile, source, buildArgs) {
+  const compact = source.replace(/\r\n/g, `
+`).replace(/\\\n/g, " ");
+  const missing = [];
+  for (const match of compact.matchAll(/^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)(=(?:[^\s\\]+|"[^"]*"|'[^']*'))?/gm)) {
+    const name = match[1];
+    const hasDefault = match[2] !== undefined;
+    if (!hasDefault && buildArgs[name] === undefined)
+      missing.push(name);
+  }
+  if (missing.length > 0) {
+    throw new Error(`shared image ${profile}: Dockerfile ARG ${missing.join(", ")} is not covered by a literal build argument`);
+  }
+}
+function parseDockerignore(source) {
+  const patterns = [];
+  for (const raw of source.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#"))
+      continue;
+    if (line.includes("\x00"))
+      throw new Error("shared image .dockerignore contains NUL");
+    patterns.push(line);
+  }
+  return patterns;
+}
+function isDockerignored(relativePath, isDirectory, patterns) {
+  let ignored = false;
+  for (const pattern of patterns) {
+    const negated = pattern.startsWith("!");
+    const body = negated ? pattern.slice(1) : pattern;
+    if (body.length === 0)
+      continue;
+    if (matchesDockerignore(relativePath, isDirectory, body))
+      ignored = !negated;
+  }
+  return ignored;
+}
+async function collectContextFiles(profile, repoRoot, context, dockerfile, patterns) {
+  const files = [];
+  let walked = 0;
+  let sentBytes = 0;
+  const hasNegation = patterns.some((pattern) => pattern.startsWith("!"));
+  const pending = [context];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      walked += 1;
+      if (walked > MAX_CONTEXT_WALK_ENTRIES) {
+        throw new Error(`shared image ${profile}: context exceeds ${MAX_CONTEXT_WALK_ENTRIES} entries`);
+      }
+      const absolute = join(directory, entry.name);
+      const relativePath = posixRelative(context, absolute);
+      if (entry.isSymbolicLink()) {
+        const info = await lstat(absolute);
+        if (isDockerignored(relativePath, false, patterns) && !isDockerfilePath(context, dockerfile, absolute))
+          continue;
+        files.push(await describeContextSymlink(profile, context, absolute, relativePath, info.mode));
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (entry.name === ".git" || relativePath === ".git" || relativePath.startsWith(".git/")) {
+          throw new Error(`shared image ${profile}: context includes mutable Git metadata`);
+        }
+        if (isDockerignored(relativePath, true, patterns) && !hasNegation)
+          continue;
+        pending.push(absolute);
+        continue;
+      }
+      if (!entry.isFile()) {
+        throw new Error(`shared image ${profile}: context contains unsupported file type at ${relativePath}`);
+      }
+      const alwaysSend = isDockerfilePath(context, dockerfile, absolute);
+      if (!alwaysSend && isDockerignored(relativePath, false, patterns))
+        continue;
+      const described = await describeContextFile(profile, absolute, relativePath);
+      sentBytes += described.size;
+      if (files.length + 1 > MAX_SENT_FILES) {
+        throw new Error(`shared image ${profile}: context exceeds ${MAX_SENT_FILES} sent files`);
+      }
+      if (sentBytes > MAX_SENT_BYTES) {
+        throw new Error(`shared image ${profile}: context exceeds ${MAX_SENT_BYTES} sent bytes`);
+      }
+      files.push({ path: described.path, kind: described.kind, sha256: described.sha256, mode: described.mode });
+    }
+  }
+  if (isPathInside(context, dockerfile)) {
+    const dockerfileRelative = posixRelative(context, dockerfile);
+    if (!files.some((file) => file.path === dockerfileRelative)) {
+      const described = await describeContextFile(profile, dockerfile, dockerfileRelative);
+      files.push({ path: described.path, kind: described.kind, sha256: described.sha256, mode: described.mode });
+    }
+  }
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  return files;
+}
+async function describeContextFile(profile, absolute, relativePath) {
+  rejectUnsafeSentPath(profile, relativePath);
+  const info = await lstat(absolute);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error(`shared image ${profile}: context path is not a regular file: ${relativePath}`);
+  }
+  const bytes = await readFile(absolute);
+  return {
+    path: relativePath,
+    kind: "file",
+    sha256: sha256Hex(bytes),
+    mode: info.mode & 511,
+    size: info.size
+  };
+}
+async function describeContextSymlink(profile, context, absolute, relativePath, mode) {
+  rejectUnsafeSentPath(profile, relativePath);
+  const target = await readlink(absolute);
+  if (target.includes("\x00") || isAbsolute(target)) {
+    throw new Error(`shared image ${profile}: context symlink must be relative: ${relativePath}`);
+  }
+  const resolved = resolve(absolute, "..", target);
+  if (!isPathInside(context, resolved, true)) {
+    throw new Error(`shared image ${profile}: context symlink escapes context: ${relativePath}`);
+  }
+  return {
+    path: relativePath,
+    kind: "symlink",
+    sha256: sha256Hex(target),
+    mode: mode & 511,
+    target
+  };
+}
+function rejectUnsafeSentPath(profile, relativePath) {
+  if (UNSAFE_SENT_PATHS.test(relativePath) || UNSAFE_SENT_FILES.test(relativePath)) {
+    throw new Error(`shared image ${profile}: context would send secret or mutable input: ${relativePath}`);
+  }
+}
+function matchesDockerignore(relativePath, isDirectory, pattern) {
+  let body = pattern;
+  let directoryOnly = false;
+  if (body.endsWith("/")) {
+    directoryOnly = true;
+    body = body.slice(0, -1);
+  }
+  if (directoryOnly && !isDirectory)
+    return false;
+  const anchored = body.startsWith("/");
+  if (anchored)
+    body = body.slice(1);
+  const expression = dockerignoreToRegExp(body);
+  if (anchored || body.includes("/"))
+    return expression.test(relativePath);
+  const base = relativePath.split("/").pop() ?? relativePath;
+  return expression.test(base) || expression.test(relativePath);
+}
+function dockerignoreToRegExp(pattern) {
+  let source = "^";
+  for (let index = 0;index < pattern.length; index++) {
+    const char = pattern[index];
+    if (char === "*" && pattern[index + 1] === "*") {
+      source += ".*";
+      index += 1;
+      if (pattern[index + 1] === "/")
+        index += 1;
+      continue;
+    }
+    if (char === "*") {
+      source += "[^/]*";
+      continue;
+    }
+    if (char === "?") {
+      source += "[^/]";
+      continue;
+    }
+    if ("\\^$+()[]{}|.".includes(char))
+      source += `\\${char}`;
+    else
+      source += char;
+  }
+  source += "$";
+  return new RegExp(source);
+}
+function isDockerfilePath(context, dockerfile, candidate) {
+  return isPathInside(context, dockerfile) && resolve(candidate) === resolve(dockerfile);
+}
+async function realDirectoryInside(root, path, label) {
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isDirectory())
+    throw new Error(`${label} is not a real directory`);
+  const canonical = await realpath(path);
+  assertInside(root, canonical, label, true);
+  return canonical;
+}
+async function realFileInside(root, path, label) {
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isFile())
+    throw new Error(`${label} is not a real file`);
+  const canonical = await realpath(path);
+  assertInside(root, canonical, label, false);
+  return canonical;
+}
+function assertInside(root, candidate, label, allowRoot) {
+  if (!isPathInside(root, candidate, allowRoot))
+    throw new Error(`${label} resolves outside the repository`);
+}
+function isPathInside(root, candidate, allowRoot = false) {
+  const fromRoot = relative(resolve(root), resolve(candidate));
+  return (allowRoot || fromRoot !== "") && fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot);
+}
+function posixRelative(root, candidate) {
+  return relative(root, candidate).split(sep).join(posix.sep);
+}
+function sha256Hex(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+function isTimestamp(value) {
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
 // packages/codex-container-lab/cli/src/config.ts
 var manifestName = ".codex-container-lab.yaml";
 function isValidContainerPath(value, allowRoot) {
   if (!value.startsWith("/") || value.includes("\x00") || !allowRoot && value === "/")
     return false;
-  return posix.normalize(value) === value && value.split("/").every((part) => part !== "." && part !== "..");
+  return posix2.normalize(value) === value && value.split("/").every((part) => part !== "." && part !== "..");
 }
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -7189,12 +7552,87 @@ function parseEnvironment(value, path, issues) {
     return [];
   return parseStringArray(value, path, issues, parseEnvironmentName, "must be an environment variable name", 0);
 }
+function parseProfileName(value) {
+  if (typeof value !== "string")
+    return;
+  const parsed = value.trim();
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(parsed) ? parsed : undefined;
+}
+function parseBuildArgValue(value) {
+  if (typeof value !== "string" || value.includes("\x00") || Buffer.byteLength(value, "utf8") > 4096)
+    return;
+  if (/BEGIN [A-Z0-9 ]*PRIVATE KEY/.test(value) || /-----BEGIN/.test(value))
+    return;
+  return value;
+}
+function isSecretBuildArgName(name) {
+  const normalized = name.toUpperCase();
+  return /(?:^|_)(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|SSH)(?:_|$)/.test(normalized);
+}
+function parseSharedImageProfile(name, value, path, issues) {
+  const record = asObject(value, path, issues);
+  if (!record)
+    return;
+  rejectUnknownKeys(record, ["context", "dockerfile", "target", "platform", "build_args", "services"], path, issues);
+  const context = requiredString(record, "context", path, issues, parseRelativePath, "must be a non-empty relative path");
+  const dockerfile = requiredString(record, "dockerfile", path, issues, parseRelativePath, "must be a non-empty relative path");
+  const platform = requiredString(record, "platform", path, issues, (candidate) => typeof candidate === "string" && isPlatform(candidate.trim()) ? candidate.trim() : undefined, "must be a normalized os/arch platform");
+  let target;
+  if (hasOwn(record, "target")) {
+    target = requiredString(record, "target", path, issues, parseNonEmptyTrimmedString, "must be a non-empty target name");
+  }
+  const buildArgs = {};
+  if (hasOwn(record, "build_args")) {
+    const args = asObject(record.build_args, [...path, "build_args"], issues);
+    if (args) {
+      for (const [key, raw] of Object.entries(args)) {
+        if (parseEnvironmentName(key) === undefined)
+          addIssue(issues, [...path, "build_args", key], "must be a build-arg name");
+        else if (isSecretBuildArgName(key))
+          addIssue(issues, [...path, "build_args", key], "must not be a secret or credential name");
+        const parsed = parseBuildArgValue(raw);
+        if (parsed === undefined)
+          addIssue(issues, [...path, "build_args", key], "must be a literal non-secret string");
+        else if (parseEnvironmentName(key) !== undefined && !isSecretBuildArgName(key))
+          buildArgs[key] = parsed;
+      }
+    }
+  }
+  const services = hasOwn(record, "services") ? parseStringArray(record.services, [...path, "services"], issues, parseServiceName, "must be a Compose service name", 1) : (addIssue(issues, [...path, "services"], "is required"), []);
+  if (new Set(services).size !== services.length)
+    addIssue(issues, [...path, "services"], "service mappings must be unique");
+  if (context === undefined || dockerfile === undefined || platform === undefined)
+    return;
+  return { name, context, dockerfile, platform, buildArgs, services, ...target === undefined ? {} : { target } };
+}
+function parseSharedImages(value, path, issues) {
+  if (value === undefined)
+    return [];
+  const record = asObject(value, path, issues);
+  if (!record)
+    return [];
+  const names = Object.keys(record);
+  if (names.length === 0)
+    addIssue(issues, path, "must declare at least one named environment profile");
+  if (names.length > 16)
+    addIssue(issues, path, "must declare at most 16 named environment profiles");
+  const parsed = [];
+  for (const name of names) {
+    const profileName = parseProfileName(name);
+    if (profileName === undefined)
+      addIssue(issues, [...path, name], "must be a lowercase profile name");
+    const profile = parseSharedImageProfile(profileName ?? name.trim(), record[name], [...path, name], issues);
+    if (profile && profileName !== undefined)
+      parsed.push(profile);
+  }
+  return parsed;
+}
 function validateManifest(document) {
   const issues = [];
   const manifest = asObject(document, [], issues);
   if (!manifest)
     throw new Error(`invalid ${manifestName}: ${issues.map(formatIssue).join("; ")}`);
-  rejectUnknownKeys(manifest, ["compose", "dockerfile", "image", "runtime", "ports", "environment", "secret_environment"], [], issues);
+  rejectUnknownKeys(manifest, ["compose", "dockerfile", "image", "runtime", "ports", "environment", "secret_environment", "shared_images"], [], issues);
   const compose = hasOwn(manifest, "compose") ? parseCompose(manifest.compose, ["compose"], issues) : undefined;
   const dockerfile = hasOwn(manifest, "dockerfile") ? parseDockerfile(manifest.dockerfile, ["dockerfile"], issues) : undefined;
   const image = hasOwn(manifest, "image") ? parseImage(manifest.image, ["image"], issues) : undefined;
@@ -7211,6 +7649,7 @@ function validateManifest(document) {
   }
   const ports = parsePorts(manifest.ports, ["ports"], issues);
   const environment = parseEnvironment(manifest.environment, ["environment"], issues);
+  const sharedImages = parseSharedImages(manifest.shared_images, ["shared_images"], issues);
   if (new Set(environment).size !== environment.length) {
     addIssue(issues, ["environment"], "environment forwarding names must be unique");
   }
@@ -7226,23 +7665,30 @@ function validateManifest(document) {
   if (new Set(portTargets).size !== portTargets.length) {
     addIssue(issues, ["ports"], "service and target pairs must be unique");
   }
+  if (sharedImages.length > 0 && !hasOwn(manifest, "compose")) {
+    addIssue(issues, ["shared_images"], "requires compose mode; Dockerfile and image shorthand are not reusable environment profiles");
+  }
+  const mappedServices = sharedImages.flatMap((profile) => profile.services);
+  if (new Set(mappedServices).size !== mappedServices.length) {
+    addIssue(issues, ["shared_images"], "each service may map to at most one environment profile");
+  }
   if (issues.length > 0)
     throw new Error(`invalid ${manifestName}: ${issues.map(formatIssue).join("; ")}`);
-  return { compose, dockerfile, image, runtime, ports, environment, secret_environment: secretEnvironment };
+  return { compose, dockerfile, image, runtime, ports, environment, secret_environment: secretEnvironment, sharedImages };
 }
 function resolveRepoPath(repoRoot, candidate) {
-  if (isAbsolute(candidate)) {
+  if (isAbsolute2(candidate)) {
     throw new Error(`project path must be relative: ${candidate}`);
   }
-  const root = resolve(repoRoot);
-  const resolved = resolve(root, candidate);
-  const fromRoot = relative(root, resolved);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(fromRoot)) {
+  const root = resolve2(repoRoot);
+  const resolved = resolve2(root, candidate);
+  const fromRoot = relative2(root, resolved);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute2(fromRoot)) {
     throw new Error(`project path escapes repository: ${candidate}`);
   }
   return resolved;
 }
-function parseLabConfig(source, repoRoot, sourcePath = resolve(repoRoot, manifestName)) {
+function parseLabConfig(source, repoRoot, sourcePath = resolve2(repoRoot, manifestName)) {
   let document;
   try {
     document = $parse(source);
@@ -7250,7 +7696,7 @@ function parseLabConfig(source, repoRoot, sourcePath = resolve(repoRoot, manifes
     throw new Error(`invalid YAML in ${sourcePath}: ${error instanceof Error ? error.message : String(error)}`);
   }
   const value = validateManifest(document);
-  const root = resolve(repoRoot);
+  const root = resolve2(repoRoot);
   let mode;
   if (value.compose) {
     mode = {
@@ -7272,21 +7718,26 @@ function parseLabConfig(source, repoRoot, sourcePath = resolve(repoRoot, manifes
   }
   return {
     repoRoot: root,
-    manifestPath: resolve(sourcePath),
+    manifestPath: resolve2(sourcePath),
     mode,
     runtime: value.runtime,
     ports: Object.entries(value.ports).map(([name, port]) => ({ name, ...port })),
     forwardEnvironment: [...value.environment],
-    secretEnvironment: [...value.secret_environment]
+    secretEnvironment: [...value.secret_environment],
+    sharedImages: value.sharedImages.map((profile) => ({
+      ...profile,
+      context: resolveRepoPath(root, profile.context),
+      dockerfile: resolveRepoPath(root, profile.dockerfile)
+    }))
   };
 }
-async function loadLabConfig(repoRoot, sourcePath = resolve(repoRoot, manifestName)) {
-  const root = resolve(repoRoot);
-  const manifestPath = resolveRepoPath(root, relative(root, resolve(sourcePath)));
+async function loadLabConfig(repoRoot, sourcePath = resolve2(repoRoot, manifestName)) {
+  const root = resolve2(repoRoot);
+  const manifestPath = resolveRepoPath(root, relative2(root, resolve2(sourcePath)));
   await assertRealPathInside(root, manifestPath);
   if (!(await stat(manifestPath)).isFile())
     throw new Error("lab manifest must be a regular file");
-  const config = parseLabConfig(await readFile(manifestPath, "utf8"), root, manifestPath);
+  const config = parseLabConfig(await readFile2(manifestPath, "utf8"), root, manifestPath);
   const paths = config.mode.kind === "compose" ? config.mode.files : config.mode.kind === "dockerfile" ? [config.mode.dockerfile, config.mode.context] : [];
   for (const projectPath of paths)
     await assertRealPathInside(root, projectPath);
@@ -7296,12 +7747,20 @@ async function loadLabConfig(repoRoot, sourcePath = resolve(repoRoot, manifestNa
     if (!(await stat(config.mode.dockerfile)).isFile())
       throw new Error("dockerfile path must be a regular file");
   }
+  for (const profile of config.sharedImages) {
+    await assertRealPathInside(root, profile.context);
+    await assertRealPathInside(root, profile.dockerfile);
+    if (!(await stat(profile.context)).isDirectory())
+      throw new Error(`shared image ${profile.name}: context must be a directory`);
+    if (!(await stat(profile.dockerfile)).isFile())
+      throw new Error(`shared image ${profile.name}: dockerfile must be a regular file`);
+  }
   return config;
 }
 async function assertRealPathInside(repoRoot, projectPath) {
-  const [realRoot, realProjectPath] = await Promise.all([realpath(repoRoot), realpath(projectPath)]);
-  const fromRoot = relative(realRoot, realProjectPath);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(fromRoot)) {
+  const [realRoot, realProjectPath] = await Promise.all([realpath2(repoRoot), realpath2(projectPath)]);
+  const fromRoot = relative2(realRoot, realProjectPath);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute2(fromRoot)) {
     throw new Error(`project path resolves outside repository: ${projectPath}`);
   }
 }
@@ -7337,7 +7796,7 @@ function generateBaseCompose(config) {
   }
   return $stringify({ services: { [config.mode.commandService]: service } });
 }
-function generateOverrideCompose(config, model, context) {
+function generateOverrideCompose(config, model, context, sharedImages = []) {
   const labels = managementLabels(context);
   const serviceNames = Object.keys(model.services ?? {});
   if (!serviceNames.includes(config.mode.commandService)) {
@@ -7351,8 +7810,12 @@ function generateOverrideCompose(config, model, context) {
     if (existing)
       throw new Error(`declared port ${port.name} overlaps a project publication for ${port.service}:${port.target}`);
   }
+  const sharedImageByService = mappedSharedImages(config, sharedImages, serviceNames);
   const services = Object.fromEntries(serviceNames.map((name) => {
     const override = { labels };
+    const shared = sharedImageByService.get(name);
+    if (shared)
+      override.image = shared.imageId;
     if (name === config.mode.commandService) {
       override.init = true;
       override.working_dir = config.runtime.workspace;
@@ -7391,11 +7854,12 @@ function generateOverrideCompose(config, model, context) {
       name: SHARED_COMPILER_CACHE_NETWORK
     };
   }
-  return $stringify({
+  const yaml = $stringify({
     services,
     ...Object.keys(volumes).length > 0 ? { volumes } : {},
     ...Object.keys(networks).length > 0 ? { networks } : {}
   });
+  return resetMappedServiceBuilds(yaml, [...sharedImageByService.keys()]);
 }
 function managementLabels(context) {
   return {
@@ -7403,6 +7867,60 @@ function managementLabels(context) {
     [`${labelPrefix}.owner`]: context.owner,
     [`${labelPrefix}.lab`]: context.labId
   };
+}
+function mappedSharedImages(config, sharedImages, serviceNames) {
+  const byProfile = new Map(sharedImages.map((reference) => [reference.profile, reference]));
+  const mapped = new Map;
+  for (const profile of config.sharedImages) {
+    const reference = byProfile.get(profile.name);
+    if (!reference)
+      throw new Error(`shared image profile was not ensured: ${profile.name}`);
+    for (const service of profile.services) {
+      if (!serviceNames.includes(service)) {
+        throw new Error(`shared image ${profile.name} maps absent service: ${service}`);
+      }
+      mapped.set(service, reference);
+    }
+  }
+  return mapped;
+}
+function resetMappedServiceBuilds(yaml, services) {
+  if (services.length === 0)
+    return yaml;
+  const document = $parseDocument(yaml);
+  for (const service of services) {
+    const reset = new $Scalar(null);
+    reset.tag = "!reset";
+    document.setIn(["services", service, "build"], reset);
+  }
+  return String(document);
+}
+function assertMappedServicesConsumeSharedImages(model, config, sharedImages) {
+  const mapped = mappedSharedImages(config, sharedImages, Object.keys(model.services ?? {}));
+  for (const [service, reference] of mapped) {
+    const definition = model.services?.[service];
+    if (!isRecord2(definition))
+      throw new Error(`shared image mapping is absent from the effective Compose model: ${service}`);
+    if (Object.hasOwn(definition, "build")) {
+      throw new Error(`mapped service still has a project-scoped build path: ${service}`);
+    }
+    if (definition.image !== reference.imageId && definition.image !== reference.tag) {
+      throw new Error(`mapped service does not consume the ensured shared image: ${service}`);
+    }
+  }
+}
+function inspectProjectScopedBuilds(model, mappedServices = new Set) {
+  const findings = [];
+  for (const [service, definition] of Object.entries(model.services ?? {})) {
+    if (!isRecord2(definition) || !Object.hasOwn(definition, "build") || mappedServices.has(service))
+      continue;
+    findings.push({
+      service,
+      surface: "project-build",
+      detail: "service keeps a project-scoped Compose build"
+    });
+  }
+  return findings;
 }
 function labelTopLevelResources(resources, labels) {
   return Object.fromEntries(Object.entries(resources ?? {}).filter(([, definition]) => !definition?.external).map(([name]) => [name, { labels }]));
@@ -7614,13 +8132,13 @@ function isRecord2(value) {
 // packages/codex-container-lab/cli/src/docker.ts
 import { randomUUID } from "crypto";
 import { spawn as spawn2 } from "child_process";
-import { lstat, mkdir, rename, rm, writeFile } from "fs/promises";
-import { join, posix as posix2 } from "path";
+import { lstat as lstat2, mkdir, rename, rm, writeFile } from "fs/promises";
+import { join as join2, posix as posix3 } from "path";
 
 // packages/codex-container-lab/cli/src/process.ts
 import { spawn } from "child_process";
 async function runCommand(command, args, options = {}) {
-  return await new Promise((resolve2, reject) => {
+  return await new Promise((resolve3, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
@@ -7655,7 +8173,7 @@ async function runCommand(command, args, options = {}) {
       if (result.code !== 0 && !options.allowFailure) {
         return reject(new Error(`${command} ${args.join(" ")} failed (${result.code}): ${result.stderr.toString().trim()}`));
       }
-      resolve2(result);
+      resolve3(result);
     });
   });
 }
@@ -7989,7 +8507,7 @@ async function ensureSharedCompilerCache(runner = defaultDockerRunner) {
   throw new Error("shared compiler cache did not respond to redis-cli ping");
 }
 async function delay(milliseconds) {
-  await new Promise((resolve2) => setTimeout(resolve2, milliseconds));
+  await new Promise((resolve3) => setTimeout(resolve3, milliseconds));
 }
 async function ensureSharedCompilerCacheNetwork(runner) {
   const existing = await inspectSharedCompilerCacheNetwork(runner);
@@ -8151,10 +8669,10 @@ function isNodeError(value) {
 async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner, environment = process.env) {
   await mkdir(metadata.runtimeRoot, { recursive: true, mode: 448 });
   const base = generateBaseCompose(config);
-  const baseFile = base === undefined ? undefined : join(metadata.runtimeRoot, "base.compose.yaml");
+  const baseFile = base === undefined ? undefined : join2(metadata.runtimeRoot, "base.compose.yaml");
   if (baseFile && base !== undefined)
     await writeFile(baseFile, base, { mode: 384 });
-  const overrideFile = join(metadata.runtimeRoot, "override.compose.yaml");
+  const overrideFile = join2(metadata.runtimeRoot, "override.compose.yaml");
   await writeFile(overrideFile, `{}
 `, { mode: 384 });
   const composeArgs = composeCommandArgs(config, { projectName: metadata.composeProject, overrideFile, baseFile });
@@ -8162,12 +8680,15 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
   const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
   validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
   const findings = inspectComposeModel(sourceModel);
+  const sharedImages = metadata.sharedImages ?? [];
+  const mappedServices = new Set(config.sharedImages.flatMap((profile) => profile.services));
+  findings.push(...inspectProjectScopedBuilds(sourceModel, mappedServices));
   const override = generateOverrideCompose(config, sourceModel, {
     workspaceHostPath: metadata.workspace,
     owner: metadata.owner,
     ownerKey: metadata.ownerKey,
     labId: metadata.id
-  });
+  }, sharedImages);
   if (config.runtime.compilerCache === "sccache-redis") {
     await ensureSharedCompilerCache(scrubDockerRunnerEnvironment(runner, config.secretEnvironment, environment));
     findings.push({ surface: "shared-cache", detail: "shared compiler cache enabled" });
@@ -8175,6 +8696,7 @@ async function prepareLabRuntime(metadata, config, runner = defaultDockerRunner,
   await writeFile(overrideFile, override, { mode: 384 });
   const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
   validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
+  assertMappedServicesConsumeSharedImages(finalModel, config, sharedImages);
   return { metadata, config, composeArgs, baseFile, overrideFile, findings };
 }
 async function normalizedModel(composeArgs, runner, environment = process.env) {
@@ -8495,11 +9017,11 @@ ${body}`;
   });
 }
 async function writeFailureTranscript(runtimeRoot, text) {
-  const root = await lstat(runtimeRoot);
+  const root = await lstat2(runtimeRoot);
   if (!root.isDirectory() || root.isSymbolicLink()) {
     throw new Error("invalid lab runtime root");
   }
-  const destination = join(runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+  const destination = join2(runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
   const temporary = `${destination}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, text, { mode: 384, flag: "wx" });
@@ -8539,6 +9061,13 @@ async function stackLogs(runtime, service, tailLines, runner = defaultDockerRunn
 }
 async function destroyLabStack(runtime, runner = defaultDockerRunner) {
   await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner);
+}
+async function countManagedLabResources(runner = defaultDockerRunner) {
+  const filter = ["--filter", "label=io.openai.codex-container-lab.managed=true"];
+  const containers = await listBounded("container", ["ps", "-aq", ...filter], runner);
+  const volumes = await listBounded("volume", ["volume", "ls", "-q", ...filter], runner);
+  const networks = await listBounded("network", ["network", "ls", "-q", ...filter], runner);
+  return { containers: containers.length, volumes: volumes.length, networks: networks.length };
 }
 async function cleanupLabLabels(metadata, removeInternalImage, runner = defaultDockerRunner, environment = process.env) {
   runner = scrubDockerRunnerEnvironment(runner, metadata.secretEnvironment, environment);
@@ -8632,7 +9161,7 @@ async function removeManagedInternalImage(metadata, runner) {
   if (image.labels["io.openai.codex-container-lab.managed"] !== "true" || image.labels["io.openai.codex-container-lab.owner"] !== metadata.owner || image.labels["io.openai.codex-container-lab.lab"] !== metadata.id) {
     throw new Error("refusing to remove Dockerfile image without exact ownership labels");
   }
-  const removed = await runner.run(["image", "rm", image.id], {
+  const removed = await runner.run(["image", "rm", "--no-prune", image.id], {
     allowFailure: true,
     timeoutMs: 30000,
     maxOutputBytes: 1024 * 1024
@@ -8675,7 +9204,7 @@ async function verifyComposeResource(metadata, kind, id, ownershipLabel, runner)
   }
 }
 function launchDockerRun(runtime, invocation, runner = defaultDockerRunner, environment = process.env) {
-  const workdir = invocation.cwd === "." ? runtime.config.runtime.workspace : posix2.join(runtime.config.runtime.workspace, invocation.cwd);
+  const workdir = invocation.cwd === "." ? runtime.config.runtime.workspace : posix3.join(runtime.config.runtime.workspace, invocation.cwd);
   const pidFile = `/tmp/.codex-container-lab-run-${invocation.runId}.pid`;
   const processIdentity = `CODEX_CONTAINER_LAB_RUN_ID=${invocation.runId}`;
   const wrapper = [
@@ -8850,9 +9379,9 @@ function isRecord3(value) {
 }
 
 // packages/codex-container-lab/cli/src/files.ts
-import { createHash, randomUUID as randomUUID2 } from "crypto";
+import { createHash as createHash2, randomUUID as randomUUID2 } from "crypto";
 import { createReadStream } from "fs";
-import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2, readlink, realpath as realpath2, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
+import { lstat as lstat3, mkdir as mkdir2, readFile as readFile3, readlink as readlink2, realpath as realpath3, rename as rename2, rm as rm2, writeFile as writeFile2 } from "fs/promises";
 import path from "path";
 var MAX_SYNC_FILE_BYTES = 64 * 1024 * 1024;
 function safeRelativePath(value) {
@@ -8872,23 +9401,23 @@ function safeStateName(value, label = "identifier") {
   return value;
 }
 async function canonicalRoot(root) {
-  const resolved = await realpath2(root);
-  const stat2 = await lstat2(resolved);
+  const resolved = await realpath3(root);
+  const stat2 = await lstat3(resolved);
   if (!stat2.isDirectory())
     throw new Error(`Synchronization root is not a directory: ${root}`);
   return resolved;
 }
-async function guardedPath(root, relative2, createParents = false) {
-  safeRelativePath(relative2);
+async function guardedPath(root, relative3, createParents = false) {
+  safeRelativePath(relative3);
   const canonical = await canonicalRoot(root);
-  const parts = relative2.split("/");
+  const parts = relative3.split("/");
   let parent = canonical;
   for (const part of parts.slice(0, -1)) {
     parent = path.join(parent, part);
     try {
-      const stat2 = await lstat2(parent);
+      const stat2 = await lstat3(parent);
       if (stat2.isSymbolicLink() || !stat2.isDirectory()) {
-        throw new Error(`Unsafe synchronization parent for ${relative2}`);
+        throw new Error(`Unsafe synchronization parent for ${relative3}`);
       }
     } catch (error) {
       if (error.code !== "ENOENT")
@@ -8900,33 +9429,33 @@ async function guardedPath(root, relative2, createParents = false) {
   }
   const result = path.join(canonical, ...parts);
   if (result !== canonical && !result.startsWith(`${canonical}${path.sep}`)) {
-    throw new Error(`Synchronization path escapes its root: ${relative2}`);
+    throw new Error(`Synchronization path escapes its root: ${relative3}`);
   }
   return result;
 }
-async function describeSyncFile(root, relative2) {
-  const absolute = await guardedPath(root, relative2);
-  const stat2 = await lstat2(absolute);
+async function describeSyncFile(root, relative3) {
+  const absolute = await guardedPath(root, relative3);
+  const stat2 = await lstat3(absolute);
   const mode = stat2.mode & 511;
   if (stat2.isSymbolicLink()) {
-    const target = await readlink(absolute);
+    const target = await readlink2(absolute);
     const bytes = Buffer.from(target);
-    return { path: relative2, kind: "symlink", sha256: sha256(bytes), size: bytes.byteLength, mode };
+    return { path: relative3, kind: "symlink", sha256: sha256(bytes), size: bytes.byteLength, mode };
   }
   if (!stat2.isFile())
-    throw new Error(`Eligible Git path is not a regular file or symlink: ${relative2}`);
+    throw new Error(`Eligible Git path is not a regular file or symlink: ${relative3}`);
   if (stat2.size > MAX_SYNC_FILE_BYTES)
-    throw new Error(`Eligible Git file exceeds 64 MiB synchronization limit: ${relative2}`);
-  const hash = createHash("sha256");
+    throw new Error(`Eligible Git file exceeds 64 MiB synchronization limit: ${relative3}`);
+  const hash = createHash2("sha256");
   for await (const chunk of createReadStream(absolute))
     hash.update(chunk);
-  return { path: relative2, kind: "file", sha256: hash.digest("hex"), size: stat2.size, mode };
+  return { path: relative3, kind: "file", sha256: hash.digest("hex"), size: stat2.size, mode };
 }
 function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
+  return createHash2("sha256").update(value).digest("hex");
 }
 async function readJson(file) {
-  return JSON.parse(await readFile2(file, "utf8"));
+  return JSON.parse(await readFile3(file, "utf8"));
 }
 async function writeJsonAtomic(file, value) {
   await mkdir2(path.dirname(file), { recursive: true, mode: 448 });
@@ -8940,7 +9469,7 @@ async function removeIfPresent(file, options = {}) {
 }
 
 // packages/codex-container-lab/cli/src/locks.ts
-import { link, lstat as lstat3, mkdir as mkdir3, open, readFile as readFile3, rm as rm3, writeFile as writeFile3 } from "fs/promises";
+import { link, lstat as lstat4, mkdir as mkdir3, open, readFile as readFile4, rm as rm3, writeFile as writeFile3 } from "fs/promises";
 import { dirname } from "path";
 async function withFileLock(path2, operation, options = {}) {
   const attempts = options.attempts ?? 100;
@@ -8965,7 +9494,7 @@ async function withFileLock(path2, operation, options = {}) {
           throw error;
       }
       if (acquired) {
-        const candidateInfo = await lstat3(candidate, { bigint: true });
+        const candidateInfo = await lstat4(candidate, { bigint: true });
         const candidateIdentity = identity2(candidateInfo);
         try {
           return await operation();
@@ -9001,7 +9530,7 @@ async function removeConfirmedStaleLock(path2, staleMs, processProbe) {
       return;
     let record;
     try {
-      const contents = info.isDirectory() ? await readFile3(`${path2}/owner.json`, "utf8") : await handle.readFile({ encoding: "utf8" });
+      const contents = info.isDirectory() ? await readFile4(`${path2}/owner.json`, "utf8") : await handle.readFile({ encoding: "utf8" });
       const value = JSON.parse(contents);
       if (isRecord4(value) && typeof value.pid === "number" && Number.isInteger(value.pid) && value.pid > 0 && typeof value.createdAt === "string") {
         record = value;
@@ -9035,7 +9564,7 @@ async function reclaimSameLock(path2, inspected, staleMs, processProbe) {
       pid: process.pid,
       createdAt: new Date().toISOString()
     }), { mode: 384, flag: "wx" });
-    const candidateIdentity = identity2(await lstat3(candidate, { bigint: true }));
+    const candidateIdentity = identity2(await lstat4(candidate, { bigint: true }));
     await claimAndRemoveLock(path2, inspected, candidate, candidateIdentity, staleMs, processProbe);
   } finally {
     await rm3(candidate, { force: true });
@@ -9112,7 +9641,7 @@ async function removeConfirmedOrphanClaim(claimPath, staleMs, processProbe) {
 async function hasIdentity(path2, expected) {
   let current;
   try {
-    current = await lstat3(path2, { bigint: true });
+    current = await lstat4(path2, { bigint: true });
   } catch (error) {
     if (error.code === "ENOENT")
       return false;
@@ -9180,11 +9709,15 @@ function truncateUtf8(value, maxBytes, policy) {
   return output;
 }
 
+// packages/codex-container-lab/cli/src/shared-image-state.ts
+import { readdir as readdir3 } from "fs/promises";
+import { join as join4 } from "path";
+
 // packages/codex-container-lab/cli/src/state.ts
-import { createHash as createHash2 } from "crypto";
+import { createHash as createHash3 } from "crypto";
 import { homedir, tmpdir } from "os";
-import { basename, isAbsolute as isAbsolute2, join as join2, parse, posix as posix3, relative as relative2, resolve as resolve2, sep } from "path";
-import { lstat as lstat4, mkdir as mkdir4, readdir, realpath as realpath3, rm as rm4 } from "fs/promises";
+import { basename, isAbsolute as isAbsolute3, join as join3, parse, posix as posix4, relative as relative3, resolve as resolve3, sep as sep2 } from "path";
+import { lstat as lstat5, mkdir as mkdir4, readdir as readdir2, realpath as realpath4, rm as rm4 } from "fs/promises";
 var LAB_STATES = new Set(["provisioning", "ready", "failed", "destroying"]);
 var FINDING_SURFACES = new Set([
   "host-bind",
@@ -9197,18 +9730,19 @@ var FINDING_SURFACES = new Set([
   "config",
   "fixed-port",
   "non-loopback-port",
-  "shared-cache"
+  "shared-cache",
+  "project-build"
 ]);
 function defaultStateRoot() {
-  return join2(homedir(), "Library", "Application Support", "OpenAI", "codex-container-lab");
+  return join3(homedir(), "Library", "Application Support", "OpenAI", "codex-container-lab");
 }
 function defaultRuntimeRoot() {
-  return join2(tmpdir(), "codex-container-lab");
+  return join3(tmpdir(), "codex-container-lab");
 }
 function resolveRoots(options = {}) {
   return {
-    stateRoot: resolve2(options.stateRoot ?? process.env.CODEX_CONTAINER_LAB_STATE_ROOT ?? defaultStateRoot()),
-    runtimeRoot: resolve2(options.runtimeRoot ?? process.env.CODEX_CONTAINER_LAB_RUNTIME_ROOT ?? defaultRuntimeRoot())
+    stateRoot: resolve3(options.stateRoot ?? process.env.CODEX_CONTAINER_LAB_STATE_ROOT ?? defaultStateRoot()),
+    runtimeRoot: resolve3(options.runtimeRoot ?? process.env.CODEX_CONTAINER_LAB_RUNTIME_ROOT ?? defaultRuntimeRoot())
   };
 }
 function resolveOwner(explicit, environment = process.env) {
@@ -9223,22 +9757,22 @@ function resolveOwner(explicit, environment = process.env) {
   return owner;
 }
 function ownerKey(owner) {
-  return createHash2("sha256").update(owner).digest("hex");
+  return createHash3("sha256").update(owner).digest("hex");
 }
 function ownerDirectory(stateRoot, owner) {
-  return join2(stateRoot, "owners", ownerKey(owner));
+  return join3(stateRoot, "owners", ownerKey(owner));
 }
 function ownerRuntimeDirectory(runtimeRoot, owner) {
-  return join2(runtimeRoot, ownerKey(owner));
+  return join3(runtimeRoot, ownerKey(owner));
 }
 function ownerManifestPath(stateRoot, owner) {
-  return join2(ownerDirectory(stateRoot, owner), "owner.json");
+  return join3(ownerDirectory(stateRoot, owner), "owner.json");
 }
 function ownerLockPath(stateRoot, owner) {
-  return join2(stateRoot, ".locks", `owner-${ownerKey(owner)}`);
+  return join3(stateRoot, ".locks", `owner-${ownerKey(owner)}`);
 }
 function reapedOwnerPath(stateRoot, owner) {
-  return join2(stateRoot, "reaped", `${ownerKey(owner)}.json`);
+  return join3(stateRoot, "reaped", `${ownerKey(owner)}.json`);
 }
 async function readReapedOwner(stateRoot, owner) {
   let value;
@@ -9249,26 +9783,26 @@ async function readReapedOwner(stateRoot, owner) {
       return;
     throw error;
   }
-  if (!isRecord5(value) || value.version !== 1 || value.owner !== owner || value.ownerKey !== ownerKey(owner) || !isTimestamp(value.reapedAt)) {
+  if (!isRecord5(value) || value.version !== 1 || value.owner !== owner || value.ownerKey !== ownerKey(owner) || !isTimestamp2(value.reapedAt)) {
     throw new Error("invalid reaped owner manifest");
   }
   return value;
 }
 function labsDirectory(stateRoot, owner) {
-  return join2(ownerDirectory(stateRoot, owner), "labs");
+  return join3(ownerDirectory(stateRoot, owner), "labs");
 }
 function labManifestPath(stateRoot, owner, labId) {
   safeStateName(labId, "lab id");
-  return join2(labsDirectory(stateRoot, owner), `${labId}.json`);
+  return join3(labsDirectory(stateRoot, owner), `${labId}.json`);
 }
 function expectedLabRuntimeRoot(roots, owner, labId) {
   safeStateName(labId, "lab id");
-  return join2(resolve2(roots.runtimeRoot), ownerKey(owner), labId);
+  return join3(resolve3(roots.runtimeRoot), ownerKey(owner), labId);
 }
 async function ensureOwner(stateRoot, owner) {
   resolveOwner(owner, {});
   const directory = ownerDirectory(stateRoot, owner);
-  await mkdir4(join2(directory, "labs"), { recursive: true, mode: 448 });
+  await mkdir4(join3(directory, "labs"), { recursive: true, mode: 448 });
   const path2 = ownerManifestPath(stateRoot, owner);
   try {
     const existing = await readOwnerManifest(path2);
@@ -9291,14 +9825,34 @@ async function ensureOwner(stateRoot, owner) {
 }
 async function readOwnerManifest(path2) {
   const value = await readJson(path2);
-  if (!isRecord5(value) || value.version !== 1 || typeof value.owner !== "string" || typeof value.ownerKey !== "string" || !isTimestamp(value.createdAt)) {
+  if (!isRecord5(value) || value.version !== 1 || typeof value.owner !== "string" || typeof value.ownerKey !== "string" || !isTimestamp2(value.createdAt)) {
     throw new Error(`invalid owner manifest: ${path2}`);
   }
   resolveOwner(value.owner, {});
-  if (value.ownerKey !== ownerKey(value.owner) || basename(resolve2(path2, "..")) !== value.ownerKey) {
+  if (value.ownerKey !== ownerKey(value.owner) || basename(resolve3(path2, "..")) !== value.ownerKey) {
     throw new Error(`owner manifest hash mismatch: ${path2}`);
   }
   return value;
+}
+async function listOwnerManifests(stateRoot) {
+  const root = join3(stateRoot, "owners");
+  let entries;
+  try {
+    entries = await readdir2(root, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return [];
+    throw error;
+  }
+  const owners = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory())
+      throw new Error(`unexpected owner state entry: ${entry.name}`);
+    const directory = join3(root, entry.name);
+    const manifest = await readOwnerManifest(join3(directory, "owner.json"));
+    owners.push({ directory, manifest });
+  }
+  return owners;
 }
 async function writeLab(roots, lab) {
   assertLabMetadata(lab, roots, lab.owner, lab.id);
@@ -9313,7 +9867,7 @@ async function listLabs(roots, owner) {
   const directory = labsDirectory(roots.stateRoot, owner);
   let names;
   try {
-    names = await readdir(directory);
+    names = await readdir2(directory);
   } catch (error) {
     if (error.code === "ENOENT")
       return [];
@@ -9334,24 +9888,24 @@ async function assertReadyLabFilesystem(roots, lab) {
   if (lab.state !== "ready" || !lab.runtime)
     throw new Error(`lab is not ready: ${lab.state}`);
   const configuredRuntime = await realDirectory(roots.runtimeRoot, "configured runtime root");
-  const ownerRuntime = await realDirectory(join2(roots.runtimeRoot, lab.ownerKey), "owner runtime root");
+  const ownerRuntime = await realDirectory(join3(roots.runtimeRoot, lab.ownerKey), "owner runtime root");
   const runtime = await realDirectory(lab.runtimeRoot, "lab runtime root");
   const workspace = await realDirectory(lab.workspace, "lab workspace");
-  if (ownerRuntime !== join2(configuredRuntime, lab.ownerKey) || runtime !== join2(ownerRuntime, lab.id) || workspace !== join2(runtime, "workspace")) {
+  if (ownerRuntime !== join3(configuredRuntime, lab.ownerKey) || runtime !== join3(ownerRuntime, lab.id) || workspace !== join3(runtime, "workspace")) {
     throw new Error("runtime or workspace resolved outside the configured runtime root");
   }
   const source = await realDirectory(lab.sourceRoot, "lab source root");
-  await realFileInside(source, lab.manifestPath, "lab manifest");
-  await realFileInside(runtime, lab.runtime.overrideFile, "Compose override");
+  await realFileInside2(source, lab.manifestPath, "lab manifest");
+  await realFileInside2(runtime, lab.runtime.overrideFile, "Compose override");
   if (lab.runtime.baseFile)
-    await realFileInside(runtime, lab.runtime.baseFile, "internal Compose base");
+    await realFileInside2(runtime, lab.runtime.baseFile, "internal Compose base");
   const mode = lab.runtime.config.mode;
   if (mode.kind === "compose") {
     for (const path2 of mode.files)
-      await realFileInside(source, path2, "project Compose file");
+      await realFileInside2(source, path2, "project Compose file");
   } else if (mode.kind === "dockerfile") {
-    await realFileInside(source, mode.dockerfile, "project Dockerfile");
-    await realDirectoryInside(source, mode.context, "Dockerfile context");
+    await realFileInside2(source, mode.dockerfile, "project Dockerfile");
+    await realDirectoryInside2(source, mode.context, "Dockerfile context");
   }
 }
 function assertLabMetadata(value, roots, owner, labId) {
@@ -9361,6 +9915,7 @@ function assertLabMetadata(value, roots, owner, labId) {
     if (!isRecord5(value) || value.version !== 1 || value.id !== labId || value.owner !== owner || value.ownerKey !== ownerKey(owner))
       throw new Error("identity mismatch");
     normalizeSecretEnvironment(value);
+    normalizeSharedImages(value);
     if (typeof value.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value.name))
       throw new Error("invalid name");
     if (typeof value.repoHash !== "string" || !/^[a-f0-9]{12}$/.test(value.repoHash))
@@ -9372,16 +9927,16 @@ function assertLabMetadata(value, roots, owner, labId) {
     const expectedRuntime = expectedLabRuntimeRoot(roots, owner, labId);
     if (!isNormalizedAbsolute(value.runtimeRoot) || value.runtimeRoot !== expectedRuntime)
       throw new Error("invalid runtime root");
-    if (value.workspace !== join2(expectedRuntime, "workspace"))
+    if (value.workspace !== join3(expectedRuntime, "workspace"))
       throw new Error("invalid workspace root");
     if (!isNormalizedAbsolute(value.sourceRoot) || value.sourceRoot === parse(value.sourceRoot).root)
       throw new Error("invalid source root");
-    if (value.manifestPath !== join2(value.sourceRoot, manifestName))
+    if (value.manifestPath !== join3(value.sourceRoot, manifestName))
       throw new Error("invalid source manifest relationship");
     if (typeof value.commandService !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(value.commandService)) {
       throw new Error("invalid command service");
     }
-    if (!isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt))
+    if (!isTimestamp2(value.createdAt) || !isTimestamp2(value.updatedAt))
       throw new Error("invalid timestamps");
     if (!Array.isArray(value.endpoints) || !value.endpoints.every(isEndpoint))
       throw new Error("invalid endpoints");
@@ -9410,12 +9965,15 @@ function assertLabMetadata(value, roots, owner, labId) {
     } else if (value.managedImage !== undefined) {
       throw new Error("unexpected managed image");
     }
+    if (value.sharedImages !== undefined && !isSharedImageReferences(value.sharedImages)) {
+      throw new Error("invalid shared image references");
+    }
   } catch (error) {
     throw new Error(`invalid lab manifest: ${labId}: ${message(error)}`);
   }
 }
 function validateProvisioningFailure(value) {
-  if (!isRecord5(value) || value.phase !== "compose-up" || !isTimestamp(value.capturedAt) || !Array.isArray(value.services) || value.services.length > 16 || typeof value.serviceCount !== "number" || !Number.isInteger(value.serviceCount) || value.serviceCount < value.services.length || value.serviceCount > 1000) {
+  if (!isRecord5(value) || value.phase !== "compose-up" || !isTimestamp2(value.capturedAt) || !Array.isArray(value.services) || value.services.length > 16 || typeof value.serviceCount !== "number" || !Number.isInteger(value.serviceCount) || value.serviceCount < value.services.length || value.serviceCount > 1000) {
     throw new Error("invalid provisioning failure diagnostic");
   }
   if (!value.services.every(isProvisioningService))
@@ -9445,11 +10003,11 @@ function validatePersistedRuntime(lab, runtime) {
     throw new Error("runtime mode identity mismatch");
   }
   if (mode.kind === "compose") {
-    if (!Array.isArray(mode.files) || mode.files.length === 0 || !mode.files.every((path2) => isPathInside(lab.sourceRoot, path2))) {
+    if (!Array.isArray(mode.files) || mode.files.length === 0 || !mode.files.every((path2) => isPathInside2(lab.sourceRoot, path2))) {
       throw new Error("invalid Compose source files");
     }
   } else if (mode.kind === "dockerfile") {
-    if (!isPathInside(lab.sourceRoot, mode.dockerfile) || !isPathInside(lab.sourceRoot, mode.context, true)) {
+    if (!isPathInside2(lab.sourceRoot, mode.dockerfile) || !isPathInside2(lab.sourceRoot, mode.context, true)) {
       throw new Error("invalid Dockerfile source paths");
     }
   } else if (mode.kind === "image") {
@@ -9458,7 +10016,7 @@ function validatePersistedRuntime(lab, runtime) {
   } else {
     throw new Error("invalid runtime mode");
   }
-  if (!isBoundedString(config.runtime.workspace, 1024) || !posix3.isAbsolute(config.runtime.workspace) || posix3.normalize(config.runtime.workspace) !== config.runtime.workspace || config.runtime.workspace === "/" || !Array.isArray(config.runtime.shell) || config.runtime.shell.length === 0 || config.runtime.shell.length > 64 || !config.runtime.shell.every((part) => isBoundedString(part, 4096) && !part.includes("\x00")) || !posix3.isAbsolute(config.runtime.shell[0]) || posix3.normalize(config.runtime.shell[0]) !== config.runtime.shell[0] || config.runtime.compilerCache !== undefined && config.runtime.compilerCache !== "sccache-redis")
+  if (!isBoundedString(config.runtime.workspace, 1024) || !posix4.isAbsolute(config.runtime.workspace) || posix4.normalize(config.runtime.workspace) !== config.runtime.workspace || config.runtime.workspace === "/" || !Array.isArray(config.runtime.shell) || config.runtime.shell.length === 0 || config.runtime.shell.length > 64 || !config.runtime.shell.every((part) => isBoundedString(part, 4096) && !part.includes("\x00")) || !posix4.isAbsolute(config.runtime.shell[0]) || posix4.normalize(config.runtime.shell[0]) !== config.runtime.shell[0] || config.runtime.compilerCache !== undefined && config.runtime.compilerCache !== "sccache-redis")
     throw new Error("invalid container runtime");
   if (!Array.isArray(config.ports) || !config.ports.every(isDeclaredPort))
     throw new Error("invalid declared ports");
@@ -9472,9 +10030,12 @@ function validatePersistedRuntime(lab, runtime) {
   if (JSON.stringify(config.secretEnvironment) !== JSON.stringify(lab.secretEnvironment)) {
     throw new Error("secret environment metadata mismatch");
   }
+  if (!isSharedImageProfiles(config.sharedImages, lab.sourceRoot)) {
+    throw new Error("invalid shared image profiles");
+  }
   const runtimeRoot = lab.runtimeRoot;
-  const expectedOverride = join2(runtimeRoot, "override.compose.yaml");
-  const expectedBase = mode.kind === "compose" ? undefined : join2(runtimeRoot, "base.compose.yaml");
+  const expectedOverride = join3(runtimeRoot, "override.compose.yaml");
+  const expectedBase = mode.kind === "compose" ? undefined : join3(runtimeRoot, "base.compose.yaml");
   if (runtime.overrideFile !== expectedOverride || runtime.baseFile !== expectedBase || !Array.isArray(runtime.findings) || !runtime.findings.every(isFinding) || JSON.stringify(runtime.findings) !== JSON.stringify(lab.findings))
     throw new Error("invalid runtime files or findings");
   const expectedArgs = composeCommandArgs(config, {
@@ -9496,17 +10057,58 @@ function normalizeSecretEnvironment(lab) {
     lab.secretEnvironment = Array.isArray(runtimeNames) ? [...runtimeNames] : [];
   }
 }
+function normalizeSharedImages(lab) {
+  if (isRecord5(lab.runtime) && isRecord5(lab.runtime.config) && lab.runtime.config.sharedImages === undefined) {
+    lab.runtime.config.sharedImages = [];
+  }
+}
+function isSharedImageReferences(value) {
+  if (!Array.isArray(value) || value.length > 16)
+    return false;
+  const profiles = new Set;
+  for (const item of value) {
+    if (!isRecord5(item) || typeof item.profile !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(item.profile) || typeof item.digest !== "string" || !/^[a-f0-9]{64}$/.test(item.digest) || typeof item.imageId !== "string" || !/^sha256:[0-9a-f]{64}$/.test(item.imageId) || item.tag !== `skizzles-shared-image:env-${item.digest}`) {
+      return false;
+    }
+    if (profiles.has(item.profile))
+      return false;
+    profiles.add(item.profile);
+  }
+  return true;
+}
+function isSharedImageProfiles(value, sourceRoot) {
+  if (!Array.isArray(value) || value.length > 16)
+    return false;
+  const names = new Set;
+  const services = new Set;
+  for (const item of value) {
+    if (!isRecord5(item) || typeof item.name !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(item.name) || names.has(item.name) || !isPathInside2(sourceRoot, item.context, true) || !isPathInside2(sourceRoot, item.dockerfile) || typeof item.platform !== "string" || !/^[a-z0-9]+\/[a-z0-9_]+(?:\/[a-z0-9_]+)?$/.test(item.platform) || item.target !== undefined && (typeof item.target !== "string" || item.target.trim() !== item.target || item.target.length === 0) || !isRecord5(item.buildArgs) || !Array.isArray(item.services) || item.services.length === 0) {
+      return false;
+    }
+    names.add(item.name);
+    for (const [key, arg] of Object.entries(item.buildArgs)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof arg !== "string" || arg.includes("\x00"))
+        return false;
+    }
+    for (const service of item.services) {
+      if (typeof service !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(service) || services.has(service))
+        return false;
+      services.add(service);
+    }
+  }
+  return true;
+}
 function isEnvironmentNames(value) {
   return Array.isArray(value) && value.length <= 64 && value.every((key) => typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) && new Set(value).size === value.length;
 }
-function isPathInside(root, candidate, allowRoot = false) {
+function isPathInside2(root, candidate, allowRoot = false) {
   if (typeof candidate !== "string" || !isNormalizedAbsolute(candidate))
     return false;
-  const fromRoot = relative2(root, candidate);
-  return (allowRoot || fromRoot !== "") && fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute2(fromRoot);
+  const fromRoot = relative3(root, candidate);
+  return (allowRoot || fromRoot !== "") && fromRoot !== ".." && !fromRoot.startsWith(`..${sep2}`) && !isAbsolute3(fromRoot);
 }
 function isNormalizedAbsolute(value) {
-  return typeof value === "string" && !value.includes("\x00") && isAbsolute2(value) && resolve2(value) === value;
+  return typeof value === "string" && !value.includes("\x00") && isAbsolute3(value) && resolve3(value) === value;
 }
 function isEndpoint(value) {
   return isRecord5(value) && typeof value.name === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(value.name) && typeof value.service === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(value.service) && typeof value.target === "number" && Number.isInteger(value.target) && value.target >= 1 && value.target <= 65535 && isBoundedString(value.url, 2048);
@@ -9518,28 +10120,28 @@ function isFinding(value) {
   return isRecord5(value) && (value.service === undefined || isBoundedString(value.service, 128)) && typeof value.surface === "string" && FINDING_SURFACES.has(value.surface) && isBoundedString(value.detail, 1024);
 }
 async function realDirectory(path2, label) {
-  const info = await lstat4(path2);
+  const info = await lstat5(path2);
   if (!info.isDirectory() || info.isSymbolicLink())
     throw new Error(`${label} is not a real directory`);
-  return await realpath3(path2);
+  return await realpath4(path2);
 }
-async function realFileInside(root, path2, label) {
-  const info = await lstat4(path2);
+async function realFileInside2(root, path2, label) {
+  const info = await lstat5(path2);
   if (!info.isFile() || info.isSymbolicLink())
     throw new Error(`${label} is not a real file`);
-  assertCanonicalInside(root, await realpath3(path2), label, false);
+  assertCanonicalInside(root, await realpath4(path2), label, false);
 }
-async function realDirectoryInside(root, path2, label) {
+async function realDirectoryInside2(root, path2, label) {
   const canonical = await realDirectory(path2, label);
   assertCanonicalInside(root, canonical, label, true);
 }
 function assertCanonicalInside(root, candidate, label, allowRoot) {
-  const fromRoot = relative2(root, candidate);
-  if (!allowRoot && fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute2(fromRoot)) {
+  const fromRoot = relative3(root, candidate);
+  if (!allowRoot && fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep2}`) || isAbsolute3(fromRoot)) {
     throw new Error(`${label} resolves outside its trusted root`);
   }
 }
-function isTimestamp(value) {
+function isTimestamp2(value) {
   if (typeof value !== "string")
     return false;
   try {
@@ -9558,14 +10160,825 @@ function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// packages/codex-container-lab/cli/src/shared-image-state.ts
+var SHARED_IMAGE_RECORD_SCHEMA = "skizzles.shared-image.v1";
+function sharedImagesDirectory(stateRoot) {
+  return join4(stateRoot, "shared-images");
+}
+function sharedImageRecordPath(stateRoot, digest) {
+  assertDigest(digest);
+  return join4(sharedImagesDirectory(stateRoot), `${digest}.json`);
+}
+function sharedImageDigestLockPath(stateRoot, digest) {
+  assertDigest(digest);
+  return join4(stateRoot, ".locks", `shared-image-${digest}`);
+}
+function sharedImageBuilderLockPath(stateRoot) {
+  return join4(stateRoot, ".locks", "shared-image-builder");
+}
+function sharedImageGcLockPath(stateRoot) {
+  return join4(stateRoot, ".locks", "shared-images-gc");
+}
+async function withSharedImageDigestLock(stateRoot, digest, operation, signal) {
+  return await withFileLock(sharedImageDigestLockPath(stateRoot, digest), operation, {
+    attempts: 3600,
+    delayMs: 500,
+    staleMs: 45 * 60000,
+    signal
+  });
+}
+async function readSharedImageRecord(stateRoot, digest) {
+  try {
+    const value = await readJson(sharedImageRecordPath(stateRoot, digest));
+    return parseSharedImageRecord(value, digest);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return;
+    throw error;
+  }
+}
+async function writeSharedImageRecord(stateRoot, record) {
+  const parsed = parseSharedImageRecord(record, record.digest);
+  await writeJsonAtomic(sharedImageRecordPath(stateRoot, parsed.digest), parsed);
+}
+async function listSharedImageRecords(stateRoot) {
+  let names;
+  try {
+    names = await readdir3(sharedImagesDirectory(stateRoot));
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return [];
+    throw error;
+  }
+  const records = [];
+  for (const name of names.sort()) {
+    if (!name.endsWith(".json"))
+      throw new Error(`unexpected shared image state entry: ${name}`);
+    const digest = name.slice(0, -5);
+    const record = await readSharedImageRecord(stateRoot, digest);
+    if (!record)
+      throw new Error(`shared image record disappeared: ${digest}`);
+    records.push(record);
+  }
+  return records;
+}
+async function ensureSharedImageRecord(stateRoot, reference, now = new Date) {
+  const timestamp = now.toISOString();
+  const existing = await readSharedImageRecord(stateRoot, reference.digest);
+  if (existing) {
+    if (existing.profile !== reference.profile || existing.platform !== reference.platform || existing.tag !== reference.tag) {
+      throw new Error("shared image catalog identity does not match the declared digest");
+    }
+    if (reference.imageId && existing.imageId && existing.imageId !== reference.imageId) {
+      throw new Error("shared image catalog image identity drifted");
+    }
+    const next = {
+      ...existing,
+      imageId: reference.imageId ?? existing.imageId,
+      lastUsedAt: timestamp
+    };
+    await writeSharedImageRecord(stateRoot, next);
+    return next;
+  }
+  const created = {
+    version: 1,
+    schema: SHARED_IMAGE_RECORD_SCHEMA,
+    kind: SHARED_IMAGE_KIND,
+    digest: reference.digest,
+    profile: reference.profile,
+    repoHash: reference.repoHash,
+    platform: reference.platform,
+    tag: reference.tag,
+    imageId: reference.imageId,
+    createdAt: reference.createdAt ?? timestamp,
+    lastUsedAt: reference.lastUsedAt ?? timestamp,
+    leases: reference.leases ?? []
+  };
+  await writeSharedImageRecord(stateRoot, created);
+  return created;
+}
+async function acquireSharedImageLease(stateRoot, reference, owner, labId, extras, now = new Date) {
+  safeStateName(labId, "lab id");
+  const timestamp = now.toISOString();
+  const key = ownerKey(owner);
+  return await withSharedImageDigestLock(stateRoot, reference.digest, async () => {
+    const record = await ensureSharedImageRecord(stateRoot, {
+      digest: reference.digest,
+      profile: reference.profile,
+      repoHash: extras.repoHash,
+      platform: extras.platform,
+      tag: reference.tag,
+      imageId: reference.imageId
+    }, now);
+    if (record.imageId !== reference.imageId || record.tag !== reference.tag) {
+      throw new Error("shared image lease identity does not match the ensured image");
+    }
+    const leases = record.leases.filter((lease) => !(lease.ownerKey === key && lease.labId === labId));
+    leases.push({ ownerKey: key, labId, acquiredAt: timestamp });
+    const next = { ...record, leases, lastUsedAt: timestamp, imageId: reference.imageId };
+    await writeSharedImageRecord(stateRoot, next);
+    return next;
+  });
+}
+async function releaseLabSharedImageLeases(stateRoot, lab, now = new Date) {
+  await releaseAllLeasesForLab(stateRoot, lab.owner, lab.id, now);
+}
+async function releaseAllLeasesForLab(stateRoot, owner, labId, now = new Date) {
+  safeStateName(labId, "lab id");
+  const key = ownerKey(owner);
+  const timestamp = now.toISOString();
+  for (const record of await listSharedImageRecords(stateRoot)) {
+    if (!record.leases.some((lease) => lease.ownerKey === key && lease.labId === labId))
+      continue;
+    await withSharedImageDigestLock(stateRoot, record.digest, async () => {
+      const current = await readSharedImageRecord(stateRoot, record.digest);
+      if (!current)
+        return;
+      const leases = current.leases.filter((lease) => !(lease.ownerKey === key && lease.labId === labId));
+      if (leases.length === current.leases.length)
+        return;
+      await writeSharedImageRecord(stateRoot, { ...current, leases, lastUsedAt: timestamp });
+    });
+  }
+}
+async function listAllLabManifests(roots) {
+  const labs = [];
+  for (const owner of await listOwnerManifests(roots.stateRoot)) {
+    const directory = join4(owner.directory, "labs");
+    let names;
+    try {
+      names = await readdir3(directory);
+    } catch (error) {
+      if (error.code === "ENOENT")
+        continue;
+      throw error;
+    }
+    for (const name of names.sort()) {
+      if (!name.endsWith(".json"))
+        throw new Error(`unexpected lab state entry: ${name}`);
+      labs.push(await readLab(roots, owner.manifest.owner, name.slice(0, -5)));
+    }
+  }
+  return labs;
+}
+function labReferencesDigest(lab, digest) {
+  return (lab.sharedImages ?? []).some((reference) => reference.digest === digest);
+}
+function parseSharedImageRecord(value, digest) {
+  if (!isRecord6(value) || value.version !== 1 || value.schema !== SHARED_IMAGE_RECORD_SCHEMA || value.kind !== SHARED_IMAGE_KIND || value.digest !== digest || typeof value.profile !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(value.profile) || typeof value.repoHash !== "string" || !/^[a-f0-9]{12}$/.test(value.repoHash) || typeof value.platform !== "string" || !isPlatform(value.platform) || value.tag !== sharedImageTag(digest) || !isDigest(digest) || typeof value.createdAt !== "string" || !isTimestamp3(value.createdAt) || typeof value.lastUsedAt !== "string" || !isTimestamp3(value.lastUsedAt) || !Array.isArray(value.leases) || value.leases.length > 256) {
+    throw new Error(`invalid shared image record: ${digest}`);
+  }
+  if (value.imageId !== undefined && (typeof value.imageId !== "string" || !isImageId(value.imageId))) {
+    throw new Error(`invalid shared image record: ${digest}`);
+  }
+  const leases = [];
+  const seen = new Set;
+  for (const lease of value.leases) {
+    if (!isRecord6(lease) || typeof lease.ownerKey !== "string" || !/^[a-f0-9]{64}$/.test(lease.ownerKey) || typeof lease.labId !== "string" || typeof lease.acquiredAt !== "string" || !isTimestamp3(lease.acquiredAt)) {
+      throw new Error(`invalid shared image lease: ${digest}`);
+    }
+    safeStateName(lease.labId, "lab id");
+    const identity3 = `${lease.ownerKey}:${lease.labId}`;
+    if (seen.has(identity3))
+      throw new Error(`duplicate shared image lease: ${digest}`);
+    seen.add(identity3);
+    leases.push({ ownerKey: lease.ownerKey, labId: lease.labId, acquiredAt: lease.acquiredAt });
+  }
+  return {
+    version: 1,
+    schema: SHARED_IMAGE_RECORD_SCHEMA,
+    kind: SHARED_IMAGE_KIND,
+    digest,
+    profile: value.profile,
+    repoHash: value.repoHash,
+    platform: value.platform,
+    tag: value.tag,
+    imageId: value.imageId,
+    createdAt: value.createdAt,
+    lastUsedAt: value.lastUsedAt,
+    leases
+  };
+}
+function isDigest(value) {
+  return /^[a-f0-9]{64}$/.test(value);
+}
+function isImageId(value) {
+  return /^sha256:[0-9a-f]{64}$/.test(value);
+}
+function assertDigest(digest) {
+  if (!isDigest(digest))
+    throw new Error("shared image digest is invalid");
+}
+function isTimestamp3(value) {
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+function isRecord6(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// packages/codex-container-lab/cli/src/shared-image-docker.ts
+import { mkdtemp, readFile as readFile5, rm as rm5 } from "fs/promises";
+import { tmpdir as tmpdir2 } from "os";
+import { join as join5 } from "path";
+var BUILD_TIMEOUT_MS = 30 * 60000;
+var DEFAULT_IMAGE_MAX_AGE_MS = 168 * 60 * 60 * 1000;
+var DEFAULT_CACHE_BUDGET_BYTES = 20 * 1024 * 1024 * 1024;
+async function ensureSharedEnvironmentImage(options) {
+  const fingerprint = await fingerprintSharedImage(options.repoRoot, options.profile);
+  const now = options.now ?? new Date;
+  const builderName = options.builderName ?? SHARED_IMAGE_BUILDER_NAME;
+  return await withSharedImageDigestLock(options.stateRoot, fingerprint.digest, async () => {
+    await ensureSharedImageRecord(options.stateRoot, {
+      digest: fingerprint.digest,
+      profile: options.profile.name,
+      repoHash: options.repoHash,
+      platform: options.profile.platform,
+      tag: fingerprint.tag
+    }, now);
+    const existing = await inspectCatalogedSharedImage(options.docker, {
+      digest: fingerprint.digest,
+      profile: options.profile.name,
+      platform: options.profile.platform,
+      tag: fingerprint.tag
+    });
+    if (existing) {
+      await ensureSharedImageRecord(options.stateRoot, {
+        digest: fingerprint.digest,
+        profile: options.profile.name,
+        repoHash: options.repoHash,
+        platform: options.profile.platform,
+        tag: fingerprint.tag,
+        imageId: existing.imageId
+      }, now);
+      return existing;
+    }
+    await ensureSharedImageBuilder(options.docker, options.stateRoot, builderName);
+    const createdAt = now.toISOString();
+    const imageId = await buildSharedImage(options.docker, {
+      profile: options.profile,
+      digest: fingerprint.digest,
+      repoHash: options.repoHash,
+      tag: fingerprint.tag,
+      createdAt,
+      builderName,
+      signal: options.signal
+    });
+    const verified = await inspectCatalogedSharedImage(options.docker, {
+      digest: fingerprint.digest,
+      profile: options.profile.name,
+      platform: options.profile.platform,
+      tag: fingerprint.tag
+    });
+    if (!verified || verified.imageId !== imageId) {
+      throw new Error("shared image build did not produce a verifiable image identity");
+    }
+    await ensureSharedImageRecord(options.stateRoot, {
+      digest: fingerprint.digest,
+      profile: options.profile.name,
+      repoHash: options.repoHash,
+      platform: options.profile.platform,
+      tag: fingerprint.tag,
+      imageId
+    }, now);
+    return verified;
+  }, options.signal);
+}
+async function ensureLabSharedImages(config, options) {
+  const references = [];
+  for (const profile of config.sharedImages) {
+    references.push(await ensureSharedEnvironmentImage({
+      stateRoot: options.stateRoot,
+      repoHash: options.repoHash,
+      profile,
+      repoRoot: config.repoRoot,
+      docker: options.docker,
+      builderName: options.builderName,
+      now: options.now,
+      signal: options.signal
+    }));
+  }
+  return references;
+}
+async function inspectCatalogedSharedImage(docker, expected) {
+  const inspected = await docker.run([
+    "image",
+    "inspect",
+    "--format",
+    '{"id":{{json .Id}},"labels":{{json .Config.Labels}},"size":{{json .Size}}}',
+    expected.tag
+  ], { allowFailure: true, timeoutMs: 1e4, maxOutputBytes: 64 * 1024 });
+  if (inspected.code !== 0) {
+    if (isExactMissingImage2(inspected, expected.tag))
+      return;
+    throw new Error("unable to inspect shared image ownership");
+  }
+  let image;
+  try {
+    image = JSON.parse(inspected.stdout.toString());
+  } catch {
+    throw new Error("invalid shared image ownership inspection");
+  }
+  if (!isRecord7(image) || typeof image.id !== "string" || !isImageId(image.id) || !isRecord7(image.labels) || !hasExactSharedImageLabels(image.labels, expected)) {
+    throw new Error("refusing shared image with mismatched provenance labels");
+  }
+  return {
+    profile: expected.profile,
+    digest: expected.digest,
+    imageId: image.id,
+    tag: expected.tag
+  };
+}
+async function inventorySharedImageBuilderCache(docker) {
+  const inspected = await inspectSharedImageBuilder(docker);
+  if (inspected !== "matching") {
+    return { present: false, namespaceOwned: false, bytes: 0 };
+  }
+  const usage = await sharedBuilderCacheUsage(docker, SHARED_IMAGE_BUILDER_NAME);
+  return {
+    present: true,
+    namespaceOwned: true,
+    bytes: usage.bytes,
+    ...usage.reclaimableBytes === undefined ? {} : { reclaimableBytes: usage.reclaimableBytes }
+  };
+}
+async function inventorySharedImages(roots, docker, policy = {}, now = new Date) {
+  const records = await listSharedImageRecords(roots.stateRoot);
+  const labs = await listAllLabManifests(roots);
+  let present = 0;
+  let activeLeases = 0;
+  let eligible = 0;
+  let bytes = 0;
+  let reclaimableBytes = 0;
+  for (const record of records) {
+    activeLeases += record.leases.length;
+    const inspection = record.imageId ? await inspectImageById(docker, record) : undefined;
+    if (inspection?.present) {
+      present += 1;
+      bytes += inspection.size;
+      if (isEligibleForGc(record, labs, policy, now)) {
+        eligible += 1;
+        reclaimableBytes += inspection.size;
+      }
+    }
+  }
+  const untracked = await countUntrackedSharedImages(docker, records);
+  return {
+    cataloged: records.length,
+    present,
+    activeLeases,
+    eligible,
+    bytes,
+    reclaimableBytes,
+    untracked
+  };
+}
+async function gcSharedImages(roots, docker, options) {
+  const now = options.now ?? new Date;
+  const findings = [];
+  return await withFileLock(sharedImageGcLockPath(roots.stateRoot), async () => {
+    let records;
+    let labs;
+    try {
+      records = await listSharedImageRecords(roots.stateRoot);
+      labs = await listAllLabManifests(roots);
+    } catch (error) {
+      return {
+        mode: options.mode,
+        considered: 0,
+        eligible: 0,
+        removed: 0,
+        retained: 0,
+        bytes: 0,
+        findings: [boundedFinding("state-unavailable", error)]
+      };
+    }
+    const policy = { maxAgeMs: options.maxAgeMs ?? DEFAULT_IMAGE_MAX_AGE_MS, budgetBytes: options.budgetBytes };
+    let eligible = 0;
+    let removed = 0;
+    let retained = 0;
+    let bytes = 0;
+    const overBudget = await catalogOverBudget(docker, records, labs, policy, now);
+    for (const record of records) {
+      const result = await withSharedImageDigestLock(roots.stateRoot, record.digest, async () => {
+        const current = await readSharedImageRecord(roots.stateRoot, record.digest);
+        if (!current)
+          return { action: "missing", size: 0 };
+        const liveLabs = await listAllLabManifests(roots);
+        const inspection = current.imageId ? await inspectImageById(docker, current) : { present: false, size: 0, finding: undefined };
+        if (inspection.finding) {
+          findings.push(inspection.finding);
+          return { action: "retain", size: 0 };
+        }
+        const eligibleNow = isEligibleForGc(current, liveLabs, policy, now) || overBudget.has(current.digest) && current.leases.length === 0 && !liveLabs.some((lab) => labReferencesDigest(lab, current.digest));
+        if (!eligibleNow)
+          return { action: "retain", size: inspection.size };
+        if (!inspection.present) {
+          if (options.mode === "apply")
+            await rmCatalogIfUnleased(roots.stateRoot, current.digest);
+          return { action: "eligible-absent", size: 0 };
+        }
+        if (options.mode === "plan")
+          return { action: "eligible", size: inspection.size };
+        const removedImage = await removeVerifiedSharedImage(docker, current);
+        if (!removedImage.ok) {
+          findings.push(removedImage.finding);
+          return { action: "retain", size: inspection.size };
+        }
+        const remaining = await inspectImageById(docker, current);
+        if (remaining.present) {
+          findings.push({ code: "remove-incomplete", detail: "shared image remained after verified removal" });
+          return { action: "retain", size: inspection.size };
+        }
+        await rmCatalogIfUnleased(roots.stateRoot, current.digest);
+        return { action: "removed", size: inspection.size };
+      });
+      if (result.action === "retain")
+        retained += 1;
+      if (result.action === "eligible" || result.action === "eligible-absent" || result.action === "removed")
+        eligible += 1;
+      if (result.action === "removed")
+        removed += 1;
+      if (result.action === "eligible" || result.action === "removed")
+        bytes += result.size;
+    }
+    return {
+      mode: options.mode,
+      considered: records.length,
+      eligible,
+      removed: options.mode === "apply" ? removed : 0,
+      retained,
+      bytes,
+      findings: findings.slice(0, 8)
+    };
+  }, { attempts: 600, delayMs: 50 });
+}
+async function gcSharedImageCache(docker, options) {
+  const builderName = SHARED_IMAGE_BUILDER_NAME;
+  const findings = [];
+  return await withFileLock(sharedImageGcLockPath(options.stateRoot), async () => {
+    return await withFileLock(sharedImageBuilderLockPath(options.stateRoot), async () => {
+      const inspected = await inspectSharedImageBuilder(docker, builderName);
+      if (inspected === "missing") {
+        return {
+          mode: options.mode,
+          builder: builderName,
+          bytes: 0,
+          applied: false,
+          findings: [{ code: "builder-absent", detail: "shared image builder is not present" }]
+        };
+      }
+      if (inspected === "mismatch") {
+        return {
+          mode: options.mode,
+          builder: builderName,
+          bytes: 0,
+          applied: false,
+          findings: [{ code: "builder-mismatch", detail: "refusing a foreign or default builder namespace" }]
+        };
+      }
+      const usage = await sharedBuilderCacheUsage(docker, builderName);
+      if (usage.finding)
+        findings.push(usage.finding);
+      const budget = options.budgetBytes ?? DEFAULT_CACHE_BUDGET_BYTES;
+      if (options.mode === "plan") {
+        return {
+          mode: options.mode,
+          builder: builderName,
+          bytes: usage.bytes,
+          reclaimableBytes: usage.reclaimableBytes,
+          applied: false,
+          findings: findings.slice(0, 8)
+        };
+      }
+      const pruned = await docker.run([
+        "buildx",
+        "prune",
+        "--builder",
+        builderName,
+        "--force",
+        "--keep-storage",
+        String(budget)
+      ], { allowFailure: true, timeoutMs: 10 * 60000, maxOutputBytes: 64 * 1024 });
+      if (pruned.code !== 0) {
+        findings.push({ code: "cache-gc-failed", detail: "shared image builder cache GC did not complete" });
+        return { mode: options.mode, builder: builderName, bytes: usage.bytes, applied: false, findings: findings.slice(0, 8) };
+      }
+      const after = await sharedBuilderCacheUsage(docker, builderName);
+      return {
+        mode: options.mode,
+        builder: builderName,
+        bytes: after.bytes,
+        reclaimableBytes: after.reclaimableBytes,
+        applied: true,
+        findings: findings.slice(0, 8)
+      };
+    });
+  }, { attempts: 600, delayMs: 50 });
+}
+async function ensureSharedImageBuilder(docker, stateRoot, builderName = SHARED_IMAGE_BUILDER_NAME) {
+  await withFileLock(sharedImageBuilderLockPath(stateRoot), async () => {
+    const existing = await inspectSharedImageBuilder(docker, builderName);
+    if (existing === "matching")
+      return;
+    if (existing === "mismatch")
+      throw new Error("refusing a foreign or default shared-image builder namespace");
+    const created = await docker.run([
+      "buildx",
+      "create",
+      "--name",
+      builderName,
+      "--driver",
+      SHARED_IMAGE_BUILDER_DRIVER,
+      "--bootstrap"
+    ], { allowFailure: true, timeoutMs: 120000, maxOutputBytes: 64 * 1024 });
+    if (created.code !== 0) {
+      const raced = await inspectSharedImageBuilder(docker, builderName);
+      if (raced !== "matching")
+        throw new Error("failed to create the shared image builder");
+      return;
+    }
+    const verified = await inspectSharedImageBuilder(docker, builderName);
+    if (verified !== "matching")
+      throw new Error("shared image builder identity could not be verified");
+  }, { attempts: 600, delayMs: 50 });
+}
+async function inspectSharedImageBuilder(docker, builderName = SHARED_IMAGE_BUILDER_NAME) {
+  if (builderName === "default" || builderName === "")
+    return "mismatch";
+  const inspected = await docker.run(["buildx", "inspect", builderName], {
+    allowFailure: true,
+    timeoutMs: 20000,
+    maxOutputBytes: 64 * 1024
+  });
+  if (inspected.code !== 0) {
+    const diagnostic = inspected.stderr.toString();
+    if (/no builder|not found|does not exist/i.test(diagnostic) && inspected.stdout.toString().trim() === "") {
+      return "missing";
+    }
+    return "mismatch";
+  }
+  const text = `${inspected.stdout.toString()}
+${inspected.stderr.toString()}`;
+  const name = text.match(/^\s*Name:\s+(\S+)/m)?.[1];
+  const driver = text.match(/^\s*Driver:\s+(\S+)/m)?.[1];
+  if (name !== builderName || driver !== SHARED_IMAGE_BUILDER_DRIVER)
+    return "mismatch";
+  return "matching";
+}
+async function buildSharedImage(docker, options) {
+  const directory = await mkdtemp(join5(tmpdir2(), "skizzles-shared-image-"));
+  const iidFile = join5(directory, "iid");
+  try {
+    const labels = sharedImageLabels({
+      profile: options.profile.name,
+      digest: options.digest,
+      repoHash: options.repoHash,
+      platform: options.profile.platform,
+      createdAt: options.createdAt
+    });
+    const args = [
+      "buildx",
+      "build",
+      "--builder",
+      options.builderName,
+      "--load",
+      "--platform",
+      options.profile.platform,
+      "--file",
+      options.profile.dockerfile,
+      "--tag",
+      options.tag,
+      "--iidfile",
+      iidFile,
+      "--provenance=false",
+      "--sbom=false",
+      ...Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]),
+      ...Object.entries(options.profile.buildArgs).flatMap(([key, value]) => ["--build-arg", `${key}=${value}`])
+    ];
+    if (options.profile.target)
+      args.push("--target", options.profile.target);
+    args.push(options.profile.context);
+    const built = await docker.run(args, {
+      allowFailure: true,
+      timeoutMs: BUILD_TIMEOUT_MS,
+      maxOutputBytes: 1024 * 1024,
+      stdoutCapture: "tail",
+      stderrCapture: "tail",
+      signal: options.signal
+    });
+    if (built.code !== 0)
+      throw new Error("shared image build failed");
+    const imageId = (await readFile5(iidFile, "utf8")).trim();
+    if (!isImageId(imageId) && !/^sha256:[0-9a-f]{64}$/.test(imageId)) {
+      const prefixed = imageId.startsWith("sha256:") ? imageId : `sha256:${imageId}`;
+      if (!isImageId(prefixed))
+        throw new Error("shared image build produced an invalid image id");
+      return prefixed;
+    }
+    return imageId.startsWith("sha256:") ? imageId : `sha256:${imageId}`;
+  } finally {
+    await rm5(directory, { recursive: true, force: true });
+  }
+}
+async function inspectImageById(docker, record) {
+  if (!record.imageId)
+    return { present: false, size: 0 };
+  const inspected = await docker.run([
+    "image",
+    "inspect",
+    "--format",
+    '{"id":{{json .Id}},"labels":{{json .Config.Labels}},"size":{{json .Size}},"repotags":{{json .RepoTags}}}',
+    record.imageId
+  ], { allowFailure: true, timeoutMs: 1e4, maxOutputBytes: 64 * 1024 });
+  if (inspected.code !== 0) {
+    if (isExactMissingImage2(inspected, record.imageId) || isExactMissingImage2(inspected, record.tag)) {
+      return { present: false, size: 0 };
+    }
+    return { present: false, size: 0, finding: { code: "inspect-uncertain", detail: "shared image inspection was uncertain" } };
+  }
+  let image;
+  try {
+    image = JSON.parse(inspected.stdout.toString());
+  } catch {
+    return { present: false, size: 0, finding: { code: "inspect-invalid", detail: "shared image inspection was invalid" } };
+  }
+  if (!isRecord7(image) || image.id !== record.imageId || !isRecord7(image.labels) || !hasExactSharedImageLabels(image.labels, record) || typeof image.size !== "number" || !Number.isFinite(image.size) || image.size < 0) {
+    return { present: true, size: 0, finding: { code: "label-mismatch", detail: "shared image labels or identity drifted" } };
+  }
+  const tags = Array.isArray(image.repotags) ? image.repotags.filter((value) => typeof value === "string") : [];
+  if (!tags.includes(record.tag)) {
+    return { present: true, size: 0, finding: { code: "tag-drift", detail: "shared image tag does not match the catalog" } };
+  }
+  return { present: true, size: image.size };
+}
+async function removeVerifiedSharedImage(docker, record) {
+  if (!record.imageId)
+    return { ok: false, finding: { code: "missing-id", detail: "shared image catalog has no image id" } };
+  try {
+    const rechecked = await inspectCatalogedSharedImage(docker, record);
+    const verified = await inspectImageById(docker, record);
+    if (verified.finding)
+      return { ok: false, finding: verified.finding };
+    if (!verified.present)
+      return { ok: true };
+    if (rechecked && rechecked.imageId !== record.imageId) {
+      return { ok: false, finding: { code: "id-drift", detail: "shared image identity drifted before removal" } };
+    }
+  } catch {
+    return { ok: false, finding: { code: "revalidate-failed", detail: "shared image revalidation failed" } };
+  }
+  const removed = await docker.run(["image", "rm", "--no-prune", record.imageId], {
+    allowFailure: true,
+    timeoutMs: 30000,
+    maxOutputBytes: 1024 * 1024
+  });
+  if (removed.code !== 0) {
+    return { ok: false, finding: { code: "remove-failed", detail: "verified shared image removal failed" } };
+  }
+  return { ok: true };
+}
+async function rmCatalogIfUnleased(stateRoot, digest) {
+  const current = await readSharedImageRecord(stateRoot, digest);
+  if (!current || current.leases.length > 0)
+    return;
+  await rm5(sharedImageRecordPath(stateRoot, digest), { force: true });
+}
+function isEligibleForGc(record, labs, policy, now) {
+  if (record.leases.length > 0)
+    return false;
+  if (labs.some((lab) => labReferencesDigest(lab, record.digest)))
+    return false;
+  const age = now.getTime() - Date.parse(record.lastUsedAt);
+  if (!Number.isFinite(age) || age < (policy.maxAgeMs ?? DEFAULT_IMAGE_MAX_AGE_MS))
+    return false;
+  return true;
+}
+async function catalogOverBudget(docker, records, labs, policy, now) {
+  const selected = new Set;
+  if (policy.budgetBytes === undefined)
+    return selected;
+  const unused = [];
+  let total = 0;
+  for (const record of records) {
+    const inspection = record.imageId ? await inspectImageById(docker, record) : undefined;
+    if (!inspection?.present)
+      continue;
+    total += inspection.size;
+    if (record.leases.length === 0 && !labs.some((lab) => labReferencesDigest(lab, record.digest))) {
+      unused.push({ digest: record.digest, lastUsedAt: Date.parse(record.lastUsedAt), size: inspection.size });
+    }
+  }
+  if (total <= policy.budgetBytes)
+    return selected;
+  unused.sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+  let remaining = total;
+  for (const record of unused) {
+    if (remaining <= policy.budgetBytes)
+      break;
+    selected.add(record.digest);
+    remaining -= record.size;
+  }
+  return selected;
+}
+async function countUntrackedSharedImages(docker, records) {
+  const listed = await docker.run([
+    "image",
+    "ls",
+    "-q",
+    "--no-trunc",
+    "--filter",
+    "label=io.openai.skizzles.shared-image.managed=true"
+  ], { allowFailure: true, timeoutMs: 15000, maxOutputBytes: 1024 * 1024 });
+  if (listed.code !== 0)
+    return 0;
+  const ids = [...new Set(listed.stdout.toString().trim().split(`
+`).filter(Boolean))];
+  if (ids.length > 1000)
+    return ids.length;
+  const known = new Set(records.map((record) => record.imageId).filter((value) => value !== undefined));
+  let untracked = 0;
+  for (const id of ids) {
+    const imageId = id.startsWith("sha256:") ? id : `sha256:${id}`;
+    if (known.has(imageId) || known.has(id))
+      continue;
+    untracked += 1;
+  }
+  return untracked;
+}
+async function sharedBuilderCacheUsage(docker, builderName) {
+  const usage = await docker.run(["buildx", "du", "--builder", builderName], {
+    allowFailure: true,
+    timeoutMs: 30000,
+    maxOutputBytes: 64 * 1024
+  });
+  if (usage.code !== 0) {
+    return { bytes: 0, finding: { code: "cache-inventory-unavailable", detail: "shared image builder cache inventory was unavailable" } };
+  }
+  const text = usage.stdout.toString();
+  const total = parseBuildxSize(text);
+  if (total === undefined) {
+    return { bytes: 0, finding: { code: "cache-inventory-invalid", detail: "shared image builder cache inventory was invalid" } };
+  }
+  return { bytes: total.bytes, reclaimableBytes: total.reclaimableBytes };
+}
+function parseBuildxSize(text) {
+  const match = text.match(/total[^\n]*?(\d+(?:\.\d+)?)\s*([KMGTPE]?i?B)/i) ?? text.match(/(\d+(?:\.\d+)?)\s*([KMGTPE]?i?B)[^\n]*total/i);
+  if (!match)
+    return;
+  const bytes = decodeSize(match[1], match[2]);
+  if (bytes === undefined)
+    return;
+  const reclaimable = text.match(/reclaimable[^\n]*?(\d+(?:\.\d+)?)\s*([KMGTPE]?i?B)/i);
+  return {
+    bytes,
+    reclaimableBytes: reclaimable ? decodeSize(reclaimable[1], reclaimable[2]) : undefined
+  };
+}
+function decodeSize(value, unit) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0)
+    return;
+  const factor = {
+    B: 1,
+    KB: 1000,
+    MB: 1000 ** 2,
+    GB: 1000 ** 3,
+    TB: 1000 ** 4,
+    KIB: 1024,
+    MIB: 1024 ** 2,
+    GIB: 1024 ** 3,
+    TIB: 1024 ** 4
+  };
+  const multiplier = factor[unit.toUpperCase()];
+  return multiplier === undefined ? undefined : Math.round(amount * multiplier);
+}
+function isExactMissingImage2(result, reference) {
+  if (result.stdout.toString().trim() !== "")
+    return false;
+  const diagnostic = result.stderr.toString().trim();
+  return diagnostic === `Error: No such image: ${reference}` || diagnostic === `Error response from daemon: No such image: ${reference}`;
+}
+function boundedFinding(code, error) {
+  const detail = (error instanceof Error ? error.message : String(error)).split(`
+`)[0] ?? code;
+  return { code, detail: detail.slice(0, 160) };
+}
+function isRecord7(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 // packages/codex-container-lab/cli/src/sync.ts
 import { randomBytes, randomUUID as randomUUID3 } from "crypto";
-import { chmod, copyFile, lstat as lstat6, mkdir as mkdir5, readlink as readlink2, rename as rename3, rm as rm5, symlink } from "fs/promises";
+import { chmod, copyFile, lstat as lstat7, mkdir as mkdir5, readlink as readlink3, rename as rename3, rm as rm6, symlink } from "fs/promises";
 import path2 from "path";
 
 // packages/codex-container-lab/cli/src/git-manifest.ts
 import { execFile } from "child_process";
-import { lstat as lstat5 } from "fs/promises";
+import { lstat as lstat6 } from "fs/promises";
 import { promisify } from "util";
 var execFileAsync = promisify(execFile);
 var MAX_SYNC_FILES = 20000;
@@ -9583,16 +10996,16 @@ async function buildGitManifest(root) {
   const canonical = await canonicalRoot(root);
   const files = {};
   let totalBytes = 0;
-  for (const relative3 of await eligibleGitPaths(canonical)) {
+  for (const relative4 of await eligibleGitPaths(canonical)) {
     try {
-      const stat2 = await lstat5(await guardedPath(canonical, relative3));
+      const stat2 = await lstat6(await guardedPath(canonical, relative4));
       if (!stat2.isFile() && !stat2.isSymbolicLink())
         continue;
-      const file = await describeSyncFile(canonical, relative3);
+      const file = await describeSyncFile(canonical, relative4);
       totalBytes += file.size;
       if (totalBytes > MAX_SYNC_TOTAL_BYTES)
         throw new Error("Git workspace exceeds 512 MiB synchronization limit");
-      files[relative3] = file;
+      files[relative4] = file;
     } catch (error) {
       if (error.code !== "ENOENT")
         throw error;
@@ -9614,7 +11027,7 @@ function serializePublicJson(value) {
   let candidate = value;
   let encoded = `${JSON.stringify(candidate)}
 `;
-  if (Buffer.byteLength(encoded) > PUBLIC_JSON_BYTE_BUDGET && isRecord6(value) && isRecord6(value.transcript) && typeof value.transcript.text === "string") {
+  if (Buffer.byteLength(encoded) > PUBLIC_JSON_BYTE_BUDGET && isRecord8(value) && isRecord8(value.transcript) && typeof value.transcript.text === "string") {
     const characters = Array.from(value.transcript.text);
     let low = 0;
     let high = characters.length;
@@ -9653,7 +11066,7 @@ function serializePublicJson(value) {
   }
   return encoded;
 }
-function isRecord6(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -9754,7 +11167,7 @@ async function applySync(options) {
   try {
     backups = await backupTargets(targetRoot, preview.changes, preview.expectedTargets, targetBackups);
   } catch (error) {
-    await rm5(backupDir, { recursive: true, force: true });
+    await rm6(backupDir, { recursive: true, force: true });
     throw error;
   }
   const journal = {
@@ -9787,14 +11200,14 @@ async function applySync(options) {
     journal.state = "applied";
     await writeJsonAtomic(journalPath, journal);
     await writeJsonAtomic(state.baseline, journal.newBaseline);
-    await rm5(journalPath, { force: true });
-    await rm5(backupDir, { recursive: true, force: true });
+    await rm6(journalPath, { force: true });
+    await rm6(backupDir, { recursive: true, force: true });
     return { applied: preview.changes.length };
   } catch (error) {
     try {
       await rollbackJournalSafely(targetRoot, journal);
-      await rm5(journalPath, { force: true });
-      await rm5(backupDir, { recursive: true, force: true });
+      await rm6(journalPath, { force: true });
+      await rm6(backupDir, { recursive: true, force: true });
     } catch (rollbackError) {
       throw new Error(`Synchronization apply failed and recovery state was retained: ${rollbackError instanceof Error ? rollbackError.message : rollbackError}`, { cause: error });
     }
@@ -9821,8 +11234,8 @@ async function recoverSyncTransactions(options) {
       await writeJsonAtomic(state.baseline, journal.newBaseline);
     else
       await rollbackJournalSafely(targetRoot, journal);
-    await rm5(journalPath, { force: true });
-    await rm5(path2.join(state.backups, path2.basename(name, ".json")), { recursive: true, force: true });
+    await rm6(journalPath, { force: true });
+    await rm6(path2.join(state.backups, path2.basename(name, ".json")), { recursive: true, force: true });
     recovered++;
   }
   return recovered;
@@ -9839,20 +11252,20 @@ async function statePaths(identity3) {
   const used = path2.join(root, "used");
   const journals = path2.join(root, "journals");
   const backups = path2.join(root, "backups");
-  for (const relative3 of ["sync", `sync/${identity3.labId}`, `sync/${identity3.labId}/previews`, `sync/${identity3.labId}/used`, `sync/${identity3.labId}/journals`, `sync/${identity3.labId}/backups`]) {
-    await ensureStateDirectory(stateRoot, relative3);
+  for (const relative4 of ["sync", `sync/${identity3.labId}`, `sync/${identity3.labId}/previews`, `sync/${identity3.labId}/used`, `sync/${identity3.labId}/journals`, `sync/${identity3.labId}/backups`]) {
+    await ensureStateDirectory(stateRoot, relative4);
   }
   return { root, previews, used, journals, backups, baseline: path2.join(root, "baseline.json") };
 }
-async function ensureStateDirectory(stateRoot, relative3) {
-  const directory = await guardedPath(stateRoot, relative3, true);
+async function ensureStateDirectory(stateRoot, relative4) {
+  const directory = await guardedPath(stateRoot, relative4, true);
   await mkdir5(directory, { mode: 448 }).catch((error) => {
     if (error.code !== "EEXIST")
       throw error;
   });
-  const stat2 = await lstat6(directory);
+  const stat2 = await lstat7(directory);
   if (stat2.isSymbolicLink() || !stat2.isDirectory())
-    throw new Error(`Unsafe synchronization state directory: ${relative3}`);
+    throw new Error(`Unsafe synchronization state directory: ${relative4}`);
 }
 function previewBinding(options, source, target, expiresAt, token) {
   return sha256(JSON.stringify([token, options.labId, options.direction, source.root, target.root, source.digest, target.digest, expiresAt]));
@@ -9892,10 +11305,10 @@ async function backupTargets(targetRoot, changes, expected, backupDir) {
     await assertExpectedEntry(targetRoot, change.path, expected[change.path] ?? null, "target");
     const target = await guardedPath(targetRoot, change.path);
     try {
-      const stat2 = await lstat6(target);
+      const stat2 = await lstat7(target);
       const backup = path2.join(backupDir, String(index));
       if (stat2.isSymbolicLink()) {
-        await symlink(await readlink2(target), backup);
+        await symlink(await readlink3(target), backup);
         records.push({ path: change.path, existed: true, kind: "symlink", mode: stat2.mode & 511, backup, original: expected[change.path] ?? null });
       } else if (stat2.isFile()) {
         await copyFile(target, backup);
@@ -9919,9 +11332,9 @@ async function stageSources(sourceRoot, changes, stagedRoot) {
       throw new Error(`Synchronization preview is missing file details for ${change.path}`);
     const source = await guardedPath(sourceRoot, change.path);
     const target = await guardedPath(stagedRoot, change.path, true);
-    const stat2 = await lstat6(source);
+    const stat2 = await lstat7(source);
     if (change.file.kind === "symlink" && stat2.isSymbolicLink()) {
-      const link2 = await readlink2(source);
+      const link2 = await readlink3(source);
       const bytes = Buffer.from(link2);
       if (bytes.byteLength !== change.file.size || sha256(bytes) !== change.file.sha256)
         throw new Error("Synchronization preview is stale; source changed");
@@ -9939,13 +11352,13 @@ async function stageSources(sourceRoot, changes, stagedRoot) {
 }
 async function applyChange(sourceRoot, targetRoot, change) {
   const target = await guardedPath(targetRoot, change.path, true);
-  await rm5(target, { force: true, recursive: false });
+  await rm6(target, { force: true, recursive: false });
   if (change.action === "delete")
     return;
   const source = await guardedPath(sourceRoot, change.path);
-  const stat2 = await lstat6(source);
+  const stat2 = await lstat7(source);
   if (change.file?.kind === "symlink" && stat2.isSymbolicLink()) {
-    await symlink(await readlink2(source), target);
+    await symlink(await readlink3(source), target);
   } else if (change.file?.kind === "file" && stat2.isFile()) {
     await copyFile(source, target);
     await chmod(target, change.file.mode);
@@ -9953,27 +11366,27 @@ async function applyChange(sourceRoot, targetRoot, change) {
     throw new Error(`Synchronization source changed type during apply: ${change.path}`);
   }
 }
-async function assertExpectedEntry(root, relative3, expected, side) {
+async function assertExpectedEntry(root, relative4, expected, side) {
   let actual = null;
   try {
-    actual = await describeSyncFile(root, relative3);
+    actual = await describeSyncFile(root, relative4);
   } catch (error) {
     if (error.code !== "ENOENT")
       throw error;
   }
   if (!sameFile(actual ?? undefined, expected ?? undefined))
-    throw new Error(`Synchronization ${side} changed after preview: ${relative3}`);
+    throw new Error(`Synchronization ${side} changed after preview: ${relative4}`);
 }
 async function restoreBackups(targetRoot, backups) {
   for (const record of backups) {
     const target = await guardedPath(targetRoot, record.path, true);
-    await rm5(target, { force: true, recursive: false });
+    await rm6(target, { force: true, recursive: false });
     if (!record.existed)
       continue;
     if (!record.backup)
       throw new Error(`Missing synchronization backup for ${record.path}`);
     if (record.kind === "symlink")
-      await symlink(await readlink2(record.backup), target);
+      await symlink(await readlink3(record.backup), target);
     else {
       await copyFile(record.backup, target);
       if (record.mode !== undefined)
@@ -10034,6 +11447,48 @@ class ContainerLabService {
       ...!docker.available ? { dockerDiagnostic: docker.diagnostic } : {}
     };
   }
+  async systemInventory(options = {}) {
+    await this.reconcileOwner();
+    const owned = (await listLabs(this.roots, this.owner)).length;
+    let other = 0;
+    for (const owner of await listOwnerManifests(this.roots.stateRoot)) {
+      if (owner.manifest.owner === this.owner)
+        continue;
+      other += (await listLabs(this.roots, owner.manifest.owner)).length;
+    }
+    const docker = await dockerAvailable(this.docker, [], this.environment);
+    const labResources = docker.available ? await countManagedLabResources(this.docker) : { containers: 0, volumes: 0, networks: 0 };
+    const shared = docker.available ? await inventorySharedImages(this.roots, this.docker, {
+      maxAgeMs: (options.maxAgeHours ?? 168) * 3600000,
+      budgetBytes: options.budgetBytes
+    }) : { cataloged: 0, present: 0, activeLeases: 0, eligible: 0, bytes: 0, reclaimableBytes: 0, untracked: 0 };
+    const builderCache = docker.available ? await inventorySharedImageBuilderCache(this.docker) : { present: false, namespaceOwned: false, bytes: 0 };
+    return {
+      ok: true,
+      labs: { owned, other },
+      labResources,
+      sharedImages: shared,
+      builderCache,
+      dockerAvailable: docker.available,
+      ...!docker.available ? { dockerDiagnostic: docker.diagnostic } : {}
+    };
+  }
+  async gcSharedImages(mode, options = {}) {
+    await this.reconcileOwner();
+    return await gcSharedImages(this.roots, this.docker, {
+      mode,
+      maxAgeMs: options.maxAgeHours === undefined ? undefined : options.maxAgeHours * 3600000,
+      budgetBytes: options.budgetBytes
+    });
+  }
+  async gcSharedImageCache(mode, options = {}) {
+    await this.reconcileOwner();
+    return await gcSharedImageCache(this.docker, {
+      stateRoot: this.roots.stateRoot,
+      mode,
+      budgetBytes: options.budgetBytes
+    });
+  }
   async createLab(name = "lab", source = process.cwd(), signal) {
     const requested = name.trim().toLowerCase();
     if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(requested)) {
@@ -10050,23 +11505,23 @@ class ContainerLabService {
         throw new Error("an owner may have at most 8 labs");
       const sourceRoot = (await runCommand("git", ["-C", source, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 })).stdout.toString().trim();
       const commonGit = (await runCommand("git", ["-C", sourceRoot, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: 1e4 })).stdout.toString().trim();
-      const repoHash = createHash3("sha256").update(await realpath4(commonGit)).digest("hex").slice(0, 12);
+      const repoHash = createHash4("sha256").update(await realpath5(commonGit)).digest("hex").slice(0, 12);
       const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 8);
       const id = `${requested}-${suffix}`;
-      const runtimeRoot = join3(ownerRuntimeDirectory(this.roots.runtimeRoot, this.owner), id);
+      const runtimeRoot = join6(ownerRuntimeDirectory(this.roots.runtimeRoot, this.owner), id);
       const lab = {
         version: 1,
         id,
         name: requested,
         owner: this.owner,
-        ownerKey: createHash3("sha256").update(this.owner).digest("hex"),
+        ownerKey: createHash4("sha256").update(this.owner).digest("hex"),
         repoHash,
         composeProject: `ccl-${repoHash.slice(0, 8)}-${suffix}`,
         state: "provisioning",
         sourceRoot,
         runtimeRoot,
-        workspace: join3(runtimeRoot, "workspace"),
-        manifestPath: join3(sourceRoot, ".codex-container-lab.yaml"),
+        workspace: join6(runtimeRoot, "workspace"),
+        manifestPath: join6(sourceRoot, ".codex-container-lab.yaml"),
         commandService: "pending",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -10101,8 +11556,8 @@ class ContainerLabService {
     if (!await exactDirectoryChain(this.roots.runtimeRoot, [lab.ownerKey, lab.id], "lab runtime directory")) {
       throw new Error("terminal provisioning diagnostic is unavailable");
     }
-    const path3 = join3(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
-    const metadata = await lstat7(path3).catch((error) => {
+    const path3 = join6(lab.runtimeRoot, PROVISIONING_FAILURE_DIAGNOSTIC_FILE);
+    const metadata = await lstat8(path3).catch((error) => {
       if (error.code === "ENOENT")
         return;
       throw error;
@@ -10110,7 +11565,7 @@ class ContainerLabService {
     if (!metadata || metadata.isSymbolicLink() || !metadata.isFile() || (metadata.mode & 511) !== 384) {
       throw new Error("terminal provisioning diagnostic is unavailable");
     }
-    const stored = await readFile5(path3, "utf8");
+    const stored = await readFile7(path3, "utf8");
     const text = stored.replace(/[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f]/g, "\uFFFD");
     if (Buffer.byteLength(text) > 8 * 1024)
       throw new Error("terminal provisioning diagnostic is unavailable");
@@ -10301,6 +11756,7 @@ class ContainerLabService {
       if (!await exactDirectoryChain(this.roots.stateRoot, ["owners", lab.ownerKey], "owner state directory")) {
         throw new Error("owner state directory changed during cleanup");
       }
+      await releaseLabSharedImageLeases(this.roots.stateRoot, lab);
       await removeLabState(this.roots.stateRoot, this.owner, id);
       return { labId: id, destroyed: true };
     }, { attempts: 600, delayMs: 50 }), { attempts: 600, delayMs: 50 });
@@ -10339,6 +11795,26 @@ class ContainerLabService {
         current.secretEnvironment = [...lab.secretEnvironment];
         current.managedImage = lab.managedImage;
       });
+      if (config.sharedImages.length > 0) {
+        const references = await ensureLabSharedImages(config, {
+          stateRoot: this.roots.stateRoot,
+          repoHash: lab.repoHash,
+          docker: this.docker,
+          signal
+        });
+        for (const profile of config.sharedImages) {
+          const reference = references.find((item) => item.profile === profile.name);
+          if (!reference)
+            throw new Error(`shared image profile was not ensured: ${profile.name}`);
+          await acquireSharedImageLease(this.roots.stateRoot, reference, this.owner, lab.id, {
+            repoHash: lab.repoHash,
+            platform: profile.platform
+          });
+        }
+        lab = await this.updateProvisioning(id, (current) => {
+          current.sharedImages = references;
+        });
+      }
       provisioningEnvironment = resolveProvisioningEnvironment(secretEnvironmentNames, this.environment);
       await this.assertProvisioning(id, signal);
       const head = (await runCommand("git", ["-C", lab.sourceRoot, "rev-parse", "HEAD"], { timeoutMs: 1e4, signal })).stdout.toString().trim();
@@ -10396,12 +11872,17 @@ class ContainerLabService {
           return;
         });
       }
-      if (runtime)
-        await destroyLabStack(runtime, this.docker).catch(() => {
-          return;
-        });
-      else if (dockerMaterializationStarted)
-        await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker, provisioningEnvironment).catch(() => {
+      let cleaned = true;
+      try {
+        if (runtime)
+          await destroyLabStack(runtime, this.docker);
+        else if (dockerMaterializationStarted)
+          await cleanupLabLabels(lab, lab.modeKind === "dockerfile", this.docker, provisioningEnvironment);
+      } catch {
+        cleaned = false;
+      }
+      if (cleaned)
+        await releaseLabSharedImageLeases(this.roots.stateRoot, lab).catch(() => {
           return;
         });
     }
@@ -10488,17 +11969,17 @@ class ContainerLabService {
     return ownerLockPath(this.roots.stateRoot, this.owner);
   }
   labLock(id) {
-    return join3(ownerDirectory(this.roots.stateRoot, this.owner), ".locks", `lab-${id}`);
+    return join6(ownerDirectory(this.roots.stateRoot, this.owner), ".locks", `lab-${id}`);
   }
   activityLock(id) {
-    return join3(ownerDirectory(this.roots.stateRoot, this.owner), ".locks", `activity-${id}`);
+    return join6(ownerDirectory(this.roots.stateRoot, this.owner), ".locks", `activity-${id}`);
   }
 }
 async function exactDirectoryChain(root, segments, label) {
-  let path3 = resolve3(root);
+  let path3 = resolve4(root);
   let info;
   try {
-    info = await lstat7(path3);
+    info = await lstat8(path3);
   } catch (error) {
     if (error.code === "ENOENT")
       return false;
@@ -10506,25 +11987,25 @@ async function exactDirectoryChain(root, segments, label) {
   }
   if (!info.isDirectory() || info.isSymbolicLink())
     throw new Error(`configured ${label} contains unsafe indirection`);
-  let expected = await realpath4(path3);
+  let expected = await realpath5(path3);
   for (const segment of segments) {
-    path3 = join3(path3, segment);
-    expected = join3(expected, segment);
+    path3 = join6(path3, segment);
+    expected = join6(expected, segment);
     try {
-      info = await lstat7(path3);
+      info = await lstat8(path3);
     } catch (error) {
       if (error.code === "ENOENT")
         return false;
       throw error;
     }
-    if (!info.isDirectory() || info.isSymbolicLink() || await realpath4(path3) !== expected) {
+    if (!info.isDirectory() || info.isSymbolicLink() || await realpath5(path3) !== expected) {
       throw new Error(`${label} contains unsafe indirection`);
     }
   }
   return true;
 }
 async function recoverLabSync(roots, lab) {
-  if (lab.runtimeRoot !== expectedLabRuntimeRoot(roots, lab.owner, lab.id) || lab.workspace !== join3(lab.runtimeRoot, "workspace")) {
+  if (lab.runtimeRoot !== expectedLabRuntimeRoot(roots, lab.owner, lab.id) || lab.workspace !== join6(lab.runtimeRoot, "workspace")) {
     throw new Error("lab runtime containment is invalid");
   }
   try {
@@ -10535,10 +12016,10 @@ async function recoverLabSync(roots, lab) {
       return;
     throw error;
   }
-  const journalDirectory = join3(lab.runtimeRoot, "sync", lab.id, "journals");
+  const journalDirectory = join6(lab.runtimeRoot, "sync", lab.id, "journals");
   let journals;
   try {
-    journals = await readdir2(journalDirectory);
+    journals = await readdir4(journalDirectory);
   } catch (error) {
     if (error.code === "ENOENT")
       return;
@@ -10571,7 +12052,7 @@ async function assertSourceRepositoryIdentity(lab) {
     "--path-format=absolute",
     "--git-common-dir"
   ], { timeoutMs: 1e4 })).stdout.toString().trim();
-  const actual = createHash3("sha256").update(await realpath4(commonGit)).digest("hex").slice(0, 12);
+  const actual = createHash4("sha256").update(await realpath5(commonGit)).digest("hex").slice(0, 12);
   if (actual !== lab.repoHash)
     throw new Error("lab source repository identity no longer matches durable state");
 }
@@ -10651,9 +12132,9 @@ function isRepositoryRelativeRunCwd(cwd) {
 function onceClosed(child) {
   if (child.exitCode !== null)
     return Promise.resolve(child.exitCode);
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     child.once("error", reject);
-    child.once("close", (code) => resolve4(code ?? 1));
+    child.once("close", (code) => resolve5(code ?? 1));
   });
 }
 
@@ -10776,6 +12257,35 @@ async function dispatch(service, args, signal) {
     }
     throw new UsageError("sync requires preview or apply");
   }
+  if (noun === "system") {
+    if (verb === "inventory") {
+      const flags = parseFlags(rest, new Set(["--max-age-hours", "--budget-bytes"]));
+      return await service.systemInventory({
+        maxAgeHours: optionalInteger(flags.one("--max-age-hours"), "--max-age-hours"),
+        budgetBytes: optionalInteger(flags.one("--budget-bytes"), "--budget-bytes")
+      });
+    }
+    if (verb === "gc") {
+      const flags = parseFlags(rest, new Set(["--resource", "--mode", "--max-age-hours", "--budget-bytes"]));
+      const resource = flags.required("--resource");
+      const mode = flags.required("--mode");
+      if (mode !== "plan" && mode !== "apply")
+        throw new UsageError("--mode must be plan or apply");
+      if (resource === "images") {
+        return await service.gcSharedImages(mode, {
+          maxAgeHours: optionalInteger(flags.one("--max-age-hours"), "--max-age-hours"),
+          budgetBytes: optionalInteger(flags.one("--budget-bytes"), "--budget-bytes")
+        });
+      }
+      if (resource === "cache") {
+        return await service.gcSharedImageCache(mode, {
+          budgetBytes: optionalInteger(flags.one("--budget-bytes"), "--budget-bytes")
+        });
+      }
+      throw new UsageError("--resource must be images or cache");
+    }
+    throw new UsageError("system requires inventory or gc");
+  }
   throw new UsageError(`unknown command: ${noun}`);
 }
 function parseGlobal(args) {
@@ -10867,6 +12377,13 @@ function integerFlag(value, flag, fallback) {
     throw new UsageError(`${flag} must be an integer`);
   return Number(value);
 }
+function optionalInteger(value, flag) {
+  if (value === undefined)
+    return;
+  if (!/^[0-9]+$/.test(value))
+    throw new UsageError(`${flag} must be an integer`);
+  return Number(value);
+}
 function direction(value) {
   if (value !== "push" && value !== "pull")
     throw new UsageError("--direction must be push or pull");
@@ -10890,13 +12407,15 @@ function helpText() {
     "  example: run --lab ID --cwd packages/api -- bun test",
     "logs --lab ID --service SERVICE [--tail-lines N]",
     "sync preview --lab ID --direction push|pull",
-    "sync apply --lab ID --direction push|pull --token TOKEN"
+    "sync apply --lab ID --direction push|pull --token TOKEN",
+    "system inventory [--max-age-hours N] [--budget-bytes N]",
+    "system gc --resource images|cache --mode plan|apply [--max-age-hours N] [--budget-bytes N]"
   ].join(`
 `);
 }
 if (import.meta.main)
   process.exit(await cliMain());
 export {
-  serializePublicJson,
-  cliMain
+  cliMain,
+  serializePublicJson
 };

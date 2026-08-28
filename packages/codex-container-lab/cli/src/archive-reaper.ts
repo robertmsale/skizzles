@@ -10,6 +10,7 @@ import {
   listLabs, markOwnerReaped, ownerDirectory, ownerLockPath, readLab,
   readOwnerManifest, removeLabState, resolveRoots, writeLab, type StateRoots,
 } from "./state";
+import { releaseLabSharedImageLeases } from "./shared-image-state";
 
 type ThreadState = "active" | "archived" | "uncertain";
 
@@ -262,6 +263,7 @@ async function cleanupExactLab(
     if (!await exactDirectoryChain(roots.stateRoot, ["owners", lab.ownerKey], "owner state directory")) {
       throw new Error("owner state directory disappeared");
     }
+    await releaseLabSharedImageLeases(roots.stateRoot, lab);
     await removeLabState(roots.stateRoot, lab.owner, lab.id);
   }, { attempts: 600, delayMs: 50 }), { attempts: 600, delayMs: 50 });
 }

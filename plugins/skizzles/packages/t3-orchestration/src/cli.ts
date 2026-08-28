@@ -48,21 +48,21 @@ function requireSelection(value, providerDriver) {
 // packages/t3-orchestration/src/config.ts
 var exports_config = {};
 __export(exports_config, {
-  token: () => token,
-  taskRuntimeMode: () => taskRuntimeMode,
-  taskProviderDefaults: () => taskProviderDefaults,
-  parseTailscaleGatewayPort: () => parseTailscaleGatewayPort,
-  origin: () => origin,
-  codexDefaults: () => codexDefaults,
-  applyTaskModelOverride: () => applyTaskModelOverride,
-  TAILSCALE_GATEWAY_PORT: () => TAILSCALE_GATEWAY_PORT,
-  TAILSCALE_ALLOWED_USERS: () => TAILSCALE_ALLOWED_USERS,
-  T3_HOME: () => T3_HOME,
-  SOCKET_PATH: () => SOCKET_PATH,
-  KEYCHAIN_SERVICE: () => KEYCHAIN_SERVICE,
-  KEYCHAIN_ACCOUNT: () => KEYCHAIN_ACCOUNT,
+  CODEX_HOME: () => CODEX_HOME,
   DEFAULT_TAILSCALE_GATEWAY_PORT: () => DEFAULT_TAILSCALE_GATEWAY_PORT,
-  CODEX_HOME: () => CODEX_HOME
+  KEYCHAIN_ACCOUNT: () => KEYCHAIN_ACCOUNT,
+  KEYCHAIN_SERVICE: () => KEYCHAIN_SERVICE,
+  SOCKET_PATH: () => SOCKET_PATH,
+  T3_HOME: () => T3_HOME,
+  TAILSCALE_ALLOWED_USERS: () => TAILSCALE_ALLOWED_USERS,
+  TAILSCALE_GATEWAY_PORT: () => TAILSCALE_GATEWAY_PORT,
+  applyTaskModelOverride: () => applyTaskModelOverride,
+  codexDefaults: () => codexDefaults,
+  origin: () => origin,
+  parseTailscaleGatewayPort: () => parseTailscaleGatewayPort,
+  taskProviderDefaults: () => taskProviderDefaults,
+  taskRuntimeMode: () => taskRuntimeMode,
+  token: () => token
 });
 import { join } from "path";
 var {$ } = globalThis.Bun;
@@ -172,13 +172,13 @@ var init_config = __esm(() => {
 // packages/t3-orchestration/src/remote-config.ts
 var exports_remote_config = {};
 __export(exports_remote_config, {
-  resolveRemoteConfigPath: () => resolveRemoteConfigPath,
-  requireLocalReaperTransport: () => requireLocalReaperTransport,
-  normalizeRemoteUrl: () => normalizeRemoteUrl,
-  configuredRemoteUrl: () => configuredRemoteUrl,
-  configureRemoteUrl: () => configureRemoteUrl,
+  REMOTE_CONFIG_PATH: () => REMOTE_CONFIG_PATH,
   clearRemoteUrl: () => clearRemoteUrl,
-  REMOTE_CONFIG_PATH: () => REMOTE_CONFIG_PATH
+  configureRemoteUrl: () => configureRemoteUrl,
+  configuredRemoteUrl: () => configuredRemoteUrl,
+  normalizeRemoteUrl: () => normalizeRemoteUrl,
+  requireLocalReaperTransport: () => requireLocalReaperTransport,
+  resolveRemoteConfigPath: () => resolveRemoteConfigPath
 });
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { dirname, join as join2, resolve } from "path";
@@ -269,22 +269,22 @@ var init_remote_config = __esm(() => {
 // packages/t3-orchestration/src/worktree-reaper-config.ts
 var exports_worktree_reaper_config = {};
 __export(exports_worktree_reaper_config, {
-  resolveProjectPolicy: () => resolveProjectPolicy,
-  resolveDenyPaths: () => resolveDenyPaths,
-  relativeInside: () => relativeInside,
-  parseReaperConfig: () => parseReaperConfig,
-  normalizeRelative: () => normalizeRelative,
-  matchesAnyGlob: () => matchesAnyGlob,
-  matchRelativeGlob: () => matchRelativeGlob,
-  loadReaperConfig: () => loadReaperConfig,
-  isDeniedPath: () => isDeniedPath,
-  extraCommandToStrategy: () => extraCommandToStrategy,
-  expandUserPath: () => expandUserPath,
-  defaultReaperConfigPath: () => defaultReaperConfigPath,
-  defaultReaperConfig: () => defaultReaperConfig,
-  assertAllowedCleanCommand: () => assertAllowedCleanCommand,
+  GENERATED_ARTIFACT_DIRS: () => GENERATED_ARTIFACT_DIRS,
   assertAllowedArtifact: () => assertAllowedArtifact,
-  GENERATED_ARTIFACT_DIRS: () => GENERATED_ARTIFACT_DIRS
+  assertAllowedCleanCommand: () => assertAllowedCleanCommand,
+  defaultReaperConfig: () => defaultReaperConfig,
+  defaultReaperConfigPath: () => defaultReaperConfigPath,
+  expandUserPath: () => expandUserPath,
+  extraCommandToStrategy: () => extraCommandToStrategy,
+  isDeniedPath: () => isDeniedPath,
+  loadReaperConfig: () => loadReaperConfig,
+  matchRelativeGlob: () => matchRelativeGlob,
+  matchesAnyGlob: () => matchesAnyGlob,
+  normalizeRelative: () => normalizeRelative,
+  parseReaperConfig: () => parseReaperConfig,
+  relativeInside: () => relativeInside,
+  resolveDenyPaths: () => resolveDenyPaths,
+  resolveProjectPolicy: () => resolveProjectPolicy
 });
 import { readFile as readFile2, realpath } from "fs/promises";
 import { homedir } from "os";
@@ -1151,32 +1151,32 @@ var init_worktree_reaper_lease = () => {};
 // packages/t3-orchestration/src/worktree-reaper.ts
 var exports_worktree_reaper = {};
 __export(exports_worktree_reaper, {
-  writeReaperState: () => writeReaperState,
-  taskTargetIdentityChanged: () => taskTargetIdentityChanged,
-  taskListEnumerationTruncated: () => taskListEnumerationTruncated,
-  shouldSkipUnchanged: () => shouldSkipUnchanged,
-  sameFsIdentity: () => sameFsIdentity,
-  runIdentityBoundClean: () => runIdentityBoundClean,
-  resolveRegisteredWorktree: () => resolveRegisteredWorktree,
-  resolveOccupiedWorktrees: () => resolveOccupiedWorktrees,
-  readReaperState: () => readReaperState,
-  parseOccupiedWorktrees: () => parseOccupiedWorktrees,
-  parseListCleanableResult: () => parseListCleanableResult,
-  parseGitWorktreePorcelain: () => parseGitWorktreePorcelain,
-  otherTaskOccupyingPath: () => otherTaskOccupyingPath,
-  normalizeBranch: () => normalizeBranch,
-  isUnknownOperationError: () => isUnknownOperationError,
-  isRunningTask: () => isRunningTask,
-  isLivenessUnavailable: () => isLivenessUnavailable,
-  isFlutterPubspec: () => isFlutterPubspec,
-  isCleanableLifecycle: () => isCleanableLifecycle,
-  formatReaperLogs: () => formatReaperLogs,
-  discoverCleanTargets: () => discoverCleanTargets,
-  defaultStatePath: () => defaultStatePath,
-  createDefaultReaperDependencies: () => createDefaultReaperDependencies,
-  cleanSettledWorktrees: () => cleanSettledWorktrees,
+  ORCHESTRATION_LAUNCH_AGENT_LABEL: () => ORCHESTRATION_LAUNCH_AGENT_LABEL,
   REAPER_LAUNCH_AGENT_LABEL: () => REAPER_LAUNCH_AGENT_LABEL,
-  ORCHESTRATION_LAUNCH_AGENT_LABEL: () => ORCHESTRATION_LAUNCH_AGENT_LABEL
+  cleanSettledWorktrees: () => cleanSettledWorktrees,
+  createDefaultReaperDependencies: () => createDefaultReaperDependencies,
+  defaultStatePath: () => defaultStatePath,
+  discoverCleanTargets: () => discoverCleanTargets,
+  formatReaperLogs: () => formatReaperLogs,
+  isCleanableLifecycle: () => isCleanableLifecycle,
+  isFlutterPubspec: () => isFlutterPubspec,
+  isLivenessUnavailable: () => isLivenessUnavailable,
+  isRunningTask: () => isRunningTask,
+  isUnknownOperationError: () => isUnknownOperationError,
+  normalizeBranch: () => normalizeBranch,
+  otherTaskOccupyingPath: () => otherTaskOccupyingPath,
+  parseGitWorktreePorcelain: () => parseGitWorktreePorcelain,
+  parseListCleanableResult: () => parseListCleanableResult,
+  parseOccupiedWorktrees: () => parseOccupiedWorktrees,
+  readReaperState: () => readReaperState,
+  resolveOccupiedWorktrees: () => resolveOccupiedWorktrees,
+  resolveRegisteredWorktree: () => resolveRegisteredWorktree,
+  runIdentityBoundClean: () => runIdentityBoundClean,
+  sameFsIdentity: () => sameFsIdentity,
+  shouldSkipUnchanged: () => shouldSkipUnchanged,
+  taskListEnumerationTruncated: () => taskListEnumerationTruncated,
+  taskTargetIdentityChanged: () => taskTargetIdentityChanged,
+  writeReaperState: () => writeReaperState
 });
 import { spawn } from "child_process";
 import { lstat as lstat2, mkdir as mkdir3, open as open2, readdir, readFile as readFile3, realpath as realpath2, rm as rm3, writeFile as writeFile3 } from "fs/promises";

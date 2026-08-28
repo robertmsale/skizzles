@@ -1101,6 +1101,33 @@ ports:
     expect(success).not.toHaveProperty("dockerDiagnostic");
   });
 
+  test("system inventory is bounded and aggregates other owners", async () => {
+    const owned = await durableFixture("thread-inventory-owned", "failed");
+    const docker = new RecordingDocker();
+    const service = new ContainerLabService(owned.owner, {
+      stateRoot: owned.roots.stateRoot,
+      runtimeRoot: owned.roots.runtimeRoot,
+    }, docker);
+    await ensureOwner(owned.roots.stateRoot, "thread-inventory-other");
+    const otherOwner = "thread-inventory-other";
+    const otherRuntime = join(owned.roots.runtimeRoot, ownerKey(otherOwner), "lab-1");
+    await writeLab(owned.roots, {
+      ...owned.lab,
+      owner: otherOwner,
+      ownerKey: ownerKey(otherOwner),
+      composeProject: "ccl-other0001",
+      runtimeRoot: otherRuntime,
+      workspace: join(otherRuntime, "workspace"),
+    });
+    const inventory = await service.systemInventory() as Record<string, unknown>;
+    expect(inventory.ok).toBe(true);
+    expect(inventory.labs).toEqual({ owned: 1, other: 1 });
+    expect(inventory.builderCache).toMatchObject({ present: expect.any(Boolean), namespaceOwned: expect.any(Boolean), bytes: expect.any(Number) });
+    expect(JSON.stringify(inventory)).not.toContain(owned.owner);
+    expect(JSON.stringify(inventory)).not.toContain(owned.lab.sourceRoot);
+    expect(docker.calls.some((args) => args.includes("prune"))).toBe(false);
+  });
+
   test("loads legacy version-1 ready state without secret metadata for status and destroy", async () => {
     const fixture = await durableFixture("thread-legacy-ready", "ready", true);
     const path = labManifestPath(fixture.roots.stateRoot, fixture.owner, fixture.lab.id);
@@ -1261,7 +1288,7 @@ function readyRuntime(sourceRoot: string, runtimeRoot: string): NonNullable<LabM
   const baseFile = join(runtimeRoot, "base.compose.yaml");
   const overrideFile = join(runtimeRoot, "override.compose.yaml");
   return {
-    config: { repoRoot: sourceRoot, manifestPath: join(sourceRoot, ".codex-container-lab.yaml"), mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
+    config: { repoRoot: sourceRoot, manifestPath: join(sourceRoot, ".codex-container-lab.yaml"), mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [], sharedImages: [] },
     composeArgs: ["compose", "--project-directory", sourceRoot, "--project-name", "ccl-durable", "-f", baseFile, "-f", overrideFile],
     baseFile, overrideFile, findings: [],
   };

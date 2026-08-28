@@ -1,0 +1,16 @@
+compose:
+  files: [compose.yaml]
+  command_service: app
+shared_images:
+  toolchain:
+    context: environment
+    dockerfile: environment/Dockerfile
+    platform: linux/arm64
+    build_args: {}
+    services: [app]
+runtime:
+  workspace: /workspace
+  shell: [/bin/bash, -lc]
+ports: {}
+environment: []
+secret_environment: []

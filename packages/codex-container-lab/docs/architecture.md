@@ -19,6 +19,8 @@ Arbitrary commands have exactly one lifecycle. `codex-container-lab run` starts 
 
 The lifecycle retains one Compose path. Project Compose files remain in the consuming checkout and are passed to Docker in manifest order. Image and Dockerfile modes generate an internal base Compose file. Every mode receives a generated override containing exact labels, the isolated workspace bind, `init`, declared random loopback publications, and non-sensitive lab metadata. Dockerfile mode also applies the exact labels at build time; cleanup verifies them on the tagged image and removes only its validated immutable image id.
 
+Named `shared_images` profiles are a separate Compose-mode contract. Container Lab fingerprints the declared environment context, takes a digest-scoped lock outside owner directories, and builds through the dedicated `skizzles-shared-image` BuildKit builder. The resulting image is tagged `skizzles-shared-image:env-<digest>` and labeled with immutable Skizzles provenance (`managed`, `schema`, `kind`, `profile`, `digest`, `repo`, `platform`, `created-at`). Active leases and last-use timestamps live in `{stateRoot}/shared-images/<digest>.json`, not in image labels. A Lab records the exact reference and acquires a lease before Compose up; successful, failed, cancelled, recovered, and reaped cleanup release that lease only after exact Lab resource removal. `lab destroy` never deletes a shared image or the shared builder cache.
+
 An explicit `runtime.compiler_cache: sccache-redis` opt-in adds one shared
 Skizzles-owned Redis container on one external bridge network before Compose
 up. The command service keeps its downstream-owned image and command; the
@@ -52,6 +54,8 @@ The stable administrative response shapes are:
 - `lab destroy`: `{labId,destroyed}`; `lab destroy-all`: `{destroyed}`
 - `logs`: `{labId,service,transcript:{text,truncated,bytes,lines}}`
 - `sync preview`: `{labId,direction,token,expiresAt,changes,conflicts,changeCount,conflictCount,truncated}`; `sync apply`: `{labId,direction,applied}`
+- `system inventory`: `{ok,labs:{owned,other},labResources:{containers,volumes,networks},sharedImages:{cataloged,present,activeLeases,eligible,bytes,reclaimableBytes,untracked},builderCache:{present,namespaceOwned,bytes,reclaimableBytes?},dockerAvailable}` plus the same optional `dockerDiagnostic` as `health`. Other-owner labs are counted, never identified. Builder-cache bytes are reported only for the verified `skizzles-shared-image` namespace. Shared-image GC eligibility uses the optional `--max-age-hours` and `--budget-bytes` policy inputs.
+- `system gc --resource images|cache --mode plan|apply`: image GC returns `{mode,considered,eligible,removed,retained,bytes,findings}`; cache GC returns `{mode,builder,bytes,reclaimableBytes?,applied,findings}`. Findings are bounded codes/details. Apply removes only this state root's cataloged images after digest-lock revalidation and only with `docker image rm --no-prune`. Cache apply prunes only the verified `skizzles-shared-image` builder.
 
 Administrative JSON is capped at 16 KiB. Service transcript text is capped at 8 KiB and 500 requested lines. If unusual JSON escaping would exceed the public ceiling, the command fails closed instead of emitting an oversized record. `run` has no JSON footer: its complete output is the attached terminal stream, and Codex's command-output supervisor provides the durable inspection artifact when it compacts a long command.
 

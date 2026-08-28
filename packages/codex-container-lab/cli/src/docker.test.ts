@@ -445,7 +445,7 @@ describe("exact Docker cleanup", () => {
     const tag = `codex-container-lab:${"a".repeat(24)}-lab-1`;
     expect(docker.calls.find((args) => args[0] === "image" && args[1] === "inspect")?.at(-1)).toBe(tag);
     expect(docker.calls.filter((args) => args[0] === "image" && args[1] === "rm")).toEqual([
-      ["image", "rm", imageId],
+      ["image", "rm", "--no-prune", imageId],
     ]);
   });
 
@@ -944,6 +944,7 @@ function runtime(): LabRuntime {
       ports: [],
       forwardEnvironment: [],
       secretEnvironment: [],
+      sharedImages: [],
     },
     composeArgs: ["compose", "--project-name", "ccl-project"],
     overrideFile: "/tmp/runtime/override.compose.yaml",

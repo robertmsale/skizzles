@@ -1,6 +1,8 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, posix, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { isPlatform, type SharedImageProfile } from "./shared-image";
+export type { SharedImageProfile } from "./shared-image";
 
 export const manifestName = ".codex-container-lab.yaml";
 
@@ -40,6 +42,7 @@ interface ParsedManifest {
   ports: Record<string, PortManifest>;
   environment: string[];
   secret_environment: string[];
+  sharedImages: SharedImageProfile[];
 }
 
 export type CompilerCache = "sccache-redis";
@@ -254,11 +257,77 @@ function parseEnvironment(value: unknown, path: IssuePath, issues: ValidationIss
   return parseStringArray(value, path, issues, parseEnvironmentName, "must be an environment variable name", 0);
 }
 
+function parseProfileName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const parsed = value.trim();
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(parsed) ? parsed : undefined;
+}
+
+function parseBuildArgValue(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.includes("\0") || Buffer.byteLength(value, "utf8") > 4_096) return undefined;
+  if (/BEGIN [A-Z0-9 ]*PRIVATE KEY/.test(value) || /-----BEGIN/.test(value)) return undefined;
+  return value;
+}
+
+function isSecretBuildArgName(name: string): boolean {
+  const normalized = name.toUpperCase();
+  return /(?:^|_)(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|SSH)(?:_|$)/.test(normalized);
+}
+
+function parseSharedImageProfile(name: string, value: unknown, path: IssuePath, issues: ValidationIssue[]): SharedImageProfile | undefined {
+  const record = asObject(value, path, issues);
+  if (!record) return undefined;
+  rejectUnknownKeys(record, ["context", "dockerfile", "target", "platform", "build_args", "services"], path, issues);
+  const context = requiredString(record, "context", path, issues, parseRelativePath, "must be a non-empty relative path");
+  const dockerfile = requiredString(record, "dockerfile", path, issues, parseRelativePath, "must be a non-empty relative path");
+  const platform = requiredString(record, "platform", path, issues, (candidate) => typeof candidate === "string" && isPlatform(candidate.trim()) ? candidate.trim() : undefined, "must be a normalized os/arch platform");
+  let target: string | undefined;
+  if (hasOwn(record, "target")) {
+    target = requiredString(record, "target", path, issues, parseNonEmptyTrimmedString, "must be a non-empty target name");
+  }
+  const buildArgs: Record<string, string> = {};
+  if (hasOwn(record, "build_args")) {
+    const args = asObject(record.build_args, [...path, "build_args"], issues);
+    if (args) {
+      for (const [key, raw] of Object.entries(args)) {
+        if (parseEnvironmentName(key) === undefined) addIssue(issues, [...path, "build_args", key], "must be a build-arg name");
+        else if (isSecretBuildArgName(key)) addIssue(issues, [...path, "build_args", key], "must not be a secret or credential name");
+        const parsed = parseBuildArgValue(raw);
+        if (parsed === undefined) addIssue(issues, [...path, "build_args", key], "must be a literal non-secret string");
+        else if (parseEnvironmentName(key) !== undefined && !isSecretBuildArgName(key)) buildArgs[key] = parsed;
+      }
+    }
+  }
+  const services = hasOwn(record, "services")
+    ? parseStringArray(record.services, [...path, "services"], issues, parseServiceName, "must be a Compose service name", 1)
+    : (addIssue(issues, [...path, "services"], "is required"), []);
+  if (new Set(services).size !== services.length) addIssue(issues, [...path, "services"], "service mappings must be unique");
+  if (context === undefined || dockerfile === undefined || platform === undefined) return undefined;
+  return { name, context, dockerfile, platform, buildArgs, services, ...(target === undefined ? {} : { target }) };
+}
+
+function parseSharedImages(value: unknown, path: IssuePath, issues: ValidationIssue[]): SharedImageProfile[] {
+  if (value === undefined) return [];
+  const record = asObject(value, path, issues);
+  if (!record) return [];
+  const names = Object.keys(record);
+  if (names.length === 0) addIssue(issues, path, "must declare at least one named environment profile");
+  if (names.length > 16) addIssue(issues, path, "must declare at most 16 named environment profiles");
+  const parsed: SharedImageProfile[] = [];
+  for (const name of names) {
+    const profileName = parseProfileName(name);
+    if (profileName === undefined) addIssue(issues, [...path, name], "must be a lowercase profile name");
+    const profile = parseSharedImageProfile(profileName ?? name.trim(), record[name], [...path, name], issues);
+    if (profile && profileName !== undefined) parsed.push(profile);
+  }
+  return parsed;
+}
+
 function validateManifest(document: unknown): ParsedManifest {
   const issues: ValidationIssue[] = [];
   const manifest = asObject(document, [], issues);
   if (!manifest) throw new Error(`invalid ${manifestName}: ${issues.map(formatIssue).join("; ")}`);
-  rejectUnknownKeys(manifest, ["compose", "dockerfile", "image", "runtime", "ports", "environment", "secret_environment"], [], issues);
+  rejectUnknownKeys(manifest, ["compose", "dockerfile", "image", "runtime", "ports", "environment", "secret_environment", "shared_images"], [], issues);
 
   const compose = hasOwn(manifest, "compose") ? parseCompose(manifest.compose, ["compose"], issues) : undefined;
   const dockerfile = hasOwn(manifest, "dockerfile") ? parseDockerfile(manifest.dockerfile, ["dockerfile"], issues) : undefined;
@@ -277,6 +346,7 @@ function validateManifest(document: unknown): ParsedManifest {
 
   const ports = parsePorts(manifest.ports, ["ports"], issues);
   const environment = parseEnvironment(manifest.environment, ["environment"], issues);
+  const sharedImages = parseSharedImages(manifest.shared_images, ["shared_images"], issues);
   if (new Set(environment).size !== environment.length) {
     addIssue(issues, ["environment"], "environment forwarding names must be unique");
   }
@@ -293,8 +363,16 @@ function validateManifest(document: unknown): ParsedManifest {
     addIssue(issues, ["ports"], "service and target pairs must be unique");
   }
 
+  if (sharedImages.length > 0 && !hasOwn(manifest, "compose")) {
+    addIssue(issues, ["shared_images"], "requires compose mode; Dockerfile and image shorthand are not reusable environment profiles");
+  }
+  const mappedServices = sharedImages.flatMap((profile) => profile.services);
+  if (new Set(mappedServices).size !== mappedServices.length) {
+    addIssue(issues, ["shared_images"], "each service may map to at most one environment profile");
+  }
+
   if (issues.length > 0) throw new Error(`invalid ${manifestName}: ${issues.map(formatIssue).join("; ")}`);
-  return { compose, dockerfile, image, runtime, ports, environment, secret_environment: secretEnvironment };
+  return { compose, dockerfile, image, runtime, ports, environment, secret_environment: secretEnvironment, sharedImages };
 }
 
 /** Resolve a project-owned path and reject lexical traversal outside the repository. */
@@ -353,6 +431,7 @@ export interface LabConfig {
   ports: DeclaredPort[];
   forwardEnvironment: string[];
   secretEnvironment: string[];
+  sharedImages: SharedImageProfile[];
 }
 
 export function parseLabConfig(source: string, repoRoot: string, sourcePath = resolve(repoRoot, manifestName)): LabConfig {
@@ -394,6 +473,11 @@ export function parseLabConfig(source: string, repoRoot: string, sourcePath = re
     ports: Object.entries(value.ports).map(([name, port]) => ({ name, ...port })),
     forwardEnvironment: [...value.environment],
     secretEnvironment: [...value.secret_environment],
+    sharedImages: value.sharedImages.map((profile) => ({
+      ...profile,
+      context: resolveRepoPath(root, profile.context),
+      dockerfile: resolveRepoPath(root, profile.dockerfile),
+    })),
   };
 }
 
@@ -410,6 +494,12 @@ export async function loadLabConfig(repoRoot: string, sourcePath = resolve(repoR
   if (config.mode.kind === "dockerfile") {
     if (!(await stat(config.mode.context)).isDirectory()) throw new Error("dockerfile context must be a directory");
     if (!(await stat(config.mode.dockerfile)).isFile()) throw new Error("dockerfile path must be a regular file");
+  }
+  for (const profile of config.sharedImages) {
+    await assertRealPathInside(root, profile.context);
+    await assertRealPathInside(root, profile.dockerfile);
+    if (!(await stat(profile.context)).isDirectory()) throw new Error(`shared image ${profile.name}: context must be a directory`);
+    if (!(await stat(profile.dockerfile)).isFile()) throw new Error(`shared image ${profile.name}: dockerfile must be a regular file`);
   }
   return config;
 }
