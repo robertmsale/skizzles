@@ -8,16 +8,22 @@ import { AggregatorState } from "./state.ts";
 const DEFAULT_RUNTIME_DIRECTORY = join(tmpdir(), `skizzles-${typeof process.getuid === "function" ? process.getuid() : "user"}`);
 export const DEFAULT_SOCKET_PATH = join(DEFAULT_RUNTIME_DIRECTORY, "codex-app-server.sock");
 export const DEFAULT_DATABASE_PATH = join(homedir(), ".local", "state", "skizzles", "codex-app-server.sqlite3");
+export const DEFAULT_HTTP_HOST = "127.0.0.1";
+export const DEFAULT_HTTP_PORT = 8788;
 
 const USAGE = `codex-app-server-aggregator serve [options]
 codex-app-server-aggregator connect [--socket PATH]
 
 serve runs one persistent app-server peer on a mode-0600 Unix socket.
 connect relays headerless JSON-RPC JSONL between stdio and that socket.
+serve also exposes versioned REST resources for one-off HTTP clients.
 
 Serve options:
   --socket PATH               Unix socket (default: ${DEFAULT_SOCKET_PATH})
   --database PATH             SQLite database (default: ${DEFAULT_DATABASE_PATH})
+  --http-host HOST            REST bind host (default: ${DEFAULT_HTTP_HOST})
+  --http-port PORT            REST port, or 0 for an ephemeral port (default: ${DEFAULT_HTTP_PORT})
+  --http-token-env NAME       Read the REST bearer token from this environment variable
   --image IMAGE               Container image (default: ${DEFAULT_IMAGE})
   --codex-home-template DIR   Read-only seed copied to in-container CODEX_HOME
   --provider-command COMMAND  Trusted command started inside each container
@@ -39,6 +45,9 @@ export type CliOptions = {
   providerReadyUrl: string | undefined;
   passEnv: string[];
   dockerBinary: string;
+  httpHost: string;
+  httpPort: number;
+  httpTokenEnv: string | undefined;
 };
 
 export async function cliMain(argv: string[]): Promise<number> {
@@ -56,10 +65,16 @@ export async function cliMain(argv: string[]): Promise<number> {
     state,
     factory,
     removeOrphan: (machine) => factory.remove(machine.containerId),
+    http: {
+      hostname: options.httpHost,
+      port: options.httpPort,
+      ...resolveHttpToken(options.httpTokenEnv),
+    },
     log: (message) => process.stderr.write(`${message}\n`),
   });
   await daemon.start();
   process.stderr.write(`codex-app-server aggregator listening on ${options.socketPath}\n`);
+  process.stderr.write(`codex-app-server REST API listening on ${daemon.httpUrl?.origin}\n`);
   await waitForShutdownSignal();
   await daemon.close();
   return 0;
@@ -78,6 +93,9 @@ export function parseArgs(argv: string[]): CliOptions {
     else if ([
       "--socket",
       "--database",
+      "--http-host",
+      "--http-port",
+      "--http-token-env",
       "--image",
       "--codex-home-template",
       "--provider-command",
@@ -103,7 +121,23 @@ export function parseArgs(argv: string[]): CliOptions {
     providerReadyUrl: values.get("--provider-ready-url"),
     passEnv,
     dockerBinary: values.get("--docker") ?? "docker",
+    httpHost: values.get("--http-host") ?? DEFAULT_HTTP_HOST,
+    httpPort: parsePort(values.get("--http-port") ?? String(DEFAULT_HTTP_PORT)),
+    httpTokenEnv: values.get("--http-token-env"),
   };
+}
+
+function parsePort(value: string): number {
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) throw new Error("--http-port must be an integer from 0 through 65535");
+  return port;
+}
+
+function resolveHttpToken(name: string | undefined): { token?: string } {
+  if (!name) return {};
+  const token = process.env[name];
+  if (!token) throw new Error(`REST bearer token environment variable is empty or unset: ${name}`);
+  return { token };
 }
 
 function waitForShutdownSignal(): Promise<void> {

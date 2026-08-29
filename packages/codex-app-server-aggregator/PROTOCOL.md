@@ -7,10 +7,17 @@ run.
 
 ## Bottom line
 
-The aggregation shape works without inventing an agent protocol. A client can speak the normal,
-headerless Codex JSON-RPC envelopes over JSONL to one long-lived Bun daemon while that process owns
-one real `codex app-server --stdio` connection per container. The daemon listens on a mode-0600
-Unix socket; an optional stdio connector relays the same bytes and is not a second protocol.
+The aggregation shape works without changing the Codex peer protocol. A client can speak the
+normal, headerless Codex JSON-RPC envelopes over JSONL to one long-lived Bun daemon while that
+process owns one real `codex app-server --stdio` connection per container. The daemon listens on a
+mode-0600 Unix socket and an optional stdio connector relays the same bytes. The versioned REST
+surface is an explicitly aggregate-owned HTTP projection for short-lived callers, not a Codex
+app-server transport or a claim that backend app-servers implement those routes.
+
+The daemon owns the aggregator core rather than lending it to a connector process. One JSONL peer
+and concurrent REST requests therefore share initialization, topology, backend writers, reverse
+requests, and teardown decisions. Disconnecting the JSONL peer drops only that client session;
+archive/delete or daemon shutdown closes the affected backend.
 
 The protocol does not supply a caller-selected thread ID, project registry, or container-routing
 field. The aggregator therefore resolves `thread/start.params.cwd` against its extension-owned
@@ -47,9 +54,26 @@ backend-minted thread IDs, thread-scoped routing keys, lifecycle notifications, 
 server requests. Those surfaces remain shape-compatible and backend IDs remain authoritative.
 
 Skizzles extends only aggregate-owned concerns: the `skizzles/project/*` registry methods, host-CWD
-validation and DTO virtualization, persistent topology/machine bookkeeping, and Unix-socket serving.
-The Unix socket and stdio connector carry unchanged JSONL. SQLite does not claim to revive a dead
-inner transport: restart marks retained threads unloaded and removes exact persisted containers.
+validation and DTO virtualization, persistent topology/machine bookkeeping, Unix-socket serving,
+and the versioned REST resource projection. The Unix socket and stdio connector carry unchanged
+JSONL. SQLite does not claim to revive a dead inner transport: restart marks retained threads
+unloaded and removes exact persisted containers.
+
+### REST event and callback boundary
+
+REST commands are ordinary finite HTTP requests. Backend notifications are copied into a bounded
+in-memory journal and exposed by cursor polling; pending bidirectional app-server requests are
+listed separately and accept explicit JSON-RPC result/error outcomes. The journal has a per-process
+stream ID, so a caller can distinguish a daemon restart from an idle stream. HTTP 410 requires the
+caller to reconcile from aggregate topology and pending requests. The journal is deliberately not
+persisted: retaining arbitrary item and turn notifications would silently create a second rollout
+store and contradict intentional archive loss.
+
+The first successful JSONL or REST initialization initializes the shared inner fleet. Later JSONL
+sessions receive the cached real initialization result, while their notification opt-outs are
+enforced at that session's edge. Inner connections retain every notification needed by aggregate
+topology and REST polling. Initialization-time notifications remain ordered after the JSONL
+initialize response.
 
 ## What the runtime actually allows
 
@@ -160,6 +184,9 @@ auth seed is mechanism, not a credential-security design.
 | Always trust backend archive immediately after start. | Start then archive before a first turn. | Rejected: the ID exists before its rollout does. Narrow synthesis is required to release that machine. |
 | Serve the outer peer directly on stdio. | EOF process-lifetime probe. | Rejected: the process exited immediately with its client, so persistence did not make it a daemon. |
 | Serve unchanged JSONL on a Unix socket with a raw stdio connector. | Mode check, connector-disconnect/reconnect test, and database restart test. | Selected: one daemon survives client processes without adding a protocol. |
+| Create a fresh aggregator session for each HTTP request. | Existing close semantics plus start/send/read lifecycle test. | Rejected: completing one HTTP call would destroy the stdio writer needed by the next call. |
+| Give REST and JSONL separate aggregator cores. | Topology/backend ownership trace. | Rejected: two in-memory routing maps could claim the same persisted thread while only one owns its writer. |
+| Adapt REST and JSONL onto one daemon-owned core. | Concurrent REST/JSONL, relay-disconnect, initialization-order, event-polling, callback-response, and archive tests. | Selected: finite HTTP calls and the live peer share one routing truth and explicit teardown. |
 | Use direct stdio per container. | Real Docker initialization, start, turn, archive, and removal. | Selected for inner connections: simple and fully bidirectional; restart cleanup acknowledges that it is not reattachable. |
 | Increase the universal RPC timeout to cover cloning. | Delayed attached-process test with a short request timeout. | Rejected: attachment is not readiness, and any fixed increase preserves the race. Gate the first request instead. |
 | Use experimental listen-WebSocket instead. | Generated/runtime CLI surface and official transport contract. | Viable later for reconnect, but deliberately not the baseline while the transport is experimental. |

@@ -1,9 +1,11 @@
 # Codex app-server aggregator
 
-This package is one long-lived, multi-project Codex app-server peer. Clients still speak Codex's
-headerless JSON-RPC 2.0 envelopes over JSONL; the aggregator adds no second agent protocol. A
-mode-0600 Unix socket keeps the daemon alive independently of any stdio client, and the `connect`
-command is a byte-for-byte stdio relay for clients that need the usual process shape.
+This package is one long-lived, multi-project Codex app-server peer. Codex clients still speak
+Codex's headerless JSON-RPC 2.0 envelopes over JSONL. A mode-0600 Unix socket keeps the daemon
+alive independently of any stdio client, and the `connect` command is a byte-for-byte stdio relay
+for clients that need the usual process shape. A versioned REST projection exposes common project,
+thread, turn, lifecycle, event, and server-request operations to short-lived HTTP clients; both
+transports use the same in-process aggregator and backend connections.
 
 The daemon starts one real `codex app-server --stdio` inside each managed Docker container. A
 registered host checkout is only a routing key and the source of its Git origin. Each container
@@ -28,8 +30,9 @@ bun run packages/codex-app-server-aggregator/src/cli.ts serve
 
 The defaults are a per-user socket below the system temporary directory and a SQLite database at
 `~/.local/state/skizzles/codex-app-server.sqlite3`. Use `--socket` and `--database` to override
-them. The daemon accepts one active outer app-server connection at a time; that connection can
-host threads from every registered project.
+them. The daemon accepts one active outer app-server connection at a time; that connection can host
+threads from every registered project. REST calls can run concurrently with it. The REST listener
+defaults to `http://127.0.0.1:8788`; use `--http-host` and `--http-port` to override it.
 
 Before a normal app-server client initializes, register a Git checkout through the same JSON-RPC
 surface. The path must be an absolute checkout root with a container-reachable `origin` remote:
@@ -46,8 +49,55 @@ Then configure the app-server client to launch the relay:
 bun run packages/codex-app-server-aggregator/src/cli.ts connect
 ```
 
-Ending that relay closes its containers but not the daemon. A later relay can reconnect to the
-same registry and retained thread snapshots.
+Ending that relay does not close its containers or the daemon. A later relay reconnects to the same
+live aggregator core. Explicit archive/delete and daemon shutdown are the container teardown
+boundaries.
+
+## REST API
+
+REST calls initialize the shared app-server core on demand. Register at least one project before
+calling a thread endpoint. Request and response bodies preserve the corresponding app-server
+parameter/result DTOs; the resource path supplies identifiers such as `threadId`.
+
+| HTTP route | App-server operation |
+| --- | --- |
+| `GET`, `POST`, `DELETE /v1/projects` | List, add, or remove registered projects. Delete uses the `cwd` query parameter. |
+| `GET`, `POST /v1/threads` | `thread/list` or `thread/start`. Common list filters are query parameters. |
+| `GET /v1/threads/:id` | `thread/read`; `includeTurns` defaults to `true`. |
+| `POST /v1/threads/:id/turns` | `turn/start`; the body supplies `input` and other native parameters. |
+| `POST /v1/threads/:id/{fork,resume,interrupt}` | The corresponding thread/turn operation. |
+| `POST /v1/threads/:id/archive`, `DELETE /v1/threads/:id` | Intentional destructive release. |
+| `GET /v1/threads/loaded` | Aggregate `thread/loaded/list`. |
+| `GET /v1/events?after=N&stream=ID` | Poll the bounded in-memory app-server notification journal. |
+| `GET /v1/server-requests` | List pending app-server callbacks such as approvals. |
+| `POST /v1/server-requests/:id/responses` | Complete a pending callback with a JSON-RPC `result` or `error` outcome. |
+| `GET /healthz` | Process liveness without initializing a backend. |
+
+For example:
+
+```sh
+curl --json '{"cwd":"/absolute/path/to/project"}' \
+  http://127.0.0.1:8788/v1/projects
+
+curl --json '{"cwd":"/absolute/path/to/project"}' \
+  http://127.0.0.1:8788/v1/threads
+
+curl --json '{"input":[{"type":"text","text":"Run the focused tests"}]}' \
+  http://127.0.0.1:8788/v1/threads/THREAD_ID/turns
+
+curl 'http://127.0.0.1:8788/v1/threads/THREAD_ID?includeTurns=true'
+```
+
+Events are intentionally not another durable rollout store. Each response contains a daemon-local
+`streamId`, numeric `nextCursor`, and retained `oldestCursor`. Send both `stream` and `after` on the
+next poll. HTTP `410` means either the bounded window was overrun or the daemon restarted; callers
+must reconcile through `thread/list`, `thread/read`, and `server-requests`. Thread snapshots and the
+project registry retain their existing SQLite persistence.
+
+The HTTP listener is loopback-only by default. Set `--http-token-env NAME` to require a bearer
+token read from the named environment variable. A non-loopback bind is rejected unless a token is
+configured; use a trusted TLS reverse proxy rather than sending that token over an untrusted
+plaintext network.
 
 ## Project registry extensions
 
@@ -81,12 +131,14 @@ machine is drained. The rollout is intentionally discarded. `thread/unarchive` i
 no-op for known threads: it returns success but leaves the snapshot archived and never provisions a
 replacement. Fork and detached review IDs remain on their original writer process.
 
-The selected outer transport is a Unix-domain JSONL socket because direct stdio exits on EOF and
-the pinned Codex runtime's listen-WebSocket surface is experimental. Inner app-server connections
-remain direct stdio because they are container-owned and deliberately non-reattachable. Tests prove
-the daemon survives relay disconnect, the registry survives daemon restart, stale machines are
-cleaned by exact ID, two CWDs select different clone sources, unknown CWDs provision nothing, and
-archive removes the selected machine.
+The canonical peer transport is a Unix-domain JSONL socket because direct stdio exits on EOF and
+the pinned Codex runtime's listen-WebSocket surface is experimental. REST is an aggregate-owned
+projection for one-off commands, not a claim that Codex itself exposes those resource routes.
+Inner app-server connections remain direct stdio because they are container-owned and deliberately
+non-reattachable. Tests prove the daemon and live backends survive relay disconnect, REST and JSONL
+share topology, the registry survives daemon restart, stale machines are cleaned by exact ID, two
+CWDs select different clone sources, unknown CWDs provision nothing, and archive removes the
+selected machine.
 
 ## Existing app-server behavior
 

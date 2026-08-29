@@ -5,9 +5,11 @@ import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { AppServerAggregator } from "./aggregator.ts";
 import type { BackendFactory } from "./backend.ts";
+import { AggregatorBridge, type AggregatorClientSession } from "./bridge.ts";
 import { readJsonLines, SerialMessageSink } from "./jsonl.ts";
 import { ProjectRegistry } from "./projects.ts";
 import { errorOutcome, isRequest, response, type RpcMessage } from "./protocol.ts";
+import { RestApiServer, type RestServerOptions } from "./rest.ts";
 import { AggregatorState, type StoredMachine } from "./state.ts";
 
 export type AggregatorDaemonOptions = {
@@ -15,21 +17,42 @@ export type AggregatorDaemonOptions = {
   state: AggregatorState;
   factory: BackendFactory;
   removeOrphan?: (machine: StoredMachine) => Promise<void>;
+  http?: Omit<RestServerOptions, "log">;
   log?: (message: string) => void;
 };
 
 export class AggregatorDaemon {
   private readonly server: Server;
   private readonly registry: ProjectRegistry;
+  private readonly bridge: AggregatorBridge;
+  private readonly aggregator: AppServerAggregator;
+  private readonly rest: RestApiServer | undefined;
   private readonly log: (message: string) => void;
-  private active: { socket: Socket; aggregator: AppServerAggregator } | undefined;
+  private active: { socket: Socket; session: AggregatorClientSession } | undefined;
+  private restUrl: URL | undefined;
   private started = false;
   private closed = false;
 
   constructor(private readonly options: AggregatorDaemonOptions) {
     this.registry = new ProjectRegistry(options.state);
     this.log = options.log ?? (() => undefined);
+    this.bridge = new AggregatorBridge(this.log);
+    this.aggregator = new AppServerAggregator({
+      factory: this.options.factory,
+      registry: this.registry,
+      state: this.options.state,
+      output: this.bridge,
+      applyClientNotificationOptOuts: false,
+      onServerRequestSettled: (id) => this.bridge.settleServerRequest(id),
+      log: this.log,
+    });
+    this.bridge.bind(this.aggregator);
+    this.rest = options.http ? new RestApiServer(this.bridge, { ...options.http, log: this.log }) : undefined;
     this.server = createServer((socket) => this.accept(socket));
+  }
+
+  get httpUrl(): URL | undefined {
+    return this.restUrl;
   }
 
   async start(): Promise<void> {
@@ -39,14 +62,22 @@ export class AggregatorDaemon {
     await this.recoverOrphans();
     await prepareSocket(this.options.socketPath);
     await mkdir(dirname(this.options.socketPath), { recursive: true, mode: 0o700 });
-    await new Promise<void>((resolve, reject) => {
-      this.server.once("error", reject);
-      this.server.listen(this.options.socketPath, () => {
-        this.server.off("error", reject);
-        chmodSync(this.options.socketPath, 0o600);
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.server.once("error", reject);
+        this.server.listen(this.options.socketPath, () => {
+          this.server.off("error", reject);
+          chmodSync(this.options.socketPath, 0o600);
+          resolve();
+        });
       });
-    });
+      this.restUrl = this.rest?.start();
+    } catch (error) {
+      await closeServer(this.server).catch(() => undefined);
+      await unlink(this.options.socketPath).catch(() => undefined);
+      this.started = false;
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -55,9 +86,13 @@ export class AggregatorDaemon {
     const active = this.active;
     this.active = undefined;
     if (active) {
-      await active.aggregator.close();
+      active.session.close();
       active.socket.destroy();
     }
+    this.rest?.close();
+    this.restUrl = undefined;
+    await this.aggregator.close();
+    await this.bridge.close();
     await closeServer(this.server);
     await unlink(this.options.socketPath).catch(() => undefined);
     this.options.state.close();
@@ -72,23 +107,17 @@ export class AggregatorDaemon {
     const sink = new SerialMessageSink((line) => new Promise<void>((resolve, reject) => {
       socket.write(line, (error) => error ? reject(error) : resolve());
     }));
-    const aggregator = new AppServerAggregator({
-      factory: this.options.factory,
-      registry: this.registry,
-      state: this.options.state,
-      output: sink,
-      log: this.log,
-    });
-    this.active = { socket, aggregator };
-    void this.serve(socket, aggregator);
+    const session = this.bridge.attachClient(sink);
+    this.active = { socket, session };
+    void this.serve(socket, session);
   }
 
-  private async serve(socket: Socket, aggregator: AppServerAggregator): Promise<void> {
+  private async serve(socket: Socket, session: AggregatorClientSession): Promise<void> {
     const active = new Set<Promise<void>>();
     try {
       const stream = Readable.toWeb(socket) as unknown as ReadableStream<Uint8Array>;
       for await (const message of readJsonLines(stream)) {
-        const work = aggregator.handle(message).catch((error) => {
+        const work = session.handle(message).catch((error) => {
           this.log(error instanceof Error ? error.stack ?? error.message : String(error));
         }).finally(() => active.delete(work));
         active.add(work);
@@ -97,7 +126,7 @@ export class AggregatorDaemon {
     } catch (error) {
       this.log(`client connection failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      await aggregator.close();
+      session.close();
       if (this.active?.socket === socket) this.active = undefined;
       if (!socket.destroyed) socket.end();
     }

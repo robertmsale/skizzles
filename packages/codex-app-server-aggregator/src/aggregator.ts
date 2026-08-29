@@ -17,7 +17,7 @@ import {
 import { Topology, type ThreadListParams } from "./topology.ts";
 import { AggregatorState, type RegisteredProject } from "./state.ts";
 
-type ReverseRequest = { backend: BackendConnection; backendId: RpcId };
+type ReverseRequest = { backend: BackendConnection; backendId: RpcId; outerId: RpcId };
 type CreatedBackend = { connection: BackendConnection; outcome: RpcOutcome; activate: () => Promise<void> };
 
 export type AggregatorOptions = {
@@ -25,6 +25,8 @@ export type AggregatorOptions = {
   registry: ProjectRegistry;
   state: AggregatorState;
   output: MessageSink;
+  applyClientNotificationOptOuts?: boolean;
+  onServerRequestSettled?: (id: RpcId) => void;
   log?: (message: string) => void;
 };
 
@@ -39,6 +41,8 @@ export class AppServerAggregator {
   private readonly registry: ProjectRegistry;
   private readonly state: AggregatorState;
   private readonly output: MessageSink;
+  private readonly applyClientNotificationOptOuts: boolean;
+  private readonly onServerRequestSettled: (id: RpcId) => void;
   private readonly log: (message: string) => void;
   private initialization?: Promise<RpcOutcome>;
   private initialActivation: (() => Promise<void>) | undefined;
@@ -54,6 +58,8 @@ export class AppServerAggregator {
     this.registry = options.registry;
     this.state = options.state;
     this.output = options.output;
+    this.applyClientNotificationOptOuts = options.applyClientNotificationOptOuts ?? true;
+    this.onServerRequestSettled = options.onServerRequestSettled ?? (() => undefined);
     this.log = options.log ?? (() => undefined);
     this.topology = new Topology({
       threads: this.state.threads(),
@@ -91,6 +97,7 @@ export class AppServerAggregator {
     this.readyBackends.clear();
     this.backendProjects.clear();
     this.warmBackends.clear();
+    for (const reverse of this.reverseRequests.values()) this.onServerRequestSettled(reverse.outerId);
     this.reverseRequests.clear();
     this.lifecycleCalls.clear();
   }
@@ -252,14 +259,15 @@ export class AppServerAggregator {
       return;
     }
     this.initializeParams = request.params;
-    for (const method of initializeOptOutMethods(request.params)) this.clientOptOutNotifications.add(method);
+    if (this.applyClientNotificationOptOuts) {
+      for (const method of initializeOptOutMethods(request.params)) this.clientOptOutNotifications.add(method);
+    }
     const project = this.registry.list()[0];
     if (!project) {
-      this.initialization = Promise.resolve(errorOutcome(
+      await this.output.send(response(request.id, errorOutcome(
         -32004,
         "no projects are registered; call skizzles/project/add before initialize",
-      ));
-      await this.output.send(response(request.id, await this.initialization));
+      )));
       return;
     }
     this.initialization = this.createInitializedBackend(project, true).then(async (backend) => {
@@ -280,7 +288,12 @@ export class AppServerAggregator {
     }).catch((error) => errorOutcome(-32603, error instanceof Error ? error.message : String(error)));
     const outcome = await this.initialization;
     await this.output.send(response(request.id, outcome));
-    if ("result" in outcome) await this.initialActivation?.();
+    if ("result" in outcome) {
+      await this.initialActivation?.();
+    } else {
+      delete this.initialization;
+      delete this.initializeParams;
+    }
   }
 
   private async handleClientNotification(method: string, params: unknown): Promise<void> {
@@ -395,14 +408,17 @@ export class AppServerAggregator {
         }),
         onServerRequest: (backend, serverRequest) => forward(async () => {
           const outerId = `agg/server/${crypto.randomUUID()}`;
-          this.reverseRequests.set(idKey(outerId), { backend, backendId: serverRequest.id });
+          this.reverseRequests.set(idKey(outerId), { backend, backendId: serverRequest.id, outerId });
           await this.output.send({ ...serverRequest, id: outerId });
         }),
         onLog: (backend, text) => this.log(`[${backend.machineId}] ${text.trimEnd()}`),
       });
       this.backends.set(connection.machineId, connection);
       this.backendProjects.set(connection, project);
-      const outcome = await connection.initialize(backendInitializeParams(this.initializeParams));
+      const outcome = await connection.initialize(backendInitializeParams(
+        this.initializeParams,
+        this.applyClientNotificationOptOuts,
+      ));
       if ("result" in outcome) this.readyBackends.add(connection);
       return {
         connection,
@@ -505,6 +521,7 @@ export class AppServerAggregator {
       return;
     }
     this.reverseRequests.delete(idKey(id));
+    this.onServerRequestSettled(reverse.outerId);
     await reverse.backend.respond(reverse.backendId, outcome);
   }
 
@@ -519,7 +536,10 @@ export class AppServerAggregator {
     this.backendProjects.delete(backend);
     this.lifecycleCalls.delete(backend);
     for (const [key, reverse] of this.reverseRequests) {
-      if (reverse.backend === backend) this.reverseRequests.delete(key);
+      if (reverse.backend === backend) {
+        this.reverseRequests.delete(key);
+        this.onServerRequestSettled(reverse.outerId);
+      }
     }
     if (project && this.warmBackends.get(project.cwd) === backend) this.warmBackends.delete(project.cwd);
   }
@@ -588,12 +608,14 @@ function initializeOptOutMethods(params: unknown): string[] {
   return Array.isArray(methods) ? methods.filter((method): method is string => typeof method === "string") : [];
 }
 
-function backendInitializeParams(params: unknown): unknown {
+function backendInitializeParams(params: unknown, applyClientNotificationOptOuts: boolean): unknown {
   const root = asRecord(params);
   const capabilities = asRecord(root.capabilities);
   const methods = capabilities.optOutNotificationMethods;
   if (!Array.isArray(methods)) return params;
-  const filtered = methods.filter((method) => typeof method !== "string" || !TOPOLOGY_NOTIFICATION_METHODS.has(method));
+  const filtered = applyClientNotificationOptOuts
+    ? methods.filter((method) => typeof method !== "string" || !TOPOLOGY_NOTIFICATION_METHODS.has(method))
+    : methods.filter((method) => typeof method !== "string");
   if (filtered.length === methods.length) return params;
   return { ...root, capabilities: { ...capabilities, optOutNotificationMethods: filtered } };
 }

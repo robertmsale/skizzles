@@ -13,6 +13,24 @@ const HOST_PROJECT_A = join(tmpdir(), "skizzles-aggregator-project-a");
 const HOST_PROJECT_B = join(tmpdir(), "skizzles-aggregator-project-b");
 
 describe("Codex app-server aggregation", () => {
+  test("allows initialization to retry after a failed provisioning attempt", async () => {
+    const harness = createHarness();
+    harness.factory.createFailures = 1;
+    const params = {
+      clientInfo: { name: "test", title: "Test", version: "0.1.0" },
+      capabilities: { experimentalApi: true },
+    };
+
+    await harness.aggregator.handle({ method: "initialize", id: "failed-init", params });
+    expect(errorFor(harness.output.messages, "failed-init")).toEqual({
+      code: -32603,
+      message: "fake provisioning failure",
+    });
+    await harness.aggregator.handle({ method: "initialize", id: "retry-init", params });
+    expect(resultFor(harness.output.messages, "retry-init")).toMatchObject({ platformOs: "linux" });
+    await harness.aggregator.close();
+  });
+
   test("preserves minted thread ids, forces container cwd, and answers topology reads itself", async () => {
     const harness = createHarness();
     await initialize(harness);
