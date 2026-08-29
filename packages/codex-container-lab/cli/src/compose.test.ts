@@ -11,6 +11,8 @@ import {
   SHARED_COMPILER_CACHE_NETWORK,
   validateSecretEnvironmentModel,
   type ComposeModel,
+  assertMappedServicesConsumeSharedImages,
+  inspectProjectScopedBuilds,
 } from "./compose";
 
 const repoRoot = "/tmp/example-repository";
@@ -176,6 +178,50 @@ compose:
       "-f", `${repoRoot}/compose.local.yaml`,
       "-f", "/tmp/lab/override.yaml",
     ]);
+  });
+
+  test("maps shared environment images and resets leftover project builds", () => {
+    const config = parseLabConfig(`
+compose: { files: [compose.yaml], command_service: app }
+shared_images:
+  toolchain:
+    context: environment
+    dockerfile: environment/Dockerfile
+    platform: linux/arm64
+    services: [app]
+`, repoRoot);
+    const digest = "ab".repeat(32);
+    const imageId = `sha256:${"cd".repeat(32)}`;
+    const reference = {
+      profile: "toolchain",
+      digest,
+      imageId,
+      tag: `skizzles-shared-image:env-${digest}`,
+    };
+    const yaml = generateOverrideCompose(config, { services: { app: {}, worker: { build: "." } } }, {
+      workspaceHostPath: "/tmp/lab/workspace",
+      owner: "thread-1",
+      ownerKey: "a".repeat(64),
+      labId: "lab-2",
+    }, [reference]);
+    expect(yaml).toContain("!reset");
+    expect(yaml).toContain(imageId);
+    expect(yaml).toMatch(new RegExp(`image:\\s*${imageId}`));
+    expect(yaml).toMatch(/pull_policy:\s*never/);
+    expect(inspectProjectScopedBuilds({ services: { app: { build: "." }, worker: { build: "." } } }, new Set(["app"])))
+      .toEqual([{ service: "worker", surface: "project-build", detail: "service keeps a project-scoped Compose build" }]);
+    expect(() => assertMappedServicesConsumeSharedImages({
+      services: { app: { image: imageId } },
+    }, config, [reference])).not.toThrow();
+    expect(() => assertMappedServicesConsumeSharedImages({
+      services: { app: { image: imageId, build: "." } },
+    }, config, [reference])).toThrow("project-scoped build path");
+    expect(() => assertMappedServicesConsumeSharedImages({
+      services: { app: { image: imageId, pull_policy: "always" } },
+    }, config, [reference])).toThrow("pull policy");
+    expect(() => assertMappedServicesConsumeSharedImages({
+      services: { app: { image: imageId, pull_policy: "build" } },
+    }, config, [reference])).toThrow("pull policy");
   });
 });
 

@@ -19,22 +19,22 @@ var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 // packages/t3-orchestration/src/worktree-reaper-config.ts
 var exports_worktree_reaper_config = {};
 __export(exports_worktree_reaper_config, {
-  resolveProjectPolicy: () => resolveProjectPolicy,
-  resolveDenyPaths: () => resolveDenyPaths,
-  relativeInside: () => relativeInside,
-  parseReaperConfig: () => parseReaperConfig,
-  normalizeRelative: () => normalizeRelative,
-  matchesAnyGlob: () => matchesAnyGlob,
-  matchRelativeGlob: () => matchRelativeGlob,
-  loadReaperConfig: () => loadReaperConfig,
-  isDeniedPath: () => isDeniedPath,
-  extraCommandToStrategy: () => extraCommandToStrategy,
-  expandUserPath: () => expandUserPath,
-  defaultReaperConfigPath: () => defaultReaperConfigPath,
-  defaultReaperConfig: () => defaultReaperConfig,
-  assertAllowedCleanCommand: () => assertAllowedCleanCommand,
+  GENERATED_ARTIFACT_DIRS: () => GENERATED_ARTIFACT_DIRS,
   assertAllowedArtifact: () => assertAllowedArtifact,
-  GENERATED_ARTIFACT_DIRS: () => GENERATED_ARTIFACT_DIRS
+  assertAllowedCleanCommand: () => assertAllowedCleanCommand,
+  defaultReaperConfig: () => defaultReaperConfig,
+  defaultReaperConfigPath: () => defaultReaperConfigPath,
+  expandUserPath: () => expandUserPath,
+  extraCommandToStrategy: () => extraCommandToStrategy,
+  isDeniedPath: () => isDeniedPath,
+  loadReaperConfig: () => loadReaperConfig,
+  matchRelativeGlob: () => matchRelativeGlob,
+  matchesAnyGlob: () => matchesAnyGlob,
+  normalizeRelative: () => normalizeRelative,
+  parseReaperConfig: () => parseReaperConfig,
+  relativeInside: () => relativeInside,
+  resolveDenyPaths: () => resolveDenyPaths,
+  resolveProjectPolicy: () => resolveProjectPolicy
 });
 import { readFile as readFile2, realpath } from "fs/promises";
 import { homedir } from "os";

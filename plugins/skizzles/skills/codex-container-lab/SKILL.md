@@ -31,6 +31,8 @@ Use this skill when work benefits from an isolated Linux workspace or disposable
 7. Resolve every reported conflict and preview again. Apply exactly the returned token with `LAUNCHER sync apply --lab ID --direction DIRECTION --token TOKEN`; tokens expire, are single-use, and fail if either side changed.
 8. Validate synchronized host changes normally, then run `LAUNCHER lab destroy --lab ID`. Destroy failed, rejected, or abandoned Labs as well; use `lab destroy-all` to remove every Lab owned by the current thread.
 
+Shared toolchain/system images are not Lab-owned. `lab destroy` leaves them and the dedicated `skizzles-shared-image` builder cache in place. Inspect with `LAUNCHER system inventory`. Reclaim only with `LAUNCHER system gc --resource images|cache --mode plan|apply` after reviewing the plan result; never use Docker prune.
+
 For intentional manual use outside Codex, place `--owner THREAD_ID` before the command. Never borrow another task's id or invent a shared owner.
 
 ## Lab Resource Lifecycle

@@ -69,6 +69,18 @@ export type LabMetadata = {
   error?: string;
   provisioningFailure?: ProvisioningFailureDiagnostic;
   runtime?: PersistedLabRuntime;
+  sharedImages?: SharedImageReference[];
+};
+
+/**
+ * Exact shared environment image used by a Lab. Provenance stays in image
+ * labels; this record is the Lab-local pointer needed for leases and destroy.
+ */
+export type SharedImageReference = {
+  profile: string;
+  digest: string;
+  imageId: string;
+  tag: string;
 };
 
 export type OwnerManifest = {

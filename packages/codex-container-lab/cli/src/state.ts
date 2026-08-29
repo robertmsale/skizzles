@@ -18,7 +18,7 @@ export type ReapedOwnerManifest = {
 const LAB_STATES = new Set(["provisioning", "ready", "failed", "destroying"]);
 const FINDING_SURFACES = new Set([
   "host-bind", "socket-bind", "privileged", "host-namespace", "device", "capability",
-  "secret", "config", "fixed-port", "non-loopback-port", "shared-cache",
+  "secret", "config", "fixed-port", "non-loopback-port", "shared-cache", "project-build",
 ]);
 
 export function defaultStateRoot(): string {
@@ -231,6 +231,7 @@ export function assertLabMetadata(
     if (!isRecord(value) || value.version !== 1 || value.id !== labId || value.owner !== owner ||
         value.ownerKey !== ownerKey(owner)) throw new Error("identity mismatch");
     normalizeSecretEnvironment(value);
+    normalizeSharedImages(value);
     if (typeof value.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value.name)) throw new Error("invalid name");
     if (typeof value.repoHash !== "string" || !/^[a-f0-9]{12}$/.test(value.repoHash)) throw new Error("invalid repository hash");
     if (typeof value.composeProject !== "string" || !/^ccl-[a-z0-9][a-z0-9-]{0,62}$/.test(value.composeProject)) throw new Error("invalid Compose project");
@@ -263,6 +264,9 @@ export function assertLabMetadata(
       if (value.managedImage !== internalImageTag(value.ownerKey, value.id)) throw new Error("invalid managed image");
     } else if (value.managedImage !== undefined) {
       throw new Error("unexpected managed image");
+    }
+    if (value.sharedImages !== undefined && !isSharedImageReferences(value.sharedImages)) {
+      throw new Error("invalid shared image references");
     }
   } catch (error) {
     throw new Error(`invalid lab manifest: ${labId}: ${message(error)}`);
@@ -346,6 +350,9 @@ function validatePersistedRuntime(lab: Record<string, unknown>, runtime: unknown
   if (JSON.stringify(config.secretEnvironment) !== JSON.stringify(lab.secretEnvironment)) {
     throw new Error("secret environment metadata mismatch");
   }
+  if (!isSharedImageProfiles(config.sharedImages, lab.sourceRoot as string)) {
+    throw new Error("invalid shared image profiles");
+  }
   const runtimeRoot = lab.runtimeRoot as string;
   const expectedOverride = join(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join(runtimeRoot, "base.compose.yaml");
@@ -370,6 +377,53 @@ function normalizeSecretEnvironment(lab: Record<string, unknown>): void {
   if (lab.secretEnvironment === undefined) {
     lab.secretEnvironment = Array.isArray(runtimeNames) ? [...runtimeNames] : [];
   }
+}
+
+function normalizeSharedImages(lab: Record<string, unknown>): void {
+  if (isRecord(lab.runtime) && isRecord(lab.runtime.config) && lab.runtime.config.sharedImages === undefined) {
+    lab.runtime.config.sharedImages = [];
+  }
+}
+
+function isSharedImageReferences(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 16) return false;
+  const profiles = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item) || typeof item.profile !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(item.profile) ||
+        typeof item.digest !== "string" || !/^[a-f0-9]{64}$/.test(item.digest) ||
+        typeof item.imageId !== "string" || !/^sha256:[0-9a-f]{64}$/.test(item.imageId) ||
+        item.tag !== `skizzles-shared-image:env-${item.digest}`) {
+      return false;
+    }
+    if (profiles.has(item.profile)) return false;
+    profiles.add(item.profile);
+  }
+  return true;
+}
+
+function isSharedImageProfiles(value: unknown, sourceRoot: string): boolean {
+  if (!Array.isArray(value) || value.length > 16) return false;
+  const names = new Set<string>();
+  const services = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item) || typeof item.name !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(item.name) ||
+        names.has(item.name) || !isPathInside(sourceRoot, item.context, true) ||
+        !isPathInside(sourceRoot, item.dockerfile) ||
+        typeof item.platform !== "string" || !/^[a-z0-9]+\/[a-z0-9_]+(?:\/[a-z0-9_]+)?$/.test(item.platform) ||
+        (item.target !== undefined && (typeof item.target !== "string" || item.target.trim() !== item.target || item.target.length === 0)) ||
+        !isRecord(item.buildArgs) || !Array.isArray(item.services) || item.services.length === 0) {
+      return false;
+    }
+    names.add(item.name);
+    for (const [key, arg] of Object.entries(item.buildArgs)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof arg !== "string" || arg.includes("\0")) return false;
+    }
+    for (const service of item.services) {
+      if (typeof service !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(service) || services.has(service)) return false;
+      services.add(service);
+    }
+  }
+  return true;
 }
 
 function isEnvironmentNames(value: unknown): value is string[] {

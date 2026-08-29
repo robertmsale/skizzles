@@ -4,7 +4,7 @@ var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, 
 var __require = import.meta.require;
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/identity.js
-var require_identity = __commonJS((exports) => {
+var require_identity = __commonJS(function(exports) {
   var ALIAS = Symbol.for("yaml.alias");
   var DOC = Symbol.for("yaml.document");
   var MAP = Symbol.for("yaml.map");
@@ -58,7 +58,7 @@ var require_identity = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/visit.js
-var require_visit = __commonJS((exports) => {
+var require_visit = __commonJS(function(exports) {
   var identity = require_identity();
   var BREAK = Symbol("break visit");
   var SKIP = Symbol("skip children");
@@ -213,7 +213,7 @@ var require_visit = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/directives.js
-var require_directives = __commonJS((exports) => {
+var require_directives = __commonJS(function(exports) {
   var identity = require_identity();
   var visit = require_visit();
   var escapeChars = {
@@ -365,7 +365,7 @@ var require_directives = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/anchors.js
-var require_anchors = __commonJS((exports) => {
+var require_anchors = __commonJS(function(exports) {
   var identity = require_identity();
   var visit = require_visit();
   function anchorIsValid(anchor) {
@@ -427,7 +427,7 @@ var require_anchors = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/applyReviver.js
-var require_applyReviver = __commonJS((exports) => {
+var require_applyReviver = __commonJS(function(exports) {
   function applyReviver(reviver, obj, key, val) {
     if (val && typeof val === "object") {
       if (Array.isArray(val)) {
@@ -474,7 +474,7 @@ var require_applyReviver = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/toJS.js
-var require_toJS = __commonJS((exports) => {
+var require_toJS = __commonJS(function(exports) {
   var identity = require_identity();
   function toJS(value, arg, ctx) {
     if (Array.isArray(value))
@@ -501,7 +501,7 @@ var require_toJS = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Node.js
-var require_Node = __commonJS((exports) => {
+var require_Node = __commonJS(function(exports) {
   var applyReviver = require_applyReviver();
   var identity = require_identity();
   var toJS = require_toJS();
@@ -538,7 +538,7 @@ var require_Node = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Alias.js
-var require_Alias = __commonJS((exports) => {
+var require_Alias = __commonJS(function(exports) {
   var anchors = require_anchors();
   var visit = require_visit();
   var identity = require_identity();
@@ -648,7 +648,7 @@ var require_Alias = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Scalar.js
-var require_Scalar = __commonJS((exports) => {
+var require_Scalar = __commonJS(function(exports) {
   var identity = require_identity();
   var Node = require_Node();
   var toJS = require_toJS();
@@ -676,7 +676,7 @@ var require_Scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/createNode.js
-var require_createNode = __commonJS((exports) => {
+var require_createNode = __commonJS(function(exports) {
   var Alias = require_Alias();
   var identity = require_identity();
   var Scalar = require_Scalar();
@@ -748,7 +748,7 @@ var require_createNode = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Collection.js
-var require_Collection = __commonJS((exports) => {
+var require_Collection = __commonJS(function(exports) {
   var createNode = require_createNode();
   var identity = require_identity();
   var Node = require_Node();
@@ -863,7 +863,7 @@ var require_Collection = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyComment.js
-var require_stringifyComment = __commonJS((exports) => {
+var require_stringifyComment = __commonJS(function(exports) {
   var stringifyComment = (str) => str.replace(/^(?!$)(?: $)?/gm, "#");
   function indentComment(comment, indent) {
     if (/^\n+$/.test(comment))
@@ -880,7 +880,7 @@ var require_stringifyComment = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/foldFlowLines.js
-var require_foldFlowLines = __commonJS((exports) => {
+var require_foldFlowLines = __commonJS(function(exports) {
   var FOLD_FLOW = "flow";
   var FOLD_BLOCK = "block";
   var FOLD_QUOTED = "quoted";
@@ -1017,7 +1017,7 @@ ${indent}${text.slice(fold + 1, end2)}`;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyString.js
-var require_stringifyString = __commonJS((exports) => {
+var require_stringifyString = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var foldFlowLines = require_foldFlowLines();
   var getFoldOptions = (ctx, isBlock) => ({
@@ -1315,7 +1315,7 @@ ${indent}`);
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringify.js
-var require_stringify = __commonJS((exports) => {
+var require_stringify = __commonJS(function(exports) {
   var anchors = require_anchors();
   var identity = require_identity();
   var stringifyComment = require_stringifyComment();
@@ -1436,7 +1436,7 @@ ${ctx.indent}${str}`;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyPair.js
-var require_stringifyPair = __commonJS((exports) => {
+var require_stringifyPair = __commonJS(function(exports) {
   var identity = require_identity();
   var Scalar = require_Scalar();
   var stringify = require_stringify();
@@ -1572,7 +1572,7 @@ ${ctx.indent}`;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/log.js
-var require_log = __commonJS((exports) => {
+var require_log = __commonJS(function(exports) {
   var node_process = __require("process");
   function debug(logLevel, ...messages) {
     if (logLevel === "debug")
@@ -1591,7 +1591,7 @@ var require_log = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/merge.js
-var require_merge = __commonJS((exports) => {
+var require_merge = __commonJS(function(exports) {
   var identity = require_identity();
   var Scalar = require_Scalar();
   var MERGE_KEY = "<<";
@@ -1648,7 +1648,7 @@ var require_merge = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/addPairToJSMap.js
-var require_addPairToJSMap = __commonJS((exports) => {
+var require_addPairToJSMap = __commonJS(function(exports) {
   var log = require_log();
   var merge = require_merge();
   var stringify = require_stringify();
@@ -1709,7 +1709,7 @@ var require_addPairToJSMap = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/Pair.js
-var require_Pair = __commonJS((exports) => {
+var require_Pair = __commonJS(function(exports) {
   var createNode = require_createNode();
   var stringifyPair = require_stringifyPair();
   var addPairToJSMap = require_addPairToJSMap();
@@ -1747,7 +1747,7 @@ var require_Pair = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyCollection.js
-var require_stringifyCollection = __commonJS((exports) => {
+var require_stringifyCollection = __commonJS(function(exports) {
   var identity = require_identity();
   var stringify = require_stringify();
   var stringifyComment = require_stringifyComment();
@@ -1899,7 +1899,7 @@ ${indent}${end}`;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/YAMLMap.js
-var require_YAMLMap = __commonJS((exports) => {
+var require_YAMLMap = __commonJS(function(exports) {
   var stringifyCollection = require_stringifyCollection();
   var addPairToJSMap = require_addPairToJSMap();
   var Collection = require_Collection();
@@ -2026,7 +2026,7 @@ var require_YAMLMap = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/common/map.js
-var require_map = __commonJS((exports) => {
+var require_map = __commonJS(function(exports) {
   var identity = require_identity();
   var YAMLMap = require_YAMLMap();
   var map = {
@@ -2045,7 +2045,7 @@ var require_map = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/nodes/YAMLSeq.js
-var require_YAMLSeq = __commonJS((exports) => {
+var require_YAMLSeq = __commonJS(function(exports) {
   var createNode = require_createNode();
   var stringifyCollection = require_stringifyCollection();
   var Collection = require_Collection();
@@ -2138,7 +2138,7 @@ var require_YAMLSeq = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/common/seq.js
-var require_seq = __commonJS((exports) => {
+var require_seq = __commonJS(function(exports) {
   var identity = require_identity();
   var YAMLSeq = require_YAMLSeq();
   var seq = {
@@ -2157,7 +2157,7 @@ var require_seq = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/common/string.js
-var require_string = __commonJS((exports) => {
+var require_string = __commonJS(function(exports) {
   var stringifyString = require_stringifyString();
   var string = {
     identify: (value) => typeof value === "string",
@@ -2173,7 +2173,7 @@ var require_string = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/common/null.js
-var require_null = __commonJS((exports) => {
+var require_null = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var nullTag = {
     identify: (value) => value == null,
@@ -2188,7 +2188,7 @@ var require_null = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/core/bool.js
-var require_bool = __commonJS((exports) => {
+var require_bool = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var boolTag = {
     identify: (value) => typeof value === "boolean",
@@ -2209,7 +2209,7 @@ var require_bool = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyNumber.js
-var require_stringifyNumber = __commonJS((exports) => {
+var require_stringifyNumber = __commonJS(function(exports) {
   function stringifyNumber({ format, minFractionDigits, tag, value }) {
     if (typeof value === "bigint")
       return String(value);
@@ -2233,7 +2233,7 @@ var require_stringifyNumber = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/core/float.js
-var require_float = __commonJS((exports) => {
+var require_float = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var stringifyNumber = require_stringifyNumber();
   var floatNaN = {
@@ -2276,7 +2276,7 @@ var require_float = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/core/int.js
-var require_int = __commonJS((exports) => {
+var require_int = __commonJS(function(exports) {
   var stringifyNumber = require_stringifyNumber();
   var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
   var intResolve = (str, offset, radix, { intAsBigInt }) => intAsBigInt ? BigInt(str) : parseInt(str.substring(offset), radix);
@@ -2318,7 +2318,7 @@ var require_int = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/core/schema.js
-var require_schema = __commonJS((exports) => {
+var require_schema = __commonJS(function(exports) {
   var map = require_map();
   var _null = require_null();
   var seq = require_seq();
@@ -2343,7 +2343,7 @@ var require_schema = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/json/schema.js
-var require_schema2 = __commonJS((exports) => {
+var require_schema2 = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var map = require_map();
   var seq = require_seq();
@@ -2407,7 +2407,7 @@ var require_schema2 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/binary.js
-var require_binary = __commonJS((exports) => {
+var require_binary = __commonJS(function(exports) {
   var node_buffer = __require("buffer");
   var Scalar = require_Scalar();
   var stringifyString = require_stringifyString();
@@ -2462,7 +2462,7 @@ var require_binary = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/pairs.js
-var require_pairs = __commonJS((exports) => {
+var require_pairs = __commonJS(function(exports) {
   var identity = require_identity();
   var Pair = require_Pair();
   var Scalar = require_Scalar();
@@ -2537,7 +2537,7 @@ ${cn.comment}` : item.comment;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/omap.js
-var require_omap = __commonJS((exports) => {
+var require_omap = __commonJS(function(exports) {
   var identity = require_identity();
   var toJS = require_toJS();
   var YAMLMap = require_YAMLMap();
@@ -2609,7 +2609,7 @@ var require_omap = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/bool.js
-var require_bool2 = __commonJS((exports) => {
+var require_bool2 = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   function boolStringify({ value, source }, ctx) {
     const boolObj = value ? trueTag : falseTag;
@@ -2638,7 +2638,7 @@ var require_bool2 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/float.js
-var require_float2 = __commonJS((exports) => {
+var require_float2 = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var stringifyNumber = require_stringifyNumber();
   var floatNaN = {
@@ -2684,7 +2684,7 @@ var require_float2 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/int.js
-var require_int2 = __commonJS((exports) => {
+var require_int2 = __commonJS(function(exports) {
   var stringifyNumber = require_stringifyNumber();
   var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
   function intResolve(str, offset, radix, { intAsBigInt }) {
@@ -2760,7 +2760,7 @@ var require_int2 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/set.js
-var require_set = __commonJS((exports) => {
+var require_set = __commonJS(function(exports) {
   var identity = require_identity();
   var Pair = require_Pair();
   var YAMLMap = require_YAMLMap();
@@ -2843,7 +2843,7 @@ var require_set = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/timestamp.js
-var require_timestamp = __commonJS((exports) => {
+var require_timestamp = __commonJS(function(exports) {
   var stringifyNumber = require_stringifyNumber();
   function parseSexagesimal(str, asBigInt) {
     const sign = str[0];
@@ -2925,7 +2925,7 @@ var require_timestamp = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/schema.js
-var require_schema3 = __commonJS((exports) => {
+var require_schema3 = __commonJS(function(exports) {
   var map = require_map();
   var _null = require_null();
   var seq = require_seq();
@@ -2966,7 +2966,7 @@ var require_schema3 = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/tags.js
-var require_tags = __commonJS((exports) => {
+var require_tags = __commonJS(function(exports) {
   var map = require_map();
   var _null = require_null();
   var seq = require_seq();
@@ -3057,7 +3057,7 @@ var require_tags = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/schema/Schema.js
-var require_Schema = __commonJS((exports) => {
+var require_Schema = __commonJS(function(exports) {
   var identity = require_identity();
   var map = require_map();
   var seq = require_seq();
@@ -3087,7 +3087,7 @@ var require_Schema = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyDocument.js
-var require_stringifyDocument = __commonJS((exports) => {
+var require_stringifyDocument = __commonJS(function(exports) {
   var identity = require_identity();
   var stringify = require_stringify();
   var stringifyComment = require_stringifyComment();
@@ -3167,7 +3167,7 @@ var require_stringifyDocument = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/doc/Document.js
-var require_Document = __commonJS((exports) => {
+var require_Document = __commonJS(function(exports) {
   var Alias = require_Alias();
   var Collection = require_Collection();
   var identity = require_identity();
@@ -3402,7 +3402,7 @@ var require_Document = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/errors.js
-var require_errors = __commonJS((exports) => {
+var require_errors = __commonJS(function(exports) {
   class YAMLError extends Error {
     constructor(name, pos, code, message) {
       super();
@@ -3467,7 +3467,7 @@ ${pointer}
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-props.js
-var require_resolve_props = __commonJS((exports) => {
+var require_resolve_props = __commonJS(function(exports) {
   function resolveProps(tokens, { flow, indicator, next, offset, onError, parentIndent, startOnNewline }) {
     let spaceBefore = false;
     let atNewline = startOnNewline;
@@ -3597,7 +3597,7 @@ var require_resolve_props = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/util-contains-newline.js
-var require_util_contains_newline = __commonJS((exports) => {
+var require_util_contains_newline = __commonJS(function(exports) {
   function containsNewline(key) {
     if (!key)
       return null;
@@ -3637,7 +3637,7 @@ var require_util_contains_newline = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/util-flow-indent-check.js
-var require_util_flow_indent_check = __commonJS((exports) => {
+var require_util_flow_indent_check = __commonJS(function(exports) {
   var utilContainsNewline = require_util_contains_newline();
   function flowIndentCheck(indent, fc, onError) {
     if (fc?.type === "flow-collection") {
@@ -3652,7 +3652,7 @@ var require_util_flow_indent_check = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/util-map-includes.js
-var require_util_map_includes = __commonJS((exports) => {
+var require_util_map_includes = __commonJS(function(exports) {
   var identity = require_identity();
   function mapIncludes(ctx, items, search) {
     const { uniqueKeys } = ctx.options;
@@ -3665,7 +3665,7 @@ var require_util_map_includes = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-map.js
-var require_resolve_block_map = __commonJS((exports) => {
+var require_resolve_block_map = __commonJS(function(exports) {
   var Pair = require_Pair();
   var YAMLMap = require_YAMLMap();
   var resolveProps = require_resolve_props();
@@ -3772,7 +3772,7 @@ var require_resolve_block_map = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-seq.js
-var require_resolve_block_seq = __commonJS((exports) => {
+var require_resolve_block_seq = __commonJS(function(exports) {
   var YAMLSeq = require_YAMLSeq();
   var resolveProps = require_resolve_props();
   var utilFlowIndentCheck = require_util_flow_indent_check();
@@ -3820,7 +3820,7 @@ var require_resolve_block_seq = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-end.js
-var require_resolve_end = __commonJS((exports) => {
+var require_resolve_end = __commonJS(function(exports) {
   function resolveEnd(end, offset, reqSpace, onError) {
     let comment = "";
     if (end) {
@@ -3860,7 +3860,7 @@ var require_resolve_end = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-flow-collection.js
-var require_resolve_flow_collection = __commonJS((exports) => {
+var require_resolve_flow_collection = __commonJS(function(exports) {
   var identity = require_identity();
   var Pair = require_Pair();
   var YAMLMap = require_YAMLMap();
@@ -4051,7 +4051,7 @@ var require_resolve_flow_collection = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/compose-collection.js
-var require_compose_collection = __commonJS((exports) => {
+var require_compose_collection = __commonJS(function(exports) {
   var identity = require_identity();
   var Scalar = require_Scalar();
   var YAMLMap = require_YAMLMap();
@@ -4113,7 +4113,7 @@ var require_compose_collection = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-scalar.js
-var require_resolve_block_scalar = __commonJS((exports) => {
+var require_resolve_block_scalar = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   function resolveBlockScalar(ctx, scalar, onError) {
     const start = scalar.offset;
@@ -4306,7 +4306,7 @@ var require_resolve_block_scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-flow-scalar.js
-var require_resolve_flow_scalar = __commonJS((exports) => {
+var require_resolve_flow_scalar = __commonJS(function(exports) {
   var Scalar = require_Scalar();
   var resolveEnd = require_resolve_end();
   function resolveFlowScalar(scalar, strict, onError) {
@@ -4523,7 +4523,7 @@ var require_resolve_flow_scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/compose-scalar.js
-var require_compose_scalar = __commonJS((exports) => {
+var require_compose_scalar = __commonJS(function(exports) {
   var identity = require_identity();
   var Scalar = require_Scalar();
   var resolveBlockScalar = require_resolve_block_scalar();
@@ -4601,7 +4601,7 @@ var require_compose_scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/util-empty-scalar-position.js
-var require_util_empty_scalar_position = __commonJS((exports) => {
+var require_util_empty_scalar_position = __commonJS(function(exports) {
   function emptyScalarPosition(offset, before, pos) {
     if (before) {
       pos ?? (pos = before.length);
@@ -4628,7 +4628,7 @@ var require_util_empty_scalar_position = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/compose-node.js
-var require_compose_node = __commonJS((exports) => {
+var require_compose_node = __commonJS(function(exports) {
   var Alias = require_Alias();
   var identity = require_identity();
   var composeCollection = require_compose_collection();
@@ -4731,7 +4731,7 @@ var require_compose_node = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/compose-doc.js
-var require_compose_doc = __commonJS((exports) => {
+var require_compose_doc = __commonJS(function(exports) {
   var Document = require_Document();
   var composeNode = require_compose_node();
   var resolveEnd = require_resolve_end();
@@ -4771,7 +4771,7 @@ var require_compose_doc = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/compose/composer.js
-var require_composer = __commonJS((exports) => {
+var require_composer = __commonJS(function(exports) {
   var node_process = __require("process");
   var directives = require_directives();
   var Document = require_Document();
@@ -4962,7 +4962,7 @@ ${end.comment}` : end.comment;
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/cst-scalar.js
-var require_cst_scalar = __commonJS((exports) => {
+var require_cst_scalar = __commonJS(function(exports) {
   var resolveBlockScalar = require_resolve_block_scalar();
   var resolveFlowScalar = require_resolve_flow_scalar();
   var errors = require_errors();
@@ -5152,7 +5152,7 @@ var require_cst_scalar = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/cst-stringify.js
-var require_cst_stringify = __commonJS((exports) => {
+var require_cst_stringify = __commonJS(function(exports) {
   var stringify = (cst) => ("type" in cst) ? stringifyToken(cst) : stringifyItem(cst);
   function stringifyToken(token) {
     switch (token.type) {
@@ -5210,7 +5210,7 @@ var require_cst_stringify = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/cst-visit.js
-var require_cst_visit = __commonJS((exports) => {
+var require_cst_visit = __commonJS(function(exports) {
   var BREAK = Symbol("break visit");
   var SKIP = Symbol("skip children");
   var REMOVE = Symbol("remove item");
@@ -5269,7 +5269,7 @@ var require_cst_visit = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/cst.js
-var require_cst = __commonJS((exports) => {
+var require_cst = __commonJS(function(exports) {
   var cstScalar = require_cst_scalar();
   var cstStringify = require_cst_stringify();
   var cstVisit = require_cst_visit();
@@ -5370,7 +5370,7 @@ var require_cst = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/lexer.js
-var require_lexer = __commonJS((exports) => {
+var require_lexer = __commonJS(function(exports) {
   var cst = require_cst();
   function isEmpty(ch) {
     switch (ch) {
@@ -5967,7 +5967,7 @@ var require_lexer = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/line-counter.js
-var require_line_counter = __commonJS((exports) => {
+var require_line_counter = __commonJS(function(exports) {
   class LineCounter {
     constructor() {
       this.lineStarts = [];
@@ -5995,7 +5995,7 @@ var require_line_counter = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/parse/parser.js
-var require_parser = __commonJS((exports) => {
+var require_parser = __commonJS(function(exports) {
   var node_process = __require("process");
   var cst = require_cst();
   var lexer = require_lexer();
@@ -6851,7 +6851,7 @@ var require_parser = __commonJS((exports) => {
 });
 
 // node_modules/.bun/yaml@2.9.0/node_modules/yaml/dist/public-api.js
-var require_public_api = __commonJS((exports) => {
+var require_public_api = __commonJS(function(exports) {
   var composer = require_composer();
   var Document = require_Document();
   var errors = require_errors();
@@ -6945,13 +6945,13 @@ var require_public_api = __commonJS((exports) => {
 });
 
 // packages/codex-container-lab/cli/src/reaper-cli.ts
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 import { homedir as homedir2 } from "os";
 
 // packages/codex-container-lab/cli/src/archive-reaper.ts
 import { Database } from "bun:sqlite";
-import { lstat as lstat6, readdir as readdir3, realpath as realpath4, rm as rm6 } from "fs/promises";
-import { join as join3, resolve as resolve3 } from "path";
+import { lstat as lstat6, readdir as readdir4, realpath as realpath4, rm as rm6 } from "fs/promises";
+import { join as join4, resolve as resolve3 } from "path";
 
 // packages/codex-container-lab/cli/src/docker.ts
 import { spawn as spawn2 } from "child_process";
@@ -7208,7 +7208,7 @@ async function removeManagedInternalImage(metadata, runner) {
   if (image.labels["io.openai.codex-container-lab.managed"] !== "true" || image.labels["io.openai.codex-container-lab.owner"] !== metadata.owner || image.labels["io.openai.codex-container-lab.lab"] !== metadata.id) {
     throw new Error("refusing to remove Dockerfile image without exact ownership labels");
   }
-  const removed = await runner.run(["image", "rm", image.id], {
+  const removed = await runner.run(["image", "rm", "--no-prune", image.id], {
     allowFailure: true,
     timeoutMs: 30000,
     maxOutputBytes: 1024 * 1024
@@ -7475,8 +7475,20 @@ function isRecord2(value) {
 
 // packages/codex-container-lab/cli/src/service.ts
 import { createHash as createHash3 } from "crypto";
-import { lstat as lstat5, mkdir as mkdir5, readdir as readdir2, readFile as readFile4, realpath as realpath3, stat } from "fs/promises";
-import { join as join2, resolve as resolve2 } from "path";
+import { lstat as lstat5, mkdir as mkdir5, readdir as readdir3, readFile as readFile4, realpath as realpath3, stat } from "fs/promises";
+import { join as join3, resolve as resolve2 } from "path";
+
+// packages/codex-container-lab/cli/src/shared-image.ts
+var SHARED_IMAGE_KIND = "environment";
+var SHARED_IMAGE_NAME = "skizzles-shared-image";
+var MAX_SENT_BYTES = 256 * 1024 * 1024;
+var MAX_DOCKERFILE_BYTES = 1024 * 1024;
+function sharedImageTag(digest) {
+  return `${SHARED_IMAGE_NAME}:env-${digest}`;
+}
+function isPlatform(value) {
+  return /^[a-z0-9]+\/[a-z0-9_]+(?:\/[a-z0-9_]+)?$/.test(value);
+}
 
 // packages/codex-container-lab/cli/src/config.ts
 var manifestName = ".codex-container-lab.yaml";
@@ -7610,6 +7622,10 @@ function truncateUtf8(value, maxBytes, policy) {
   return output;
 }
 
+// packages/codex-container-lab/cli/src/shared-image-state.ts
+import { readdir as readdir2 } from "fs/promises";
+import { join as join2 } from "path";
+
 // packages/codex-container-lab/cli/src/state.ts
 import { createHash as createHash2 } from "crypto";
 import { homedir, tmpdir } from "os";
@@ -7627,7 +7643,8 @@ var FINDING_SURFACES = new Set([
   "config",
   "fixed-port",
   "non-loopback-port",
-  "shared-cache"
+  "shared-cache",
+  "project-build"
 ]);
 function defaultStateRoot() {
   return join(homedir(), "Library", "Application Support", "OpenAI", "codex-container-lab");
@@ -7750,6 +7767,7 @@ function assertLabMetadata(value, roots, owner, labId) {
     if (!isRecord3(value) || value.version !== 1 || value.id !== labId || value.owner !== owner || value.ownerKey !== ownerKey(owner))
       throw new Error("identity mismatch");
     normalizeSecretEnvironment(value);
+    normalizeSharedImages(value);
     if (typeof value.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value.name))
       throw new Error("invalid name");
     if (typeof value.repoHash !== "string" || !/^[a-f0-9]{12}$/.test(value.repoHash))
@@ -7798,6 +7816,9 @@ function assertLabMetadata(value, roots, owner, labId) {
         throw new Error("invalid managed image");
     } else if (value.managedImage !== undefined) {
       throw new Error("unexpected managed image");
+    }
+    if (value.sharedImages !== undefined && !isSharedImageReferences(value.sharedImages)) {
+      throw new Error("invalid shared image references");
     }
   } catch (error) {
     throw new Error(`invalid lab manifest: ${labId}: ${message(error)}`);
@@ -7861,6 +7882,9 @@ function validatePersistedRuntime(lab, runtime) {
   if (JSON.stringify(config.secretEnvironment) !== JSON.stringify(lab.secretEnvironment)) {
     throw new Error("secret environment metadata mismatch");
   }
+  if (!isSharedImageProfiles(config.sharedImages, lab.sourceRoot)) {
+    throw new Error("invalid shared image profiles");
+  }
   const runtimeRoot = lab.runtimeRoot;
   const expectedOverride = join(runtimeRoot, "override.compose.yaml");
   const expectedBase = mode.kind === "compose" ? undefined : join(runtimeRoot, "base.compose.yaml");
@@ -7884,6 +7908,47 @@ function normalizeSecretEnvironment(lab) {
   if (lab.secretEnvironment === undefined) {
     lab.secretEnvironment = Array.isArray(runtimeNames) ? [...runtimeNames] : [];
   }
+}
+function normalizeSharedImages(lab) {
+  if (isRecord3(lab.runtime) && isRecord3(lab.runtime.config) && lab.runtime.config.sharedImages === undefined) {
+    lab.runtime.config.sharedImages = [];
+  }
+}
+function isSharedImageReferences(value) {
+  if (!Array.isArray(value) || value.length > 16)
+    return false;
+  const profiles = new Set;
+  for (const item of value) {
+    if (!isRecord3(item) || typeof item.profile !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(item.profile) || typeof item.digest !== "string" || !/^[a-f0-9]{64}$/.test(item.digest) || typeof item.imageId !== "string" || !/^sha256:[0-9a-f]{64}$/.test(item.imageId) || item.tag !== `skizzles-shared-image:env-${item.digest}`) {
+      return false;
+    }
+    if (profiles.has(item.profile))
+      return false;
+    profiles.add(item.profile);
+  }
+  return true;
+}
+function isSharedImageProfiles(value, sourceRoot) {
+  if (!Array.isArray(value) || value.length > 16)
+    return false;
+  const names = new Set;
+  const services = new Set;
+  for (const item of value) {
+    if (!isRecord3(item) || typeof item.name !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(item.name) || names.has(item.name) || !isPathInside(sourceRoot, item.context, true) || !isPathInside(sourceRoot, item.dockerfile) || typeof item.platform !== "string" || !/^[a-z0-9]+\/[a-z0-9_]+(?:\/[a-z0-9_]+)?$/.test(item.platform) || item.target !== undefined && (typeof item.target !== "string" || item.target.trim() !== item.target || item.target.length === 0) || !isRecord3(item.buildArgs) || !Array.isArray(item.services) || item.services.length === 0) {
+      return false;
+    }
+    names.add(item.name);
+    for (const [key, arg] of Object.entries(item.buildArgs)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof arg !== "string" || arg.includes("\x00"))
+        return false;
+    }
+    for (const service of item.services) {
+      if (typeof service !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(service) || services.has(service))
+        return false;
+      services.add(service);
+    }
+  }
+  return true;
 }
 function isEnvironmentNames(value) {
   return Array.isArray(value) && value.length <= 64 && value.every((key) => typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) && new Set(value).size === value.length;
@@ -7924,6 +7989,144 @@ function message(error) {
 function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+// packages/codex-container-lab/cli/src/shared-image-state.ts
+var SHARED_IMAGE_RECORD_SCHEMA = "skizzles.shared-image.v1";
+function sharedImagesDirectory(stateRoot) {
+  return join2(stateRoot, "shared-images");
+}
+function sharedImageRecordPath(stateRoot, digest) {
+  assertDigest(digest);
+  return join2(sharedImagesDirectory(stateRoot), `${digest}.json`);
+}
+function sharedImageDigestLockPath(stateRoot, digest) {
+  assertDigest(digest);
+  return join2(stateRoot, ".locks", `shared-image-${digest}`);
+}
+async function withSharedImageDigestLock(stateRoot, digest, operation, signal) {
+  return await withFileLock(sharedImageDigestLockPath(stateRoot, digest), operation, {
+    attempts: 3600,
+    delayMs: 500,
+    staleMs: 45 * 60000,
+    signal
+  });
+}
+async function readSharedImageRecord(stateRoot, digest) {
+  try {
+    const value = await readJson(sharedImageRecordPath(stateRoot, digest));
+    return parseSharedImageRecord(value, digest);
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return;
+    throw error;
+  }
+}
+async function writeSharedImageRecord(stateRoot, record) {
+  const parsed = parseSharedImageRecord(record, record.digest);
+  await writeJsonAtomic(sharedImageRecordPath(stateRoot, parsed.digest), parsed);
+}
+async function listSharedImageRecords(stateRoot) {
+  let names;
+  try {
+    names = await readdir2(sharedImagesDirectory(stateRoot));
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return [];
+    throw error;
+  }
+  const records = [];
+  for (const name of names.sort()) {
+    if (!name.endsWith(".json"))
+      throw new Error(`unexpected shared image state entry: ${name}`);
+    const digest = name.slice(0, -5);
+    const record = await readSharedImageRecord(stateRoot, digest);
+    if (!record)
+      throw new Error(`shared image record disappeared: ${digest}`);
+    records.push(record);
+  }
+  return records;
+}
+async function releaseLabSharedImageLeases(stateRoot, lab, now = new Date) {
+  await releaseAllLeasesForLab(stateRoot, lab.owner, lab.id, now);
+}
+async function releaseAllLeasesForLab(stateRoot, owner, labId, now = new Date) {
+  safeStateName(labId, "lab id");
+  const key = ownerKey(owner);
+  const timestamp = now.toISOString();
+  for (const record of await listSharedImageRecords(stateRoot)) {
+    if (!record.leases.some((lease) => lease.ownerKey === key && lease.labId === labId))
+      continue;
+    await withSharedImageDigestLock(stateRoot, record.digest, async () => {
+      const current = await readSharedImageRecord(stateRoot, record.digest);
+      if (!current)
+        return;
+      const leases = current.leases.filter((lease) => !(lease.ownerKey === key && lease.labId === labId));
+      if (leases.length === current.leases.length)
+        return;
+      await writeSharedImageRecord(stateRoot, { ...current, leases, lastUsedAt: timestamp });
+    });
+  }
+}
+function parseSharedImageRecord(value, digest) {
+  if (!isRecord4(value) || value.version !== 1 || value.schema !== SHARED_IMAGE_RECORD_SCHEMA || value.kind !== SHARED_IMAGE_KIND || value.digest !== digest || typeof value.profile !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(value.profile) || typeof value.repoHash !== "string" || !/^[a-f0-9]{12}$/.test(value.repoHash) || typeof value.platform !== "string" || !isPlatform(value.platform) || value.tag !== sharedImageTag(digest) || !isDigest(digest) || typeof value.createdAt !== "string" || !isTimestamp2(value.createdAt) || typeof value.lastUsedAt !== "string" || !isTimestamp2(value.lastUsedAt) || !Array.isArray(value.leases) || value.leases.length > 256) {
+    throw new Error(`invalid shared image record: ${digest}`);
+  }
+  if (value.imageId !== undefined && (typeof value.imageId !== "string" || !isImageId(value.imageId))) {
+    throw new Error(`invalid shared image record: ${digest}`);
+  }
+  const leases = [];
+  const seen = new Set;
+  for (const lease of value.leases) {
+    if (!isRecord4(lease) || typeof lease.ownerKey !== "string" || !/^[a-f0-9]{64}$/.test(lease.ownerKey) || typeof lease.labId !== "string" || typeof lease.acquiredAt !== "string" || !isTimestamp2(lease.acquiredAt)) {
+      throw new Error(`invalid shared image lease: ${digest}`);
+    }
+    safeStateName(lease.labId, "lab id");
+    const identity3 = `${lease.ownerKey}:${lease.labId}`;
+    if (seen.has(identity3))
+      throw new Error(`duplicate shared image lease: ${digest}`);
+    seen.add(identity3);
+    leases.push({ ownerKey: lease.ownerKey, labId: lease.labId, acquiredAt: lease.acquiredAt });
+  }
+  return {
+    version: 1,
+    schema: SHARED_IMAGE_RECORD_SCHEMA,
+    kind: SHARED_IMAGE_KIND,
+    digest,
+    profile: value.profile,
+    repoHash: value.repoHash,
+    platform: value.platform,
+    tag: value.tag,
+    imageId: value.imageId,
+    createdAt: value.createdAt,
+    lastUsedAt: value.lastUsedAt,
+    leases
+  };
+}
+function isDigest(value) {
+  return /^[a-f0-9]{64}$/.test(value);
+}
+function isImageId(value) {
+  return /^sha256:[0-9a-f]{64}$/.test(value);
+}
+function assertDigest(digest) {
+  if (!isDigest(digest))
+    throw new Error("shared image digest is invalid");
+}
+function isTimestamp2(value) {
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+function isRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// packages/codex-container-lab/cli/src/shared-image-docker.ts
+var BUILD_TIMEOUT_MS = 30 * 60000;
+var DEFAULT_IMAGE_MAX_AGE_MS = 168 * 60 * 60 * 1000;
+var DEFAULT_CACHE_BUDGET_BYTES = 20 * 1024 * 1024 * 1024;
 
 // packages/codex-container-lab/cli/src/sync.ts
 import { chmod, copyFile, lstat as lstat4, mkdir as mkdir4, readlink as readlink2, rename as rename2, rm as rm4, symlink } from "fs/promises";
@@ -8041,7 +8244,7 @@ async function readRequiredJson(file, message2) {
 
 // packages/codex-container-lab/cli/src/service.ts
 async function recoverLabSync(roots, lab) {
-  if (lab.runtimeRoot !== expectedLabRuntimeRoot(roots, lab.owner, lab.id) || lab.workspace !== join2(lab.runtimeRoot, "workspace")) {
+  if (lab.runtimeRoot !== expectedLabRuntimeRoot(roots, lab.owner, lab.id) || lab.workspace !== join3(lab.runtimeRoot, "workspace")) {
     throw new Error("lab runtime containment is invalid");
   }
   try {
@@ -8052,10 +8255,10 @@ async function recoverLabSync(roots, lab) {
       return;
     throw error;
   }
-  const journalDirectory = join2(lab.runtimeRoot, "sync", lab.id, "journals");
+  const journalDirectory = join3(lab.runtimeRoot, "sync", lab.id, "journals");
   let journals;
   try {
-    journals = await readdir2(journalDirectory);
+    journals = await readdir3(journalDirectory);
   } catch (error) {
     if (error.code === "ENOENT")
       return;
@@ -8101,12 +8304,12 @@ async function reapArchivedOwners(options) {
     };
   }
   try {
-    const ownerRoot = join3(roots.stateRoot, "owners");
+    const ownerRoot = join4(roots.stateRoot, "owners");
     if (!await exactDirectoryChain(roots.stateRoot, ["owners"], "owner state root"))
       return result;
     let entries;
     try {
-      entries = await readdir3(ownerRoot, { withFileTypes: true });
+      entries = await readdir4(ownerRoot, { withFileTypes: true });
     } catch (error) {
       if (error.code === "ENOENT")
         return result;
@@ -8127,7 +8330,7 @@ async function reapArchivedOwners(options) {
         if (!await exactDirectoryChain(roots.stateRoot, ["owners", entry.name], "owner state directory")) {
           throw new Error("owner state directory disappeared");
         }
-        owner = await readOwnerManifest(join3(ownerRoot, entry.name, "owner.json"));
+        owner = await readOwnerManifest(join4(ownerRoot, entry.name, "owner.json"));
       } catch (error) {
         result.retainedOwners.push({ ownerKey: fallbackKey, reason: "invalid owner manifest" });
         result.ok = false;
@@ -8160,7 +8363,7 @@ async function reapArchivedOwners(options) {
           if (!await exactDirectoryChain(roots.stateRoot, ["owners", owner.ownerKey], "owner state directory")) {
             throw new Error("owner state directory disappeared");
           }
-          const currentOwner = await readOwnerManifest(join3(ownerRoot, owner.ownerKey, "owner.json"));
+          const currentOwner = await readOwnerManifest(join4(ownerRoot, owner.ownerKey, "owner.json"));
           if (currentOwner.owner !== owner.owner || currentOwner.ownerKey !== owner.ownerKey || currentOwner.createdAt !== owner.createdAt) {
             throw new Error("owner state changed before archive cleanup");
           }
@@ -8195,10 +8398,10 @@ async function reapArchivedOwners(options) {
           }
           await markOwnerReaped(roots.stateRoot, owner.owner);
           if (await exactDirectoryChain(roots.stateRoot, ["owners", owner.ownerKey], "owner state directory")) {
-            await removeVerifiedTree(join3(ownerRoot, owner.ownerKey));
+            await removeVerifiedTree(join4(ownerRoot, owner.ownerKey));
           }
           if (await exactDirectoryChain(roots.runtimeRoot, [owner.ownerKey], "owner runtime directory")) {
-            await removeVerifiedTree(join3(roots.runtimeRoot, owner.ownerKey));
+            await removeVerifiedTree(join4(roots.runtimeRoot, owner.ownerKey));
           }
           result.archivedOwnersCleaned.push(owner.ownerKey);
         }, { attempts: 600, delayMs: 50 });
@@ -8244,7 +8447,7 @@ function queryThreadState(database, owner) {
   return "uncertain";
 }
 async function prepareExactLab(roots, snapshot, cleanup) {
-  const lock = join3(ownerDirectory(roots.stateRoot, snapshot.owner), ".locks", `lab-${snapshot.id}`);
+  const lock = join4(ownerDirectory(roots.stateRoot, snapshot.owner), ".locks", `lab-${snapshot.id}`);
   const claimed = await withFileLock(lock, async () => {
     const lab = await readLab(roots, snapshot.owner, snapshot.id);
     await validateReaperLab(roots, lab.owner, lab.ownerKey, lab);
@@ -8253,8 +8456,8 @@ async function prepareExactLab(roots, snapshot, cleanup) {
   await cleanup?.(claimed);
 }
 async function cleanupExactLab(roots, lab, docker, authorize) {
-  const labLock = join3(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `lab-${lab.id}`);
-  const activityLock = join3(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `activity-${lab.id}`);
+  const labLock = join4(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `lab-${lab.id}`);
+  const activityLock = join4(ownerDirectory(roots.stateRoot, lab.owner), ".locks", `activity-${lab.id}`);
   await authorize();
   let previous;
   await withFileLock(labLock, async () => {
@@ -8304,12 +8507,13 @@ async function cleanupExactLab(roots, lab, docker, authorize) {
     if (!await exactDirectoryChain(roots.stateRoot, ["owners", lab.ownerKey], "owner state directory")) {
       throw new Error("owner state directory disappeared");
     }
+    await releaseLabSharedImageLeases(roots.stateRoot, lab);
     await removeLabState(roots.stateRoot, lab.owner, lab.id);
   }, { attempts: 600, delayMs: 50 }), { attempts: 600, delayMs: 50 });
 }
 async function validateReaperLab(roots, owner, ownerKey2, lab) {
   const expectedRuntime = resolve3(roots.runtimeRoot, ownerKey2, lab.id);
-  if (lab.owner !== owner || lab.ownerKey !== ownerKey2 || resolve3(lab.runtimeRoot) !== expectedRuntime || resolve3(lab.workspace) !== join3(expectedRuntime, "workspace")) {
+  if (lab.owner !== owner || lab.ownerKey !== ownerKey2 || resolve3(lab.runtimeRoot) !== expectedRuntime || resolve3(lab.workspace) !== join4(expectedRuntime, "workspace")) {
     throw new Error("lab ownership or runtime containment is invalid");
   }
   if (lab.modeKind === "dockerfile" && lab.managedImage !== internalImageTag(ownerKey2, lab.id)) {
@@ -8334,8 +8538,8 @@ async function exactDirectoryChain(root, segments, label) {
     throw new Error(`configured ${label} contains unsafe indirection`);
   let expected = await realpath4(path3);
   for (const segment of segments) {
-    path3 = join3(path3, segment);
-    expected = join3(expected, segment);
+    path3 = join4(path3, segment);
+    expected = join4(expected, segment);
     if (!await exactDirectory(path3, expected, label))
       return false;
   }
@@ -8383,7 +8587,7 @@ async function reaperMain(args = process.argv.slice(2)) {
       return 0;
     }
     const result = await reapArchivedOwners({
-      dbPath: parsed.dbPath ?? join4(homedir2(), ".codex", "state_5.sqlite"),
+      dbPath: parsed.dbPath ?? join5(homedir2(), ".codex", "state_5.sqlite"),
       roots: resolveRoots({ stateRoot: parsed.stateRoot, runtimeRoot: parsed.runtimeRoot })
     });
     const output = reaperOutput(result);
@@ -8465,7 +8669,7 @@ function reaperHelp() {
 if (import.meta.main)
   process.exit(await reaperMain());
 export {
-  reaperOutput,
+  REAPER_OUTPUT_MAX_BYTES,
   reaperMain,
-  REAPER_OUTPUT_MAX_BYTES
+  reaperOutput
 };

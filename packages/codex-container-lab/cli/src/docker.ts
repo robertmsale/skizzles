@@ -10,6 +10,8 @@ import {
   generateOverrideCompose,
   internalImageTag,
   inspectComposeModel,
+  inspectProjectScopedBuilds,
+  assertMappedServicesConsumeSharedImages,
   SHARED_COMPILER_CACHE_CONTAINER,
   SHARED_COMPILER_CACHE_IMAGE,
   SHARED_COMPILER_CACHE_LABELS,
@@ -347,12 +349,15 @@ export async function prepareLabRuntime(
   const sourceModel = await normalizedModel(composeArgs, runner, composeEnvironment);
   validateSecretEnvironmentModel(sourceModel, config.secretEnvironment, composeEnvironment);
   const findings = inspectComposeModel(sourceModel);
+  const sharedImages = metadata.sharedImages ?? [];
+  const mappedServices = new Set(config.sharedImages.flatMap((profile) => profile.services));
+  findings.push(...inspectProjectScopedBuilds(sourceModel, mappedServices));
   const override = generateOverrideCompose(config, sourceModel, {
     workspaceHostPath: metadata.workspace,
     owner: metadata.owner,
     ownerKey: metadata.ownerKey,
     labId: metadata.id,
-  });
+  }, sharedImages);
   if (config.runtime.compilerCache === "sccache-redis") {
     await ensureSharedCompilerCache(scrubDockerRunnerEnvironment(runner, config.secretEnvironment, environment));
     findings.push({ surface: "shared-cache", detail: "shared compiler cache enabled" });
@@ -360,6 +365,7 @@ export async function prepareLabRuntime(
   await writeFile(overrideFile, override, { mode: 0o600 });
   const finalModel = await normalizedModel(composeArgs, runner, composeEnvironment);
   validateSecretEnvironmentModel(finalModel, config.secretEnvironment, composeEnvironment);
+  assertMappedServicesConsumeSharedImages(finalModel, config, sharedImages);
   return { metadata, config, composeArgs, baseFile, overrideFile, findings };
 }
 
@@ -851,6 +857,16 @@ export async function destroyLabStack(runtime: LabRuntime, runner: DockerRunner 
   await cleanupLabLabels(runtime.metadata, runtime.config.mode.kind === "dockerfile", runner);
 }
 
+export async function countManagedLabResources(
+  runner: DockerRunner = defaultDockerRunner,
+): Promise<{ containers: number; volumes: number; networks: number }> {
+  const filter = ["--filter", "label=io.openai.codex-container-lab.managed=true"];
+  const containers = await listBounded("container", ["ps", "-aq", ...filter], runner);
+  const volumes = await listBounded("volume", ["volume", "ls", "-q", ...filter], runner);
+  const networks = await listBounded("network", ["network", "ls", "-q", ...filter], runner);
+  return { containers: containers.length, volumes: volumes.length, networks: networks.length };
+}
+
 export async function cleanupLabLabels(
   metadata: LabMetadata,
   removeInternalImage: boolean,
@@ -928,7 +944,7 @@ async function removeManagedInternalImage(metadata: LabMetadata, runner: DockerR
     throw new Error("refusing to remove Dockerfile image without exact ownership labels");
   }
 
-  const removed = await runner.run(["image", "rm", image.id], {
+  const removed = await runner.run(["image", "rm", "--no-prune", image.id], {
     allowFailure: true, timeoutMs: 30_000, maxOutputBytes: 1024 * 1024,
   });
   if (removed.code !== 0) throw new Error("failed to remove managed Dockerfile image");

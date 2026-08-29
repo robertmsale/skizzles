@@ -30,6 +30,25 @@ describe("CLI process boundary", () => {
     expect(help).toContain("run --lab ID --cwd packages/api -- bun test");
   });
 
+  test("help and usage cover system inventory and gc without a dry-run flag", async () => {
+    const output: string[] = [];
+    expect(await cliMain(["--help"], {}, { stdout: (value) => output.push(value), stderr: () => undefined })).toBe(0);
+    const help = JSON.parse(output.join("")).help as string;
+    expect(help).toContain("system inventory");
+    expect(help).toContain("system gc --resource images|cache --mode plan|apply");
+    expect(help).not.toContain("--dry-run");
+
+    const errors: string[] = [];
+    expect(await cliMain([
+      "--owner", "thread-gc", "--state-root", "/tmp/ccl-state", "--runtime-root", "/tmp/ccl-runtime",
+      "system", "gc", "--resource", "images", "--mode", "plan", "--dry-run",
+    ], {}, { stdout: () => undefined, stderr: (value) => errors.push(value) })).toBe(2);
+    expect(JSON.parse(errors.join("")).error).toEqual({
+      code: "USAGE",
+      message: "unknown argument: --dry-run",
+    });
+  });
+
   test("run rejects non-repository-relative --cwd values before touching lab state", async () => {
     for (const cwd of ["/workspace/packages/api", "../api", "packages\\api", "C:/workspace", ""]) {
       const child = Bun.spawn([
@@ -276,7 +295,7 @@ async function oversizedPreviewFixture() {
   await writeFile(baseFile, "services: {}\n");
   await writeFile(overrideFile, "services: {}\n");
   lab.runtime = {
-    config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
+    config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [], sharedImages: [] },
     composeArgs: ["compose", "--project-directory", lab.sourceRoot, "--project-name", lab.composeProject, "-f", baseFile, "-f", overrideFile],
     baseFile, overrideFile, findings: [],
   };
@@ -307,7 +326,7 @@ async function attachedFixture() {
   await writeFile(baseFile, "services: {}\n");
   await writeFile(overrideFile, "services: {}\n");
   lab.runtime = {
-    config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [] },
+    config: { repoRoot: lab.sourceRoot, manifestPath: lab.manifestPath, mode: { kind: "image", image: "node:24", commandService: "dev" }, runtime: { workspace: "/workspace", shell: ["/bin/sh", "-lc"] }, ports: [], forwardEnvironment: [], secretEnvironment: [], sharedImages: [] },
     composeArgs: ["compose", "--project-directory", lab.sourceRoot, "--project-name", lab.composeProject, "-f", baseFile, "-f", overrideFile],
     baseFile, overrideFile, findings: [],
   };

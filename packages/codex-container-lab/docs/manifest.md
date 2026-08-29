@@ -23,6 +23,50 @@ environment:
 secret_environment: []
 ```
 
+### Optional shared environment images
+
+Compose mode may declare one or more named toolchain/system image profiles.
+Each profile is an environment-only Docker build: a narrow context, Dockerfile,
+literal non-secret build arguments, an explicit platform, and the Compose
+services that consume the resulting image. Shared profiles are never inferred
+from a project `build:` path, and Dockerfile/image shorthand cannot declare
+them.
+
+```yaml
+compose:
+  files:
+    - compose.yaml
+  command_service: app
+shared_images:
+  toolchain:
+    context: environment
+    dockerfile: environment/Dockerfile
+    platform: linux/arm64
+    build_args:
+      TOOLCHAIN: "1"
+    services:
+      - app
+```
+
+The digest hashes everything Docker may read for that context: Dockerfile,
+the ignore file Docker will apply (`<Dockerfile>.dockerignore` next to the
+Dockerfile if that file exists, otherwise context-root `.dockerignore`),
+selected files, target, platform, profile name, and declared
+build arguments. It does not include owner, Lab id, worktree, host path,
+Compose project, or random identity. Secret mounts, SSH forwarding, host
+network, remote `ADD` (including ARG/ENV-expanded sources that are not
+proven local), and Dockerfile `ARG` values that are not literal
+`build_args` fail closed. Ignore matching follows Docker's rules, including
+Dockerfile-specific ignore files, character classes, and ignored-directory
+pruning: a directory excluded by ignore rules stays out unless a negation
+un-ignores that directory.
+
+After ensure, mapped services in the effective Compose model reference the
+exact content-addressed image, have no remaining project-scoped `build`,
+and do not keep a source `pull_policy` that would rebuild or pull away from
+that image. Unmapped project builds remain allowed and are reported as
+`project-build` findings. Copy `examples/shared-image` for a minimal layout.
+
 ### Optional shared compiler cache
 
 Compiler caching is opt-in per lab:

@@ -361,7 +361,7 @@ if (import.meta.main) {
   }
 }
 export {
-  parseGlobalOptions,
+  errorPayload,
   execute,
-  errorPayload
+  parseGlobalOptions
 };

@@ -20,6 +20,7 @@ Non-negotiable constraints:
 - Never synthesize Docker sockets, credentials, sensitive mounts, privilege escalation, language toolchains, databases, object stores, or project ports. Caches remain absent unless the manifest explicitly opts into `runtime.compiler_cache: sccache-redis`; that opt-in is host-port-free and outside per-lab ownership. Explicit `secret_environment` sources remain the sole credential opt-in.
 - Inspect notable privilege surfaces without rejecting intentional trusted-project configuration.
 - Make cleanup idempotent, bounded, and exact-label scoped. Never use Docker prune, broad prefixes, or unrelated resources.
+- Keep shared toolchain/system images content-addressed, lease-tracked, and outside Lab destroy. Remove them only through explicit provenance-aware GC with `docker image rm --no-prune` after digest-lock revalidation.
 - Open Codex's SQLite state database read-only, coexist with WAL, validate schema, require a consistent exact archived owner row, recheck before cleanup, and retain resources on missing rows or uncertainty.
 - Keep stopped but unarchived root tasks and subagents intact. Never infer descendant state from a parent row.
 - Expose only compact purpose-built public DTOs. Never serialize durable lab metadata, internal owner keys, runtime configuration, Compose arguments, generated absolute paths, image bookkeeping, or process identities. Bound service status and logs by structure, lines, bytes, and final serialized size.

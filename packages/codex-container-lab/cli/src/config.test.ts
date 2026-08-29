@@ -160,6 +160,55 @@ ports:
     expect(() => parseLabConfig("image: { name: node:24, service: dev }\nruntime: { shell: [] }", root)).toThrow("runtime.shell: must contain at least 1 item");
   });
 
+  test("rejects unsafe or incomplete shared image profiles", () => {
+    expect(() => parseLabConfig(`
+compose: { files: [compose.yaml], command_service: app }
+shared_images:
+  toolchain:
+    context: environment
+    dockerfile: environment/Dockerfile
+    services: [app]
+`, root)).toThrow("platform");
+    expect(() => parseLabConfig(`
+compose: { files: [compose.yaml], command_service: app }
+shared_images:
+  toolchain:
+    context: environment
+    dockerfile: environment/Dockerfile
+    platform: linux/arm64
+    extra: true
+    services: [app]
+`, root)).toThrow("unknown key");
+    expect(() => parseLabConfig(`
+compose: { files: [compose.yaml], command_service: app }
+shared_images:
+  toolchain:
+    context: environment
+    dockerfile: environment/Dockerfile
+    platform: linux/arm64
+    services: [app]
+  tools:
+    context: environment
+    dockerfile: environment/Dockerfile
+    platform: linux/arm64
+    services: [app]
+`, root)).toThrow("at most one environment profile");
+    expect(() => parseLabConfig(`
+compose: { files: [compose.yaml], command_service: app }
+shared_images: {}
+`, root)).toThrow("at least one named environment profile");
+    expect(() => parseLabConfig(`
+compose: { files: [compose.yaml], command_service: app }
+shared_images:
+  toolchain:
+    context: environment
+    dockerfile: environment/Dockerfile
+    platform: linux/arm64
+    build_args: { GITHUB_TOKEN: "abc" }
+    services: [app]
+`, root)).toThrow("must not be a secret or credential name");
+  });
+
   test("rejects project paths that escape through symlinks", async () => {
     const repository = await mkdtemp(join(tmpdir(), "container-lab-config-"));
     const outside = await mkdtemp(join(tmpdir(), "container-lab-outside-"));
