@@ -1,15 +1,14 @@
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { BackendFactory, BackendTransport } from "./backend.ts";
+import type { RegisteredProject } from "./state.ts";
 
 export const CONTAINER_WORKSPACE = "/workspace/repo";
 export const DEFAULT_IMAGE = "skizzles/codex-app-server:0.149.1";
 export const APP_SERVER_READY_MARKER = "__SKIZZLES_CODEX_APP_SERVER_READY__";
 
 export type DockerBackendOptions = {
-  repoUrl: string;
   image?: string | undefined;
-  repoRef?: string | undefined;
   codexHomeTemplate?: string | undefined;
   providerCommand?: string | undefined;
   providerReadyUrl?: string | undefined;
@@ -24,7 +23,6 @@ export class DockerBackendFactory implements BackendFactory {
   };
 
   constructor(options: DockerBackendOptions) {
-    validateText("repo URL", options.repoUrl);
     const image = options.image ?? DEFAULT_IMAGE;
     const dockerBinary = options.dockerBinary ?? "docker";
     validateText("image", image);
@@ -40,7 +38,8 @@ export class DockerBackendFactory implements BackendFactory {
     this.options = { ...options, image, dockerBinary };
   }
 
-  async create(): Promise<BackendTransport> {
+  async create(project: RegisteredProject): Promise<BackendTransport> {
+    validateText("repo URL", project.cloneUrl);
     const machineId = crypto.randomUUID();
     const name = `skizzles-codex-${machineId}`;
     const args = [
@@ -50,10 +49,9 @@ export class DockerBackendFactory implements BackendFactory {
       "--label", "dev.skizzles.codex-aggregator=true",
       "--label", `dev.skizzles.machine-id=${machineId}`,
       "--add-host", "host.docker.internal:host-gateway",
-      "--env", `CODEX_AGGREGATOR_REPO_URL=${this.options.repoUrl}`,
+      "--env", `CODEX_AGGREGATOR_REPO_URL=${project.cloneUrl}`,
       "--env", `CODEX_AGGREGATOR_WORKSPACE=${CONTAINER_WORKSPACE}`,
     ];
-    if (this.options.repoRef) args.push("--env", `CODEX_AGGREGATOR_REPO_REF=${this.options.repoRef}`);
     if (this.options.providerCommand) args.push("--env", `CODEX_AGGREGATOR_PROVIDER_COMMAND=${this.options.providerCommand}`);
     if (this.options.providerReadyUrl) args.push("--env", `CODEX_AGGREGATOR_PROVIDER_READY_URL=${this.options.providerReadyUrl}`);
     for (const name of this.options.passEnv ?? []) args.push("--env", name);
@@ -82,6 +80,10 @@ export class DockerBackendFactory implements BackendFactory {
       if (containerId) await removeContainer(this.options.dockerBinary, containerId);
       throw error;
     }
+  }
+
+  async remove(containerId: string): Promise<void> {
+    await removeContainer(this.options.dockerBinary, containerId);
   }
 }
 

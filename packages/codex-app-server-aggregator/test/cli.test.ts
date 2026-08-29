@@ -1,15 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { parseArgs } from "../src/cli.ts";
+import { DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, parseArgs } from "../src/cli.ts";
 import { DEFAULT_IMAGE } from "../src/docker.ts";
 
 describe("aggregator CLI", () => {
-  test("requires a repository and collects explicit provider env names", () => {
-    expect(() => parseArgs([])).toThrow("--repo is required");
-    expect(parseArgs(["--repo", "https://example.test/repo.git", "--pass-env", "OPENAI_API_KEY", "--pass-env", "PROVIDER_TOKEN"]))
+  test("separates daemon infrastructure from the stdio connector", () => {
+    expect(() => parseArgs([])).toThrow("expected serve or connect");
+    expect(parseArgs(["serve", "--pass-env", "OPENAI_API_KEY", "--pass-env", "PROVIDER_TOKEN"]))
       .toMatchObject({
-        repoUrl: "https://example.test/repo.git",
+        mode: "serve",
         image: DEFAULT_IMAGE,
         passEnv: ["OPENAI_API_KEY", "PROVIDER_TOKEN"],
+        httpHost: DEFAULT_HTTP_HOST,
+        httpPort: DEFAULT_HTTP_PORT,
       });
+    expect(parseArgs(["connect", "--socket", "/tmp/skizzles-aggregator-test.sock"]))
+      .toEqual({ mode: "connect", socketPath: "/tmp/skizzles-aggregator-test.sock" });
+    expect(() => parseArgs(["connect", "--pass-env", "TOKEN"]))
+      .toThrow("connect accepts only --socket");
+    expect(parseArgs(["serve", "--http-host", "localhost", "--http-port", "0", "--http-token-env", "REST_TOKEN"]))
+      .toMatchObject({ httpHost: "localhost", httpPort: 0, httpTokenEnv: "REST_TOKEN" });
+    expect(() => parseArgs(["serve", "--http-port", "65536"]))
+      .toThrow("--http-port must be an integer from 0 through 65535");
   });
 });

@@ -1,4 +1,5 @@
 import { readJsonLines } from "./jsonl.ts";
+import type { RegisteredProject } from "./state.ts";
 import {
   errorOutcome,
   idKey,
@@ -25,7 +26,7 @@ export interface BackendTransport {
 }
 
 export interface BackendFactory {
-  create(): Promise<BackendTransport>;
+  create(project: RegisteredProject): Promise<BackendTransport>;
 }
 
 export type BackendHandlers = {
