@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseLabConfig } from "./config";
@@ -7,6 +7,7 @@ import {
   fingerprintSharedImage,
   hasExactSharedImageLabels,
   isDockerignored,
+  materializeSharedImageSnapshot,
   parseDockerignore,
   rejectUnaccountedBuildArgs,
   rejectUnsafeDockerfile,
@@ -93,7 +94,7 @@ describe("shared image digest", () => {
     await writeFile(join(root, "environment", "keepdir", "drop.txt"), "drop\n");
     await writeFile(join(root, "environment", ".dockerignore"), "**\n!Dockerfile\n!keepdir/\n!keepdir/keep.txt\n");
     const before = await fingerprintSharedImage(root, testProfile(root));
-    expect(before.files.map((file) => file.path).sort()).toEqual(["Dockerfile", "keepdir/keep.txt"]);
+    expect(before.files.map((file) => file.path).sort()).toEqual(["Dockerfile", "keepdir", "keepdir/keep.txt"]);
     await writeFile(join(root, "environment", "keepdir", "keep.txt"), "keep-two\n");
     const afterKeep = await fingerprintSharedImage(root, testProfile(root));
     expect(afterKeep.digest).not.toBe(before.digest);
@@ -135,6 +136,30 @@ describe("shared image digest", () => {
     await writeFile(join(root, "environment", "vendor", "README.md"), "changed\n");
     await writeFile(join(root, "environment", "vendor", ".env"), "TOKEN=2\n");
     expect((await fingerprintSharedImage(root, testProfile(root))).digest).toBe(before.digest);
+  });
+
+  test("records empty directories and preserves directory modes in the snapshot", async () => {
+    const root = await environmentRepo("directory-modes");
+    const emptyDir = join(root, "environment", "emptydir");
+    const modeDir = join(root, "environment", "keepdir");
+    await mkdir(emptyDir);
+    await mkdir(modeDir);
+    await chmod(emptyDir, 0o755);
+    await chmod(modeDir, 0o755);
+    await writeFile(join(modeDir, "keep.txt"), "keep\n");
+    const before = await fingerprintSharedImage(root, testProfile(root));
+    expect(before.files).toEqual(expect.arrayContaining([
+      { path: "emptydir", kind: "directory", sha256: expect.any(String), mode: 0o755 },
+      { path: "keepdir", kind: "directory", sha256: expect.any(String), mode: 0o755 },
+      { path: "keepdir/keep.txt", kind: "file", sha256: expect.any(String), mode: expect.any(Number) },
+    ]));
+    const snapshot = await materializeSharedImageSnapshot(testProfile(root), before);
+    temporary.push(snapshot.root);
+    expect((await lstat(join(snapshot.context, "emptydir"))).isDirectory()).toBe(true);
+    expect((await lstat(join(snapshot.context, "emptydir"))).mode & 0o777).toBe(0o755);
+    expect((await lstat(join(snapshot.context, "keepdir"))).mode & 0o777).toBe(0o755);
+    await chmod(emptyDir, 0o700);
+    expect((await fingerprintSharedImage(root, testProfile(root))).digest).not.toBe(before.digest);
   });
 
   test("character-class ignore exceptions un-ignore files Docker would send", async () => {
@@ -200,6 +225,31 @@ describe("shared image safety", () => {
       "toolchain",
       "ARG SRC=./local.tgz\nADD ${SRC} /opt/\n",
     )).not.toThrow();
+  });
+
+  test("does not let heredoc payload mutate ARG/ENV used for remote ADD checks", () => {
+    expect(() => rejectUnsafeDockerfile(
+      "toolchain",
+      [
+        "ENV SRC=https://example.invalid",
+        "COPY <<EOF /marker",
+        "ENV SRC=/local",
+        "EOF",
+        "ADD ${SRC}/archive.tar.gz /opt/",
+        "",
+      ].join("\n"),
+    )).toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile(
+      "toolchain",
+      [
+        "ARG SRC=https://example.invalid/rootfs.tgz",
+        "COPY <<EOF /marker",
+        "ARG SRC=./local.tgz",
+        "EOF",
+        "ADD ${SRC} /opt/",
+        "",
+      ].join("\n"),
+    )).toThrow("remote ADD");
   });
 
   test("rejects secret files, Git metadata, and escaping symlinks in context", async () => {

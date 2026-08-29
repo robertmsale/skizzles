@@ -7124,8 +7124,16 @@ async function materializeSharedImageSnapshot(profile, fingerprint) {
     await mkdir(context, { recursive: true, mode: 448 });
     for (const file of fingerprint.files) {
       const destination = snapshotJoin(context, file.path);
-      await mkdir(dirname(destination), { recursive: true, mode: 448 });
       const live = snapshotJoin(profile.context, file.path);
+      if (file.kind === "directory") {
+        const info = await lstat(live);
+        if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 511) !== file.mode) {
+          throw new Error(`shared image ${profile.name}: context changed after fingerprint: ${file.path}`);
+        }
+        await mkdir(destination, { mode: file.mode });
+        await chmod(destination, file.mode);
+        continue;
+      }
       if (file.kind === "symlink") {
         if (!file.target) {
           throw new Error(`shared image ${profile.name}: context symlink is missing a target: ${file.path}`);
@@ -7183,7 +7191,7 @@ function rejectUnsafeDockerfile(profile, source, buildArgs = {}) {
     reasons.push("build SSH forwarding");
   if (/(?:^|\s)--network\s*=\s*host(?:\s|$)/im.test(compact))
     reasons.push("host network");
-  if (hasUnaccountedRemoteAdd(compact, buildArgs)) {
+  if (hasUnaccountedRemoteAdd(normalized, buildArgs)) {
     reasons.push("remote ADD");
   }
   if (/\$\{[A-Za-z_][A-Za-z0-9_]*\}|(?:^|[^A-Za-z0-9_])\$[A-Za-z_][A-Za-z0-9_]*/m.test(compact) && /(?:^|\s)--mount\s*=/im.test(compact) === false) {}
@@ -7304,6 +7312,7 @@ async function collectContextFiles(profile, repoRoot, context, dockerfile, patte
         }
         if (isExcludedByDockerignore(relativePath, true, patterns))
           continue;
+        await recordContextDirectory(profile, files, absolute, relativePath);
         pending.push(absolute);
         continue;
       }
@@ -7327,6 +7336,7 @@ async function collectContextFiles(profile, repoRoot, context, dockerfile, patte
   if (isPathInside(context, dockerfile)) {
     const dockerfileRelative = posixRelative(context, dockerfile);
     if (!files.some((file) => file.path === dockerfileRelative)) {
+      await recordDockerfileAncestors(profile, context, dockerfileRelative, files);
       const described = await describeContextFile(profile, dockerfile, dockerfileRelative);
       files.push({ path: described.path, kind: described.kind, sha256: described.sha256, mode: described.mode });
     }
@@ -7366,6 +7376,32 @@ async function describeContextSymlink(profile, context, absolute, relativePath, 
     mode: mode & 511,
     target
   };
+}
+async function recordContextDirectory(profile, files, absolute, relativePath) {
+  if (files.some((file) => file.path === relativePath))
+    return;
+  rejectUnsafeSentPath(profile, relativePath);
+  const info = await lstat(absolute);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`shared image ${profile}: context path is not a directory: ${relativePath}`);
+  }
+  if (files.length + 1 > MAX_SENT_FILES) {
+    throw new Error(`shared image ${profile}: context exceeds ${MAX_SENT_FILES} sent files`);
+  }
+  files.push({
+    path: relativePath,
+    kind: "directory",
+    sha256: sha256Hex(""),
+    mode: info.mode & 511
+  });
+}
+async function recordDockerfileAncestors(profile, context, dockerfileRelative, files) {
+  const parts = dockerfileRelative.split("/").filter((part) => part.length > 0);
+  let prefix = "";
+  for (let index = 0;index < parts.length - 1; index++) {
+    prefix = prefix ? `${prefix}/${parts[index]}` : parts[index];
+    await recordContextDirectory(profile, files, snapshotJoin(context, prefix), prefix);
+  }
 }
 function rejectUnsafeSentPath(profile, relativePath) {
   if (UNSAFE_SENT_PATHS.test(relativePath) || UNSAFE_SENT_FILES.test(relativePath)) {
@@ -7511,34 +7547,188 @@ function readDockerignoreCharacterClass(pattern, start) {
   return;
 }
 function hasUnaccountedRemoteAdd(source, buildArgs) {
+  const instructions = parseDockerfileInstructions(source);
+  if (instructions === undefined)
+    return true;
+  const globalArgs = {};
   const env = {};
-  for (const raw of source.split(`
-`)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#"))
-      continue;
-    const match = /^(ARG|ENV|ADD)\s+(.*)$/i.exec(line);
-    if (!match)
-      continue;
-    const instruction = match[1].toUpperCase();
-    const body = match[2] ?? "";
-    if (instruction === "ARG") {
-      applyArgInstruction(body, env, buildArgs);
+  let inStage = false;
+  for (const instruction of instructions) {
+    if (instruction.name === "FROM") {
+      inStage = true;
+      for (const key of Object.keys(env))
+        delete env[key];
       continue;
     }
-    if (instruction === "ENV") {
-      applyEnvInstruction(body, env);
+    if (instruction.name === "ARG") {
+      if (!inStage) {
+        applyArgInstruction(instruction.body, globalArgs, buildArgs);
+        applyArgInstruction(instruction.body, env, buildArgs);
+      } else {
+        applyArgInstruction(instruction.body, env, inheritedBuildArgs(globalArgs, buildArgs));
+      }
       continue;
     }
-    if (/(?:^|\s)<<[-]?["']?\w+["']?/.test(body))
+    if (instruction.name === "ENV") {
+      applyEnvInstruction(instruction.body, env);
       continue;
-    const parsed = parseAddSources(body);
+    }
+    const addBody = addInstructionBody(instruction.name, instruction.body);
+    if (addBody === undefined)
+      continue;
+    const parsed = parseAddSources(addBody);
     if (parsed === undefined)
       return true;
-    if (parsed.some((addSource) => !isProvenLocalAddSource(addSource, env)))
+    if (parsed.some((addSource) => !isHeredocAddSource(addSource) && !isProvenLocalAddSource(addSource, env))) {
       return true;
+    }
   }
   return false;
+}
+function inheritedBuildArgs(globalArgs, buildArgs) {
+  const inherited = {};
+  for (const [name, value] of Object.entries(globalArgs)) {
+    if (value !== undefined)
+      inherited[name] = value;
+  }
+  return { ...inherited, ...buildArgs };
+}
+function addInstructionBody(name, body) {
+  if (name === "ADD")
+    return body;
+  if (name === "ONBUILD") {
+    const match = /^\s*ADD\s+(.*)$/i.exec(body);
+    if (match)
+      return match[1] ?? "";
+  }
+  return;
+}
+function parseDockerfileInstructions(source) {
+  const lines = source.replace(/\r\n/g, `
+`).split(`
+`);
+  const instructions = [];
+  let index = 0;
+  while (index < lines.length) {
+    const raw = lines[index];
+    index += 1;
+    const start = raw.replace(/^[ \t\v\f\r]+/, "");
+    if (start.length === 0 || start.startsWith("#"))
+      continue;
+    let assembled = "";
+    let current = start;
+    while (true) {
+      const split = splitDockerfileContinuation(current);
+      assembled += split.text;
+      if (!split.continues)
+        break;
+      let found = false;
+      while (index < lines.length) {
+        const next = lines[index];
+        index += 1;
+        if (isDockerfileComment(next) || isDockerfileEmpty(next))
+          continue;
+        current = next;
+        found = true;
+        break;
+      }
+      if (!found)
+        break;
+    }
+    if (assembled.trim().length === 0)
+      continue;
+    const parsed = splitDockerfileInstruction(assembled);
+    if (!parsed)
+      return;
+    if (instructionCanContainHeredoc(parsed.name, parsed.body) && assembled.includes("<<")) {
+      const docs = heredocsFromInstruction(parsed.name, parsed.body);
+      if (docs === undefined)
+        return;
+      for (const doc of docs) {
+        let terminated = false;
+        while (index < lines.length) {
+          const bodyLine = lines[index];
+          index += 1;
+          let possible = bodyLine.replace(/\r$/, "");
+          if (doc.chomp)
+            possible = possible.replace(/^\t+/, "");
+          if (possible === doc.name) {
+            terminated = true;
+            break;
+          }
+        }
+        if (!terminated)
+          return;
+      }
+    }
+    instructions.push(parsed);
+  }
+  return instructions;
+}
+function splitDockerfileContinuation(line) {
+  const match = /^(?:(.*[^\\]))?\\[ \t]*$/.exec(line);
+  if (!match)
+    return { text: line, continues: false };
+  return { text: match[1] ?? "", continues: true };
+}
+function splitDockerfileInstruction(assembled) {
+  const match = /^([A-Za-z][A-Za-z0-9]*)(?:\s+(.*))?$/.exec(assembled.trim());
+  if (!match)
+    return;
+  return { name: match[1].toUpperCase(), body: match[2] ?? "" };
+}
+function instructionCanContainHeredoc(name, body) {
+  if (name === "ADD" || name === "COPY" || name === "RUN")
+    return !isJsonInstructionBody(body);
+  if (name === "ONBUILD") {
+    const match = /^\s*(ADD|COPY|RUN)\s+(.*)$/i.exec(body);
+    if (!match)
+      return false;
+    return !isJsonInstructionBody(match[2] ?? "");
+  }
+  return false;
+}
+function isJsonInstructionBody(body) {
+  const tokens = tokenizeDockerfileArgs(body);
+  if (tokens === undefined)
+    return false;
+  let index = 0;
+  while (index < tokens.length && tokens[index].startsWith("--"))
+    index += 1;
+  return tokens[index]?.startsWith("[") === true;
+}
+function heredocsFromInstruction(name, body) {
+  const tokens = tokenizeDockerfileArgs(`${name} ${body}`);
+  if (tokens === undefined)
+    return;
+  const docs = [];
+  for (const token of tokens) {
+    const doc = parseHeredocToken(token);
+    if (doc)
+      docs.push(doc);
+  }
+  return docs;
+}
+function parseHeredocToken(token) {
+  const match = /^(\d*)<<(-?)\s*([^<]*)$/.exec(token);
+  if (!match)
+    return;
+  const rest = match[3] ?? "";
+  if (rest.length === 0)
+    return;
+  const name = rest.replace(/['"]/g, "");
+  if (name.length === 0)
+    return;
+  return { name, chomp: match[2] === "-" };
+}
+function isHeredocAddSource(source) {
+  return parseHeredocToken(source) !== undefined;
+}
+function isDockerfileComment(line) {
+  return /^\s*#/.test(line);
+}
+function isDockerfileEmpty(line) {
+  return /^\s*$/.test(line);
 }
 function parseAddSources(body) {
   const tokens = tokenizeDockerfileArgs(body);
