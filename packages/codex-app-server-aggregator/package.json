@@ -8,10 +8,22 @@
     "codex-app-server-ctl": "./src/http-cli.ts"
   },
   "scripts": {
+    "build": "vite build",
     "check": "bun run typecheck && bun test",
     "ctl": "bun run src/http-cli.ts",
+    "dev": "vite",
     "protocol:generate": "bun run scripts/generate-protocol.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest"
   }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AggregatorDaemon, connectStdio } from "./daemon.ts";
 import { DEFAULT_IMAGE, DockerBackendFactory } from "./docker.ts";
 import { AggregatorState } from "./state.ts";
@@ -65,9 +66,11 @@ export async function cliMain(argv: string[]): Promise<number> {
     state,
     factory,
     removeOrphan: (machine) => factory.remove(machine.containerId),
+    inspectContainer: (containerId) => factory.inspect(containerId),
     http: {
       hostname: options.httpHost,
       port: options.httpPort,
+      staticDirectory: resolve(dirname(fileURLToPath(import.meta.url)), "../dist"),
       ...resolveHttpToken(options.httpTokenEnv),
     },
     log: (message) => process.stderr.write(`${message}\n`),

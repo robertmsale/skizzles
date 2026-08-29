@@ -162,6 +162,14 @@ export class AggregatorState {
     return active;
   }
 
+  machines(): StoredMachine[] {
+    return this.database.query<MachineRow, []>(`
+      SELECT machine_id, project_cwd, container_id, state
+      FROM machines
+      ORDER BY machine_id
+    `).all().map(machineFromRow);
+  }
+
   saveThread(thread: StoredThread, now = Date.now()): void {
     this.database.query(`
       INSERT INTO threads (

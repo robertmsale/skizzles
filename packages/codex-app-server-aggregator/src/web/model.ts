@@ -1,0 +1,155 @@
+import type {
+  ServerRequestDto,
+  ThreadDto,
+  ThreadItemDto,
+  ThreadView,
+  TimelineEntry,
+} from "./types.ts";
+
+export function classifyThread(
+  thread: ThreadDto,
+  loadedIds: ReadonlySet<string>,
+  archived: boolean,
+): ThreadView {
+  return { ...thread, lifecycle: archived ? "archived" : loadedIds.has(thread.id) ? "live" : "snapshot" };
+}
+
+export function threadIsRunning(thread: ThreadDto): boolean {
+  const type = thread.status?.type?.toLowerCase() ?? "";
+  return type !== "" && !["idle", "notloaded", "not_loaded", "completed"].includes(type);
+}
+
+export function requestThreadId(request: ServerRequestDto): string | undefined {
+  const params = record(request.params);
+  return typeof params.threadId === "string" ? params.threadId : undefined;
+}
+
+export function requestLabel(request: ServerRequestDto): string {
+  if (request.method.includes("commandExecution") || request.method === "execCommandApproval") return "Run command";
+  if (request.method.includes("fileChange") || request.method === "applyPatchApproval") return "Apply file changes";
+  if (request.method.includes("permissions")) return "Grant permissions";
+  if (request.method.includes("requestUserInput")) return "Input requested";
+  return words(request.method.split("/").at(-1) ?? "Request");
+}
+
+export function requestDetail(request: ServerRequestDto): string {
+  const params = record(request.params);
+  const command = params.command;
+  if (typeof command === "string") return command;
+  if (Array.isArray(command)) return command.filter((part): part is string => typeof part === "string").join(" ");
+  for (const key of ["reason", "message", "description"]) {
+    if (typeof params[key] === "string") return params[key];
+  }
+  return "Codex is waiting for your decision.";
+}
+
+export function approvalResult(request: ServerRequestDto, accepted: boolean): Record<string, unknown> {
+  if (request.method === "applyPatchApproval" || request.method === "execCommandApproval") {
+    return { decision: accepted ? "approved" : "denied" };
+  }
+  return { decision: accepted ? "accept" : "decline" };
+}
+
+export function timelineEntries(thread: ThreadDto | null, deltas: ReadonlyMap<string, string>): TimelineEntry[] {
+  if (!thread?.turns) return [];
+  const result: TimelineEntry[] = [];
+  for (const turn of thread.turns) {
+    for (const [index, item] of (turn.items ?? []).entries()) {
+      const type = item.type ?? "activity";
+      const key = item.id ?? `${turn.id}-${index}`;
+      const text = itemText(item) + (deltas.get(key) ?? "");
+      if (/user.*message/i.test(type)) {
+        result.push({ key, role: "user", label: "You", text: text || "Message", raw: item });
+      } else if (/agent.*message|assistant.*message/i.test(type)) {
+        result.push({ key, role: "assistant", label: "Codex", text: text || "Thinking…", raw: item });
+      } else if (/reasoning/i.test(type)) {
+        if (text) result.push({ key, role: "tool", label: "Reasoning", text, ...optionalStatus(item.status), raw: item });
+      } else {
+        result.push({
+          key,
+          role: "tool",
+          label: toolLabel(item),
+          text: text || toolFallback(item),
+          ...optionalStatus(item.status),
+          raw: item,
+        });
+      }
+    }
+  }
+  return result;
+}
+
+export function eventThreadId(event: { params?: unknown }): string | undefined {
+  const params = record(event.params);
+  if (typeof params.threadId === "string") return params.threadId;
+  const thread = record(params.thread);
+  return typeof thread.id === "string" ? thread.id : undefined;
+}
+
+export function eventDelta(event: { method: string; params?: unknown }): { itemId: string; delta: string } | null {
+  if (!/delta$/i.test(event.method)) return null;
+  const params = record(event.params);
+  const itemId = typeof params.itemId === "string" ? params.itemId : undefined;
+  const delta = typeof params.delta === "string" ? params.delta : typeof params.text === "string" ? params.text : undefined;
+  return itemId && delta ? { itemId, delta } : null;
+}
+
+export function threadTitle(thread: ThreadDto): string {
+  const preview = thread.preview?.replace(/\s+/g, " ").trim();
+  return preview || "New Codex thread";
+}
+
+export function relativeTime(value: number | undefined, now = Date.now()): string {
+  if (!value) return "";
+  const seconds = Math.max(0, Math.round((now - value) / 1000));
+  if (seconds < 60) return "now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
+function itemText(item: ThreadItemDto): string {
+  for (const key of ["text", "output", "aggregatedOutput", "result", "summary"]) {
+    if (typeof item[key] === "string") return item[key] as string;
+  }
+  const content = item.content;
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === "string") return part;
+      const value = record(part);
+      return typeof value.text === "string" ? value.text : typeof value.value === "string" ? value.value : "";
+    }).filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+function toolLabel(item: ThreadItemDto): string {
+  const type = item.type ?? "activity";
+  if (/command/i.test(type)) return "Command";
+  if (/file.*change|patch/i.test(type)) return "File changes";
+  if (/mcp/i.test(type)) return typeof item.server === "string" ? `MCP · ${item.server}` : "MCP tool";
+  if (/web.*search/i.test(type)) return "Web search";
+  if (/tool/i.test(type) && typeof item.name === "string") return words(item.name);
+  return words(type);
+}
+
+function toolFallback(item: ThreadItemDto): string {
+  if (Array.isArray(item.command)) return item.command.join(" ");
+  if (typeof item.command === "string") return item.command;
+  if (typeof item.path === "string") return item.path;
+  return "Activity details are not available.";
+}
+
+function words(value: string): string {
+  return value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_/-]+/g, " ").replace(/^./, (char) => char.toUpperCase());
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function optionalStatus(value: unknown): { status: string } | Record<string, never> {
+  return typeof value === "string" ? { status: value } : {};
+}
