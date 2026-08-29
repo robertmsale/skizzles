@@ -184,6 +184,18 @@ describe("Codex app-server aggregation", () => {
     });
     await harness.aggregator.handle({ method: "thread/read", id: 5, params: { threadId, includeTurns: false } });
     expect(resultFor(harness.output.messages, 5)).toMatchObject({ thread: { id: threadId } });
+    await harness.aggregator.handle({ method: "thread/unarchive", id: 6, params: { threadId } });
+    expect(resultFor(harness.output.messages, 6)).toEqual({});
+    await harness.aggregator.handle({ method: "thread/unarchive", id: "unarchive-again", params: { threadId } });
+    expect(resultFor(harness.output.messages, "unarchive-again")).toEqual({});
+    expect(harness.factory.transports[0]!.request("thread/unarchive")).toBeUndefined();
+    expect(harness.factory.transports).toHaveLength(1);
+    await harness.aggregator.handle({ method: "thread/list", id: 7, params: { archived: true } });
+    expect(resultFor(harness.output.messages, 7)).toMatchObject({ data: [{ id: threadId }] });
+    await harness.aggregator.handle({ method: "thread/list", id: 8, params: {} });
+    expect(resultFor(harness.output.messages, 8)).toEqual({ data: [], nextCursor: null, backwardsCursor: null });
+    await harness.aggregator.handle({ method: "thread/unarchive", id: 9, params: { threadId: "unknown-thread" } });
+    expect(errorFor(harness.output.messages, 9)).toEqual({ code: -32004, message: "unknown thread: unknown-thread" });
     await harness.aggregator.close();
   });
 
@@ -468,7 +480,6 @@ const TOPOLOGY_NOTIFICATION_METHODS = new Set([
   "thread/started",
   "thread/status/changed",
   "thread/archived",
-  "thread/unarchived",
   "thread/deleted",
   "thread/closed",
   "thread/name/updated",

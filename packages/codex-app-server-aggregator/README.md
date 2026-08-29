@@ -75,9 +75,11 @@ persisted active/orphaned containers by exact container ID, retains snapshot-onl
 `thread/read` data, and returns an unavailable-thread error for operations that require the dead
 writer.
 
-Within a live connection, archive/delete still route by the real backend-minted thread ID and run
-`docker rm --force` only after every thread mapped to that machine is drained. Fork and detached
-review IDs remain on their original writer process.
+Within a live connection, archive is the explicit destructive release operation. It routes by the
+real backend-minted thread ID and runs `docker rm --force` only after every thread mapped to that
+machine is drained. The rollout is intentionally discarded. `thread/unarchive` is an idempotent
+no-op for known threads: it returns success but leaves the snapshot archived and never provisions a
+replacement. Fork and detached review IDs remain on their original writer process.
 
 The selected outer transport is a Unix-domain JSONL socket because direct stdio exits on EOF and
 the pinned Codex runtime's listen-WebSocket surface is experimental. Inner app-server connections
@@ -96,7 +98,9 @@ archive removes the selected machine.
 | `thread/read` after teardown | Return the retained snapshot when turns are not requested. |
 | Thread-scoped requests | Route by the real Codex thread ID. Fork/review IDs bind to the same backend and project. |
 | Backend approvals and other requests | Rewrite only the JSON-RPC request ID for collision-free correlation, then route the client response back to the originating backend. |
-| `thread/archive`, `thread/delete` | Pass through, persist lifecycle state, and remove the exact container when its thread tree drains. |
+| `thread/archive` | Pass through, persist the archived snapshot, and intentionally remove the exact container when its thread tree drains. |
+| `thread/unarchive` | Return success for a known thread without changing its archived state or provisioning a replacement. |
+| `thread/delete` | Pass through, persist deletion, and remove the exact container when its thread tree drains. |
 | Native project/section/search topology | Reject rather than return one backend's false partial view; the Skizzles registry extensions are a separate aggregate-owned surface. |
 | Homogeneous global reads | Route to a warm or running representative backend. |
 | Other unkeyed requests | Reject until an aggregate, broadcast, or seed-owned meaning exists. |

@@ -124,6 +124,16 @@ export class AppServerAggregator {
       await this.output.send(response(request.id, { result }));
       return;
     }
+    if (request.method === "thread/unarchive") {
+      const threadId = asRecord(request.params).threadId;
+      if (typeof threadId !== "string" || !this.topology.has(threadId)) {
+        const detail = typeof threadId === "string" ? threadId : "missing thread id";
+        await this.output.send(response(request.id, errorOutcome(-32004, `unknown thread: ${detail}`)));
+        return;
+      }
+      await this.output.send(response(request.id, { result: {} }));
+      return;
+    }
     if (isAggregateTopologyMethod(request.method)) {
       await this.output.send(response(request.id, errorOutcome(
         -32004,
@@ -605,7 +615,6 @@ const TOPOLOGY_NOTIFICATION_METHODS = new Set([
   "thread/started",
   "thread/status/changed",
   "thread/archived",
-  "thread/unarchived",
   "thread/deleted",
   "thread/closed",
   "thread/name/updated",

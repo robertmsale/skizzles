@@ -63,7 +63,6 @@ export class Topology {
     const method = typeof envelope.method === "string" ? envelope.method : undefined;
     const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
     if (method === "thread/archived" && threadId) this.markArchived(threadId);
-    if (method === "thread/unarchived" && threadId) this.markUnarchived(threadId);
     if (method === "thread/deleted" && threadId) this.markDeleted(threadId);
     if (method === "thread/closed" && threadId) {
       this.patchSnapshot(threadId, { status: { type: "notLoaded" } });
@@ -90,6 +89,11 @@ export class Topology {
     return entry && !entry.deleted && entry.snapshot ? structuredClone(entry.snapshot) : undefined;
   }
 
+  has(threadId: string): boolean {
+    const entry = this.threads.get(threadId);
+    return entry !== undefined && !entry.deleted;
+  }
+
   markArchived(threadId: string): void {
     const entry = this.threads.get(threadId);
     if (!entry) return;
@@ -97,14 +101,6 @@ export class Topology {
     entry.loaded = false;
     if (entry.snapshot) entry.snapshot = { ...entry.snapshot, status: { type: "notLoaded" } };
     this.persistEntry(threadId);
-  }
-
-  markUnarchived(threadId: string): void {
-    const entry = this.threads.get(threadId);
-    if (entry) {
-      entry.archived = false;
-      this.persistEntry(threadId);
-    }
   }
 
   markDeleted(threadId: string): void {

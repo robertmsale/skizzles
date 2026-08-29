@@ -30,6 +30,7 @@ and rejects unkeyed operations that have no honest aggregate meaning.
 | `thread/fork`, detached `review/start`, and new `thread/started` notifications | Pass through and bind every returned/announced ID to the same backend. | These operations mint extra real thread IDs inside the existing writer process. |
 | Backend-to-client requests | Preserve method and params, remap only the JSON-RPC request ID, and reverse-map the client response. | Different backends can concurrently choose the same request ID for approvals or elicitation. Thread IDs remain untouched. |
 | `thread/archive`, `thread/delete` | Pass through, update aggregate topology, and `docker rm --force` once every mapped thread is archived/deleted. | A fork tree can share one backend, so one archived ID is not necessarily enough to free the machine. |
+| `thread/unarchive` | Return success for a known thread without changing its archived state or provisioning a backend. | Archive is the intentional destructive release boundary; the removed rollout cannot honestly be restored. |
 | `skizzles/project/add`, `list`, `remove` | Maintain the persistent host-CWD registry with ordinary JSON-RPC envelopes, including before `initialize`. | Codex 0.149.1 has no backend-owned surface with a truthful fleet-wide registry view. |
 | Native project, section, and thread-search topology | Return an explicit same-protocol error for now. | These must eventually be aggregate-owned; asking one arbitrary backend would return a false partial view. |
 | Homogeneous global reads | Use a warm or running representative backend. | Model/config/account capability reads are expected to agree while every container comes from one image and Codex-home seed. |
@@ -171,7 +172,8 @@ auth seed is mechanism, not a credential-security design.
   Direct stdio still cannot reattach after restart, so stale containers are removed and old
   threads remain snapshot-only and unloaded.
 - `docker rm` intentionally destroys rollout history. Durable archive/read/resume requires an
-  external volume or object-store policy before teardown.
+  external volume or object-store policy before teardown. This pipeline instead defines archive as
+  irreversible release and makes unarchive an idempotent no-op.
 - Native Codex project/section/search topology is explicitly unimplemented. The host-CWD registry
   is an extension-owned aggregate view, not a backend's partial `project/*` response.
 - Thread-list cursors and filters have the right DTO shape and cover common filters, but use an
