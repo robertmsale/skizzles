@@ -99,7 +99,7 @@ export class RestApiServer {
     if (threadRoute) {
       return this.thread(request, decodeURIComponent(threadRoute[1]!), threadRoute[2], url);
     }
-    if ((request.method === "GET" || request.method === "HEAD") && this.options.staticDirectory) {
+    if ((request.method === "GET" || request.method === "HEAD") && this.options.staticDirectory && !path.startsWith("/v1/")) {
       return this.staticAsset(path, request.method === "HEAD");
     }
     return json({ error: { code: "not_found", message: "route not found" } }, 404);

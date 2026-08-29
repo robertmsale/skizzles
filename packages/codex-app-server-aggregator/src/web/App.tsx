@@ -126,14 +126,13 @@ export function App() {
         cursor = page.nextCursor;
         stream = page.streamId;
         setRequests(approvals.data);
-        let selectedChanged = false;
         if (page.data.length) {
+          const selectedChanged = page.data.some((record) => eventThreadId(record.event) === selectedId);
           setDeltas((current) => {
             const next = new Map(current);
             for (const record of page.data) {
               const delta = eventDelta(record.event);
               if (delta) next.set(delta.itemId, (next.get(delta.itemId) ?? "") + delta.delta);
-              if (eventThreadId(record.event) === selectedId) selectedChanged = true;
             }
             return next;
           });

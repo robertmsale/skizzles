@@ -146,10 +146,13 @@ describe("aggregator REST API", () => {
     await daemon.start();
     const root = await fetch(daemon.httpUrl!);
     const fallback = await fetch(new URL("/threads/example", daemon.httpUrl!));
+    const unknownApi = await fetch(new URL("/v1/not-a-route", daemon.httpUrl!));
     expect(root.status).toBe(200);
     expect(root.headers.get("cache-control")).toBe("no-cache");
     expect(await root.text()).toContain("Codex board");
     expect(await fallback.text()).toContain("Codex board");
+    expect(unknownApi.status).toBe(404);
+    expect(await unknownApi.json()).toEqual({ error: { code: "not_found", message: "route not found" } });
     await daemon.close();
   });
 
