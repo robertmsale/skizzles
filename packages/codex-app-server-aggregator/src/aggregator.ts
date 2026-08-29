@@ -1,5 +1,6 @@
 import { BackendConnection, type BackendFactory, type BackendTransport } from "./backend.ts";
 import type { MessageSink } from "./jsonl.ts";
+import { ProjectRegistry } from "./projects.ts";
 import {
   errorOutcome,
   idKey,
@@ -14,29 +15,35 @@ import {
   type RpcRequest,
 } from "./protocol.ts";
 import { Topology, type ThreadListParams } from "./topology.ts";
+import { AggregatorState, type RegisteredProject } from "./state.ts";
 
 type ReverseRequest = { backend: BackendConnection; backendId: RpcId };
 type CreatedBackend = { connection: BackendConnection; outcome: RpcOutcome; activate: () => Promise<void> };
 
 export type AggregatorOptions = {
   factory: BackendFactory;
+  registry: ProjectRegistry;
+  state: AggregatorState;
   output: MessageSink;
   log?: (message: string) => void;
 };
 
 export class AppServerAggregator {
-  private readonly topology = new Topology();
+  private readonly topology: Topology;
   private readonly backends = new Map<string, BackendConnection>();
+  private readonly backendProjects = new Map<BackendConnection, RegisteredProject>();
   private readonly readyBackends = new Set<BackendConnection>();
   private readonly reverseRequests = new Map<string, ReverseRequest>();
   private readonly lifecycleCalls = new Map<BackendConnection, number>();
   private readonly factory: BackendFactory;
+  private readonly registry: ProjectRegistry;
+  private readonly state: AggregatorState;
   private readonly output: MessageSink;
   private readonly log: (message: string) => void;
   private initialization?: Promise<RpcOutcome>;
   private initialActivation: (() => Promise<void>) | undefined;
   private initializeParams?: unknown;
-  private warmBackend: BackendConnection | undefined;
+  private readonly warmBackends = new Map<string, BackendConnection>();
   private globalBackendCreation: Promise<BackendConnection | undefined> | undefined;
   private readonly clientOptOutNotifications = new Set<string>();
   private initialized = false;
@@ -44,8 +51,14 @@ export class AppServerAggregator {
 
   constructor(options: AggregatorOptions) {
     this.factory = options.factory;
+    this.registry = options.registry;
+    this.state = options.state;
     this.output = options.output;
     this.log = options.log ?? (() => undefined);
+    this.topology = new Topology({
+      threads: this.state.threads(),
+      persist: (thread) => this.state.saveThread(thread),
+    });
   }
 
   async handle(message: RpcMessage): Promise<void> {
@@ -70,15 +83,23 @@ export class AppServerAggregator {
       if (result.status === "rejected") {
         const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
         this.log(`failed to close backend ${backends[index]!.machineId}: ${reason}`);
+      } else {
+        this.state.markMachine(backends[index]!.machineId, "removed");
       }
     });
     this.backends.clear();
     this.readyBackends.clear();
+    this.backendProjects.clear();
+    this.warmBackends.clear();
     this.reverseRequests.clear();
     this.lifecycleCalls.clear();
   }
 
   private async handleClientRequest(request: RpcRequest): Promise<void> {
+    if (request.method.startsWith("skizzles/project/")) {
+      await this.handleProjectRequest(request);
+      return;
+    }
     if (request.method === "initialize") {
       await this.handleInitialize(request);
       return;
@@ -143,7 +164,8 @@ export class AppServerAggregator {
     if (lifecycleRequest) this.beginLifecycleCall(backend);
     let outcome: RpcOutcome;
     try {
-      outcome = await backend.call(request.method, request.params);
+      const rawOutcome = await backend.call(request.method, backendRoutedParams(backend, request.params));
+      outcome = virtualizeOutcome(rawOutcome, this.projectForBackend(backend).cwd);
     } finally {
       if (lifecycleRequest) this.endLifecycleCall(backend);
     }
@@ -151,7 +173,11 @@ export class AppServerAggregator {
       && lifecycleRequest
       && isMissingRollout(outcome, threadId);
     if (synthesizedLifecycle) outcome = { result: {} };
-    this.topology.observe(backend.machineId, response(request.id, outcome));
+    this.topology.observe(
+      backend.machineId,
+      this.projectForBackend(backend).cwd,
+      response(request.id, outcome),
+    );
     await this.output.send(response(request.id, outcome));
 
     if ("result" in outcome && threadId && request.method === "thread/archive") {
@@ -169,6 +195,47 @@ export class AppServerAggregator {
     }
   }
 
+  private async handleProjectRequest(request: RpcRequest): Promise<void> {
+    try {
+      if (request.method === "skizzles/project/list") {
+        await this.output.send(response(request.id, { result: { data: this.registry.list() } }));
+        return;
+      }
+      const cwd = asRecord(request.params).cwd;
+      if (typeof cwd !== "string") {
+        await this.output.send(response(request.id, errorOutcome(-32602, "project cwd must be a string")));
+        return;
+      }
+      if (request.method === "skizzles/project/add") {
+        const project = await this.registry.register(cwd);
+        await this.output.send(response(request.id, { result: { project } }));
+        return;
+      }
+      if (request.method === "skizzles/project/remove") {
+        const project = await this.registry.find(cwd);
+        if (project) {
+          const projectBackends = [...this.backendProjects.entries()]
+            .filter(([, candidate]) => candidate.cwd === project.cwd)
+            .map(([backend]) => backend);
+          if (projectBackends.some((backend) => this.topology.hasLiveThreads(backend.machineId))) {
+            await this.output.send(response(request.id, errorOutcome(-32005, "project has active threads")));
+            return;
+          }
+          await Promise.all(projectBackends.map((backend) => this.removeIfDrained(backend)));
+        }
+        const removed = await this.registry.remove(cwd);
+        await this.output.send(response(request.id, { result: { removed } }));
+        return;
+      }
+      await this.output.send(response(request.id, errorOutcome(-32601, `unknown extension method: ${request.method}`)));
+    } catch (error) {
+      await this.output.send(response(request.id, errorOutcome(
+        -32602,
+        error instanceof Error ? error.message : String(error),
+      )));
+    }
+  }
+
   private async handleInitialize(request: RpcRequest): Promise<void> {
     if (this.initialization) {
       await this.output.send(response(request.id, errorOutcome(-32600, "Already initialized")));
@@ -176,16 +243,27 @@ export class AppServerAggregator {
     }
     this.initializeParams = request.params;
     for (const method of initializeOptOutMethods(request.params)) this.clientOptOutNotifications.add(method);
-    this.initialization = this.createInitializedBackend(true).then(async (backend) => {
+    const project = this.registry.list()[0];
+    if (!project) {
+      this.initialization = Promise.resolve(errorOutcome(
+        -32004,
+        "no projects are registered; call skizzles/project/add before initialize",
+      ));
+      await this.output.send(response(request.id, await this.initialization));
+      return;
+    }
+    this.initialization = this.createInitializedBackend(project, true).then(async (backend) => {
       if ("error" in backend.outcome) {
         this.backends.delete(backend.connection.machineId);
+        this.backendProjects.delete(backend.connection);
         try {
           await backend.connection.close();
+          this.state.markMachine(backend.connection.machineId, "removed");
         } catch (error) {
           this.log(`failed to clean initialization backend ${backend.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       } else {
-        this.warmBackend = backend.connection;
+        this.warmBackends.set(project.cwd, backend.connection);
         this.initialActivation = backend.activate;
       }
       return backend.outcome;
@@ -208,12 +286,21 @@ export class AppServerAggregator {
   }
 
   private async handleThreadStart(request: RpcRequest): Promise<void> {
-    let backend = this.warmBackend;
-    this.warmBackend = undefined;
+    const requestedCwd = asRecord(request.params).cwd;
+    const project = typeof requestedCwd === "string" ? await this.registry.find(requestedCwd) : undefined;
+    if (!project) {
+      await this.output.send(response(request.id, errorOutcome(
+        -32004,
+        "thread/start cwd is not a registered project",
+      )));
+      return;
+    }
+    let backend = this.warmBackends.get(project.cwd);
+    this.warmBackends.delete(project.cwd);
     if (!backend) {
       let created: CreatedBackend;
       try {
-        created = await this.createInitializedBackend();
+        created = await this.createInitializedBackend(project);
       } catch (error) {
         this.log(`failed to provision backend: ${error instanceof Error ? error.message : String(error)}`);
         await this.output.send(response(request.id, errorOutcome(-32603, "failed to provision app-server backend")));
@@ -221,8 +308,10 @@ export class AppServerAggregator {
       }
       if ("error" in created.outcome) {
         this.backends.delete(created.connection.machineId);
+        this.backendProjects.delete(created.connection);
         try {
           await created.connection.close();
+          this.state.markMachine(created.connection.machineId, "removed");
         } catch (error) {
           this.log(`failed to clean rejected backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -236,8 +325,10 @@ export class AppServerAggregator {
         } catch (error) {
           this.readyBackends.delete(backend);
           this.backends.delete(backend.machineId);
+          this.backendProjects.delete(backend);
           try {
             await backend.close();
+            this.state.markMachine(backend.machineId, "removed");
           } catch (closeError) {
             this.log(`failed to clean unnotified backend ${backend.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
           }
@@ -249,21 +340,29 @@ export class AppServerAggregator {
     }
     const params: Record<string, unknown> = { ...asRecord(request.params), cwd: backend.workspace };
     if (Array.isArray(params.runtimeWorkspaceRoots)) params.runtimeWorkspaceRoots = [backend.workspace];
-    const outcome = await backend.call("thread/start", params);
-    this.topology.observe(backend.machineId, response(request.id, outcome));
+    const rawOutcome = await backend.call("thread/start", params);
+    const outcome = virtualizeOutcome(rawOutcome, project.cwd);
+    this.topology.observe(backend.machineId, project.cwd, response(request.id, outcome));
     await this.output.send(response(request.id, outcome));
     if ("error" in outcome && !this.topology.hasLiveThreads(backend.machineId)) {
       this.readyBackends.delete(backend);
       await backend.close();
+      this.state.markMachine(backend.machineId, "removed");
       this.backends.delete(backend.machineId);
+      this.backendProjects.delete(backend);
     }
   }
 
-  private async createInitializedBackend(deferEvents = false): Promise<CreatedBackend> {
+  private async createInitializedBackend(project: RegisteredProject, deferEvents = false): Promise<CreatedBackend> {
     let transport: BackendTransport | undefined;
     let connection: BackendConnection | undefined;
     try {
-      transport = await this.factory.create();
+      transport = await this.factory.create(project);
+      this.state.saveMachine({
+        machineId: transport.machineId,
+        projectCwd: project.cwd,
+        containerId: transport.containerId,
+      });
       let active = !deferEvents;
       const queued: Array<() => Promise<void>> = [];
       const forward = (operation: () => Promise<void>): Promise<void> => {
@@ -273,9 +372,10 @@ export class AppServerAggregator {
       };
       connection = new BackendConnection(transport, {
         onNotification: (backend, notification) => forward(async () => {
-          this.topology.observe(backend.machineId, notification);
-          await this.sendClientNotification(notification);
-          if (notification.method === "thread/archived" || notification.method === "thread/deleted") {
+          const outerNotification = virtualizeNotification(notification, project.cwd);
+          this.topology.observe(backend.machineId, project.cwd, outerNotification);
+          await this.sendClientNotification(outerNotification);
+          if (outerNotification.method === "thread/archived" || outerNotification.method === "thread/deleted") {
             queueMicrotask(() => {
               this.removeIfDrained(backend).catch((error) => {
                 this.log(`failed to remove drained backend ${backend.machineId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -291,6 +391,7 @@ export class AppServerAggregator {
         onLog: (backend, text) => this.log(`[${backend.machineId}] ${text.trimEnd()}`),
       });
       this.backends.set(connection.machineId, connection);
+      this.backendProjects.set(connection, project);
       const outcome = await connection.initialize(backendInitializeParams(this.initializeParams));
       if ("result" in outcome) this.readyBackends.add(connection);
       return {
@@ -306,14 +407,17 @@ export class AppServerAggregator {
       if (connection) {
         this.readyBackends.delete(connection);
         this.backends.delete(connection.machineId);
+        this.backendProjects.delete(connection);
         try {
           await connection.close();
+          this.state.markMachine(connection.machineId, "removed");
         } catch (closeError) {
           this.log(`failed to clean partial backend ${connection.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
         }
       } else if (transport) {
         try {
           await transport.destroy();
+          this.state.markMachine(transport.machineId, "removed");
         } catch (closeError) {
           this.log(`failed to clean partial transport ${transport.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
         }
@@ -323,7 +427,8 @@ export class AppServerAggregator {
   }
 
   private async globalBackend(): Promise<BackendConnection | undefined> {
-    if (this.warmBackend) return this.warmBackend;
+    const warm = this.warmBackends.values().next().value as BackendConnection | undefined;
+    if (warm) return warm;
     if (this.globalBackendCreation) return this.globalBackendCreation;
     const running = this.readyBackends.values().next().value as BackendConnection | undefined;
     if (running) return running;
@@ -331,15 +436,19 @@ export class AppServerAggregator {
       const attempt = (async () => {
         let created: CreatedBackend;
         try {
-          created = await this.createInitializedBackend();
+          const project = this.registry.list()[0];
+          if (!project) return undefined;
+          created = await this.createInitializedBackend(project);
         } catch (error) {
           this.log(`failed to provision representative backend: ${error instanceof Error ? error.message : String(error)}`);
           return undefined;
         }
         if ("error" in created.outcome) {
           this.backends.delete(created.connection.machineId);
+          this.backendProjects.delete(created.connection);
           try {
             await created.connection.close();
+            this.state.markMachine(created.connection.machineId, "removed");
           } catch (error) {
             this.log(`failed to clean representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
           }
@@ -351,8 +460,10 @@ export class AppServerAggregator {
           } catch (error) {
             this.readyBackends.delete(created.connection);
             this.backends.delete(created.connection.machineId);
+            this.backendProjects.delete(created.connection);
             try {
               await created.connection.close();
+              this.state.markMachine(created.connection.machineId, "removed");
             } catch (closeError) {
               this.log(`failed to clean unnotified representative backend ${created.connection.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
             }
@@ -360,7 +471,7 @@ export class AppServerAggregator {
             return undefined;
           }
         }
-        this.warmBackend = created.connection;
+        this.warmBackends.set(this.projectForBackend(created.connection).cwd, created.connection);
         return created.connection;
       })();
       this.globalBackendCreation = attempt;
@@ -392,12 +503,21 @@ export class AppServerAggregator {
     if (this.topology.hasLiveThreads(backend.machineId)) return;
     this.readyBackends.delete(backend);
     await backend.close();
+    this.state.markMachine(backend.machineId, "removed");
     this.backends.delete(backend.machineId);
+    const project = this.backendProjects.get(backend);
+    this.backendProjects.delete(backend);
     this.lifecycleCalls.delete(backend);
     for (const [key, reverse] of this.reverseRequests) {
       if (reverse.backend === backend) this.reverseRequests.delete(key);
     }
-    if (this.warmBackend === backend) this.warmBackend = undefined;
+    if (project && this.warmBackends.get(project.cwd) === backend) this.warmBackends.delete(project.cwd);
+  }
+
+  private projectForBackend(backend: BackendConnection): RegisteredProject {
+    const project = this.backendProjects.get(backend);
+    if (!project) throw new Error(`backend ${backend.machineId} has no project`);
+    return project;
   }
 
   private beginLifecycleCall(backend: BackendConnection): void {
@@ -420,6 +540,36 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function backendRoutedParams(backend: BackendConnection, value: unknown): unknown {
+  const params = asRecord(value);
+  let changed = false;
+  const routed = { ...params };
+  if ("cwd" in params) {
+    routed.cwd = backend.workspace;
+    changed = true;
+  }
+  if (Array.isArray(params.runtimeWorkspaceRoots)) {
+    routed.runtimeWorkspaceRoots = [backend.workspace];
+    changed = true;
+  }
+  return changed ? routed : value;
+}
+
+function virtualizeOutcome(outcome: RpcOutcome, cwd: string): RpcOutcome {
+  return "result" in outcome ? { result: virtualizePayload(outcome.result, cwd) } : outcome;
+}
+
+function virtualizeNotification(notification: RpcNotification, cwd: string): RpcNotification {
+  return { ...notification, params: virtualizePayload(notification.params, cwd) };
+}
+
+function virtualizePayload(value: unknown, cwd: string): unknown {
+  const payload = asRecord(value);
+  const thread = asRecord(payload.thread);
+  if (typeof thread.id !== "string") return value;
+  return { ...payload, thread: { ...thread, cwd } };
 }
 
 function initializeOptOutMethods(params: unknown): string[] {

@@ -1,6 +1,7 @@
 import type { RpcMessage } from "./protocol.ts";
 import type { ThreadListParams } from "./generated/v2/ThreadListParams.ts";
 import type { ThreadSourceKind } from "./generated/v2/ThreadSourceKind.ts";
+import type { StoredThread } from "./state.ts";
 
 export type { ThreadListParams } from "./generated/v2/ThreadListParams.ts";
 
@@ -8,6 +9,7 @@ export type ThreadSnapshot = Record<string, unknown> & { id: string };
 
 type ThreadEntry = {
   machineId: string;
+  projectCwd: string;
   snapshot: ThreadSnapshot | undefined;
   loaded: boolean;
   archived: boolean;
@@ -16,30 +18,47 @@ type ThreadEntry = {
 
 export class Topology {
   private readonly threads = new Map<string, ThreadEntry>();
+  private readonly persist: ((thread: StoredThread) => void) | undefined;
 
-  bind(machineId: string, threadId: string, snapshot?: ThreadSnapshot): void {
+  constructor(options: { threads?: StoredThread[]; persist?: (thread: StoredThread) => void } = {}) {
+    this.persist = options.persist;
+    for (const thread of options.threads ?? []) {
+      this.threads.set(thread.threadId, {
+        machineId: thread.machineId,
+        projectCwd: thread.projectCwd,
+        snapshot: thread.snapshot,
+        loaded: false,
+        archived: thread.archived,
+        deleted: thread.deleted,
+      });
+    }
+  }
+
+  bind(machineId: string, projectCwd: string, threadId: string, snapshot?: ThreadSnapshot): void {
     const current = this.threads.get(threadId);
     if (current && current.machineId !== machineId) {
       throw new Error(`thread ${threadId} was minted by more than one backend`);
     }
     this.threads.set(threadId, {
       machineId,
+      projectCwd,
       snapshot: snapshot ?? current?.snapshot,
       loaded: loadedFromStatus(snapshot?.status) ?? current?.loaded ?? true,
       archived: current?.archived ?? false,
       deleted: current?.deleted ?? false,
     });
+    this.persistEntry(threadId);
   }
 
-  observe(machineId: string, message: RpcMessage): void {
+  observe(machineId: string, projectCwd: string, message: RpcMessage): void {
     const envelope = message as Record<string, unknown>;
     const result = asRecord(envelope.result);
     const params = asRecord(envelope.params);
     const thread = asThread(result?.thread) ?? asThread(params?.thread);
-    if (thread) this.bind(machineId, thread.id, thread);
+    if (thread) this.bind(machineId, projectCwd, thread.id, thread);
 
     const reviewThreadId = result?.reviewThreadId;
-    if (typeof reviewThreadId === "string") this.bind(machineId, reviewThreadId);
+    if (typeof reviewThreadId === "string") this.bind(machineId, projectCwd, reviewThreadId);
 
     const method = typeof envelope.method === "string" ? envelope.method : undefined;
     const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
@@ -77,11 +96,15 @@ export class Topology {
     entry.archived = true;
     entry.loaded = false;
     if (entry.snapshot) entry.snapshot = { ...entry.snapshot, status: { type: "notLoaded" } };
+    this.persistEntry(threadId);
   }
 
   markUnarchived(threadId: string): void {
     const entry = this.threads.get(threadId);
-    if (entry) entry.archived = false;
+    if (entry) {
+      entry.archived = false;
+      this.persistEntry(threadId);
+    }
   }
 
   markDeleted(threadId: string): void {
@@ -89,6 +112,7 @@ export class Topology {
     if (entry) {
       entry.deleted = true;
       entry.loaded = false;
+      this.persistEntry(threadId);
     }
   }
 
@@ -143,12 +167,18 @@ export class Topology {
 
   private patchSnapshot(threadId: string, patch: Record<string, unknown>): void {
     const entry = this.threads.get(threadId);
-    if (entry?.snapshot) entry.snapshot = { ...entry.snapshot, ...patch };
+    if (entry?.snapshot) {
+      entry.snapshot = { ...entry.snapshot, ...patch };
+      this.persistEntry(threadId);
+    }
   }
 
   private setLoaded(threadId: string, loaded: boolean): void {
     const entry = this.threads.get(threadId);
-    if (entry) entry.loaded = loaded;
+    if (entry) {
+      entry.loaded = loaded;
+      this.persistEntry(threadId);
+    }
   }
 
   private observeActivity(
@@ -171,7 +201,16 @@ export class Topology {
     if (activity.recencyAt !== undefined && activity.recencyAt >= numericTimestamp(snapshot.recencyAt)) {
       patch.recencyAt = activity.recencyAt;
     }
-    if (Object.keys(patch).length) entry.snapshot = { ...snapshot, ...patch };
+    if (Object.keys(patch).length) {
+      entry.snapshot = { ...snapshot, ...patch };
+      this.persistEntry(threadId);
+    }
+  }
+
+  private persistEntry(threadId: string): void {
+    const entry = this.threads.get(threadId);
+    if (!entry) return;
+    this.persist?.({ threadId, ...entry });
   }
 }
 

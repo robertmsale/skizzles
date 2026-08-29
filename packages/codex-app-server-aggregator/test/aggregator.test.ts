@@ -1,24 +1,35 @@
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AppServerAggregator } from "../src/aggregator.ts";
 import type { BackendFactory, BackendTransport } from "../src/backend.ts";
 import { CONTAINER_WORKSPACE } from "../src/docker.ts";
 import type { MessageSink } from "../src/jsonl.ts";
+import { ProjectRegistry } from "../src/projects.ts";
 import type { RpcId, RpcMessage } from "../src/protocol.ts";
+import { AggregatorState, type RegisteredProject } from "../src/state.ts";
+
+const HOST_PROJECT_A = join(tmpdir(), "skizzles-aggregator-project-a");
+const HOST_PROJECT_B = join(tmpdir(), "skizzles-aggregator-project-b");
 
 describe("Codex app-server aggregation", () => {
   test("preserves minted thread ids, forces container cwd, and answers topology reads itself", async () => {
     const harness = createHarness();
     await initialize(harness);
 
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: "/host/worktree" } });
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: "/another/host/worktree" } });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
+    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_B } });
 
     const firstId = harness.factory.threadId(0);
     const secondId = harness.factory.threadId(1);
-    expect(resultFor(harness.output.messages, 2)).toMatchObject({ thread: { id: firstId } });
-    expect(resultFor(harness.output.messages, 3)).toMatchObject({ thread: { id: secondId } });
+    expect(resultFor(harness.output.messages, 2)).toMatchObject({ thread: { id: firstId, cwd: HOST_PROJECT_A } });
+    expect(resultFor(harness.output.messages, 3)).toMatchObject({ thread: { id: secondId, cwd: HOST_PROJECT_B } });
     expect(harness.factory.transports[0]!.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
     expect(harness.factory.transports[1]!.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
+    expect(harness.factory.projects.map((project) => project.cloneUrl)).toEqual([
+      "https://example.test/project-a.git",
+      "https://example.test/project-b.git",
+    ]);
 
     await harness.aggregator.handle({
       method: "thread/list",
@@ -36,6 +47,42 @@ describe("Codex app-server aggregation", () => {
     expect(harness.factory.transports[0]!.request("turn/start")).toBeDefined();
     expect(harness.factory.transports[1]!.request("turn/start")).toBeUndefined();
 
+    await harness.aggregator.close();
+  });
+
+  test("rejects an unknown cwd without provisioning a container", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({
+      method: "thread/start",
+      id: 2,
+      params: { cwd: join(tmpdir(), "skizzles-unregistered-project") },
+    });
+
+    expect(errorFor(harness.output.messages, 2)).toEqual({
+      code: -32004,
+      message: "thread/start cwd is not a registered project",
+    });
+    expect(harness.factory.transports).toHaveLength(1);
+    expect(harness.factory.transports[0]!.request("thread/start")).toBeUndefined();
+    await harness.aggregator.close();
+  });
+
+  test("archives through the machine belonging to the selected project", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
+    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_B } });
+
+    await harness.aggregator.handle({
+      method: "thread/archive",
+      id: 4,
+      params: { threadId: harness.factory.threadId(1) },
+    });
+    expect(harness.factory.transports[0]!.request("thread/archive")).toBeUndefined();
+    expect(harness.factory.transports[0]!.destroyed).toBe(false);
+    expect(harness.factory.transports[1]!.request("thread/archive")).toBeDefined();
+    expect(harness.factory.transports[1]!.destroyed).toBe(true);
     await harness.aggregator.close();
   });
 
@@ -61,8 +108,8 @@ describe("Codex app-server aggregation", () => {
   test("correlates colliding backend approval ids without changing approval payloads", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
+    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_A } });
 
     harness.factory.transports[0]!.emit({
       method: "item/commandExecution/requestApproval",
@@ -94,7 +141,7 @@ describe("Codex app-server aggregation", () => {
   test("removes a drained container after archive and retains an archived topology record", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     const threadId = harness.factory.threadId(0);
 
     await harness.aggregator.handle({ method: "thread/archive", id: 3, params: { threadId } });
@@ -121,7 +168,7 @@ describe("Codex app-server aggregation", () => {
   test("waits for backend cascade notifications before removing a fork-bearing container", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     const threadId = harness.factory.threadId(0);
     await harness.aggregator.handle({ method: "thread/fork", id: 3, params: { threadId } });
     harness.factory.archiveMode = "cascade";
@@ -144,7 +191,7 @@ describe("Codex app-server aggregation", () => {
   test("does not let an archive notification overtake its backend response", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     const threadId = harness.factory.threadId(0);
     harness.factory.archiveMode = "notificationFirst";
 
@@ -157,7 +204,7 @@ describe("Codex app-server aggregation", () => {
   test("retries a failed transport teardown during aggregate close", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     const transport = harness.factory.transports[0]!;
     transport.destroyFailures = 1;
 
@@ -175,7 +222,7 @@ describe("Codex app-server aggregation", () => {
   test("returns a backend error without stranding a timed pending call when transport write fails", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     harness.factory.transports[0]!.writeFailures = 1;
 
     await harness.aggregator.handle({
@@ -193,7 +240,7 @@ describe("Codex app-server aggregation", () => {
   test("includes non-interactive descendants when a relation filter supplies the topology", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     const parentId = harness.factory.threadId(0);
     const childId = `${parentId}-child`;
     harness.factory.transports[0]!.emit({
@@ -225,7 +272,7 @@ describe("Codex app-server aggregation", () => {
   test("coalesces concurrent representative-backend provisioning", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     await harness.aggregator.handle({
       method: "thread/archive",
       id: 3,
@@ -246,7 +293,7 @@ describe("Codex app-server aggregation", () => {
   test("excludes a closed thread from loaded topology while its backend remains ready", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     const parentId = harness.factory.threadId(0);
     await harness.aggregator.handle({ method: "thread/fork", id: 3, params: { threadId: parentId } });
     const forkId = harness.factory.forkId(0);
@@ -269,8 +316,8 @@ describe("Codex app-server aggregation", () => {
   test("refreshes preview and activity timestamps before aggregate list filtering and sorting", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
+    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_A } });
     const activeId = harness.factory.threadId(0);
     const otherId = harness.factory.threadId(1);
     harness.factory.transports[0]!.emit({
@@ -353,7 +400,7 @@ describe("Codex app-server aggregation", () => {
     });
     expect(harness.output.messages.some((message) => "method" in message && message.method === "configWarning")).toBe(false);
 
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     const parentId = harness.factory.threadId(0);
     const childId = `${parentId}-child`;
     harness.factory.transports[0]!.emit({
@@ -382,10 +429,10 @@ describe("Codex app-server aggregation", () => {
   test("answers thread/start when later backend provisioning rejects", async () => {
     const harness = createHarness();
     await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
     harness.factory.createFailures = 1;
 
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: {} });
+    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_A } });
     expect(errorFor(harness.output.messages, 3)).toEqual({
       code: -32603,
       message: "failed to provision app-server backend",
@@ -419,16 +466,18 @@ class CaptureSink implements MessageSink {
 
 class FakeFactory implements BackendFactory {
   readonly transports: FakeTransport[] = [];
+  readonly projects: RegisteredProject[] = [];
   archiveMode: "missing" | "cascade" | "notificationFirst" = "missing";
   initializeDelayMs = 0;
   createFailures = 0;
 
-  async create(): Promise<BackendTransport> {
+  async create(project: RegisteredProject): Promise<BackendTransport> {
     if (this.createFailures > 0) {
       this.createFailures--;
       throw new Error("fake provisioning failure");
     }
     const index = this.transports.length;
+    this.projects.push(project);
     const transport = new FakeTransport(index, (message) => this.handle(index, message));
     this.transports.push(transport);
     return transport;
@@ -559,8 +608,12 @@ class FakeTransport implements BackendTransport {
 function createHarness() {
   const factory = new FakeFactory();
   const output = new CaptureSink();
-  const aggregator = new AppServerAggregator({ factory, output });
-  return { factory, output, aggregator };
+  const state = new AggregatorState(":memory:");
+  state.saveProject({ cwd: HOST_PROJECT_A, cloneUrl: "https://example.test/project-a.git" });
+  state.saveProject({ cwd: HOST_PROJECT_B, cloneUrl: "https://example.test/project-b.git" });
+  const registry = new ProjectRegistry(state);
+  const aggregator = new AppServerAggregator({ factory, registry, state, output });
+  return { factory, output, aggregator, registry, state };
 }
 
 async function initialize(

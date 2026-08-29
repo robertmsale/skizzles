@@ -9,6 +9,23 @@ export type RegisteredProject = {
   updatedAt: number;
 };
 
+export type StoredMachine = {
+  machineId: string;
+  projectCwd: string;
+  containerId: string;
+  state: "active" | "orphaned" | "removed";
+};
+
+export type StoredThread = {
+  threadId: string;
+  machineId: string;
+  projectCwd: string;
+  snapshot: Record<string, unknown> & { id: string } | undefined;
+  loaded: boolean;
+  archived: boolean;
+  deleted: boolean;
+};
+
 export class AggregatorState {
   private readonly database: Database;
 
@@ -22,6 +39,26 @@ export class AggregatorState {
         cwd TEXT PRIMARY KEY,
         clone_url TEXT NOT NULL,
         created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT
+    `);
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS machines (
+        machine_id TEXT PRIMARY KEY,
+        project_cwd TEXT NOT NULL,
+        container_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('active', 'orphaned', 'removed')),
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS threads (
+        thread_id TEXT PRIMARY KEY,
+        machine_id TEXT NOT NULL,
+        project_cwd TEXT NOT NULL,
+        snapshot_json TEXT,
+        loaded INTEGER NOT NULL CHECK (loaded IN (0, 1)),
+        archived INTEGER NOT NULL CHECK (archived IN (0, 1)),
+        deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
         updated_at INTEGER NOT NULL
       ) STRICT
     `);
@@ -62,6 +99,76 @@ export class AggregatorState {
   removeProject(cwd: string): boolean {
     return this.database.query("DELETE FROM projects WHERE cwd = ?").run(cwd).changes > 0;
   }
+
+  saveMachine(machine: Omit<StoredMachine, "state">, now = Date.now()): void {
+    this.database.query(`
+      INSERT INTO machines (machine_id, project_cwd, container_id, state, updated_at)
+      VALUES (?, ?, ?, 'active', ?)
+      ON CONFLICT (machine_id) DO UPDATE SET
+        project_cwd = excluded.project_cwd,
+        container_id = excluded.container_id,
+        state = 'active',
+        updated_at = excluded.updated_at
+    `).run(machine.machineId, machine.projectCwd, machine.containerId, now);
+  }
+
+  markMachine(machineId: string, state: StoredMachine["state"], now = Date.now()): void {
+    this.database.transaction(() => {
+      this.database.query("UPDATE machines SET state = ?, updated_at = ? WHERE machine_id = ?")
+        .run(state, now, machineId);
+      if (state !== "active") {
+        this.database.query("UPDATE threads SET loaded = 0, updated_at = ? WHERE machine_id = ? AND loaded = 1")
+          .run(now, machineId);
+      }
+    })();
+  }
+
+  recoverOrphanedMachines(now = Date.now()): StoredMachine[] {
+    const active = this.database.query<MachineRow, []>(`
+      SELECT machine_id, project_cwd, container_id, state
+      FROM machines
+      WHERE state IN ('active', 'orphaned')
+      ORDER BY machine_id
+    `).all().map(machineFromRow);
+    this.database.transaction(() => {
+      this.database.query("UPDATE machines SET state = 'orphaned', updated_at = ? WHERE state = 'active'").run(now);
+      this.database.query("UPDATE threads SET loaded = 0, updated_at = ? WHERE loaded = 1").run(now);
+    })();
+    return active;
+  }
+
+  saveThread(thread: StoredThread, now = Date.now()): void {
+    this.database.query(`
+      INSERT INTO threads (
+        thread_id, machine_id, project_cwd, snapshot_json, loaded, archived, deleted, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (thread_id) DO UPDATE SET
+        machine_id = excluded.machine_id,
+        project_cwd = excluded.project_cwd,
+        snapshot_json = excluded.snapshot_json,
+        loaded = excluded.loaded,
+        archived = excluded.archived,
+        deleted = excluded.deleted,
+        updated_at = excluded.updated_at
+    `).run(
+      thread.threadId,
+      thread.machineId,
+      thread.projectCwd,
+      thread.snapshot ? JSON.stringify(thread.snapshot) : null,
+      Number(thread.loaded),
+      Number(thread.archived),
+      Number(thread.deleted),
+      now,
+    );
+  }
+
+  threads(): StoredThread[] {
+    return this.database.query<ThreadRow, []>(`
+      SELECT thread_id, machine_id, project_cwd, snapshot_json, loaded, archived, deleted
+      FROM threads
+      ORDER BY thread_id
+    `).all().map(threadFromRow);
+  }
 }
 
 type ProjectRow = {
@@ -77,5 +184,47 @@ function projectFromRow(row: ProjectRow): RegisteredProject {
     cloneUrl: row.clone_url,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+type MachineRow = {
+  machine_id: string;
+  project_cwd: string;
+  container_id: string;
+  state: StoredMachine["state"];
+};
+
+function machineFromRow(row: MachineRow): StoredMachine {
+  return {
+    machineId: row.machine_id,
+    projectCwd: row.project_cwd,
+    containerId: row.container_id,
+    state: row.state,
+  };
+}
+
+type ThreadRow = {
+  thread_id: string;
+  machine_id: string;
+  project_cwd: string;
+  snapshot_json: string | null;
+  loaded: number;
+  archived: number;
+  deleted: number;
+};
+
+function threadFromRow(row: ThreadRow): StoredThread {
+  const snapshot = row.snapshot_json === null ? undefined : JSON.parse(row.snapshot_json) as StoredThread["snapshot"];
+  if (snapshot !== undefined && (snapshot === null || typeof snapshot !== "object" || typeof snapshot.id !== "string")) {
+    throw new Error(`invalid persisted snapshot for thread ${row.thread_id}`);
+  }
+  return {
+    threadId: row.thread_id,
+    machineId: row.machine_id,
+    projectCwd: row.project_cwd,
+    snapshot,
+    loaded: row.loaded === 1,
+    archived: row.archived === 1,
+    deleted: row.deleted === 1,
   };
 }

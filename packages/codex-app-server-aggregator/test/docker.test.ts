@@ -24,10 +24,14 @@ describe("Docker backend process boundary", () => {
     chmodSync(dockerBinary, 0o755);
 
     const factory = new DockerBackendFactory({
-      repoUrl: "https://example.invalid/repository.git",
       dockerBinary,
     });
-    const transport = await factory.create();
+    const transport = await factory.create({
+      cwd: join(directory, "project"),
+      cloneUrl: "https://example.invalid/repository.git",
+      createdAt: 1,
+      updatedAt: 1,
+    });
     const backend = new BackendConnection(transport, {
       onNotification: () => undefined,
       onServerRequest: () => undefined,
