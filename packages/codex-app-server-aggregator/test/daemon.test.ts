@@ -15,6 +15,25 @@ afterEach(() => {
 });
 
 describe("aggregator daemon boundary", () => {
+  test("delivers a one-shot response after the client half-closes its write side", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    await run("git", "init", cwd);
+    await run("git", "-C", cwd, "remote", "add", "origin", "https://example.test/owner/project.git");
+    const socketPath = join(directory, "aggregator.sock");
+    const daemon = daemonFor(socketPath, join(directory, "aggregator.sqlite3"));
+    await daemon.start();
+
+    const added = await oneShotRequest(socketPath, {
+      method: "skizzles/project/add",
+      id: 1,
+      params: { cwd },
+    });
+
+    expect(result(added, 1)).toMatchObject({ project: { cwd, cloneUrl: "https://example.test/owner/project.git" } });
+    await daemon.close();
+  });
+
   test("outlives a client connection and reloads its registry after a daemon restart", async () => {
     const directory = temporaryDirectory();
     const cwd = join(directory, "project");
@@ -187,6 +206,28 @@ function request(socketPath: string, message: RpcMessage): Promise<RpcMessage> {
       try {
         parsed = JSON.parse(buffer.slice(0, newline)) as RpcMessage;
         socket.end();
+      } catch (error) {
+        reject(error);
+        socket.destroy();
+      }
+    });
+    socket.once("error", reject);
+    socket.once("close", () => parsed ? resolveRequest(parsed) : reject(new Error("daemon closed without a response")));
+  });
+}
+
+function oneShotRequest(socketPath: string, message: RpcMessage): Promise<RpcMessage> {
+  return new Promise((resolveRequest, reject) => {
+    const socket = connect(socketPath);
+    let buffer = "";
+    let parsed: RpcMessage | undefined;
+    socket.on("connect", () => socket.end(`${JSON.stringify(message)}\n`));
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const newline = buffer.indexOf("\n");
+      if (newline < 0 || parsed) return;
+      try {
+        parsed = JSON.parse(buffer.slice(0, newline)) as RpcMessage;
       } catch (error) {
         reject(error);
         socket.destroy();

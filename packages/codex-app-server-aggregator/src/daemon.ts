@@ -52,7 +52,7 @@ export class AggregatorDaemon {
     });
     this.bridge.bind(this.aggregator);
     this.rest = options.http ? new RestApiServer(this.bridge, { ...options.http, log: this.log }) : undefined;
-    this.server = createServer((socket) => this.accept(socket));
+    this.server = createServer({ allowHalfOpen: true }, (socket) => this.accept(socket));
   }
 
   get httpUrl(): URL | undefined {
@@ -147,10 +147,26 @@ export class AggregatorDaemon {
     } catch (error) {
       this.log(`client connection failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      const handlers = Promise.allSettled(active);
+      let closeListener: (() => void) | undefined;
+      const disconnected = socket.destroyed || await Promise.race([
+        handlers.then(() => false),
+        new Promise<boolean>((resolve) => {
+          closeListener = () => resolve(true);
+          socket.once("close", closeListener);
+        }),
+      ]);
+      if (closeListener) socket.off("close", closeListener);
+      if (disconnected) {
+        session.close();
+        if (this.active?.socket === socket) this.active = undefined;
+        await handlers;
+        return;
+      }
+      await session.drain();
       session.close();
       if (this.active?.socket === socket) this.active = undefined;
       if (!socket.destroyed) socket.end();
-      await Promise.allSettled(active);
     }
   }
 

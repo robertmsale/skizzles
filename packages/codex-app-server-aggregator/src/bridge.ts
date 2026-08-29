@@ -305,6 +305,7 @@ class ClientDelivery {
   private queuedBytes = 0;
   private active = false;
   private closed = false;
+  private delivery: Promise<void> | undefined;
 
   constructor(private readonly output: MessageSink, private readonly disconnect: (reason: string) => void) {}
 
@@ -312,7 +313,11 @@ class ClientDelivery {
     if (this.closed) return;
     if (!this.active) {
       this.active = true;
-      void this.deliver(structuredClone(message));
+      const delivery = this.deliver(structuredClone(message));
+      this.delivery = delivery;
+      delivery.finally(() => {
+        if (this.delivery === delivery) this.delivery = undefined;
+      }).catch(() => undefined);
       return;
     }
     const bytes = messageBytes(message);
@@ -322,6 +327,10 @@ class ClientDelivery {
     }
     this.queue.push({ message: structuredClone(message), bytes });
     this.queuedBytes += bytes;
+  }
+
+  drain(): Promise<void> {
+    return this.delivery ?? Promise.resolve();
   }
 
   close(): void {
@@ -368,6 +377,10 @@ export class AggregatorClientSession {
 
   async handle(message: RpcMessage): Promise<void> {
     if (!this.closed) await this.bridge.handleClientMessage(this.client, message);
+  }
+
+  drain(): Promise<void> {
+    return this.client.delivery.drain();
   }
 
   close(): void {

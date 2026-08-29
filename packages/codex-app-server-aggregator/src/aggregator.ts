@@ -350,7 +350,18 @@ export class AppServerAggregator {
 
   private async handleThreadStart(request: RpcRequest): Promise<void> {
     const requestedCwd = asRecord(request.params).cwd;
-    const project = typeof requestedCwd === "string" ? await this.registry.find(requestedCwd) : undefined;
+    let project: RegisteredProject | undefined;
+    if (typeof requestedCwd === "string") {
+      try {
+        project = await this.registry.find(requestedCwd);
+      } catch (error) {
+        await this.output.send(response(request.id, errorOutcome(
+          -32602,
+          `invalid thread/start cwd: ${error instanceof Error ? error.message : String(error)}`,
+        )));
+        return;
+      }
+    }
     if (!project) {
       await this.output.send(response(request.id, errorOutcome(
         -32004,
@@ -359,7 +370,16 @@ export class AppServerAggregator {
       return;
     }
     await this.withProjectLock(project.cwd, async () => {
-      const current = await this.registry.find(project.cwd);
+      let current: RegisteredProject | undefined;
+      try {
+        current = await this.registry.find(project.cwd);
+      } catch (error) {
+        await this.output.send(response(request.id, errorOutcome(
+          -32602,
+          `invalid thread/start cwd: ${error instanceof Error ? error.message : String(error)}`,
+        )));
+        return;
+      }
       if (!current) {
         await this.output.send(response(request.id, errorOutcome(
           -32004,

@@ -39,6 +39,20 @@ describe("aggregator REST API", () => {
     expect(added.status).toBe(201);
     expect(added.body).toMatchObject({ project: { cwd, cloneUrl: "https://example.test/owner/project.git" } });
 
+    const malformedCwd = await fetchJson(`${origin}/v1/threads`, {
+      method: "POST",
+      body: JSON.stringify({ cwd: "relative/project" }),
+    });
+    expect(malformedCwd).toEqual({
+      status: 400,
+      body: {
+        error: {
+          code: -32602,
+          message: "invalid thread/start cwd: project cwd must be absolute",
+        },
+      },
+    });
+
     const started = await fetchJson(`${origin}/v1/threads`, {
       method: "POST",
       body: JSON.stringify({ cwd }),
@@ -532,11 +546,14 @@ function sendReadThenDisconnect(socketPath: string, threadId: string): Promise<v
         socket.destroy();
         return;
       }
-      socket.end(`${JSON.stringify({
+      socket.write(`${JSON.stringify({
         method: "thread/read",
         id: "abandoned-read",
         params: { threadId, includeTurns: true },
-      })}\n`, () => resolveSend());
+      })}\n`, () => {
+        socket.destroy();
+        resolveSend();
+      });
     });
     socket.once("error", reject);
   });
