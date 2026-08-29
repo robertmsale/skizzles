@@ -1,6 +1,6 @@
 export const DEFAULT_AGGREGATOR_HTTP_URL = "http://127.0.0.1:8788";
 export const DEFAULT_AGGREGATOR_TOKEN_ENV = "SKIZZLES_AGGREGATOR_TOKEN";
-export const DEFAULT_HTTP_TIMEOUT_MS = 65_000;
+export const DEFAULT_HTTP_TIMEOUT_MS = 10 * 60_000;
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 

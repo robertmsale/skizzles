@@ -14,6 +14,7 @@ export type RestServerOptions = {
 export class RestApiServer {
   private server: ReturnType<typeof Bun.serve> | undefined;
   private readonly log: (message: string) => void;
+  private readonly activeRequests = new Set<Promise<Response>>();
 
   constructor(private readonly bridge: AggregatorBridge, private readonly options: RestServerOptions) {
     this.log = options.log ?? (() => undefined);
@@ -27,7 +28,7 @@ export class RestApiServer {
     this.server = Bun.serve({
       hostname: this.options.hostname,
       port: this.options.port,
-      fetch: (request) => this.handle(request),
+      fetch: (request) => this.dispatch(request),
       error: (error) => {
         this.log(error instanceof Error ? error.stack ?? error.message : String(error));
         return json({ error: { code: "internal_error", message: "internal server error" } }, 500);
@@ -36,9 +37,18 @@ export class RestApiServer {
     return this.server.url;
   }
 
-  close(): void {
-    this.server?.stop(true);
+  async close(): Promise<void> {
+    const server = this.server;
     this.server = undefined;
+    server?.stop(true);
+    await Promise.allSettled([...this.activeRequests]);
+  }
+
+  private dispatch(request: Request): Promise<Response> {
+    const work = this.handle(request);
+    this.activeRequests.add(work);
+    work.finally(() => this.activeRequests.delete(work)).catch(() => undefined);
+    return work;
   }
 
   private async handle(request: Request): Promise<Response> {

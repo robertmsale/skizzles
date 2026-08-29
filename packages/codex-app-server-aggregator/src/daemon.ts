@@ -29,6 +29,8 @@ export class AggregatorDaemon {
   private readonly rest: RestApiServer | undefined;
   private readonly log: (message: string) => void;
   private active: { socket: Socket; session: AggregatorClientSession } | undefined;
+  private readonly sockets = new Set<Socket>();
+  private readonly serveTasks = new Set<Promise<void>>();
   private restUrl: URL | undefined;
   private started = false;
   private closed = false;
@@ -61,8 +63,8 @@ export class AggregatorDaemon {
     if (this.closed) throw new Error("daemon is closed");
     this.started = true;
     try {
+      await prepareSocketDirectory(dirname(this.options.socketPath));
       await prepareSocket(this.options.socketPath);
-      await mkdir(dirname(this.options.socketPath), { recursive: true, mode: 0o700 });
       await new Promise<void>((resolve, reject) => {
         this.server.once("error", reject);
         this.server.listen(this.options.socketPath, () => {
@@ -86,17 +88,16 @@ export class AggregatorDaemon {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    const serverClosed = closeServer(this.server);
+    const restClosed = this.rest?.close() ?? Promise.resolve();
     const active = this.active;
     this.active = undefined;
-    if (active) {
-      active.session.close();
-      active.socket.destroy();
-    }
-    this.rest?.close();
+    active?.session.close();
+    for (const socket of this.sockets) socket.destroy();
     this.restUrl = undefined;
+    await Promise.allSettled([serverClosed, restClosed, ...this.serveTasks]);
     await this.aggregator.close();
     await this.bridge.close();
-    await closeServer(this.server);
     if (this.ownsSocket) await unlink(this.options.socketPath).catch(() => undefined);
     this.ownsSocket = false;
     this.options.state.close();
@@ -104,6 +105,12 @@ export class AggregatorDaemon {
 
   private accept(socket: Socket): void {
     socket.on("error", () => undefined);
+    this.sockets.add(socket);
+    socket.once("close", () => this.sockets.delete(socket));
+    if (this.closed) {
+      socket.destroy();
+      return;
+    }
     if (this.active) {
       void rejectBusyClient(socket);
       return;
@@ -113,7 +120,9 @@ export class AggregatorDaemon {
     }));
     const session = this.bridge.attachClient(sink);
     this.active = { socket, session };
-    void this.serve(socket, session);
+    const work = this.serve(socket, session);
+    this.serveTasks.add(work);
+    work.finally(() => this.serveTasks.delete(work)).catch(() => undefined);
   }
 
   private async serve(socket: Socket, session: AggregatorClientSession): Promise<void> {
@@ -191,6 +200,15 @@ async function prepareSocket(path: string): Promise<void> {
   } catch (error) {
     if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
   }
+}
+
+async function prepareSocketDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const directory = await lstat(path);
+  if (!directory.isDirectory()) throw new Error(`socket parent is not a directory: ${path}`);
+  if (typeof process.getuid !== "function") throw new Error(`cannot verify socket directory ownership: ${path}`);
+  if (directory.uid !== process.getuid()) throw new Error(`socket directory is not owned by the current user: ${path}`);
+  if ((directory.mode & 0o777) !== 0o700) throw new Error(`socket directory must have mode 0700: ${path}`);
 }
 
 function socketIsLive(path: string): Promise<boolean> {

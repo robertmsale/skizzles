@@ -251,16 +251,65 @@ describe("aggregator REST API", () => {
       await daemon.close();
     }
   });
+
+  test("waits for an in-flight provisioning request before closing shared state", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    await run("git", "init", cwd);
+    await run("git", "-C", cwd, "remote", "add", "origin", "https://example.test/owner/project.git");
+    const factory = new RestFactory();
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      factory,
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    await daemon.start();
+    const origin = daemon.httpUrl!.origin;
+    await fetchJson(`${origin}/v1/projects`, { method: "POST", body: JSON.stringify({ cwd }) });
+    factory.pauseNextCreate = true;
+    const starting = fetchJson(`${origin}/v1/threads`, {
+      method: "POST",
+      body: JSON.stringify({ cwd }),
+    }).catch((error: unknown) => error);
+    await waitFor(async () => factory.createBlocked);
+
+    let closeSettled = false;
+    const closing = daemon.close().then(() => { closeSettled = true; });
+    await Bun.sleep(5);
+    expect(closeSettled).toBe(false);
+    factory.releaseCreate();
+    await Promise.allSettled([starting, closing]);
+
+    expect(closeSettled).toBe(true);
+    expect(factory.transport.destroyed).toBe(true);
+  });
 });
 
 class RestFactory implements BackendFactory {
   readonly threadId = "0198f000-7000-7000-8000-000000000000";
   readonly transport = new RestTransport((message) => this.handle(message));
   delayNextRead = false;
+  pauseNextCreate = false;
+  createBlocked = false;
   private pendingReadId: RpcId | undefined;
+  private releaseBlockedCreate: (() => void) | undefined;
 
   async create(_project: RegisteredProject): Promise<BackendTransport> {
+    if (this.pauseNextCreate) {
+      this.pauseNextCreate = false;
+      this.createBlocked = true;
+      await new Promise<void>((resolve) => { this.releaseBlockedCreate = resolve; });
+      this.createBlocked = false;
+      this.releaseBlockedCreate = undefined;
+    }
     return this.transport;
+  }
+
+  releaseCreate(): void {
+    const release = this.releaseBlockedCreate;
+    if (!release) throw new Error("no REST provisioning call is blocked");
+    release();
   }
 
   hasPendingRead(): boolean {

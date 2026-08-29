@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -114,6 +114,17 @@ describe("aggregator daemon boundary", () => {
     expect(removed).toEqual([]);
     expect(statSync(socketPath).isSocket()).toBe(true);
     await owner.close();
+  });
+
+  test("rejects a pre-existing socket directory with non-private permissions", async () => {
+    const directory = temporaryDirectory();
+    const hostile = join(directory, "hostile-runtime");
+    mkdirSync(hostile, { mode: 0o700 });
+    chmodSync(hostile, 0o777);
+    const daemon = daemonFor(join(hostile, "aggregator.sock"), join(directory, "aggregator.sqlite3"));
+
+    await expect(daemon.start()).rejects.toThrow("socket directory must have mode 0700");
+    await daemon.close();
   });
 });
 

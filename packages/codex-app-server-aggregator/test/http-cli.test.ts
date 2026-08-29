@@ -14,7 +14,7 @@ describe("aggregator HTTP control CLI", () => {
     expect(config).toEqual({
       baseUrl: "http://aggregator.test:9000",
       tokenEnv: "SKIZZLES_AGGREGATOR_TOKEN",
-      timeoutMs: 65_000,
+      timeoutMs: 600_000,
       command: {
         method: "POST",
         path: "/v1/threads/thread%2Fwith%2Fslash/turns",
