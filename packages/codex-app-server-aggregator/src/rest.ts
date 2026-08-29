@@ -203,8 +203,11 @@ function statusForRpcError(error: RpcError): number {
 }
 
 async function jsonObject(request: Request): Promise<Record<string, unknown>> {
-  const bytes = await request.arrayBuffer();
-  if (bytes.byteLength > MAX_BODY_BYTES) throw new HttpError(413, "request body exceeds 1 MiB");
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null && /^\d+$/.test(contentLength) && Number(contentLength) > MAX_BODY_BYTES) {
+    throw new HttpError(413, "request body exceeds 1 MiB");
+  }
+  const bytes = await boundedBody(request);
   if (bytes.byteLength === 0) return {};
   let parsed: unknown;
   try {
@@ -216,6 +219,34 @@ async function jsonObject(request: Request): Promise<Record<string, unknown>> {
     throw new HttpError(400, "request body must be a JSON object");
   }
   return parsed as Record<string, unknown>;
+}
+
+async function boundedBody(request: Request): Promise<Uint8Array> {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new HttpError(413, "request body exceeds 1 MiB");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 function parseResponseOutcome(body: Record<string, unknown>): RpcOutcome {

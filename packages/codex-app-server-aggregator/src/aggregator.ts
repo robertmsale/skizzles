@@ -48,6 +48,7 @@ export class AppServerAggregator {
   private initialActivation: (() => Promise<void>) | undefined;
   private initializeParams?: unknown;
   private readonly warmBackends = new Map<string, BackendConnection>();
+  private readonly projectLocks = new Map<string, Promise<void>>();
   private globalBackendCreation: Promise<BackendConnection | undefined> | undefined;
   private readonly clientOptOutNotifications = new Set<string>();
   private initialized = false;
@@ -164,6 +165,17 @@ export class AppServerAggregator {
     }
     const backend = threadId ? this.backendForThread(threadId) : await this.globalBackend();
     if (!backend) {
+      if (threadId && (request.method === "thread/archive" || request.method === "thread/delete") && this.topology.has(threadId)) {
+        if (request.method === "thread/archive") this.topology.markArchived(threadId);
+        else this.topology.markDeleted(threadId);
+        await this.output.send(response(request.id, { result: {} }));
+        await this.sendClientNotification({
+          method: request.method === "thread/archive" ? "thread/archived" : "thread/deleted",
+          params: { threadId },
+          emittedAtMs: Date.now(),
+        });
+        return;
+      }
       if (request.method === "thread/read" && threadId && params.includeTurns !== true) {
         const thread = this.topology.snapshot(threadId);
         if (thread) {
@@ -235,18 +247,28 @@ export class AppServerAggregator {
       }
       if (request.method === "skizzles/project/remove") {
         const project = await this.registry.find(cwd);
-        if (project) {
+        if (!project) {
+          const removed = await this.registry.remove(cwd);
+          await this.output.send(response(request.id, { result: { removed } }));
+          return;
+        }
+        await this.withProjectLock(project.cwd, async () => {
+          const current = await this.registry.find(project.cwd);
+          if (!current) {
+            await this.output.send(response(request.id, { result: { removed: false } }));
+            return;
+          }
           const projectBackends = [...this.backendProjects.entries()]
-            .filter(([, candidate]) => candidate.cwd === project.cwd)
+            .filter(([, candidate]) => candidate.cwd === current.cwd)
             .map(([backend]) => backend);
           if (projectBackends.some((backend) => this.topology.hasLiveThreads(backend.machineId))) {
             await this.output.send(response(request.id, errorOutcome(-32005, "project has active threads")));
             return;
           }
           await Promise.all(projectBackends.map((backend) => this.removeIfDrained(backend)));
-        }
-        const removed = await this.registry.remove(cwd);
-        await this.output.send(response(request.id, { result: { removed } }));
+          const removed = await this.registry.remove(current.cwd);
+          await this.output.send(response(request.id, { result: { removed } }));
+        });
         return;
       }
       await this.output.send(response(request.id, errorOutcome(-32601, `unknown extension method: ${request.method}`)));
@@ -323,6 +345,20 @@ export class AppServerAggregator {
       )));
       return;
     }
+    await this.withProjectLock(project.cwd, async () => {
+      const current = await this.registry.find(project.cwd);
+      if (!current) {
+        await this.output.send(response(request.id, errorOutcome(
+          -32004,
+          "thread/start cwd is not a registered project",
+        )));
+        return;
+      }
+      await this.startThread(request, current);
+    });
+  }
+
+  private async startThread(request: RpcRequest, project: RegisteredProject): Promise<void> {
     let backend = this.warmBackends.get(project.cwd);
     this.warmBackends.delete(project.cwd);
     if (!backend) {
@@ -547,6 +583,21 @@ export class AppServerAggregator {
       }
     }
     if (project && this.warmBackends.get(project.cwd) === backend) this.warmBackends.delete(project.cwd);
+  }
+
+  private async withProjectLock<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.projectLocks.get(cwd) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => current);
+    this.projectLocks.set(cwd, queued);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.projectLocks.get(cwd) === queued) this.projectLocks.delete(cwd);
+    }
   }
 
   private projectForBackend(backend: BackendConnection): RegisteredProject {

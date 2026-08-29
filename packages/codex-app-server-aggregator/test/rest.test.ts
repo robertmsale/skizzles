@@ -217,6 +217,40 @@ describe("aggregator REST API", () => {
     expect((await fetch(`${origin}/healthz`, { headers: { authorization: "Bearer test-secret" } })).status).toBe(200);
     await daemon.close();
   });
+
+  test("rejects an oversized streamed body without waiting for its end", async () => {
+    const directory = temporaryDirectory();
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      factory: new RestFactory(),
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    await daemon.start();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let index = 0; index < 17; index++) controller.enqueue(new Uint8Array(64 * 1024));
+      },
+      cancel() { cancelled = true; },
+    });
+    try {
+      const response = await fetch(`${daemon.httpUrl!.origin}/v1/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        duplex: "half",
+        signal: AbortSignal.timeout(5_000),
+      } as RequestInit & { duplex: "half" });
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({
+        error: { code: "bad_request", message: "request body exceeds 1 MiB" },
+      });
+      expect(cancelled).toBe(true);
+    } finally {
+      await daemon.close();
+    }
+  });
 });
 
 class RestFactory implements BackendFactory {

@@ -8,7 +8,7 @@ import { CONTAINER_WORKSPACE } from "../src/docker.ts";
 import type { MessageSink } from "../src/jsonl.ts";
 import { ProjectRegistry } from "../src/projects.ts";
 import type { RpcId, RpcMessage } from "../src/protocol.ts";
-import { AggregatorState, type RegisteredProject } from "../src/state.ts";
+import { AggregatorState, type RegisteredProject, type StoredThread } from "../src/state.ts";
 
 const HOST_PROJECT_A = join(tmpdir(), "skizzles-aggregator-project-a");
 const HOST_PROJECT_B = join(tmpdir(), "skizzles-aggregator-project-b");
@@ -124,6 +124,33 @@ describe("Codex app-server aggregation", () => {
     expect(errorFor(harness.output.messages, 3)).toEqual({ code: -32005, message: "project has active threads" });
     expect(harness.registry.list().map((project) => project.cwd)).toContain(HOST_PROJECT_A);
     expect(harness.factory.transports[0]!.destroyed).toBe(false);
+    await harness.aggregator.close();
+  });
+
+  test("serializes project removal with delayed thread provisioning", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    harness.factory.pauseNextCreate = true;
+
+    const starting = harness.aggregator.handle({
+      method: "thread/start",
+      id: 2,
+      params: { cwd: HOST_PROJECT_B },
+    });
+    await waitFor(() => harness.factory.createBlocked);
+    const removing = harness.aggregator.handle({
+      method: "skizzles/project/remove",
+      id: 3,
+      params: { cwd: HOST_PROJECT_B },
+    });
+    await Bun.sleep(0);
+    harness.factory.releaseCreate();
+    await Promise.all([starting, removing]);
+
+    expect(resultFor(harness.output.messages, 2)).toMatchObject({ thread: { cwd: HOST_PROJECT_B } });
+    expect(errorFor(harness.output.messages, 3)).toEqual({ code: -32005, message: "project has active threads" });
+    expect(harness.registry.list().map((project) => project.cwd)).toContain(HOST_PROJECT_B);
+    expect(harness.factory.transports[1]!.destroyed).toBe(false);
     await harness.aggregator.close();
   });
 
@@ -244,6 +271,43 @@ describe("Codex app-server aggregation", () => {
     expect(resultFor(harness.output.messages, 8)).toEqual({ data: [], nextCursor: null, backwardsCursor: null });
     await harness.aggregator.handle({ method: "thread/unarchive", id: 9, params: { threadId: "unknown-thread" } });
     expect(errorFor(harness.output.messages, 9)).toEqual({ code: -32004, message: "unknown thread: unknown-thread" });
+    await harness.aggregator.close();
+  });
+
+  test("archives and deletes recovered threads without their removed backends", async () => {
+    const archivedId = "0198f100-7000-7000-8000-000000000000";
+    const deletedId = "0198f100-7000-7000-8000-000000000001";
+    const recovered = [archivedId, deletedId].map((threadId): StoredThread => ({
+      threadId,
+      machineId: `recovered-${threadId}`,
+      projectCwd: HOST_PROJECT_A,
+      snapshot: { ...threadSnapshot(threadId, 10), cwd: HOST_PROJECT_A },
+      loaded: false,
+      archived: false,
+      deleted: false,
+    }));
+    const harness = createHarness(undefined, recovered);
+    await initialize(harness);
+
+    await harness.aggregator.handle({ method: "thread/archive", id: 2, params: { threadId: archivedId } });
+    await harness.aggregator.handle({ method: "thread/delete", id: 3, params: { threadId: deletedId } });
+
+    expect(resultFor(harness.output.messages, 2)).toEqual({});
+    expect(resultFor(harness.output.messages, 3)).toEqual({});
+    expect(harness.output.messages).toContainEqual(expect.objectContaining({
+      method: "thread/archived",
+      params: { threadId: archivedId },
+    }));
+    expect(harness.output.messages).toContainEqual(expect.objectContaining({
+      method: "thread/deleted",
+      params: { threadId: deletedId },
+    }));
+    expect(harness.factory.transports[0]!.request("thread/archive")).toBeUndefined();
+    expect(harness.factory.transports[0]!.request("thread/delete")).toBeUndefined();
+    expect(harness.state.threads()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ threadId: archivedId, archived: true, deleted: false }),
+      expect.objectContaining({ threadId: deletedId, archived: false, deleted: true }),
+    ]));
     await harness.aggregator.close();
   });
 
@@ -551,17 +615,33 @@ class FakeFactory implements BackendFactory {
   archiveMode: "missing" | "cascade" | "notificationFirst" = "missing";
   initializeDelayMs = 0;
   createFailures = 0;
+  pauseNextCreate = false;
+  createBlocked = false;
+  private releaseBlockedCreate: (() => void) | undefined;
 
   async create(project: RegisteredProject): Promise<BackendTransport> {
     if (this.createFailures > 0) {
       this.createFailures--;
       throw new Error("fake provisioning failure");
     }
+    if (this.pauseNextCreate) {
+      this.pauseNextCreate = false;
+      this.createBlocked = true;
+      await new Promise<void>((resolve) => { this.releaseBlockedCreate = resolve; });
+      this.createBlocked = false;
+      this.releaseBlockedCreate = undefined;
+    }
     const index = this.transports.length;
     this.projects.push(project);
     const transport = new FakeTransport(index, (message) => this.handle(index, message));
     this.transports.push(transport);
     return transport;
+  }
+
+  releaseCreate(): void {
+    const release = this.releaseBlockedCreate;
+    if (!release) throw new Error("no fake provisioning call is blocked");
+    release();
   }
 
   threadId(index: number): string {
@@ -689,11 +769,12 @@ class FakeTransport implements BackendTransport {
 function createHarness(projects: Array<{ cwd: string; cloneUrl: string }> = [
   { cwd: HOST_PROJECT_A, cloneUrl: "https://example.test/project-a.git" },
   { cwd: HOST_PROJECT_B, cloneUrl: "https://example.test/project-b.git" },
-]) {
+], threads: StoredThread[] = []) {
   const factory = new FakeFactory();
   const output = new CaptureSink();
   const state = new AggregatorState(":memory:");
   for (const project of projects) state.saveProject(project);
+  for (const thread of threads) state.saveThread(thread);
   const registry = new ProjectRegistry(state);
   const aggregator = new AppServerAggregator({ factory, registry, state, output });
   return { factory, output, aggregator, registry, state };
