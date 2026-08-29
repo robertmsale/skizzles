@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "bin": {
-    "codex-app-server-aggregator": "./src/cli.ts"
+    "codex-app-server-aggregator": "./src/cli.ts",
+    "codex-app-server-ctl": "./src/http-cli.ts"
   },
   "scripts": {
     "check": "bun run typecheck && bun test",
+    "ctl": "bun run src/http-cli.ts",
     "protocol:generate": "bun run scripts/generate-protocol.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"

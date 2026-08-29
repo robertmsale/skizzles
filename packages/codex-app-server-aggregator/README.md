@@ -99,6 +99,31 @@ token read from the named environment variable. A non-loopback bind is rejected 
 configured; use a trusted TLS reverse proxy rather than sending that token over an untrusted
 plaintext network.
 
+### Scripted HTTP client
+
+`codex-app-server-ctl` standardizes the REST calls and always emits JSON. In this checkout, invoke
+the package script as follows; the package also publishes that executable name through its `bin`
+map for installed/linkable use.
+
+```sh
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- projects list
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- threads list --cwd /absolute/path/to/project
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- threads send THREAD_ID --message 'Run the focused tests'
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- threads read THREAD_ID
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- events list --after 12 --stream STREAM_ID
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- requests approve REQUEST_ID
+```
+
+Use `--stdin` instead of `--message` for multiline input. `threads start`, `send`, `fork`, `resume`,
+and `interrupt` accept `--params JSON` for native app-server fields that do not warrant dedicated
+CLI flags. Resource identifiers and query parameters are encoded by the client.
+
+The client defaults to `http://127.0.0.1:8788`. Override it with
+`SKIZZLES_AGGREGATOR_URL` or `--url`. If the server requires authentication, export
+`SKIZZLES_AGGREGATOR_TOKEN`; `--token-env NAME` selects another environment variable without
+placing the token in process arguments. HTTP failures produce structured JSON on stderr and a
+nonzero exit status.
+
 ## Project registry extensions
 
 These requests are available before `initialize`, which allows an empty database to be bootstrapped.
