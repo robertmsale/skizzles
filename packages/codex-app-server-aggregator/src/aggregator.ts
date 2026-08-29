@@ -45,11 +45,9 @@ export class AppServerAggregator {
   private readonly onServerRequestSettled: (id: RpcId) => void;
   private readonly log: (message: string) => void;
   private initialization?: Promise<RpcOutcome>;
-  private initialActivation: (() => Promise<void>) | undefined;
   private initializeParams?: unknown;
   private readonly warmBackends = new Map<string, BackendConnection>();
   private readonly projectLocks = new Map<string, Promise<void>>();
-  private globalBackendCreation: Promise<BackendConnection | undefined> | undefined;
   private readonly clientOptOutNotifications = new Set<string>();
   private initialized = false;
   private closed = false;
@@ -163,7 +161,11 @@ export class AppServerAggregator {
       )));
       return;
     }
-    const backend = threadId ? this.backendForThread(threadId) : await this.globalBackend();
+    if (!threadId) {
+      await this.handleRepresentativeRead(request, params);
+      return;
+    }
+    const backend = this.backendForThread(threadId);
     if (!backend) {
       if (threadId && (request.method === "thread/archive" || request.method === "thread/delete") && this.topology.has(threadId)) {
         if (request.method === "thread/archive") this.topology.markArchived(threadId);
@@ -241,7 +243,6 @@ export class AppServerAggregator {
           const project = await this.registry.register(projectCwd);
           const warm = this.warmBackends.get(project.cwd);
           if (warm && this.projectForBackend(warm).cloneUrl !== project.cloneUrl) {
-            this.warmBackends.delete(project.cwd);
             await this.removeIfDrained(warm);
           }
           await this.output.send(response(request.id, { result: { project } }));
@@ -300,7 +301,14 @@ export class AppServerAggregator {
       )));
       return;
     }
-    this.initialization = this.createInitializedBackend(project, true).then(async (backend) => {
+    this.initialization = this.withProjectLock(project.cwd, async () => {
+      const current = await this.registry.find(project.cwd);
+      if (!current) {
+        const outcome = errorOutcome(-32004, "initialization project is no longer registered");
+        await this.output.send(response(request.id, outcome));
+        return outcome;
+      }
+      const backend = await this.createInitializedBackend(current, true);
       if ("error" in backend.outcome) {
         this.backends.delete(backend.connection.machineId);
         this.backendProjects.delete(backend.connection);
@@ -311,16 +319,18 @@ export class AppServerAggregator {
           this.log(`failed to clean initialization backend ${backend.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       } else {
-        this.warmBackends.set(project.cwd, backend.connection);
-        this.initialActivation = backend.activate;
+        this.warmBackends.set(current.cwd, backend.connection);
       }
+      await this.output.send(response(request.id, backend.outcome));
+      if ("result" in backend.outcome) await backend.activate();
       return backend.outcome;
-    }).catch((error) => errorOutcome(-32603, error instanceof Error ? error.message : String(error)));
+    }).catch(async (error) => {
+      const outcome = errorOutcome(-32603, error instanceof Error ? error.message : String(error));
+      await this.output.send(response(request.id, outcome));
+      return outcome;
+    });
     const outcome = await this.initialization;
-    await this.output.send(response(request.id, outcome));
-    if ("result" in outcome) {
-      await this.initialActivation?.();
-    } else {
+    if ("error" in outcome) {
       delete this.initialization;
       delete this.initializeParams;
     }
@@ -496,60 +506,116 @@ export class AppServerAggregator {
     }
   }
 
-  private async globalBackend(): Promise<BackendConnection | undefined> {
-    const warm = this.warmBackends.values().next().value as BackendConnection | undefined;
-    if (warm) return warm;
-    if (this.globalBackendCreation) return this.globalBackendCreation;
-    const running = this.readyBackends.values().next().value as BackendConnection | undefined;
-    if (running) return running;
-    if (!this.globalBackendCreation) {
-      const attempt = (async () => {
-        let created: CreatedBackend;
-        try {
-          const project = this.registry.list()[0];
-          if (!project) return undefined;
-          created = await this.createInitializedBackend(project);
-        } catch (error) {
-          this.log(`failed to provision representative backend: ${error instanceof Error ? error.message : String(error)}`);
-          return undefined;
-        }
-        if ("error" in created.outcome) {
-          this.backends.delete(created.connection.machineId);
-          this.backendProjects.delete(created.connection);
-          try {
-            await created.connection.close();
-            this.state.markMachine(created.connection.machineId, "removed");
-          } catch (error) {
-            this.log(`failed to clean representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
-          }
-          return undefined;
-        }
-        if (this.initialized) {
-          try {
-            await created.connection.notify("initialized");
-          } catch (error) {
-            this.readyBackends.delete(created.connection);
-            this.backends.delete(created.connection.machineId);
-            this.backendProjects.delete(created.connection);
-            try {
-              await created.connection.close();
-              this.state.markMachine(created.connection.machineId, "removed");
-            } catch (closeError) {
-              this.log(`failed to clean unnotified representative backend ${created.connection.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
-            }
-            this.log(`failed to notify representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
-            return undefined;
-          }
-        }
-        this.warmBackends.set(this.projectForBackend(created.connection).cwd, created.connection);
-        return created.connection;
-      })();
-      this.globalBackendCreation = attempt;
-      attempt.finally(() => {
-        if (this.globalBackendCreation === attempt) this.globalBackendCreation = undefined;
-      }).catch(() => undefined);
+  private async handleRepresentativeRead(request: RpcRequest, params: Record<string, unknown>): Promise<void> {
+    const requested = representativeCwds(params);
+    if ("error" in requested) {
+      await this.output.send(response(request.id, errorOutcome(-32602, requested.error)));
+      return;
     }
-    return this.globalBackendCreation;
+    let project: RegisteredProject | undefined;
+    if (requested.cwds.length) {
+      let projects: Array<RegisteredProject | undefined>;
+      try {
+        projects = await Promise.all(requested.cwds.map((cwd) => this.registry.find(cwd)));
+      } catch (error) {
+        await this.output.send(response(request.id, errorOutcome(
+          -32602,
+          error instanceof Error ? error.message : String(error),
+        )));
+        return;
+      }
+      const missing = requested.cwds.find((_cwd, index) => !projects[index]);
+      if (missing) {
+        await this.output.send(response(request.id, errorOutcome(
+          -32004,
+          `representative read cwd is not a registered project: ${missing}`,
+        )));
+        return;
+      }
+      const unique = new Map(projects.map((candidate) => [candidate!.cwd, candidate!]));
+      if (unique.size > 1) {
+        await this.output.send(response(request.id, errorOutcome(
+          -32602,
+          "representative read cannot span multiple registered projects",
+        )));
+        return;
+      }
+      project = unique.values().next().value as RegisteredProject;
+    } else {
+      const warm = this.warmBackends.values().next().value as BackendConnection | undefined;
+      const running = this.readyBackends.values().next().value as BackendConnection | undefined;
+      project = warm ? this.projectForBackend(warm) : running ? this.projectForBackend(running) : this.registry.list()[0];
+    }
+    if (!project) {
+      await this.output.send(response(request.id, errorOutcome(-32004, "no app-server backend is available")));
+      return;
+    }
+
+    await this.withProjectLock(project.cwd, async () => {
+      const current = await this.registry.find(project.cwd);
+      if (!current) {
+        await this.output.send(response(request.id, errorOutcome(-32004, "representative read project is no longer registered")));
+        return;
+      }
+      let warm = this.warmBackends.get(current.cwd);
+      if (warm && this.projectForBackend(warm).cloneUrl !== current.cloneUrl) {
+        await this.removeIfDrained(warm);
+        warm = this.warmBackends.get(current.cwd);
+      }
+      const running = [...this.readyBackends].find((backend) => {
+        const candidate = this.projectForBackend(backend);
+        return candidate.cwd === current.cwd && candidate.cloneUrl === current.cloneUrl;
+      });
+      const backend = warm ?? running ?? await this.createRepresentativeBackend(current);
+      if (!backend) {
+        await this.output.send(response(request.id, errorOutcome(-32004, "no app-server backend is available")));
+        return;
+      }
+      const rawOutcome = await backend.call(request.method, backendRoutedParams(backend, request.params));
+      const outcome = virtualizeOutcome(rawOutcome, current.cwd);
+      this.topology.observe(backend.machineId, current.cwd, response(request.id, outcome));
+      await this.output.send(response(request.id, outcome));
+    });
+  }
+
+  private async createRepresentativeBackend(project: RegisteredProject): Promise<BackendConnection | undefined> {
+    let created: CreatedBackend;
+    try {
+      created = await this.createInitializedBackend(project);
+    } catch (error) {
+      this.log(`failed to provision representative backend: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
+    if ("error" in created.outcome) {
+      this.backends.delete(created.connection.machineId);
+      this.backendProjects.delete(created.connection);
+      try {
+        await created.connection.close();
+        this.state.markMachine(created.connection.machineId, "removed");
+      } catch (error) {
+        this.log(`failed to clean representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return undefined;
+    }
+    if (this.initialized) {
+      try {
+        await created.connection.notify("initialized");
+      } catch (error) {
+        this.readyBackends.delete(created.connection);
+        this.backends.delete(created.connection.machineId);
+        this.backendProjects.delete(created.connection);
+        try {
+          await created.connection.close();
+          this.state.markMachine(created.connection.machineId, "removed");
+        } catch (closeError) {
+          this.log(`failed to clean unnotified representative backend ${created.connection.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
+        }
+        this.log(`failed to notify representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      }
+    }
+    this.warmBackends.set(project.cwd, created.connection);
+    return created.connection;
   }
 
   private backendForThread(threadId: string): BackendConnection | undefined {
@@ -631,12 +697,31 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function representativeCwds(params: Record<string, unknown>): { cwds: string[] } | { error: string } {
+  const cwds: string[] = [];
+  if (params.cwd !== undefined && params.cwd !== null) {
+    if (typeof params.cwd !== "string") return { error: "representative read cwd must be a string" };
+    cwds.push(params.cwd);
+  }
+  if (params.cwds !== undefined && params.cwds !== null) {
+    if (!Array.isArray(params.cwds) || params.cwds.some((cwd) => typeof cwd !== "string")) {
+      return { error: "representative read cwds must be an array of strings" };
+    }
+    cwds.push(...params.cwds as string[]);
+  }
+  return { cwds };
+}
+
 function backendRoutedParams(backend: BackendConnection, value: unknown): unknown {
   const params = asRecord(value);
   let changed = false;
   const routed = { ...params };
   if ("cwd" in params) {
     routed.cwd = backend.workspace;
+    changed = true;
+  }
+  if (Array.isArray(params.cwds)) {
+    routed.cwds = params.cwds.map(() => backend.workspace);
     changed = true;
   }
   if (Array.isArray(params.runtimeWorkspaceRoots)) {

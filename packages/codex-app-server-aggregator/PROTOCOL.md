@@ -40,7 +40,7 @@ and rejects unkeyed operations that have no honest aggregate meaning.
 | `thread/unarchive` | Return success for a known thread without changing its archived state or provisioning a backend. | Archive is the intentional destructive release boundary; the removed rollout cannot honestly be restored. |
 | `skizzles/project/add`, `list`, `remove` | Maintain the persistent host-CWD registry with ordinary JSON-RPC envelopes, including before `initialize`. | Codex 0.149.1 has no backend-owned surface with a truthful fleet-wide registry view. |
 | Native project, section, and thread-search topology | Return an explicit same-protocol error for now. | These must eventually be aggregate-owned; asking one arbitrary backend would return a false partial view. |
-| Homogeneous global reads | Use a warm or running representative backend. | Model/config/account capability reads are expected to agree while every container comes from one image and Codex-home seed. |
+| Representative reads | Route `cwd`/`cwds` to one registered project's backend and reject cross-project arrays; unscoped reads use a warm or running representative. | Project-sensitive reads must observe the requested checkout, while model/account capability reads are expected to agree across the pinned image and Codex-home seed. |
 | Other unkeyed methods | Return an explicit same-protocol error. | A config write, login, filesystem operation, or process mutation cannot be safely assigned to an arbitrary container. |
 
 The 0.149.1 schema has `thread/archive` and `thread/delete`, but no separate `thread/done`

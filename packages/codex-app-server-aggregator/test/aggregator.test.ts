@@ -231,6 +231,151 @@ describe("Codex app-server aggregation", () => {
     }
   });
 
+  test("serializes an origin refresh with initialization warm provisioning", async () => {
+    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-init-origin-race-")));
+    const oldOrigin = "https://example.test/owner/old.git";
+    const newOrigin = "https://example.test/owner/new.git";
+    await runGit("init", projectCwd);
+    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
+    const state = new AggregatorState(":memory:");
+    state.saveProject({ cwd: projectCwd, cloneUrl: oldOrigin });
+    const registry = new SignalingProjectRegistry(state);
+    const factory = new FakeFactory();
+    factory.pauseNextCreate = true;
+    const output = new CaptureSink();
+    const aggregator = new AppServerAggregator({ factory, registry, state, output });
+    try {
+      const initializing = aggregator.handle({
+        method: "initialize",
+        id: 1,
+        params: {
+          clientInfo: { name: "test", title: "Test", version: "0.1.0" },
+          capabilities: { experimentalApi: true },
+        },
+      });
+      await waitFor(() => factory.createBlocked);
+
+      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
+      let refreshSettled = false;
+      const refreshing = aggregator.handle({
+        method: "skizzles/project/add",
+        id: 2,
+        params: { cwd: projectCwd },
+      }).then(() => { refreshSettled = true; });
+      await registry.waitForCanonicalization();
+      await Bun.sleep(0);
+      expect(refreshSettled).toBe(false);
+
+      factory.releaseCreate();
+      await Promise.all([initializing, refreshing]);
+      expect(resultFor(output.messages, 1)).toMatchObject({ platformOs: "linux" });
+      expect(resultFor(output.messages, 2)).toMatchObject({ project: { cloneUrl: newOrigin } });
+      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin]);
+      expect(factory.transports[0]!.destroyed).toBe(true);
+
+      await aggregator.handle({ method: "initialized" });
+      await aggregator.handle({ method: "thread/start", id: 3, params: { cwd: projectCwd } });
+      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, newOrigin]);
+    } finally {
+      await aggregator.close();
+      state.close();
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  test("serializes an origin refresh with later representative warm provisioning", async () => {
+    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-read-origin-race-")));
+    const oldOrigin = "https://example.test/owner/old.git";
+    const newOrigin = "https://example.test/owner/new.git";
+    await runGit("init", projectCwd);
+    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
+    const state = new AggregatorState(":memory:");
+    state.saveProject({ cwd: projectCwd, cloneUrl: oldOrigin });
+    const registry = new SignalingProjectRegistry(state);
+    const factory = new FakeFactory();
+    const output = new CaptureSink();
+    const aggregator = new AppServerAggregator({ factory, registry, state, output });
+    const harness = { factory, output, aggregator, registry, state };
+    try {
+      await initialize(harness);
+      await aggregator.handle({ method: "thread/start", id: 2, params: { cwd: projectCwd } });
+      await aggregator.handle({
+        method: "thread/archive",
+        id: 3,
+        params: { threadId: factory.threadId(0) },
+      });
+      expect(factory.transports[0]!.destroyed).toBe(true);
+
+      factory.pauseNextCreate = true;
+      const reading = aggregator.handle({ method: "model/list", id: 4, params: {} });
+      await waitFor(() => factory.createBlocked);
+      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
+      let refreshSettled = false;
+      const refreshing = aggregator.handle({
+        method: "skizzles/project/add",
+        id: 5,
+        params: { cwd: projectCwd },
+      }).then(() => { refreshSettled = true; });
+      await registry.waitForCanonicalization();
+      await Bun.sleep(0);
+      expect(refreshSettled).toBe(false);
+
+      factory.releaseCreate();
+      await Promise.all([reading, refreshing]);
+      expect(resultFor(output.messages, 4)).toEqual({});
+      expect(resultFor(output.messages, 5)).toMatchObject({ project: { cloneUrl: newOrigin } });
+      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, oldOrigin]);
+      expect(factory.transports[1]!.destroyed).toBe(true);
+
+      await aggregator.handle({ method: "thread/start", id: 6, params: { cwd: projectCwd } });
+      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, oldOrigin, newOrigin]);
+    } finally {
+      await aggregator.close();
+      state.close();
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  test("retains a stale warm backend when refresh teardown fails so retry can remove it", async () => {
+    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-origin-retry-")));
+    const oldOrigin = "https://example.test/owner/old.git";
+    const newOrigin = "https://example.test/owner/new.git";
+    await runGit("init", projectCwd);
+    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
+    const harness = createHarness([{ cwd: projectCwd, cloneUrl: oldOrigin }]);
+    try {
+      await initialize(harness);
+      const stale = harness.factory.transports[0]!;
+      stale.destroyFailures = 1;
+      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
+
+      await harness.aggregator.handle({
+        method: "skizzles/project/add",
+        id: 2,
+        params: { cwd: projectCwd },
+      });
+      expect(errorFor(harness.output.messages, 2)).toEqual({ code: -32602, message: "fake destroy failure" });
+      expect(stale.destroyCalls).toBe(1);
+      expect(stale.destroyed).toBe(false);
+      expect(harness.registry.list()[0]?.cloneUrl).toBe(newOrigin);
+
+      await harness.aggregator.handle({
+        method: "skizzles/project/add",
+        id: 3,
+        params: { cwd: projectCwd },
+      });
+      expect(resultFor(harness.output.messages, 3)).toMatchObject({ project: { cloneUrl: newOrigin } });
+      expect(stale.destroyCalls).toBe(2);
+      expect(stale.destroyed).toBe(true);
+
+      await harness.aggregator.handle({ method: "thread/start", id: 4, params: { cwd: projectCwd } });
+      expect(harness.factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, newOrigin]);
+    } finally {
+      await harness.aggregator.close();
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
   test("disconnects a backpressured relay without blocking backend responses", async () => {
     const state = new AggregatorState(":memory:");
     state.saveProject({ cwd: HOST_PROJECT_A, cloneUrl: "https://example.test/project-a.git" });
@@ -296,6 +441,33 @@ describe("Codex app-server aggregation", () => {
     expect(errorFor(harness.output.messages, 2)?.message).toContain("aggregate topology method");
     await harness.aggregator.handle({ method: "config/value/write", id: 3, params: {} });
     expect(errorFor(harness.output.messages, 3)?.message).toContain("no thread routing key");
+    await harness.aggregator.close();
+  });
+
+  test("routes project-sensitive representative reads by cwd and rejects multi-project cwds", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+
+    await harness.aggregator.handle({ method: "config/read", id: 2, params: { cwd: HOST_PROJECT_B } });
+    expect(resultFor(harness.output.messages, 2)).toEqual({});
+    expect(harness.factory.projects.map((project) => project.cwd)).toEqual([HOST_PROJECT_A, HOST_PROJECT_B]);
+    expect(harness.factory.transports[0]!.request("config/read")).toBeUndefined();
+    expect(harness.factory.transports[1]!.request("config/read")?.params).toEqual({ cwd: CONTAINER_WORKSPACE });
+
+    await harness.aggregator.handle({ method: "hooks/list", id: 3, params: { cwds: [HOST_PROJECT_B] } });
+    expect(resultFor(harness.output.messages, 3)).toEqual({});
+    expect(harness.factory.transports[1]!.request("hooks/list")?.params).toEqual({ cwds: [CONTAINER_WORKSPACE] });
+
+    await harness.aggregator.handle({
+      method: "skills/list",
+      id: 4,
+      params: { cwds: [HOST_PROJECT_A, HOST_PROJECT_B] },
+    });
+    expect(errorFor(harness.output.messages, 4)).toEqual({
+      code: -32602,
+      message: "representative read cannot span multiple registered projects",
+    });
+    expect(harness.factory.transports.every((transport) => transport.request("skills/list") === undefined)).toBe(true);
     await harness.aggregator.close();
   });
 

@@ -179,7 +179,7 @@ selected machine.
 | `thread/unarchive` | Return success for a known thread without changing its archived state or provisioning a replacement. |
 | `thread/delete` | Pass through, persist deletion, and remove the exact container when its thread tree drains. |
 | Native project/section/search topology | Reject rather than return one backend's false partial view; the Skizzles registry extensions are a separate aggregate-owned surface. |
-| Homogeneous global reads | Route to a warm or running representative backend. |
+| Representative reads | Route `cwd`/`cwds` to one registered project's backend and reject cross-project arrays; unscoped homogeneous reads use any warm or running representative. |
 | Other unkeyed requests | Reject until an aggregate, broadcast, or seed-owned meaning exists. |
 
 Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every isolated
