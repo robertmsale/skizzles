@@ -122,13 +122,13 @@ export class AggregatorDaemon {
         }).finally(() => active.delete(work));
         active.add(work);
       }
-      await Promise.allSettled(active);
     } catch (error) {
       this.log(`client connection failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       session.close();
       if (this.active?.socket === socket) this.active = undefined;
       if (!socket.destroyed) socket.end();
+      await Promise.allSettled(active);
     }
   }
 

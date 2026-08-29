@@ -175,6 +175,34 @@ describe("aggregator REST API", () => {
     await daemon.close();
   });
 
+  test("accepts a replacement relay while a disconnected client's backend call is still pending", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    await run("git", "init", cwd);
+    await run("git", "-C", cwd, "remote", "add", "origin", "https://example.test/owner/project.git");
+    const factory = new RestFactory();
+    const socketPath = join(directory, "aggregator.sock");
+    const daemon = new AggregatorDaemon({
+      socketPath,
+      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      factory,
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    await daemon.start();
+    const origin = daemon.httpUrl!.origin;
+    await fetchJson(`${origin}/v1/projects`, { method: "POST", body: JSON.stringify({ cwd }) });
+    await fetchJson(`${origin}/v1/threads`, { method: "POST", body: JSON.stringify({ cwd }) });
+
+    factory.delayNextRead = true;
+    await sendReadThenDisconnect(socketPath, factory.threadId);
+    await waitFor(async () => factory.hasPendingRead());
+    const replacement = await waitForReplacement(socketPath);
+    expect(replacement).toMatchObject({ id: "replacement", result: { data: [{ cwd }] } });
+
+    factory.releaseRead();
+    await daemon.close();
+  });
+
   test("requires the configured bearer token", async () => {
     const directory = temporaryDirectory();
     const daemon = new AggregatorDaemon({
@@ -194,9 +222,25 @@ describe("aggregator REST API", () => {
 class RestFactory implements BackendFactory {
   readonly threadId = "0198f000-7000-7000-8000-000000000000";
   readonly transport = new RestTransport((message) => this.handle(message));
+  delayNextRead = false;
+  private pendingReadId: RpcId | undefined;
 
   async create(_project: RegisteredProject): Promise<BackendTransport> {
     return this.transport;
+  }
+
+  hasPendingRead(): boolean {
+    return this.pendingReadId !== undefined;
+  }
+
+  releaseRead(): void {
+    const id = this.pendingReadId;
+    if (id === undefined) throw new Error("no fake thread/read is pending");
+    this.pendingReadId = undefined;
+    this.transport.emit({
+      id,
+      result: { thread: { ...threadSnapshot(this.threadId), turns: [{ id: "turn-1" }] } },
+    });
   }
 
   private async handle(message: RpcMessage): Promise<void> {
@@ -234,6 +278,11 @@ class RestFactory implements BackendFactory {
       return;
     }
     if (message.method === "thread/read") {
+      if (this.delayNextRead) {
+        this.delayNextRead = false;
+        this.pendingReadId = message.id;
+        return;
+      }
       this.transport.emit({
         id: message.id,
         result: { thread: { ...threadSnapshot(this.threadId), turns: [{ id: "turn-1" }] } },
@@ -349,6 +398,51 @@ function socketMessages(socketPath: string, message: RpcMessage, count: number):
     });
     socket.once("error", reject);
   });
+}
+
+function sendReadThenDisconnect(socketPath: string, threadId: string): Promise<void> {
+  return new Promise((resolveSend, reject) => {
+    const socket = connect(socketPath);
+    let buffer = "";
+    socket.once("connect", () => socket.write(`${JSON.stringify({
+      method: "initialize",
+      id: "disconnect-init",
+      params: {
+        clientInfo: { name: "disconnecting-client", title: null, version: "1.0.0" },
+        capabilities: { experimentalApi: true, requestAttestation: false },
+      },
+    })}\n`));
+    socket.on("data", (data) => {
+      buffer += data.toString();
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      const message = JSON.parse(buffer.slice(0, newline)) as RpcMessage;
+      if (!("id" in message) || message.id !== "disconnect-init" || !("result" in message)) {
+        reject(new Error("disconnecting client did not initialize"));
+        socket.destroy();
+        return;
+      }
+      socket.end(`${JSON.stringify({
+        method: "thread/read",
+        id: "abandoned-read",
+        params: { threadId, includeTurns: true },
+      })}\n`, () => resolveSend());
+    });
+    socket.once("error", reject);
+  });
+}
+
+async function waitForReplacement(socketPath: string): Promise<RpcMessage> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const response = await socketRequest(socketPath, {
+      method: "skizzles/project/list",
+      id: "replacement",
+      params: {},
+    });
+    if ("result" in response) return response;
+    await Bun.sleep(1);
+  }
+  throw new Error("replacement relay remained busy after the old socket disconnected");
 }
 
 function temporaryDirectory(): string {
