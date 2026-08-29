@@ -83,6 +83,38 @@ describe("aggregator daemon boundary", () => {
     }]);
     await daemon.close();
   });
+
+  test("does not recover active machines until it owns the daemon socket", async () => {
+    const directory = temporaryDirectory();
+    const socketPath = join(directory, "aggregator.sock");
+    const databasePath = join(directory, "aggregator.sqlite3");
+    const ownerState = new AggregatorState(databasePath);
+    const owner = new AggregatorDaemon({
+      socketPath,
+      state: ownerState,
+      factory: new UnusedFactory(),
+    });
+    await owner.start();
+    ownerState.saveMachine({
+      machineId: "machine-owned",
+      projectCwd: join(directory, "project"),
+      containerId: "container-owned",
+    });
+
+    const removed: string[] = [];
+    const contender = new AggregatorDaemon({
+      socketPath,
+      state: new AggregatorState(databasePath),
+      factory: new UnusedFactory(),
+      removeOrphan: async (machine) => { removed.push(machine.containerId); },
+    });
+    await expect(contender.start()).rejects.toThrow("aggregator daemon is already running");
+    await contender.close();
+
+    expect(removed).toEqual([]);
+    expect(statSync(socketPath).isSocket()).toBe(true);
+    await owner.close();
+  });
 });
 
 class UnusedFactory implements BackendFactory {

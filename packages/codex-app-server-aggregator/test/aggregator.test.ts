@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AppServerAggregator } from "../src/aggregator.ts";
@@ -124,6 +125,35 @@ describe("Codex app-server aggregation", () => {
     expect(harness.registry.list().map((project) => project.cwd)).toContain(HOST_PROJECT_A);
     expect(harness.factory.transports[0]!.destroyed).toBe(false);
     await harness.aggregator.close();
+  });
+
+  test("replaces an unused warm backend after the registered origin changes", async () => {
+    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-origin-")));
+    const oldOrigin = "https://example.test/owner/old.git";
+    const newOrigin = "https://example.test/owner/new.git";
+    await runGit("init", projectCwd);
+    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
+    const harness = createHarness([{ cwd: projectCwd, cloneUrl: oldOrigin }]);
+    try {
+      await initialize(harness);
+      expect(harness.factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin]);
+
+      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
+      await harness.aggregator.handle({
+        method: "skizzles/project/add",
+        id: 2,
+        params: { cwd: projectCwd },
+      });
+      expect(resultFor(harness.output.messages, 2)).toMatchObject({ project: { cloneUrl: newOrigin } });
+      expect(harness.factory.transports[0]!.destroyed).toBe(true);
+
+      await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: projectCwd } });
+      expect(harness.factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, newOrigin]);
+      expect(harness.factory.transports[1]!.request("thread/start")).toBeDefined();
+    } finally {
+      await harness.aggregator.close();
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
   });
 
   test("does not reorder backend initialization notifications ahead of the initialize result", async () => {
@@ -656,12 +686,14 @@ class FakeTransport implements BackendTransport {
   }
 }
 
-function createHarness() {
+function createHarness(projects: Array<{ cwd: string; cloneUrl: string }> = [
+  { cwd: HOST_PROJECT_A, cloneUrl: "https://example.test/project-a.git" },
+  { cwd: HOST_PROJECT_B, cloneUrl: "https://example.test/project-b.git" },
+]) {
   const factory = new FakeFactory();
   const output = new CaptureSink();
   const state = new AggregatorState(":memory:");
-  state.saveProject({ cwd: HOST_PROJECT_A, cloneUrl: "https://example.test/project-a.git" });
-  state.saveProject({ cwd: HOST_PROJECT_B, cloneUrl: "https://example.test/project-b.git" });
+  for (const project of projects) state.saveProject(project);
   const registry = new ProjectRegistry(state);
   const aggregator = new AppServerAggregator({ factory, registry, state, output });
   return { factory, output, aggregator, registry, state };
@@ -738,4 +770,10 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await Bun.sleep(1);
   }
   throw new Error("timed out waiting for fake app-server event");
+}
+
+async function runGit(...args: string[]): Promise<void> {
+  const process = Bun.spawn(["git", ...args], { stdout: "ignore", stderr: "pipe" });
+  const [stderr, exitCode] = await Promise.all([new Response(process.stderr).text(), process.exited]);
+  if (exitCode !== 0) throw new Error(stderr.trim() || `git ${args[0] ?? "command"} failed`);
 }

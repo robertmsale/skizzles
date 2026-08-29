@@ -63,17 +63,18 @@ export type HttpCliDependencies = {
 export async function httpCliMain(argv: string[], dependencies: HttpCliDependencies = {}): Promise<number> {
   const stdout = dependencies.stdout ?? ((text) => process.stdout.write(text));
   const stderr = dependencies.stderr ?? ((text) => process.stderr.write(text));
-  if (argv.includes("--help") || argv.includes("-h")) {
-    stdout(`${USAGE}\n`);
-    return 0;
-  }
   try {
+    const global = extractGlobalOptions(argv);
+    if (global.help) {
+      stdout(`${USAGE}\n`);
+      return 0;
+    }
     const env = dependencies.env ?? process.env;
     const config = await parseHttpCliArgs(argv, {
       env,
       readStdin: dependencies.readStdin ?? readStdin,
     });
-    const explicitTokenEnv = argv.includes("--token-env");
+    const explicitTokenEnv = global.tokenEnv !== undefined;
     const token = env[config.tokenEnv]?.trim();
     if (explicitTokenEnv && !token) throw new Error(`bearer token environment variable is empty or unset: ${config.tokenEnv}`);
     const client = new AggregatorHttpClient({
@@ -263,14 +264,21 @@ function parseCommandOptions(argv: string[]): ParsedCommandOptions {
 
 function extractGlobalOptions(argv: string[]): {
   args: string[];
+  help: boolean;
   url?: string;
   tokenEnv?: string;
   timeoutMs?: string;
 } {
   const values = new Map<string, string>();
+  let help = false;
   let index = 0;
   while (index < argv.length) {
     const argument = argv[index]!;
+    if (argument === "--help" || argument === "-h") {
+      help = true;
+      index++;
+      continue;
+    }
     if (!["--url", "--token-env", "--timeout-ms"].includes(argument)) break;
     const value = argv[index + 1];
     if (value === undefined) throw new Error(`missing value for ${argument}`);
@@ -279,6 +287,7 @@ function extractGlobalOptions(argv: string[]): {
   }
   return {
     args: argv.slice(index),
+    help,
     ...(values.has("--url") ? { url: values.get("--url")! } : {}),
     ...(values.has("--token-env") ? { tokenEnv: values.get("--token-env")! } : {}),
     ...(values.has("--timeout-ms") ? { timeoutMs: values.get("--timeout-ms")! } : {}),

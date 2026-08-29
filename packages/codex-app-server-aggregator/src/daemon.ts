@@ -32,6 +32,7 @@ export class AggregatorDaemon {
   private restUrl: URL | undefined;
   private started = false;
   private closed = false;
+  private ownsSocket = false;
 
   constructor(private readonly options: AggregatorDaemonOptions) {
     this.registry = new ProjectRegistry(options.state);
@@ -59,22 +60,24 @@ export class AggregatorDaemon {
     if (this.started) return;
     if (this.closed) throw new Error("daemon is closed");
     this.started = true;
-    await this.recoverOrphans();
-    await prepareSocket(this.options.socketPath);
-    await mkdir(dirname(this.options.socketPath), { recursive: true, mode: 0o700 });
     try {
+      await prepareSocket(this.options.socketPath);
+      await mkdir(dirname(this.options.socketPath), { recursive: true, mode: 0o700 });
       await new Promise<void>((resolve, reject) => {
         this.server.once("error", reject);
         this.server.listen(this.options.socketPath, () => {
           this.server.off("error", reject);
-          chmodSync(this.options.socketPath, 0o600);
           resolve();
         });
       });
+      this.ownsSocket = true;
+      chmodSync(this.options.socketPath, 0o600);
+      await this.recoverOrphans();
       this.restUrl = this.rest?.start();
     } catch (error) {
       await closeServer(this.server).catch(() => undefined);
-      await unlink(this.options.socketPath).catch(() => undefined);
+      if (this.ownsSocket) await unlink(this.options.socketPath).catch(() => undefined);
+      this.ownsSocket = false;
       this.started = false;
       throw error;
     }
@@ -94,7 +97,8 @@ export class AggregatorDaemon {
     await this.aggregator.close();
     await this.bridge.close();
     await closeServer(this.server);
-    await unlink(this.options.socketPath).catch(() => undefined);
+    if (this.ownsSocket) await unlink(this.options.socketPath).catch(() => undefined);
+    this.ownsSocket = false;
     this.options.state.close();
   }
 

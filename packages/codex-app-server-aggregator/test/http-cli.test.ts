@@ -71,6 +71,23 @@ describe("aggregator HTTP control CLI", () => {
     });
   });
 
+  test("sends help- and token-shaped message text through the HTTP boundary", async () => {
+    for (const message of ["--help", "--token-env"]) {
+      let body: unknown;
+      const exitCode = await httpCliMain(["threads", "send", "thread-1", "--message", message], {
+        env: {},
+        fetch: async (_input, init = {}) => {
+          body = JSON.parse(String(init.body));
+          return Response.json({ turn: { id: "turn-1" } });
+        },
+        stdout: () => undefined,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(body).toMatchObject({ input: [{ type: "text", text: message }] });
+    }
+  });
+
   test("sends bearer-authenticated requests and prints only JSON results", async () => {
     let request: { url: string; init: RequestInit } | undefined;
     let stdout = "";
