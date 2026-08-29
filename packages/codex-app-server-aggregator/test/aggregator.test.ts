@@ -39,6 +39,12 @@ describe("Codex app-server aggregation", () => {
     const listed = resultFor(harness.output.messages, 4) as { data: Array<{ id: string }> };
     expect(listed.data.map((thread) => thread.id).sort()).toEqual([firstId, secondId].sort());
     expect(harness.factory.transports.every((transport) => transport.request("thread/list") === undefined)).toBe(true);
+    await harness.aggregator.handle({ method: "thread/list", id: "cwd-list", params: { cwd: HOST_PROJECT_B } });
+    expect(resultFor(harness.output.messages, "cwd-list")).toMatchObject({ data: [{ id: secondId, cwd: HOST_PROJECT_B }] });
+    expect(harness.state.threads().map((thread) => [thread.threadId, thread.projectCwd]).sort()).toEqual([
+      [firstId, HOST_PROJECT_A],
+      [secondId, HOST_PROJECT_B],
+    ].sort());
 
     await harness.aggregator.handle({ method: "thread/fork", id: 5, params: { threadId: firstId } });
     const forkId = harness.factory.forkId(0);
@@ -83,6 +89,22 @@ describe("Codex app-server aggregation", () => {
     expect(harness.factory.transports[0]!.destroyed).toBe(false);
     expect(harness.factory.transports[1]!.request("thread/archive")).toBeDefined();
     expect(harness.factory.transports[1]!.destroyed).toBe(true);
+    await harness.aggregator.close();
+  });
+
+  test("refuses to remove a project with active container-backed threads", async () => {
+    const harness = createHarness();
+    await initialize(harness);
+    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
+    await harness.aggregator.handle({
+      method: "skizzles/project/remove",
+      id: 3,
+      params: { cwd: HOST_PROJECT_A },
+    });
+
+    expect(errorFor(harness.output.messages, 3)).toEqual({ code: -32005, message: "project has active threads" });
+    expect(harness.registry.list().map((project) => project.cwd)).toContain(HOST_PROJECT_A);
+    expect(harness.factory.transports[0]!.destroyed).toBe(false);
     await harness.aggregator.close();
   });
 

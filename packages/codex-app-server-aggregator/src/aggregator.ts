@@ -127,7 +127,7 @@ export class AppServerAggregator {
     if (isAggregateTopologyMethod(request.method)) {
       await this.output.send(response(request.id, errorOutcome(
         -32004,
-        `aggregate topology method is not implemented by this spike: ${request.method}`,
+        `aggregate topology method is not implemented by this aggregator: ${request.method}`,
       )));
       return;
     }

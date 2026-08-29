@@ -1,10 +1,16 @@
-# Codex app-server aggregator spike
+# Codex app-server aggregator
 
-This package is a Bun middleware spike that remains a Codex app-server peer: headerless JSON-RPC 2.0 over JSONL on stdio. It starts one real `codex app-server` per Docker container and forwards the backend's notifications and server-to-client approval requests on the original client connection.
+This package is one long-lived, multi-project Codex app-server peer. Clients still speak Codex's
+headerless JSON-RPC 2.0 envelopes over JSONL; the aggregator adds no second agent protocol. A
+mode-0600 Unix socket keeps the daemon alive independently of any stdio client, and the `connect`
+command is a byte-for-byte stdio relay for clients that need the usual process shape.
 
-It is deliberately not a GUI, worktree manager, review product, or second agent protocol.
+The daemon starts one real `codex app-server --stdio` inside each managed Docker container. A
+registered host checkout is only a routing key and the source of its Git origin. Each container
+clones that origin into `/workspace/repo`; the host checkout is never mounted as the agent
+workspace.
 
-## Run the spike
+## Run it
 
 Build the version-locked container image:
 
@@ -14,38 +20,104 @@ docker build \
   packages/codex-app-server-aggregator/container
 ```
 
-Start the aggregator with a repository that each container can clone:
+Start the single daemon:
 
 ```sh
-bun run packages/codex-app-server-aggregator/src/cli.ts \
-  --repo https://github.com/owner/repository.git
+bun run packages/codex-app-server-aggregator/src/cli.ts serve
 ```
 
-The client then speaks the normal app-server protocol on stdin/stdout. `initialize` provisions a warm container so its returned `codexHome`, platform, and user agent are real in-container values. Container startup emits an internal readiness marker only after clone and provider readiness; the transport strips it before starting the app-server RPC timeout. The cloned workspace is trusted inside that disposable container so its repo-local Codex config, hooks, and exec policy load. The first `thread/start` consumes that container; later starts provision another container. A failed later provision returns a JSON-RPC error for that `thread/start` instead of stranding its request ID.
+The defaults are a per-user socket below the system temporary directory and a SQLite database at
+`~/.local/state/skizzles/codex-app-server.sqlite3`. Use `--socket` and `--database` to override
+them. The daemon accepts one active outer app-server connection at a time; that connection can
+host threads from every registered project.
 
-Client notification opt-outs still apply on the outer connection. The aggregator removes the thread lifecycle, status, and turn/item activity methods needed for aggregate bookkeeping from the capabilities sent to each backend, observes them internally, then suppresses them before forwarding when the client opted out.
+Before a normal app-server client initializes, register a Git checkout through the same JSON-RPC
+surface. The path must be an absolute checkout root with a container-reachable `origin` remote:
 
-Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every isolated `/codex-home`. Keep session rollouts out of this seed; it should contain only intentional shared config/auth material. A custom image can include an OpenCodex-compatible provider, started with `--provider-command`; use `--provider-ready-url` to gate app-server startup until it is ready. `--pass-env NAME` passes selected provider credentials by name without putting their values in this repository.
+```sh
+printf '%s\n' \
+  '{"method":"skizzles/project/add","id":1,"params":{"cwd":"/absolute/path/to/project"}}' \
+  | bun run packages/codex-app-server-aggregator/src/cli.ts connect
+```
 
-## Current interception boundary
+Then configure the app-server client to launch the relay:
 
-| Method | Spike behavior |
+```sh
+bun run packages/codex-app-server-aggregator/src/cli.ts connect
+```
+
+Ending that relay closes its containers but not the daemon. A later relay can reconnect to the
+same registry and retained thread snapshots.
+
+## Project registry extensions
+
+These requests are available before `initialize`, which allows an empty database to be bootstrapped.
+They retain ordinary JSON-RPC request and response envelopes.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `skizzles/project/add` | `{ cwd: string }` | `{ project }`; canonicalizes the Git root and discovers or refreshes its `origin`. |
+| `skizzles/project/list` | `{}` | `{ data: project[] }`. |
+| `skizzles/project/remove` | `{ cwd: string }` | `{ removed: boolean }`; refuses removal while that project has live container-backed threads. |
+
+`thread/start` requires a `cwd` that exactly resolves to a registered project. Unknown paths are
+rejected before provisioning. The selected project's stored origin is cloned in a new container,
+the inner request is forced to `/workspace/repo`, and returned thread DTOs expose the registered
+host CWD so normal client filtering remains meaningful. Re-add a checkout after changing its
+`origin` to refresh the persisted clone source.
+
+## Persistence and process truth
+
+SQLite retains registered projects, aggregate thread snapshots, lifecycle flags, and the exact
+machine/project/container association. A daemon restart cannot reattach the lost stdio streams,
+so it never labels old threads as loaded or pretends their backend is routable. Instead it removes
+persisted active/orphaned containers by exact container ID, retains snapshot-only `thread/list` and
+`thread/read` data, and returns an unavailable-thread error for operations that require the dead
+writer.
+
+Within a live connection, archive/delete still route by the real backend-minted thread ID and run
+`docker rm --force` only after every thread mapped to that machine is drained. Fork and detached
+review IDs remain on their original writer process.
+
+The selected outer transport is a Unix-domain JSONL socket because direct stdio exits on EOF and
+the pinned Codex runtime's listen-WebSocket surface is experimental. Inner app-server connections
+remain direct stdio because they are container-owned and deliberately non-reattachable. Tests prove
+the daemon survives relay disconnect, the registry survives daemon restart, stale machines are
+cleaned by exact ID, two CWDs select different clone sources, unknown CWDs provision nothing, and
+archive removes the selected machine.
+
+## Existing app-server behavior
+
+| Method | Aggregator behavior |
 | --- | --- |
-| `initialize`, `initialized` | Initialize every real backend with the client's DTO, except topology-critical notification opt-outs retained only at the outer boundary; return the warm Linux backend's response. |
-| `thread/start` | Clone/provision first, force `cwd` to `/workspace/repo`, then preserve the real returned thread id. |
-| `thread/list`, `thread/loaded/list` | Answer from aggregate bookkeeping across containers. Turn/item activity refreshes preview and ordering timestamps; close/status notifications maintain per-thread loaded state independently of container readiness. |
+| `initialize`, `initialized` | Initialize a real warm backend from a registered project and preserve the backend's Linux runtime description. |
+| `thread/start` | Route by registered host CWD, clone/provision, force the inner workspace, and preserve the real returned thread ID. |
+| `thread/list`, `thread/loaded/list` | Answer from aggregate topology across projects; persisted but disconnected threads are never reported loaded. |
 | `thread/read` after teardown | Return the retained snapshot when turns are not requested. |
-| Thread-scoped requests | Route by the real Codex thread id. Fork/review ids observed in responses or `thread/started` bind to the same container. |
-| Backend approvals and other requests | Rewrite only the JSON-RPC request id for collision-free correlation, then route the client response back to the originating backend. Payloads are untouched. |
-| `thread/archive`, `thread/delete` | Pass through; if the real backend has not materialized a rollout yet, synthesize the normal lifecycle success for its already-minted thread. Remove the container when no mapped live threads remain. |
-| Project/section/search topology | Reject as not yet implemented instead of returning one backend's false partial view. |
-| Homogeneous global reads | Route to the warm backend or an existing representative. |
+| Thread-scoped requests | Route by the real Codex thread ID. Fork/review IDs bind to the same backend and project. |
+| Backend approvals and other requests | Rewrite only the JSON-RPC request ID for collision-free correlation, then route the client response back to the originating backend. |
+| `thread/archive`, `thread/delete` | Pass through, persist lifecycle state, and remove the exact container when its thread tree drains. |
+| Native project/section/search topology | Reject rather than return one backend's false partial view; the Skizzles registry extensions are a separate aggregate-owned surface. |
+| Homogeneous global reads | Route to a warm or running representative backend. |
 | Other unkeyed requests | Reject until an aggregate, broadcast, or seed-owned meaning exists. |
 
-This is not production-ready. Bookkeeping is in memory, stdio backends cannot be reattached after an aggregator crash, and an archived container's rollout is destroyed with the container. Those are protocol/process questions the spike is intended to expose, not paper over.
+Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every isolated
+`/codex-home`. Keep session rollouts out of this seed. A custom image can start an
+OpenCodex-compatible provider with `--provider-command`; use `--provider-ready-url` to gate
+app-server startup and `--pass-env NAME` for explicitly selected provider credentials.
 
-See [PROTOCOL.md](PROTOCOL.md) for the runtime probes, counterfactuals, interception boundary, and known breaks.
+Run the package boundary with:
+
+```sh
+bun run --cwd packages/codex-app-server-aggregator check
+```
+
+See [PROTOCOL.md](PROTOCOL.md) for the runtime probes, protocol/extension boundary, and remaining
+limitations.
 
 ## Protocol lock
 
-`bun run --cwd packages/codex-app-server-aggregator protocol:generate` invokes the installed `codex app-server generate-ts --experimental`. The checked-in subset under `src/generated/` is the exact 0.149.1 DTO surface synthesized by this shim; passthrough payloads intentionally remain opaque.
+`bun run --cwd packages/codex-app-server-aggregator protocol:generate` invokes the installed
+`codex app-server generate-ts --experimental`. The checked-in subset under `src/generated/` is the
+exact 0.149.1 DTO surface synthesized by this middleware; passthrough payloads intentionally remain
+opaque.
