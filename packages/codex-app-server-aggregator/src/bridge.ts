@@ -17,6 +17,8 @@ import {
 const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 500;
 const MAX_RETAINED_EVENTS = 2_000;
+const MAX_QUEUED_CLIENT_MESSAGES = 256;
+const MAX_QUEUED_CLIENT_BYTES = 16 * 1024 * 1024;
 
 const DEFAULT_INITIALIZE_PARAMS = {
   clientInfo: {
@@ -33,11 +35,13 @@ const DEFAULT_INITIALIZE_PARAMS = {
 type PendingCall = (outcome: RpcOutcome) => void;
 
 type ActiveClient = {
-  output: MessageSink;
+  delivery: ClientDelivery;
+  disconnect: () => void;
   initialized: boolean;
   initializing: boolean;
   optOutNotifications: Set<string>;
   queuedNotifications: RpcNotification[];
+  queuedNotificationBytes: number;
 };
 
 export type EventRecord = {
@@ -73,14 +77,18 @@ export class AggregatorBridge implements MessageSink {
     this.aggregator = aggregator;
   }
 
-  attachClient(output: MessageSink): AggregatorClientSession {
+  attachClient(output: MessageSink, disconnect: () => void = () => undefined): AggregatorClientSession {
     if (this.activeClient) throw new Error("aggregator already has an active client");
-    const client: ActiveClient = {
-      output,
+    let client!: ActiveClient;
+    const delivery = new ClientDelivery(output, (reason) => this.disconnectClient(client, reason));
+    client = {
+      delivery,
+      disconnect,
       initialized: false,
       initializing: false,
       optOutNotifications: new Set(),
       queuedNotifications: [],
+      queuedNotificationBytes: 0,
     };
     this.activeClient = client;
     return new AggregatorClientSession(this, client);
@@ -88,6 +96,9 @@ export class AggregatorBridge implements MessageSink {
 
   detachClient(client: ActiveClient): void {
     if (this.activeClient === client) this.activeClient = undefined;
+    client.delivery.close();
+    client.queuedNotifications.length = 0;
+    client.queuedNotificationBytes = 0;
   }
 
   async call(method: string, params?: unknown): Promise<RpcOutcome> {
@@ -147,15 +158,15 @@ export class AggregatorBridge implements MessageSink {
       this.appendEvent(message);
       const client = this.activeClient;
       if (client && !client.optOutNotifications.has(message.method)) {
-        if (client.initialized) await client.output.send(message);
-        else if (client.initializing) client.queuedNotifications.push(structuredClone(message));
+        if (client.initialized) client.delivery.enqueue(message);
+        else if (client.initializing) this.queueInitializingNotification(client, message);
       }
       return;
     }
     if (isRequest(message)) {
       this.serverRequests.set(idKey(message.id), structuredClone(message));
       const client = this.activeClient;
-      if (client?.initialized) await client.output.send(message);
+      if (client?.initialized) client.delivery.enqueue(message);
     }
   }
 
@@ -165,25 +176,31 @@ export class AggregatorBridge implements MessageSink {
     }
     this.pendingCalls.clear();
     this.serverRequests.clear();
+    const client = this.activeClient;
     this.activeClient = undefined;
+    client?.delivery.close();
   }
 
   async initializeClient(client: ActiveClient, id: RpcId, params: unknown): Promise<void> {
     client.optOutNotifications = new Set(initializeOptOutMethods(params));
     client.initializing = true;
     const outcome = await this.ensureInitialized(params);
-    await client.output.send(response(id, outcome));
+    client.delivery.enqueue(response(id, outcome));
     client.initializing = false;
     if ("result" in outcome) {
       client.initialized = true;
-      for (const notification of client.queuedNotifications.splice(0)) await client.output.send(notification);
-      for (const request of this.serverRequests.values()) await client.output.send(request);
+      const notifications = client.queuedNotifications.splice(0);
+      client.queuedNotificationBytes = 0;
+      for (const notification of notifications) client.delivery.enqueue(notification);
+      for (const request of this.serverRequests.values()) client.delivery.enqueue(request);
     } else {
       client.queuedNotifications.length = 0;
+      client.queuedNotificationBytes = 0;
     }
   }
 
   async handleClientMessage(client: ActiveClient, message: RpcMessage): Promise<void> {
+    if (this.activeClient !== client) return;
     if (isResponse(message)) {
       if (this.serverRequests.has(idKey(message.id))) this.serverRequests.delete(idKey(message.id));
       await this.requiredAggregator().handle(message);
@@ -196,18 +213,18 @@ export class AggregatorBridge implements MessageSink {
     }
     if (message.method === "initialize") {
       if (client.initializing || client.initialized) {
-        await client.output.send(response(message.id, errorOutcome(-32600, "Already initialized")));
+        client.delivery.enqueue(response(message.id, errorOutcome(-32600, "Already initialized")));
         return;
       }
       await this.initializeClient(client, message.id, message.params);
       return;
     }
     if (!client.initialized && !message.method.startsWith("skizzles/project/")) {
-      await client.output.send(response(message.id, errorOutcome(-32000, "Not initialized")));
+      client.delivery.enqueue(response(message.id, errorOutcome(-32000, "Not initialized")));
       return;
     }
     const outcome = await this.callCore(message.method, message.params);
-    await client.output.send(response(message.id, outcome));
+    client.delivery.enqueue(response(message.id, outcome));
   }
 
   private async ensureInitialized(params: unknown = DEFAULT_INITIALIZE_PARAMS): Promise<RpcOutcome> {
@@ -248,10 +265,100 @@ export class AggregatorBridge implements MessageSink {
     if (this.events.length > MAX_RETAINED_EVENTS) this.events.splice(0, this.events.length - MAX_RETAINED_EVENTS);
   }
 
+  private queueInitializingNotification(client: ActiveClient, notification: RpcNotification): void {
+    const bytes = messageBytes(notification);
+    if (
+      client.queuedNotifications.length >= MAX_QUEUED_CLIENT_MESSAGES
+      || client.queuedNotificationBytes + bytes > MAX_QUEUED_CLIENT_BYTES
+    ) {
+      this.disconnectClient(client, "relay initialization queue exceeded its limit");
+      return;
+    }
+    client.queuedNotifications.push(structuredClone(notification));
+    client.queuedNotificationBytes += bytes;
+  }
+
+  private disconnectClient(client: ActiveClient, reason: string): void {
+    if (this.activeClient !== client) return;
+    this.log(`disconnecting client: ${reason}`);
+    this.activeClient = undefined;
+    client.delivery.close();
+    client.queuedNotifications.length = 0;
+    client.queuedNotificationBytes = 0;
+    try {
+      client.disconnect();
+    } catch (error) {
+      this.log(`failed to disconnect client: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private requiredAggregator(): AppServerAggregator {
     if (!this.aggregator) throw new Error("aggregator bridge is not bound");
     return this.aggregator;
   }
+}
+
+type QueuedClientMessage = { message: RpcMessage; bytes: number };
+
+class ClientDelivery {
+  private readonly queue: QueuedClientMessage[] = [];
+  private queuedBytes = 0;
+  private active = false;
+  private closed = false;
+
+  constructor(private readonly output: MessageSink, private readonly disconnect: (reason: string) => void) {}
+
+  enqueue(message: RpcMessage): void {
+    if (this.closed) return;
+    if (!this.active) {
+      this.active = true;
+      void this.deliver(structuredClone(message));
+      return;
+    }
+    const bytes = messageBytes(message);
+    if (this.queue.length >= MAX_QUEUED_CLIENT_MESSAGES || this.queuedBytes + bytes > MAX_QUEUED_CLIENT_BYTES) {
+      this.fail("relay output queue exceeded its limit");
+      return;
+    }
+    this.queue.push({ message: structuredClone(message), bytes });
+    this.queuedBytes += bytes;
+  }
+
+  close(): void {
+    this.closed = true;
+    this.queue.length = 0;
+    this.queuedBytes = 0;
+  }
+
+  private async deliver(first: RpcMessage): Promise<void> {
+    let message: RpcMessage | undefined = first;
+    while (message && !this.closed) {
+      try {
+        await this.output.send(message);
+      } catch (error) {
+        this.fail(`relay write failed: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      if (this.closed) return;
+      const next = this.queue.shift();
+      if (!next) {
+        this.active = false;
+        return;
+      }
+      this.queuedBytes -= next.bytes;
+      message = next.message;
+    }
+  }
+
+  private fail(reason: string): void {
+    if (this.closed) return;
+    this.close();
+    this.disconnect(reason);
+  }
+}
+
+function messageBytes(message: RpcMessage): number {
+  return Buffer.byteLength(JSON.stringify(message));
 }
 
 export class AggregatorClientSession {

@@ -127,7 +127,7 @@ export class AggregatorDaemon {
     const sink = new SerialMessageSink((line) => new Promise<void>((resolve, reject) => {
       socket.write(line, (error) => error ? reject(error) : resolve());
     }));
-    const session = this.bridge.attachClient(sink);
+    const session = this.bridge.attachClient(sink, () => socket.destroy());
     this.active = { socket, session };
     const work = this.serve(socket, session);
     this.serveTasks.add(work);

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AppServerAggregator } from "../src/aggregator.ts";
 import type { BackendFactory, BackendTransport } from "../src/backend.ts";
+import { AggregatorBridge } from "../src/bridge.ts";
 import { CONTAINER_WORKSPACE } from "../src/docker.ts";
 import type { MessageSink } from "../src/jsonl.ts";
 import { ProjectRegistry } from "../src/projects.ts";
@@ -180,6 +181,102 @@ describe("Codex app-server aggregation", () => {
     } finally {
       await harness.aggregator.close();
       rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  test("serializes an origin refresh with in-flight thread provisioning", async () => {
+    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-origin-race-")));
+    const oldOrigin = "https://example.test/owner/old.git";
+    const newOrigin = "https://example.test/owner/new.git";
+    await runGit("init", projectCwd);
+    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
+    const state = new AggregatorState(":memory:");
+    state.saveProject({ cwd: projectCwd, cloneUrl: oldOrigin });
+    const registry = new SignalingProjectRegistry(state);
+    const factory = new FakeFactory();
+    const output = new CaptureSink();
+    const aggregator = new AppServerAggregator({ factory, registry, state, output });
+    const harness = { factory, output, aggregator, registry, state };
+    try {
+      await initialize(harness);
+      await aggregator.handle({ method: "thread/start", id: 2, params: { cwd: projectCwd } });
+      factory.pauseNextCreate = true;
+      const starting = aggregator.handle({ method: "thread/start", id: 3, params: { cwd: projectCwd } });
+      await waitFor(() => factory.createBlocked);
+
+      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
+      let refreshSettled = false;
+      const refreshing = aggregator.handle({
+        method: "skizzles/project/add",
+        id: 4,
+        params: { cwd: projectCwd },
+      }).then(() => { refreshSettled = true; });
+      await registry.waitForCanonicalization();
+      await Bun.sleep(0);
+      expect(refreshSettled).toBe(false);
+      expect(registry.list()[0]?.cloneUrl).toBe(oldOrigin);
+
+      factory.releaseCreate();
+      await Promise.all([starting, refreshing]);
+      expect(resultFor(output.messages, 3)).toMatchObject({ thread: { cwd: projectCwd } });
+      expect(resultFor(output.messages, 4)).toMatchObject({ project: { cloneUrl: newOrigin } });
+      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, oldOrigin]);
+
+      await aggregator.handle({ method: "thread/start", id: 5, params: { cwd: projectCwd } });
+      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, oldOrigin, newOrigin]);
+    } finally {
+      await aggregator.close();
+      state.close();
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  test("disconnects a backpressured relay without blocking backend responses", async () => {
+    const state = new AggregatorState(":memory:");
+    state.saveProject({ cwd: HOST_PROJECT_A, cloneUrl: "https://example.test/project-a.git" });
+    const registry = new ProjectRegistry(state);
+    const factory = new FakeFactory();
+    factory.notificationsBeforeThreadStartResponse = 300;
+    const bridge = new AggregatorBridge();
+    const aggregator = new AppServerAggregator({
+      factory,
+      registry,
+      state,
+      output: bridge,
+      applyClientNotificationOptOuts: false,
+    });
+    bridge.bind(aggregator);
+    const relay = new BlockingRelaySink();
+    let disconnected = false;
+    const session = bridge.attachClient(relay, () => {
+      disconnected = true;
+      relay.release();
+    });
+    try {
+      const initializing = session.handle({
+        method: "initialize",
+        id: "relay-init",
+        params: {
+          clientInfo: { name: "slow-relay", title: "Slow relay", version: "1.0.0" },
+          capabilities: { experimentalApi: true },
+        },
+      });
+      await relay.waitUntilBlocked();
+
+      const outcome = await withTimeout(
+        bridge.call("thread/start", { cwd: HOST_PROJECT_A }),
+        1_000,
+        "backend response remained blocked behind the relay",
+      );
+      expect(outcome).toMatchObject({ result: { thread: { cwd: HOST_PROJECT_A } } });
+      expect(disconnected).toBe(true);
+      await initializing;
+    } finally {
+      session.close();
+      relay.release();
+      await aggregator.close();
+      await bridge.close();
+      state.close();
     }
   });
 
@@ -618,6 +715,41 @@ class CaptureSink implements MessageSink {
   }
 }
 
+class BlockingRelaySink implements MessageSink {
+  private sends = 0;
+  private readonly blocked = Promise.withResolvers<void>();
+  private readonly writable = Promise.withResolvers<void>();
+
+  async send(_message: RpcMessage): Promise<void> {
+    this.sends++;
+    if (this.sends === 1) return;
+    this.blocked.resolve();
+    await this.writable.promise;
+  }
+
+  waitUntilBlocked(): Promise<void> {
+    return this.blocked.promise;
+  }
+
+  release(): void {
+    this.writable.resolve();
+  }
+}
+
+class SignalingProjectRegistry extends ProjectRegistry {
+  private readonly canonicalized = Promise.withResolvers<void>();
+
+  override async canonicalCwd(rawCwd: string): Promise<string> {
+    const cwd = await super.canonicalCwd(rawCwd);
+    this.canonicalized.resolve();
+    return cwd;
+  }
+
+  waitForCanonicalization(): Promise<void> {
+    return this.canonicalized.promise;
+  }
+}
+
 class FakeFactory implements BackendFactory {
   readonly transports: FakeTransport[] = [];
   readonly projects: RegisteredProject[] = [];
@@ -625,6 +757,7 @@ class FakeFactory implements BackendFactory {
   initializeDelayMs = 0;
   createFailures = 0;
   pauseNextCreate = false;
+  notificationsBeforeThreadStartResponse = 0;
   createBlocked = false;
   private releaseBlockedCreate: (() => void) | undefined;
 
@@ -685,6 +818,9 @@ class FakeFactory implements BackendFactory {
     }
     if (message.method === "thread/start") {
       const thread = threadSnapshot(this.threadId(index), index);
+      for (let notification = 0; notification < this.notificationsBeforeThreadStartResponse; notification++) {
+        transport.emit({ method: "configWarning", params: { summary: `warning ${notification}`, details: null } });
+      }
       transport.emit({ id: message.id, result: { thread, cwd: CONTAINER_WORKSPACE } });
       transport.emit({ method: "thread/started", params: { thread } });
       return;
@@ -860,6 +996,18 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await Bun.sleep(1);
   }
   throw new Error("timed out waiting for fake app-server event");
+}
+
+async function withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), milliseconds);
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function runGit(...args: string[]): Promise<void> {

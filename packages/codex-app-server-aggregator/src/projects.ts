@@ -9,8 +9,12 @@ export class ProjectRegistry {
     return this.state.projects();
   }
 
+  canonicalCwd(rawCwd: string): Promise<string> {
+    return canonicalDirectory(rawCwd);
+  }
+
   async register(rawCwd: string): Promise<RegisteredProject> {
-    const cwd = await canonicalDirectory(rawCwd);
+    const cwd = await this.canonicalCwd(rawCwd);
     const root = await git(cwd, "rev-parse", "--show-toplevel");
     if (await realpath(root) !== cwd) throw new Error("project cwd must be the Git checkout root");
     const cloneUrl = await git(cwd, "remote", "get-url", "origin");

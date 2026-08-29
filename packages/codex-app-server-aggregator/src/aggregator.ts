@@ -236,13 +236,16 @@ export class AppServerAggregator {
         return;
       }
       if (request.method === "skizzles/project/add") {
-        const project = await this.registry.register(cwd);
-        const warm = this.warmBackends.get(project.cwd);
-        if (warm && this.projectForBackend(warm).cloneUrl !== project.cloneUrl) {
-          this.warmBackends.delete(project.cwd);
-          await this.removeIfDrained(warm);
-        }
-        await this.output.send(response(request.id, { result: { project } }));
+        const projectCwd = await this.registry.canonicalCwd(cwd);
+        await this.withProjectLock(projectCwd, async () => {
+          const project = await this.registry.register(projectCwd);
+          const warm = this.warmBackends.get(project.cwd);
+          if (warm && this.projectForBackend(warm).cloneUrl !== project.cloneUrl) {
+            this.warmBackends.delete(project.cwd);
+            await this.removeIfDrained(warm);
+          }
+          await this.output.send(response(request.id, { result: { project } }));
+        });
         return;
       }
       if (request.method === "skizzles/project/remove") {
