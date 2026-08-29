@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { ApiError, boardApi, eventCursorRecovery } from "../src/web/api.ts";
 import {
+  appendSelectedDeltas,
   approvalResult,
   classifyThread,
   eventDelta,
+  eventPageNeedsReconciliation,
   LatestRequest,
   projectRegistriesMatch,
+  pruneIncorporatedDeltas,
   relativeTime,
   threadForSelection,
+  threadHasSystemError,
+  threadIsRunning,
   timelineEntries,
 } from "../src/web/model.ts";
 import type { ServerRequestDto, ThreadDto } from "../src/web/types.ts";
@@ -25,6 +30,14 @@ describe("board client mapping", () => {
     expect(classifyThread(baseThread, new Set([baseThread.id]), false).lifecycle).toBe("live");
     expect(classifyThread(baseThread, new Set([baseThread.id]), true).lifecycle).toBe("archived");
     expect(relativeTime(1_700_000_000, 1_700_000_120_000)).toBe("2m");
+  });
+
+  test("only active threads are running and system errors remain actionable errors", () => {
+    expect(threadIsRunning({ ...baseThread, status: { type: "active" } })).toBe(true);
+    expect(threadIsRunning({ ...baseThread, status: { type: "idle" } })).toBe(false);
+    expect(threadIsRunning({ ...baseThread, status: { type: "notLoaded" } })).toBe(false);
+    expect(threadIsRunning({ ...baseThread, status: { type: "systemError" } })).toBe(false);
+    expect(threadHasSystemError({ ...baseThread, status: { type: "systemError" } })).toBe(true);
   });
 
   test("maps user, assistant, and command items into a stable timeline", () => {
@@ -74,6 +87,44 @@ describe("board client mapping", () => {
       method: "item/permissions/requestApproval",
       params: { threadId: "thread-1" },
     } as ServerRequestDto, false)).toBeNull();
+  });
+
+  test("keeps delta-only pages incremental and bounds output to the selected thread", () => {
+    const deltas = Array.from({ length: 140 }, (_, index) => ({
+      cursor: index + 1,
+      event: {
+        method: "item/agentMessage/delta",
+        params: { threadId: index === 0 ? "other-thread" : "thread-1", itemId: `agent-${index}`, delta: String(index) },
+      },
+    }));
+    const appended = appendSelectedDeltas(new Map(), deltas, "thread-1");
+    expect(eventPageNeedsReconciliation(deltas)).toBe(false);
+    expect(appended.size).toBe(128);
+    expect(appended.has("agent-0")).toBe(false);
+    expect(appended.has("agent-1")).toBe(false);
+    expect(appended.get("agent-139")).toBe("139");
+    expect(eventPageNeedsReconciliation([{
+      cursor: 141,
+      event: { method: "item/agentMessage/completed", params: { threadId: "thread-1", itemId: "agent-139" } },
+    }])).toBe(true);
+  });
+
+  test("prunes deltas incorporated by an authoritative thread snapshot", () => {
+    const current = new Map([
+      ["agent-complete", "Hello world"],
+      ["agent-partial", "Partial response"],
+      ["agent-pending", "Still streaming"],
+    ]);
+    const pruned = pruneIncorporatedDeltas({
+      ...baseThread,
+      turns: [{ id: "turn-1", items: [
+        { id: "agent-complete", type: "agentMessage", text: "Hello world" },
+        { id: "agent-partial", type: "agentMessage", text: "Partial" },
+      ] }],
+    }, current);
+    expect(pruned.has("agent-complete")).toBe(false);
+    expect(pruned.get("agent-partial")).toBe(" response");
+    expect(pruned.get("agent-pending")).toBe("Still streaming");
   });
 
   test("resumes an expired event journal at the server-provided retained boundary", () => {

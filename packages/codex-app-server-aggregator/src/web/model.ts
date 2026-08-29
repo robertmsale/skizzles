@@ -1,5 +1,6 @@
 import type {
   ServerRequestDto,
+  EventRecordDto,
   ProjectDto,
   ThreadDto,
   ThreadItemDto,
@@ -55,8 +56,11 @@ export function threadForSelection(thread: ThreadDto | null, selectedId: string 
 }
 
 export function threadIsRunning(thread: ThreadDto): boolean {
-  const type = thread.status?.type?.toLowerCase() ?? "";
-  return type !== "" && !["idle", "notloaded", "not_loaded", "completed"].includes(type);
+  return thread.status?.type?.toLowerCase() === "active";
+}
+
+export function threadHasSystemError(thread: ThreadDto): boolean {
+  return thread.status?.type?.toLowerCase() === "systemerror";
 }
 
 export function requestThreadId(request: ServerRequestDto): string | undefined {
@@ -141,6 +145,59 @@ export function eventDelta(event: { method: string; params?: unknown }): { itemI
   const itemId = typeof params.itemId === "string" ? params.itemId : undefined;
   const delta = typeof params.delta === "string" ? params.delta : typeof params.text === "string" ? params.text : undefined;
   return itemId && delta ? { itemId, delta } : null;
+}
+
+export function eventNeedsReconciliation(event: { method: string; params?: unknown }): boolean {
+  return eventDelta(event) === null;
+}
+
+export function eventPageNeedsReconciliation(records: EventRecordDto[]): boolean {
+  return records.some((record) => eventNeedsReconciliation(record.event));
+}
+
+export function appendSelectedDeltas(
+  current: ReadonlyMap<string, string>,
+  records: EventRecordDto[],
+  selectedThreadId: string | null,
+  maximumItems = 128,
+): Map<string, string> {
+  const next = new Map(current);
+  if (!selectedThreadId) return next;
+  for (const record of records) {
+    if (eventThreadId(record.event) !== selectedThreadId) continue;
+    const delta = eventDelta(record.event);
+    if (delta) next.set(delta.itemId, (next.get(delta.itemId) ?? "") + delta.delta);
+  }
+  while (next.size > maximumItems) {
+    const oldest = next.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    next.delete(oldest);
+  }
+  return next;
+}
+
+export function pruneIncorporatedDeltas(
+  thread: ThreadDto,
+  current: ReadonlyMap<string, string>,
+): Map<string, string> {
+  if (!current.size) return new Map();
+  const next = new Map(current);
+  for (const turn of thread.turns ?? []) {
+    for (const item of turn.items ?? []) {
+      if (!item.id) continue;
+      const streamed = next.get(item.id);
+      if (!streamed) continue;
+      const authoritative = itemText(item);
+      if (authoritative.endsWith(streamed)) {
+        next.delete(item.id);
+      } else if (authoritative && streamed.startsWith(authoritative)) {
+        const remainder = streamed.slice(authoritative.length);
+        if (remainder) next.set(item.id, remainder);
+        else next.delete(item.id);
+      }
+    }
+  }
+  return next;
 }
 
 export function threadTitle(thread: ThreadDto): string {

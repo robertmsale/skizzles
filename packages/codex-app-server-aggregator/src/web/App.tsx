@@ -11,16 +11,20 @@ import {
 } from "react";
 import { ApiError, boardApi, eventCursorRecovery } from "./api.ts";
 import {
+  appendSelectedDeltas,
   approvalResult,
   classifyThread,
-  eventDelta,
+  eventNeedsReconciliation,
+  eventPageNeedsReconciliation,
   eventThreadId,
   LatestRequest,
   projectRegistriesMatch,
+  pruneIncorporatedDeltas,
   relativeTime,
   requestDetail,
   requestLabel,
   requestThreadId,
+  threadHasSystemError,
   threadIsRunning,
   threadForSelection,
   threadTitle,
@@ -29,6 +33,7 @@ import {
 import type { MachineDto, ProjectDto, ServerRequestDto, ThreadDto, ThreadView } from "./types.ts";
 
 type ThreadFilter = "current" | "snapshot" | "archived";
+const BOARD_RECONCILIATION_INTERVAL_MS = 15_000;
 
 export function App() {
   const [projects, setProjects] = useState<ProjectDto[]>([]);
@@ -55,6 +60,7 @@ export function App() {
   const projectsRef = useRef<ProjectDto[]>([]);
   const eventCursorRef = useRef(0);
   const eventStreamRef = useRef<string | null>(null);
+  const lastBoardRefreshAtRef = useRef(0);
   const boardRequestRef = useRef<LatestRequest | null>(null);
   const threadRequestRef = useRef<LatestRequest | null>(null);
   if (!boardRequestRef.current) boardRequestRef.current = new LatestRequest();
@@ -66,6 +72,7 @@ export function App() {
     if (selectedIdRef.current !== id) {
       threadRequests.cancel();
       setThread(null);
+      setDeltas(new Map());
     }
     selectedIdRef.current = id;
     setSelectedId(id);
@@ -93,6 +100,7 @@ export function App() {
           selectThread(null);
           setLoading(false);
           setError(null);
+          lastBoardRefreshAtRef.current = Date.now();
         });
       }
       const [active, archived, loaded, machineData, approvals] = await Promise.all([
@@ -121,6 +129,7 @@ export function App() {
         selectThread(nextSelectedId);
         setLoading(false);
         setError(null);
+        lastBoardRefreshAtRef.current = Date.now();
       });
     } catch (cause) {
       if (controller.signal.aborted) return false;
@@ -146,6 +155,7 @@ export function App() {
       threadRequests.commit(controller, () => {
         if (selectedIdRef.current !== view.id || response.thread.id !== view.id) return;
         setThread(response.thread);
+        setDeltas((current) => pruneIncorporatedDeltas(response.thread, current));
         setError(null);
       });
     } catch (cause) {
@@ -213,17 +223,16 @@ export function App() {
         if (registryChanged && selectedProjectRemoved) {
           changeProject(projectRegistry.data[0]?.cwd ?? null);
         }
-        if (page.data.length || (registryChanged && !selectedProjectRemoved)) {
+        const periodicRefresh = Date.now() - lastBoardRefreshAtRef.current >= BOARD_RECONCILIATION_INTERVAL_MS;
+        const structuralEvents = eventPageNeedsReconciliation(page.data);
+        if (page.data.length) {
+          const currentSelectedId = selectedIdRef.current;
+          setDeltas((current) => appendSelectedDeltas(current, page.data, currentSelectedId));
+        }
+        if (structuralEvents || periodicRefresh || (registryChanged && !selectedProjectRemoved)) {
           const currentSelection = selectedRef.current;
-          const selectedChanged = page.data.some((record) => eventThreadId(record.event) === currentSelection?.id);
-          setDeltas((current) => {
-            const next = new Map(current);
-            for (const record of page.data) {
-              const delta = eventDelta(record.event);
-              if (delta) next.set(delta.itemId, (next.get(delta.itemId) ?? "") + delta.delta);
-            }
-            return next;
-          });
+          const selectedChanged = page.data.some((record) => eventThreadId(record.event) === currentSelection?.id
+            && eventNeedsReconciliation(record.event));
           await refreshBoard();
           if (selectedChanged && selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
         }
@@ -314,8 +323,8 @@ export function App() {
           machine={currentMachine}
           approvalCount={requests.length}
           onInbox={() => setShowInbox(true)}
-          onArchive={() => selected && window.confirm("Archive permanently removes its container and rollout. Continue?") && void act(() => boardApi.archive(selected.id))}
-          onDelete={() => selected && window.confirm("Delete this thread permanently?") && void act(() => boardApi.delete(selected.id))}
+          onArchive={() => selected && window.confirm("Archive permanently removes its container and rollout. Continue?") && void act(async () => { await boardApi.archive(selected.id); setDeltas(new Map()); })}
+          onDelete={() => selected && window.confirm("Delete this thread permanently?") && void act(async () => { await boardApi.delete(selected.id); setDeltas(new Map()); })}
           disabled={mutating || loading}
         />
         {error && <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss">×</button></div>}
@@ -371,8 +380,8 @@ function Sidebar(props: {
       {props.threads.map((item) => {
         const count = props.pending.filter((request) => requestThreadId(request) === item.id).length;
         return <button key={item.id} className={`thread-row ${props.selectedId === item.id ? "selected" : ""}`} onClick={() => props.onSelect(item.id)}>
-          <span className={`state-dot ${item.lifecycle} ${threadIsRunning(item) ? "working" : ""}`} />
-          <span className="thread-copy"><strong>{threadTitle(item)}</strong><small>{item.lifecycle === "snapshot" ? "Snapshot only" : item.lifecycle === "archived" ? "Archived" : threadIsRunning(item) ? "Working" : "Live · idle"}</small></span>
+          <span className={`state-dot ${item.lifecycle} ${threadIsRunning(item) ? "working" : ""} ${threadHasSystemError(item) ? "system-error" : ""}`} />
+          <span className="thread-copy"><strong>{threadTitle(item)}</strong><small>{item.lifecycle === "snapshot" ? "Snapshot only" : item.lifecycle === "archived" ? "Archived" : threadHasSystemError(item) ? "System error" : threadIsRunning(item) ? "Working" : "Live · idle"}</small></span>
           <span className="thread-meta">{count > 0 ? <b title={`${count} pending request${count === 1 ? "" : "s"}`}>{count}</b> : relativeTime(item.recencyAt ?? item.updatedAt)}</span>
         </button>;
       })}
@@ -386,6 +395,7 @@ function Topbar(props: { thread: ThreadView | null; machine: MachineDto | null; 
     <div className="topbar-title">
       <strong>{props.thread ? threadTitle(props.thread) : "Agent board"}</strong>
       {props.thread && <span className={`status-chip ${props.thread.lifecycle}`}>{props.thread.lifecycle === "snapshot" ? "Snapshot only" : capitalize(props.thread.lifecycle)}</span>}
+      {props.thread && threadHasSystemError(props.thread) && <span className="status-chip system-error">System error</span>}
       {props.machine && <span className={`status-chip machine ${props.machine.dockerStatus ?? props.machine.state}`}>{props.machine.dockerStatus ?? props.machine.state}</span>}
     </div>
     <div className="topbar-actions">
@@ -413,6 +423,7 @@ function Conversation(props: { view: ThreadView; thread: ThreadDto | null; reque
   const running = props.view.lifecycle === "live" && threadIsRunning(props.thread ?? props.view);
   return <div className="conversation">
     {props.view.lifecycle !== "live" && <div className={`truth-banner ${props.view.lifecycle}`}><strong>{props.view.lifecycle === "snapshot" ? "This thread is not live" : "This thread is archived"}</strong><span>{props.view.lifecycle === "snapshot" ? "The daemon retained its summary after restart, but the original container cannot be reattached. Turn history may be unavailable." : "Its container and rollout were removed. Archive is irreversible."}</span></div>}
+    {props.view.lifecycle === "live" && threadHasSystemError(props.thread ?? props.view) && <div className="truth-banner system-error"><strong>Codex stopped with a system error</strong><span>Review the timeline or send a new message to retry.</span></div>}
     <div className="timeline" ref={scrollRef} onScroll={(event) => { const node = event.currentTarget; setAtBottom(node.scrollHeight - node.scrollTop - node.clientHeight < 88); }}>
       <div className="timeline-inner">
         {!entries.length && <div className="thread-welcome"><span className="brand-mark large">C</span><h1>{props.view.lifecycle === "live" ? "What should Codex do?" : "No retained turn history"}</h1><p>{props.view.lifecycle === "live" ? "Work happens in an isolated container cloned from this project's origin." : "The aggregate snapshot preserves identity and status, not a second copy of the rollout."}</p></div>}
