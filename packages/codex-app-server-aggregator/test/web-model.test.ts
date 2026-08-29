@@ -4,7 +4,10 @@ import {
   approvalResult,
   classifyThread,
   eventDelta,
+  LatestRequest,
+  projectRegistriesMatch,
   relativeTime,
+  threadForSelection,
   timelineEntries,
 } from "../src/web/model.ts";
 import type { ServerRequestDto, ThreadDto } from "../src/web/types.ts";
@@ -98,6 +101,48 @@ describe("board client mapping", () => {
       expect(requested).toHaveLength(2);
       expect(requested[0]?.searchParams.get("searchTerm")).toBe("build");
       expect(requested[1]?.searchParams.get("cursor")).toBe("cursor-1");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("allows only the newest board or thread request to commit", () => {
+    const requests = new LatestRequest();
+    const first = requests.begin();
+    const second = requests.begin();
+    let rendered = "";
+    expect(first.signal.aborted).toBe(true);
+    expect(requests.commit(second, () => { rendered = "thread-b"; })).toBe(true);
+    expect(requests.commit(first, () => { rendered = "thread-a"; })).toBe(false);
+    expect(rendered).toBe("thread-b");
+    expect(threadForSelection({ ...baseThread, turns: [{ id: "turn-a" }] }, "thread-b")).toBeNull();
+    expect(threadForSelection({ ...baseThread, id: "thread-b" }, "thread-b")?.id).toBe("thread-b");
+  });
+
+  test("detects cross-client project registry additions, removals, and updates", () => {
+    const project = { cwd: "/host/a", cloneUrl: "https://example.test/a.git", createdAt: 1, updatedAt: 1 };
+    expect(projectRegistriesMatch([project], [project])).toBe(true);
+    expect(projectRegistriesMatch([project], [])).toBe(false);
+    expect(projectRegistriesMatch([project], [project, { ...project, cwd: "/host/b" }])).toBe(false);
+    expect(projectRegistriesMatch([project], [{ ...project, updatedAt: 2 }])).toBe(false);
+  });
+
+  test("follows every loaded-thread cursor", async () => {
+    const originalFetch = globalThis.fetch;
+    const requested: URL[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input), "http://board.test");
+      requested.push(url);
+      return Response.json(url.searchParams.has("cursor")
+        ? { data: ["thread-501"], nextCursor: null }
+        : { data: ["thread-1"], nextCursor: "cursor-500" });
+    }) as typeof fetch;
+    try {
+      const result = await boardApi.loaded();
+      expect(result.data).toEqual(["thread-1", "thread-501"]);
+      expect(requested).toHaveLength(2);
+      expect(requested[0]?.searchParams.get("limit")).toBe("500");
+      expect(requested[1]?.searchParams.get("cursor")).toBe("cursor-500");
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -15,11 +15,14 @@ import {
   classifyThread,
   eventDelta,
   eventThreadId,
+  LatestRequest,
+  projectRegistriesMatch,
   relativeTime,
   requestDetail,
   requestLabel,
   requestThreadId,
   threadIsRunning,
+  threadForSelection,
   threadTitle,
   timelineEntries,
 } from "./model.ts";
@@ -45,99 +48,172 @@ export function App() {
   const [showInbox, setShowInbox] = useState(false);
   const [deltas, setDeltas] = useState<Map<string, string>>(new Map());
   const selected = threads.find((candidate) => candidate.id === selectedId) ?? null;
+  const selectedIdRef = useRef<string | null>(null);
   const selectedRef = useRef<ThreadView | null>(null);
+  const projectCwdRef = useRef<string | null>(null);
+  const searchTermRef = useRef("");
+  const projectsRef = useRef<ProjectDto[]>([]);
   const eventCursorRef = useRef(0);
   const eventStreamRef = useRef<string | null>(null);
+  const boardRequestRef = useRef<LatestRequest | null>(null);
+  const threadRequestRef = useRef<LatestRequest | null>(null);
+  if (!boardRequestRef.current) boardRequestRef.current = new LatestRequest();
+  if (!threadRequestRef.current) threadRequestRef.current = new LatestRequest();
+  const boardRequests = boardRequestRef.current;
+  const threadRequests = threadRequestRef.current;
 
-  const refreshProjects = useCallback(async () => {
-    const response = await boardApi.projects();
-    setProjects(response.data);
-    setProjectCwd((current) => current && response.data.some((project) => project.cwd === current)
-      ? current
-      : response.data[0]?.cwd ?? null);
-    return response.data;
-  }, []);
-
-  const refreshBoard = useCallback(async (cwd = projectCwd, knownProjects?: ProjectDto[]) => {
-    const projectData = knownProjects ?? (projects.length ? projects : await refreshProjects());
-    if (projectData.length === 0) {
-      setThreads([]);
-      setMachines([]);
-      setRequests([]);
-      setLoading(false);
-      return;
+  const selectThread = useCallback((id: string | null) => {
+    if (selectedIdRef.current !== id) {
+      threadRequests.cancel();
+      setThread(null);
     }
-    const [active, archived, loaded, machineData, approvals] = await Promise.all([
-      boardApi.threads(cwd, false, searchTerm || undefined),
-      boardApi.threads(cwd, true, searchTerm || undefined),
-      boardApi.loaded(),
-      boardApi.machines(),
-      boardApi.approvals(),
-    ]);
-    const loadedIds = new Set(loaded.data);
-    const next = [
-      ...active.data.map((item) => classifyThread(item, loadedIds, false)),
-      ...archived.data.map((item) => classifyThread(item, loadedIds, true)),
-    ].sort((a, b) => (b.recencyAt ?? b.updatedAt ?? 0) - (a.recencyAt ?? a.updatedAt ?? 0));
-    setThreads(next);
-    setMachines(machineData.data);
-    setRequests(approvals.data);
-    setSelectedId((current) => current && next.some((item) => item.id === current) ? current : next[0]?.id ?? null);
-    setLoading(false);
-  }, [projectCwd, projects, refreshProjects, searchTerm]);
+    selectedIdRef.current = id;
+    setSelectedId(id);
+  }, [threadRequests]);
+
+  const refreshBoard = useCallback(async (
+    requestedCwd = projectCwdRef.current,
+    requestedSearch = searchTermRef.current,
+  ): Promise<boolean> => {
+    const controller = boardRequests.begin();
+    try {
+      const projectResponse = await boardApi.projects(controller.signal);
+      const effectiveCwd = requestedCwd && projectResponse.data.some((project) => project.cwd === requestedCwd)
+        ? requestedCwd
+        : projectResponse.data[0]?.cwd ?? null;
+      if (!effectiveCwd) {
+        return boardRequests.commit(controller, () => {
+          projectsRef.current = projectResponse.data;
+          projectCwdRef.current = null;
+          setProjects(projectResponse.data);
+          setProjectCwd(null);
+          setThreads([]);
+          setMachines([]);
+          setRequests([]);
+          selectThread(null);
+          setLoading(false);
+          setError(null);
+        });
+      }
+      const [active, archived, loaded, machineData, approvals] = await Promise.all([
+        boardApi.threads(effectiveCwd, false, requestedSearch || undefined, controller.signal),
+        boardApi.threads(effectiveCwd, true, requestedSearch || undefined, controller.signal),
+        boardApi.loaded(controller.signal),
+        boardApi.machines(controller.signal),
+        boardApi.approvals(controller.signal),
+      ]);
+      const loadedIds = new Set(loaded.data);
+      const next = [
+        ...active.data.map((item) => classifyThread(item, loadedIds, false)),
+        ...archived.data.map((item) => classifyThread(item, loadedIds, true)),
+      ].sort((a, b) => (b.recencyAt ?? b.updatedAt ?? 0) - (a.recencyAt ?? a.updatedAt ?? 0));
+      return boardRequests.commit(controller, () => {
+        const nextSelectedId = selectedIdRef.current && next.some((item) => item.id === selectedIdRef.current)
+          ? selectedIdRef.current
+          : next[0]?.id ?? null;
+        projectsRef.current = projectResponse.data;
+        projectCwdRef.current = effectiveCwd;
+        setProjects(projectResponse.data);
+        setProjectCwd(effectiveCwd);
+        setThreads(next);
+        setMachines(machineData.data);
+        setRequests(approvals.data);
+        selectThread(nextSelectedId);
+        setLoading(false);
+        setError(null);
+      });
+    } catch (cause) {
+      if (controller.signal.aborted) return false;
+      boardRequests.commit(controller, () => {
+        setError(message(cause));
+        setLoading(false);
+      });
+      return false;
+    } finally {
+      boardRequests.finish(controller);
+    }
+  }, [boardRequests, selectThread]);
 
   const readThread = useCallback(async (view: ThreadView | null) => {
+    const controller = threadRequests.begin();
+    setThread(null);
     if (!view) {
-      setThread(null);
+      threadRequests.finish(controller);
       return;
     }
     try {
-      const response = await boardApi.readThread(view.id, view.lifecycle === "live");
-      setThread(response.thread);
-      setError(null);
+      const response = await boardApi.readThread(view.id, view.lifecycle === "live", controller.signal);
+      threadRequests.commit(controller, () => {
+        if (selectedIdRef.current !== view.id || response.thread.id !== view.id) return;
+        setThread(response.thread);
+        setError(null);
+      });
     } catch (cause) {
-      setError(message(cause));
+      if (!controller.signal.aborted) {
+        threadRequests.commit(controller, () => setError(message(cause)));
+      }
+    } finally {
+      threadRequests.finish(controller);
     }
-  }, []);
+  }, [threadRequests]);
 
   useEffect(() => {
-    refreshProjects().then(() => setLoading(false)).catch((cause) => {
-      setError(message(cause));
-      setLoading(false);
-    });
-  }, [refreshProjects]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setSearchTerm(search.trim()), 180);
-    return () => window.clearTimeout(timer);
-  }, [search]);
-
-  useEffect(() => {
-    if (!projects.length) return;
     setLoading(true);
-    refreshBoard(projectCwd).catch((cause) => {
-      setError(message(cause));
-      setLoading(false);
-    });
-  }, [projectCwd, projects.length, searchTerm]); // eslint-disable-line react-hooks/exhaustive-deps
+    void refreshBoard(projectCwd, searchTerm);
+  }, [projectCwd, searchTerm, refreshBoard]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const next = search.trim();
+      if (next === searchTermRef.current) return;
+      boardRequests.cancel();
+      searchTermRef.current = next;
+      setLoading(true);
+      setSearchTerm(next);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [boardRequests, search]);
 
   useEffect(() => { void readThread(selected); }, [selectedId, selected?.lifecycle, readThread]);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
+  useEffect(() => () => {
+    boardRequests.cancel();
+    threadRequests.cancel();
+  }, [boardRequests, threadRequests]);
+
+  const changeProject = useCallback((cwd: string | null) => {
+    if (projectCwdRef.current === cwd) return;
+    boardRequests.cancel();
+    projectCwdRef.current = cwd;
+    setProjectCwd(cwd);
+    setThreads([]);
+    setMachines([]);
+    selectThread(null);
+    setLoading(true);
+  }, [boardRequests, selectThread]);
 
   useEffect(() => {
     let stopped = false;
     let timer = 0;
     const poll = async () => {
       try {
-        const [page, approvals] = await Promise.all([
+        const [page, approvals, projectRegistry] = await Promise.all([
           boardApi.events(eventCursorRef.current, eventStreamRef.current),
           boardApi.approvals(),
+          boardApi.projects(),
         ]);
         if (stopped) return;
         eventCursorRef.current = page.nextCursor;
         eventStreamRef.current = page.streamId;
         setRequests(approvals.data);
-        if (page.data.length) {
+        const registryChanged = !projectRegistriesMatch(projectsRef.current, projectRegistry.data);
+        const currentCwd = projectCwdRef.current;
+        const selectedProjectRemoved = currentCwd !== null
+          && !projectRegistry.data.some((project) => project.cwd === currentCwd);
+        if (registryChanged && selectedProjectRemoved) {
+          changeProject(projectRegistry.data[0]?.cwd ?? null);
+        }
+        if (page.data.length || (registryChanged && !selectedProjectRemoved)) {
           const currentSelection = selectedRef.current;
           const selectedChanged = page.data.some((record) => eventThreadId(record.event) === currentSelection?.id);
           setDeltas((current) => {
@@ -149,7 +225,7 @@ export function App() {
             return next;
           });
           await refreshBoard();
-          if (selectedChanged) await readThread(currentSelection);
+          if (selectedChanged && selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
         }
         setError(null);
       } catch (cause) {
@@ -158,8 +234,9 @@ export function App() {
           eventCursorRef.current = recovery.after;
           eventStreamRef.current = recovery.stream;
           setDeltas(new Map());
-          await refreshBoard().catch(() => undefined);
-          await readThread(selectedRef.current).catch(() => undefined);
+          await refreshBoard();
+          const currentSelection = selectedRef.current;
+          if (selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
           if (!stopped) setError(null);
         } else if (!stopped) {
           setError(message(cause));
@@ -170,7 +247,7 @@ export function App() {
     };
     void poll();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [refreshBoard, readThread]);
+  }, [changeProject, refreshBoard, readThread]);
 
   const act = async (operation: () => Promise<unknown>, reconcile = true) => {
     setMutating(true);
@@ -207,34 +284,29 @@ export function App() {
     ? machines.find((machine) => machine.threadIds.includes(selected.id)) ?? null
     : null;
   const pendingForThread = requests.filter((request) => requestThreadId(request) === selectedId);
+  const selectedThread = threadForSelection(thread, selectedId);
 
   return (
     <div className="app-shell">
       <Sidebar
         projects={projects}
         projectCwd={projectCwd}
-        onProject={setProjectCwd}
+        onProject={changeProject}
         threads={visibleThreads}
         selectedId={selectedId}
-        onSelect={setSelectedId}
+        onSelect={selectThread}
         search={search}
         onSearch={setSearch}
         filter={filter}
         onFilter={setFilter}
         pending={requests}
         onAdd={() => setShowAdd(true)}
-        onRemove={(cwd) => void act(async () => {
-          await boardApi.removeProject(cwd);
-          const projectData = await refreshProjects();
-          const nextCwd = projectData[0]?.cwd ?? null;
-          setProjectCwd(nextCwd);
-          await refreshBoard(nextCwd, projectData);
-        }, false)}
+        onRemove={(cwd) => void act(() => boardApi.removeProject(cwd))}
         onNew={() => projectCwd && void act(async () => {
           const started = await boardApi.startThread(projectCwd);
-          setSelectedId(started.thread.id);
+          selectThread(started.thread.id);
         })}
-        disabled={mutating}
+        disabled={mutating || loading}
       />
       <main className="main-pane">
         <Topbar
@@ -244,28 +316,28 @@ export function App() {
           onInbox={() => setShowInbox(true)}
           onArchive={() => selected && window.confirm("Archive permanently removes its container and rollout. Continue?") && void act(() => boardApi.archive(selected.id))}
           onDelete={() => selected && window.confirm("Delete this thread permanently?") && void act(() => boardApi.delete(selected.id))}
-          disabled={mutating}
+          disabled={mutating || loading}
         />
         {error && <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss">×</button></div>}
         {loading ? <Empty title="Loading board…" detail="Reading the aggregator state." />
           : !projects.length ? <Empty title="Register a project to begin" detail="Choose a host Git checkout with a container-reachable origin." action={<button className="primary" onClick={() => setShowAdd(true)}>Add project</button>} />
-          : !selected ? <Empty title="No threads here" detail="Start a Codex thread in the selected project." action={<button className="primary" onClick={() => projectCwd && void act(async () => { const result = await boardApi.startThread(projectCwd); setSelectedId(result.thread.id); })}>New thread</button>} />
+          : !selected ? <Empty title="No threads here" detail="Start a Codex thread in the selected project." action={<button className="primary" onClick={() => projectCwd && void act(async () => { const result = await boardApi.startThread(projectCwd); selectThread(result.thread.id); })}>New thread</button>} />
           : <Conversation
               view={selected}
-              thread={thread}
+              thread={selectedThread}
               requests={pendingForThread}
               deltas={deltas}
-              disabled={mutating}
+              disabled={mutating || !selectedThread}
               onRespond={respond}
               onSend={(text) => void act(async () => { await boardApi.sendTurn(selected.id, text); await readThread(selected); })}
               onInterrupt={() => {
-                const turnId = thread?.turns?.at(-1)?.id;
+                const turnId = selectedThread?.turns?.at(-1)?.id;
                 if (turnId) void act(() => boardApi.interrupt(selected.id, turnId));
               }}
             />}
       </main>
-      {showAdd && <AddProject onClose={() => setShowAdd(false)} onSubmit={(cwd) => void act(async () => { const result = await boardApi.addProject(cwd); setProjectCwd(result.project.cwd); setShowAdd(false); await refreshProjects(); })} disabled={mutating} />}
-      {showInbox && <Inbox requests={requests} onClose={() => setShowInbox(false)} onSelect={(id) => { if (id) setSelectedId(id); setShowInbox(false); }} onRespond={respond} disabled={mutating} />}
+      {showAdd && <AddProject onClose={() => setShowAdd(false)} onSubmit={(cwd) => void act(async () => { const result = await boardApi.addProject(cwd); changeProject(result.project.cwd); setShowAdd(false); })} disabled={mutating} />}
+      {showInbox && <Inbox requests={requests} onClose={() => setShowInbox(false)} onSelect={(id) => { if (id) selectThread(id); setShowInbox(false); }} onRespond={respond} disabled={mutating} />}
     </div>
   );
 }

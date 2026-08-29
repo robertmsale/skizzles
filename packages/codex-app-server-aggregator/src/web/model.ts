@@ -1,10 +1,46 @@
 import type {
   ServerRequestDto,
+  ProjectDto,
   ThreadDto,
   ThreadItemDto,
   ThreadView,
   TimelineEntry,
 } from "./types.ts";
+
+export class LatestRequest {
+  private current: AbortController | null = null;
+
+  begin(): AbortController {
+    this.current?.abort();
+    const controller = new AbortController();
+    this.current = controller;
+    return controller;
+  }
+
+  commit(controller: AbortController, action: () => void): boolean {
+    if (controller.signal.aborted || this.current !== controller) return false;
+    action();
+    return true;
+  }
+
+  finish(controller: AbortController): void {
+    if (this.current === controller) this.current = null;
+  }
+
+  cancel(): void {
+    this.current?.abort();
+    this.current = null;
+  }
+}
+
+export function projectRegistriesMatch(current: ProjectDto[], incoming: ProjectDto[]): boolean {
+  if (current.length !== incoming.length) return false;
+  const byCwd = new Map(current.map((project) => [project.cwd, project]));
+  return incoming.every((project) => {
+    const previous = byCwd.get(project.cwd);
+    return previous?.cloneUrl === project.cloneUrl && previous.updatedAt === project.updatedAt;
+  });
+}
 
 export function classifyThread(
   thread: ThreadDto,
@@ -12,6 +48,10 @@ export function classifyThread(
   archived: boolean,
 ): ThreadView {
   return { ...thread, lifecycle: archived ? "archived" : loadedIds.has(thread.id) ? "live" : "snapshot" };
+}
+
+export function threadForSelection(thread: ThreadDto | null, selectedId: string | null): ThreadDto | null {
+  return thread?.id === selectedId ? thread : null;
 }
 
 export function threadIsRunning(thread: ThreadDto): boolean {

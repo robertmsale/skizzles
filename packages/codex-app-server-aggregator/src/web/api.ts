@@ -1,5 +1,6 @@
 import type {
   EventPageDto,
+  LoadedThreadPageDto,
   MachineDto,
   ProjectDto,
   ServerRequestDto,
@@ -36,20 +37,20 @@ export function eventCursorRecovery(error: ApiError): { after: number; stream: s
 }
 
 export const boardApi = {
-  projects: () => api<{ data: ProjectDto[] }>("/v1/projects"),
+  projects: (signal?: AbortSignal) => api<{ data: ProjectDto[] }>("/v1/projects", signalInit(signal)),
   addProject: (cwd: string) => api<{ project: ProjectDto }>("/v1/projects", { method: "POST", body: JSON.stringify({ cwd }) }),
   removeProject: (cwd: string) => api<{ removed: boolean }>(`/v1/projects?cwd=${encodeURIComponent(cwd)}`, { method: "DELETE" }),
-  threads: (cwd: string | null, archived: boolean, searchTerm?: string) => allThreads(cwd, archived, searchTerm),
-  loaded: () => api<{ data: string[] }>("/v1/threads/loaded?limit=500"),
-  readThread: (id: string, includeTurns: boolean) => api<{ thread: ThreadDto }>(`/v1/threads/${encodeURIComponent(id)}?includeTurns=${includeTurns}`),
+  threads: (cwd: string | null, archived: boolean, searchTerm?: string, signal?: AbortSignal) => allThreads(cwd, archived, searchTerm, signal),
+  loaded: (signal?: AbortSignal) => allLoadedThreads(signal),
+  readThread: (id: string, includeTurns: boolean, signal?: AbortSignal) => api<{ thread: ThreadDto }>(`/v1/threads/${encodeURIComponent(id)}?includeTurns=${includeTurns}`, signalInit(signal)),
   startThread: (cwd: string) => api<{ thread: ThreadDto }>("/v1/threads", { method: "POST", body: JSON.stringify({ cwd }) }),
   sendTurn: (id: string, text: string) => api(`/v1/threads/${encodeURIComponent(id)}/turns`, { method: "POST", body: JSON.stringify({ input: [{ type: "text", text }] }) }),
   interrupt: (id: string, turnId: string) => api(`/v1/threads/${encodeURIComponent(id)}/interrupt`, { method: "POST", body: JSON.stringify({ turnId }) }),
   archive: (id: string) => api(`/v1/threads/${encodeURIComponent(id)}/archive`, { method: "POST", body: "{}" }),
   delete: (id: string) => api(`/v1/threads/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  approvals: () => api<{ data: ServerRequestDto[] }>("/v1/server-requests"),
+  approvals: (signal?: AbortSignal) => api<{ data: ServerRequestDto[] }>("/v1/server-requests", signalInit(signal)),
   respond: (id: string | number, result: unknown) => api(`/v1/server-requests/${encodeURIComponent(String(id))}/responses`, { method: "POST", body: JSON.stringify({ result }) }),
-  machines: () => api<{ data: MachineDto[] }>("/v1/machines"),
+  machines: (signal?: AbortSignal) => api<{ data: MachineDto[] }>("/v1/machines", signalInit(signal)),
   events: (after: number, stream: string | null) => {
     const query = new URLSearchParams({ after: String(after), limit: "200" });
     if (stream) query.set("stream", stream);
@@ -57,7 +58,7 @@ export const boardApi = {
   },
 };
 
-async function allThreads(cwd: string | null, archived: boolean, searchTerm?: string): Promise<ThreadPageDto> {
+async function allThreads(cwd: string | null, archived: boolean, searchTerm?: string, signal?: AbortSignal): Promise<ThreadPageDto> {
   const data: ThreadDto[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | null = null;
@@ -66,7 +67,7 @@ async function allThreads(cwd: string | null, archived: boolean, searchTerm?: st
     if (cwd) query.set("cwd", cwd);
     if (searchTerm) query.set("searchTerm", searchTerm);
     if (cursor) query.set("cursor", cursor);
-    const page = await api<ThreadPageDto>(`/v1/threads?${query}`);
+    const page = await api<ThreadPageDto>(`/v1/threads?${query}`, signalInit(signal));
     data.push(...page.data);
     cursor = page.nextCursor;
     if (cursor && seenCursors.has(cursor)) throw new Error("thread pagination returned a repeated cursor");
@@ -75,6 +76,26 @@ async function allThreads(cwd: string | null, archived: boolean, searchTerm?: st
   return { data, nextCursor: null };
 }
 
+async function allLoadedThreads(signal?: AbortSignal): Promise<LoadedThreadPageDto> {
+  const data: string[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const query = new URLSearchParams({ limit: "500" });
+    if (cursor) query.set("cursor", cursor);
+    const page = await api<LoadedThreadPageDto>(`/v1/threads/loaded?${query}`, signalInit(signal));
+    data.push(...page.data);
+    cursor = page.nextCursor;
+    if (cursor && seenCursors.has(cursor)) throw new Error("loaded-thread pagination returned a repeated cursor");
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor);
+  return { data, nextCursor: null };
+}
+
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function signalInit(signal: AbortSignal | undefined): RequestInit | undefined {
+  return signal ? { signal } : undefined;
 }

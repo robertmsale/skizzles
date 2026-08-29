@@ -50,6 +50,11 @@ export type ThreadPageDto = {
   backwardsCursor?: string | null;
 };
 
+export type LoadedThreadPageDto = {
+  data: string[];
+  nextCursor: string | null;
+};
+
 export type TimelineEntry = {
   key: string;
   role: "user" | "assistant" | "tool";
