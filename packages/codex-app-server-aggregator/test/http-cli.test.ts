@@ -64,6 +64,13 @@ describe("aggregator HTTP control CLI", () => {
       .rejects.toThrow("--result must be valid JSON");
   });
 
+  test("does not consume flag-shaped message text as a global option", async () => {
+    const config = await parseHttpCliArgs(["threads", "send", "thread-1", "--message", "--url"], { env: {} });
+    expect(config.command).toMatchObject({
+      body: { input: [{ type: "text", text: "--url" }] },
+    });
+  });
+
   test("sends bearer-authenticated requests and prints only JSON results", async () => {
     let request: { url: string; init: RequestInit } | undefined;
     let stdout = "";

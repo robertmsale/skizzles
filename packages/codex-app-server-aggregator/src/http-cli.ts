@@ -267,20 +267,18 @@ function extractGlobalOptions(argv: string[]): {
   tokenEnv?: string;
   timeoutMs?: string;
 } {
-  const args: string[] = [];
   const values = new Map<string, string>();
-  for (let index = 0; index < argv.length; index++) {
+  let index = 0;
+  while (index < argv.length) {
     const argument = argv[index]!;
-    if (!["--url", "--token-env", "--timeout-ms"].includes(argument)) {
-      args.push(argument);
-      continue;
-    }
-    const value = argv[++index];
+    if (!["--url", "--token-env", "--timeout-ms"].includes(argument)) break;
+    const value = argv[index + 1];
     if (value === undefined) throw new Error(`missing value for ${argument}`);
     values.set(argument, value);
+    index += 2;
   }
   return {
-    args,
+    args: argv.slice(index),
     ...(values.has("--url") ? { url: values.get("--url")! } : {}),
     ...(values.has("--token-env") ? { tokenEnv: values.get("--token-env")! } : {}),
     ...(values.has("--timeout-ms") ? { timeoutMs: values.get("--timeout-ms")! } : {}),
