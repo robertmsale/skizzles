@@ -27,6 +27,7 @@ import { runCommand } from "./process";
 import { redactPublicText } from "./public-output";
 import {
   releaseLabSharedImageLeases,
+  summarizeSharedImageCatalog,
 } from "./shared-image-state";
 import {
   ensureLabSharedImages,
@@ -105,12 +106,21 @@ export class ContainerLabService {
     const labResources = docker.available
       ? await countManagedLabResources(this.docker)
       : { containers: 0, volumes: 0, networks: 0 };
+    const catalog = await summarizeSharedImageCatalog(this.roots.stateRoot);
     const shared = docker.available
       ? await inventorySharedImages(this.roots, this.docker, {
         maxAgeMs: (options.maxAgeHours ?? 168) * 3_600_000,
         budgetBytes: options.budgetBytes,
       })
-      : { cataloged: 0, present: 0, activeLeases: 0, eligible: 0, bytes: 0, reclaimableBytes: 0, untracked: 0 };
+      : {
+        cataloged: catalog.cataloged,
+        present: null,
+        activeLeases: catalog.activeLeases,
+        eligible: null,
+        bytes: null,
+        reclaimableBytes: null,
+        untracked: null,
+      };
     const builderCache = docker.available
       ? await inventorySharedImageBuilderCache(this.docker)
       : { present: false, namespaceOwned: false, bytes: 0 };

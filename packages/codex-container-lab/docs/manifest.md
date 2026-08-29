@@ -54,8 +54,12 @@ Dockerfile if that file exists, otherwise context-root `.dockerignore`),
 selected files, target, platform, profile name, and declared
 build arguments. It does not include owner, Lab id, worktree, host path,
 Compose project, or random identity. Secret mounts, SSH forwarding, host
-network, remote `ADD`, and Dockerfile `ARG` values that are not literal
-`build_args` fail closed.
+network, remote `ADD` (including ARG/ENV-expanded sources that are not
+proven local), and Dockerfile `ARG` values that are not literal
+`build_args` fail closed. Ignore matching follows Docker's rules, including
+Dockerfile-specific ignore files, character classes, and ignored-directory
+pruning: a directory excluded by ignore rules stays out unless a negation
+un-ignores that directory.
 
 After ensure, mapped services in the effective Compose model reference the
 exact content-addressed image, have no remaining project-scoped `build`,

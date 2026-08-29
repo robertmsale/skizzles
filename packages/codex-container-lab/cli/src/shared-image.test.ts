@@ -121,6 +121,22 @@ describe("shared image digest", () => {
     await expect(fingerprintSharedImage(root, testProfile(root))).rejects.toThrow("secret or mutable input");
   });
 
+  test("keeps ignored directories pruned even when an unrelated negation exists", async () => {
+    const root = await environmentRepo("ignored-directory");
+    await mkdir(join(root, "environment", "vendor", "pkg"), { recursive: true });
+    await writeFile(join(root, "environment", "vendor", "README.md"), "ignored-readme\n");
+    await writeFile(join(root, "environment", "vendor", "pkg", "secret.env"), "TOKEN=1\n");
+    await writeFile(join(root, "environment", "vendor", ".env"), "TOKEN=1\n");
+    await writeFile(join(root, "environment", "README.md"), "keep\n");
+    await writeFile(join(root, "environment", ".dockerignore"), "vendor/\n!README.md\n");
+    const before = await fingerprintSharedImage(root, testProfile(root));
+    expect(before.files.map((file) => file.path).sort()).toEqual([".dockerignore", "Dockerfile", "README.md"]);
+    expect(before.files.some((file) => file.path.startsWith("vendor/"))).toBe(false);
+    await writeFile(join(root, "environment", "vendor", "README.md"), "changed\n");
+    await writeFile(join(root, "environment", "vendor", ".env"), "TOKEN=2\n");
+    expect((await fingerprintSharedImage(root, testProfile(root))).digest).toBe(before.digest);
+  });
+
   test("character-class ignore exceptions un-ignore files Docker would send", async () => {
     const patterns = parseDockerignore("*\n![.]env\n!Dockerfile\n");
     expect(isDockerignored(".env", false, patterns)).toBe(false);
@@ -156,6 +172,34 @@ describe("shared image safety", () => {
     expect(() => rejectUnaccountedBuildArgs("toolchain", "ARG TOKEN\nFROM alpine\n", {}))
       .toThrow("ARG TOKEN");
     expect(() => rejectUnaccountedBuildArgs("toolchain", "ARG TOKEN=dev\nFROM alpine\n", {})).not.toThrow();
+  });
+
+  test("rejects remote ADD after ARG and ENV expansion", () => {
+    expect(() => rejectUnsafeDockerfile(
+      "toolchain",
+      "ARG SRC=https://example.invalid/rootfs.tgz\nADD ${SRC} /opt/\n",
+    )).toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile(
+      "toolchain",
+      "ARG SRC\nADD ${SRC} /opt/\n",
+      { SRC: "https://example.invalid/rootfs.tgz" },
+    )).toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile(
+      "toolchain",
+      'ARG SRC=https://example.invalid/rootfs.tgz\nADD ["${SRC}", "/opt/"]\n',
+    )).toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile(
+      "toolchain",
+      "ENV SRC=https://example.invalid/rootfs.tgz\nADD $SRC /opt/\n",
+    )).toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile(
+      "toolchain",
+      "ADD ${SRC:-https://example.invalid/rootfs.tgz} /opt/\n",
+    )).toThrow("remote ADD");
+    expect(() => rejectUnsafeDockerfile(
+      "toolchain",
+      "ARG SRC=./local.tgz\nADD ${SRC} /opt/\n",
+    )).not.toThrow();
   });
 
   test("rejects secret files, Git metadata, and escaping symlinks in context", async () => {

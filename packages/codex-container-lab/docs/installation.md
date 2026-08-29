@@ -30,7 +30,7 @@ When requested by the host owner, link the canonical workspace package from `pac
 
 Keep every doctor health probe on disposable owner, state, runtime, and database roots. The archive reaper defaults are live-host behavior and are not a test target. Any database, schema, busy, manifest, or archive-state uncertainty retains resources.
 
-The first shared-image ensure creates the dedicated `skizzles-shared-image` BuildKit builder if it is absent. That builder and its cache are Skizzles-owned and are not removed by `lab destroy` or archive cleanup. Inspect them with `system inventory`; reclaim them only with `system gc --resource images|cache --mode plan|apply`.
+The first shared-image ensure creates the dedicated `skizzles-shared-image` BuildKit builder if it is absent, and stamps a Skizzles identity into that builder. That builder and its cache are Skizzles-owned and are not removed by `lab destroy` or archive cleanup. Inspect them with `system inventory`; reclaim them only with `system gc --resource images|cache --mode plan|apply` after that identity is verified.
 
 ## Verification and rollback
 

@@ -8,6 +8,8 @@ export const SHARED_IMAGE_KIND = "environment";
 export const SHARED_IMAGE_NAME = "skizzles-shared-image";
 export const SHARED_IMAGE_BUILDER_NAME = "skizzles-shared-image";
 export const SHARED_IMAGE_BUILDER_DRIVER = "docker-container";
+export const SHARED_IMAGE_BUILDER_IDENTITY_ENV = "SKIZZLES_SHARED_IMAGE_BUILDER";
+export const SHARED_IMAGE_BUILDER_IDENTITY = "v1";
 
 export const SHARED_IMAGE_LABEL_MANAGED = "io.openai.skizzles.shared-image.managed";
 export const SHARED_IMAGE_LABEL_SCHEMA = "io.openai.skizzles.shared-image.schema";
@@ -163,7 +165,7 @@ export async function fingerprintSharedImage(
     throw new Error(`shared image ${profile.name}: Dockerfile exceeds ${MAX_DOCKERFILE_BYTES} bytes`);
   }
   const dockerfileText = dockerfileBytes.toString("utf8");
-  rejectUnsafeDockerfile(profile.name, dockerfileText);
+  rejectUnsafeDockerfile(profile.name, dockerfileText, profile.buildArgs);
   rejectUnaccountedBuildArgs(profile.name, dockerfileText, profile.buildArgs);
   const dockerfileSha256 = sha256Hex(dockerfileBytes);
 
@@ -242,7 +244,11 @@ export async function materializeSharedImageSnapshot(
   }
 }
 
-export function rejectUnsafeDockerfile(profile: string, source: string): void {
+export function rejectUnsafeDockerfile(
+  profile: string,
+  source: string,
+  buildArgs: Record<string, string> = {},
+): void {
   const normalized = source.replace(/\r\n/g, "\n");
   const compact = normalized.replace(/\\\n/g, " ");
   const reasons: string[] = [];
@@ -252,8 +258,7 @@ export function rejectUnsafeDockerfile(profile: string, source: string): void {
   if (/(?:^|\s)--secret(?:\s|=)/im.test(compact)) reasons.push("build secret");
   if (/(?:^|\s)--ssh(?:\s|=)/im.test(compact)) reasons.push("build SSH forwarding");
   if (/(?:^|\s)--network\s*=\s*host(?:\s|$)/im.test(compact)) reasons.push("host network");
-  const addSources = dockerfileAddSources(compact);
-  if (addSources === undefined || addSources.some(isRemoteAddSource)) {
+  if (hasUnaccountedRemoteAdd(compact, buildArgs)) {
     reasons.push("remote ADD");
   }
   if (/\$\{[A-Za-z_][A-Za-z0-9_]*\}|(?:^|[^A-Za-z0-9_])\$[A-Za-z_][A-Za-z0-9_]*/m.test(compact) &&
@@ -366,6 +371,21 @@ export function isDockerignored(relativePath: string, isDirectory: boolean, patt
   return ignored;
 }
 
+function isExcludedByDockerignore(
+  relativePath: string,
+  isDirectory: boolean,
+  patterns: readonly string[],
+): boolean {
+  const parts = relativePath.split("/").filter((part) => part.length > 0);
+  let prefix = "";
+  for (let index = 0; index < parts.length; index++) {
+    prefix = prefix ? `${prefix}/${parts[index]}` : parts[index]!;
+    const last = index === parts.length - 1;
+    if (isDockerignored(prefix, last ? isDirectory : true, patterns)) return true;
+  }
+  return false;
+}
+
 async function collectContextFiles(
   profile: string,
   repoRoot: string,
@@ -376,7 +396,6 @@ async function collectContextFiles(
   const files: SharedImageContextFile[] = [];
   let walked = 0;
   let sentBytes = 0;
-  const hasNegation = patterns.some((pattern) => pattern.startsWith("!"));
   const pending = [context];
   while (pending.length > 0) {
     const directory = pending.pop()!;
@@ -390,7 +409,10 @@ async function collectContextFiles(
       const relativePath = posixRelative(context, absolute);
       if (entry.isSymbolicLink()) {
         const info = await lstat(absolute);
-        if (isDockerignored(relativePath, false, patterns) && !isDockerfilePath(context, dockerfile, absolute)) continue;
+        if (
+          !isDockerfilePath(context, dockerfile, absolute) &&
+          isExcludedByDockerignore(relativePath, false, patterns)
+        ) continue;
         files.push(await describeContextSymlink(profile, context, absolute, relativePath, info.mode));
         continue;
       }
@@ -398,7 +420,7 @@ async function collectContextFiles(
         if (entry.name === ".git" || relativePath === ".git" || relativePath.startsWith(".git/")) {
           throw new Error(`shared image ${profile}: context includes mutable Git metadata`);
         }
-        if (isDockerignored(relativePath, true, patterns) && !hasNegation) continue;
+        if (isExcludedByDockerignore(relativePath, true, patterns)) continue;
         pending.push(absolute);
         continue;
       }
@@ -406,7 +428,7 @@ async function collectContextFiles(
         throw new Error(`shared image ${profile}: context contains unsupported file type at ${relativePath}`);
       }
       const alwaysSend = isDockerfilePath(context, dockerfile, absolute);
-      if (!alwaysSend && isDockerignored(relativePath, false, patterns)) continue;
+      if (!alwaysSend && isExcludedByDockerignore(relativePath, false, patterns)) continue;
       const described = await describeContextFile(profile, absolute, relativePath);
       sentBytes += described.size;
       if (files.length + 1 > MAX_SENT_FILES) {
@@ -613,20 +635,29 @@ function readDockerignoreCharacterClass(pattern: string, start: number): { regex
   return undefined;
 }
 
-function dockerfileAddSources(source: string): string[] | undefined {
-  const sources: string[] = [];
+function hasUnaccountedRemoteAdd(source: string, buildArgs: Record<string, string>): boolean {
+  const env: Record<string, string | undefined> = {};
   for (const raw of source.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-    const match = /^ADD\s+(.*)$/i.exec(line);
+    const match = /^(ARG|ENV|ADD)\s+(.*)$/i.exec(line);
     if (!match) continue;
-    const body = match[1] ?? "";
+    const instruction = match[1]!.toUpperCase();
+    const body = match[2] ?? "";
+    if (instruction === "ARG") {
+      applyArgInstruction(body, env, buildArgs);
+      continue;
+    }
+    if (instruction === "ENV") {
+      applyEnvInstruction(body, env);
+      continue;
+    }
     if (/(?:^|\s)<<[-]?["']?\w+["']?/.test(body)) continue;
     const parsed = parseAddSources(body);
-    if (parsed === undefined) return undefined;
-    sources.push(...parsed);
+    if (parsed === undefined) return true;
+    if (parsed.some((addSource) => !isProvenLocalAddSource(addSource, env))) return true;
   }
-  return sources;
+  return false;
 }
 
 function parseAddSources(body: string): string[] | undefined {
@@ -736,6 +767,133 @@ function isRemoteAddSource(source: string): boolean {
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) return true;
   if (value.startsWith("git@")) return true;
   return /^[A-Za-z0-9._-]+@[^/:]+?:/.test(value);
+}
+
+function isProvenLocalAddSource(source: string, env: Readonly<Record<string, string | undefined>>): boolean {
+  const expanded = expandDockerfileValue(source, env);
+  if (!expanded.complete) return false;
+  const value = expanded.value.trim();
+  return value.length > 0 && !isRemoteAddSource(value);
+}
+
+function applyArgInstruction(
+  body: string,
+  env: Record<string, string | undefined>,
+  buildArgs: Record<string, string>,
+): void {
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*=\s*(.*))?$/.exec(body.trim());
+  if (!match) return;
+  const name = match[1]!;
+  if (Object.hasOwn(buildArgs, name)) {
+    env[name] = buildArgs[name];
+    return;
+  }
+  if (match[2] === undefined) {
+    env[name] = undefined;
+    return;
+  }
+  env[name] = expandDockerfileValue(unquoteDockerfileValue(match[2]), env).value;
+}
+
+function applyEnvInstruction(body: string, env: Record<string, string | undefined>): void {
+  const tokens = tokenizeDockerfileArgs(body);
+  if (tokens === undefined || tokens.length === 0) return;
+  if (tokens.length >= 2 && !tokens[0]!.includes("=")) {
+    const name = tokens[0]!;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return;
+    env[name] = expandDockerfileValue(tokens.slice(1).join(" "), env).value;
+    return;
+  }
+  for (const token of tokens) {
+    const separator = token.indexOf("=");
+    if (separator <= 0) continue;
+    const name = token.slice(0, separator);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+    env[name] = expandDockerfileValue(token.slice(separator + 1), env).value;
+  }
+}
+
+function unquoteDockerfileValue(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const quote = trimmed[0];
+    if ((quote === '"' || quote === "'") && trimmed.endsWith(quote)) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+function expandDockerfileValue(
+  input: string,
+  env: Readonly<Record<string, string | undefined>>,
+): { value: string; complete: boolean } {
+  let value = "";
+  let complete = true;
+  for (let index = 0; index < input.length; index++) {
+    const char = input[index]!;
+    if (char === "$" && input[index + 1] === "$") {
+      value += "$";
+      index += 1;
+      continue;
+    }
+    if (char === "$" && input[index + 1] === "{") {
+      const closing = input.indexOf("}", index + 2);
+      if (closing < 0) {
+        complete = false;
+        value += input.slice(index);
+        break;
+      }
+      const expanded = expandDockerfileBrace(input.slice(index + 2, closing), env);
+      if (!expanded.complete) complete = false;
+      value += expanded.value;
+      index = closing;
+      continue;
+    }
+    if (char === "$" && /[A-Za-z_]/.test(input[index + 1] ?? "")) {
+      const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(input.slice(index + 1))?.[0];
+      if (!name) {
+        complete = false;
+        value += char;
+        continue;
+      }
+      value += env[name] ?? "";
+      index += name.length;
+      continue;
+    }
+    value += char;
+  }
+  return { value, complete };
+}
+
+function expandDockerfileBrace(
+  inner: string,
+  env: Readonly<Record<string, string | undefined>>,
+): { value: string; complete: boolean } {
+  const nameMatch = /^[A-Za-z_][A-Za-z0-9_]*/.exec(inner);
+  if (!nameMatch) return { value: "", complete: false };
+  const name = nameMatch[0];
+  const rest = inner.slice(name.length);
+  const current = env[name];
+  const set = current !== undefined;
+  const empty = !set || current.length === 0;
+  if (rest === "") return { value: current ?? "", complete: true };
+  const operator = rest.startsWith(":-") || rest.startsWith(":+") || rest.startsWith(":?")
+    ? rest.slice(0, 2)
+    : rest.startsWith("-") || rest.startsWith("+") || rest.startsWith("?")
+      ? rest[0]!
+      : undefined;
+  if (operator === undefined) return { value: "", complete: false };
+  const word = expandDockerfileValue(rest.slice(operator.length), env);
+  if (operator === ":-") return empty ? word : { value: current ?? "", complete: true };
+  if (operator === "-") return set ? { value: current ?? "", complete: true } : word;
+  if (operator === ":+") return empty ? { value: "", complete: true } : word;
+  if (operator === "+") return set ? word : { value: "", complete: true };
+  if (operator === ":?" || operator === "?") {
+    if ((operator === ":?" && empty) || (operator === "?" && !set)) return { value: "", complete: false };
+    return { value: current ?? "", complete: true };
+  }
+  return { value: "", complete: false };
 }
 
 function escapeRegex(value: string): string {

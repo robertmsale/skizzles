@@ -8,6 +8,8 @@ import type { CommandResult } from "./process";
 import {
   SHARED_IMAGE_BUILDER_DRIVER,
   SHARED_IMAGE_BUILDER_NAME,
+  SHARED_IMAGE_BUILDER_IDENTITY,
+  SHARED_IMAGE_BUILDER_IDENTITY_ENV,
   fingerprintSharedImage,
   hasExactSharedImageLabels,
   materializeSharedImageSnapshot,
@@ -75,12 +77,12 @@ export type SharedCacheGcResult = {
 
 export type SharedImageInventory = {
   cataloged: number;
-  present: number;
+  present: number | null;
   activeLeases: number;
-  eligible: number;
-  bytes: number;
-  reclaimableBytes: number;
-  untracked: number;
+  eligible: number | null;
+  bytes: number | null;
+  reclaimableBytes: number | null;
+  untracked: number | null;
 };
 
 export async function ensureSharedEnvironmentImage(options: SharedImageEnsureOptions): Promise<SharedImageReference> {
@@ -442,6 +444,7 @@ export async function ensureSharedImageBuilder(
       "buildx", "create",
       "--name", builderName,
       "--driver", SHARED_IMAGE_BUILDER_DRIVER,
+      "--driver-opt", `env.${SHARED_IMAGE_BUILDER_IDENTITY_ENV}=${SHARED_IMAGE_BUILDER_IDENTITY}`,
       "--bootstrap",
     ], { allowFailure: true, timeoutMs: 120_000, maxOutputBytes: 64 * 1024 });
     if (created.code !== 0) {
@@ -473,7 +476,27 @@ export async function inspectSharedImageBuilder(
   const name = text.match(/^\s*Name:\s+(\S+)/m)?.[1];
   const driver = text.match(/^\s*Driver:\s+(\S+)/m)?.[1];
   if (name !== builderName || driver !== SHARED_IMAGE_BUILDER_DRIVER) return "mismatch";
-  return "matching";
+  return await builderHasSkizzlesIdentity(docker, builderName, text) ? "matching" : "mismatch";
+}
+
+async function builderHasSkizzlesIdentity(
+  docker: DockerRunner,
+  builderName: string,
+  inspectText: string,
+): Promise<boolean> {
+  const names = [...inspectText.matchAll(/^\s*Name:\s+(\S+)/gm)].map((match) => match[1]!);
+  const nodeName = names[1] ?? `${builderName}0`;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(nodeName)) return false;
+  const container = `buildx_buildkit_${nodeName}`;
+  const inspected = await docker.run([
+    "inspect", "--format", "{{json .Config.Env}}", container,
+  ], { allowFailure: true, timeoutMs: 10_000, maxOutputBytes: 16 * 1024 });
+  if (inspected.code !== 0) return false;
+  let env: unknown;
+  try { env = JSON.parse(inspected.stdout.toString()); }
+  catch { return false; }
+  if (!Array.isArray(env) || env.some((item) => typeof item !== "string")) return false;
+  return env.includes(`${SHARED_IMAGE_BUILDER_IDENTITY_ENV}=${SHARED_IMAGE_BUILDER_IDENTITY}`);
 }
 
 async function buildSharedImage(

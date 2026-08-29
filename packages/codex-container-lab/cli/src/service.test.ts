@@ -12,6 +12,7 @@ import type { CommandResult, RunOptions } from "./process";
 import { runCommand } from "./process";
 import { ensureOwner, labManifestPath, ownerKey, readLab, writeLab } from "./state";
 import type { LabMetadata } from "./types";
+import { acquireSharedImageLease, ensureSharedImageRecord } from "./shared-image-state";
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -1126,6 +1127,43 @@ ports:
     expect(JSON.stringify(inventory)).not.toContain(owned.owner);
     expect(JSON.stringify(inventory)).not.toContain(owned.lab.sourceRoot);
     expect(docker.calls.some((args) => args.includes("prune"))).toBe(false);
+  });
+
+  test("system inventory reports catalog and leases from Lab state when Docker is down", async () => {
+    const owned = await durableFixture("thread-inventory-docker-down", "failed");
+    const digest = "ab".repeat(32);
+    const imageId = `sha256:${"cd".repeat(32)}`;
+    const tag = `skizzles-shared-image:env-${digest}`;
+    await ensureSharedImageRecord(owned.roots.stateRoot, {
+      digest,
+      profile: "toolchain",
+      repoHash: "123456789abc",
+      platform: "linux/arm64",
+      tag,
+      imageId,
+    });
+    await acquireSharedImageLease(owned.roots.stateRoot, {
+      profile: "toolchain",
+      digest,
+      imageId,
+      tag,
+    }, owned.owner, owned.lab.id, { repoHash: "123456789abc", platform: "linux/arm64" });
+    const docker = new HealthFailureDocker("Cannot connect to the Docker daemon");
+    const service = new ContainerLabService(owned.owner, owned.roots, docker);
+    const inventory = await service.systemInventory() as Record<string, unknown>;
+    expect(inventory.dockerAvailable).toBe(false);
+    expect(inventory.sharedImages).toEqual({
+      cataloged: 1,
+      present: null,
+      activeLeases: 1,
+      eligible: null,
+      bytes: null,
+      reclaimableBytes: null,
+      untracked: null,
+    });
+    expect(JSON.stringify(inventory)).not.toContain(owned.owner);
+    expect(JSON.stringify(inventory)).not.toContain(owned.lab.sourceRoot);
+    expect(docker.calls.some((args) => args[0] !== "info")).toBe(false);
   });
 
   test("loads legacy version-1 ready state without secret metadata for status and destroy", async () => {

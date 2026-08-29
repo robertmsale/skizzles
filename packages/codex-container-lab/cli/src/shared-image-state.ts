@@ -103,6 +103,16 @@ export async function listSharedImageRecords(stateRoot: string): Promise<SharedI
   return records;
 }
 
+export async function summarizeSharedImageCatalog(
+  stateRoot: string,
+): Promise<{ cataloged: number; activeLeases: number }> {
+  const records = await listSharedImageRecords(stateRoot);
+  return {
+    cataloged: records.length,
+    activeLeases: records.reduce((sum, record) => sum + record.leases.length, 0),
+  };
+}
+
 export async function ensureSharedImageRecord(
   stateRoot: string,
   reference: Omit<SharedImageRecord, "version" | "schema" | "kind" | "createdAt" | "lastUsedAt" | "leases"> & {

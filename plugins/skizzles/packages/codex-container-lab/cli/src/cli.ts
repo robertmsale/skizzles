@@ -7012,6 +7012,8 @@ var SHARED_IMAGE_KIND = "environment";
 var SHARED_IMAGE_NAME = "skizzles-shared-image";
 var SHARED_IMAGE_BUILDER_NAME = "skizzles-shared-image";
 var SHARED_IMAGE_BUILDER_DRIVER = "docker-container";
+var SHARED_IMAGE_BUILDER_IDENTITY_ENV = "SKIZZLES_SHARED_IMAGE_BUILDER";
+var SHARED_IMAGE_BUILDER_IDENTITY = "v1";
 var SHARED_IMAGE_LABEL_MANAGED = "io.openai.skizzles.shared-image.managed";
 var SHARED_IMAGE_LABEL_SCHEMA = "io.openai.skizzles.shared-image.schema";
 var SHARED_IMAGE_LABEL_KIND = "io.openai.skizzles.shared-image.kind";
@@ -7091,7 +7093,7 @@ async function fingerprintSharedImage(repoRoot, profile) {
     throw new Error(`shared image ${profile.name}: Dockerfile exceeds ${MAX_DOCKERFILE_BYTES} bytes`);
   }
   const dockerfileText = dockerfileBytes.toString("utf8");
-  rejectUnsafeDockerfile(profile.name, dockerfileText);
+  rejectUnsafeDockerfile(profile.name, dockerfileText, profile.buildArgs);
   rejectUnaccountedBuildArgs(profile.name, dockerfileText, profile.buildArgs);
   const dockerfileSha256 = sha256Hex(dockerfileBytes);
   const dockerignore = await resolveDockerignore(profile.name, context, dockerfile);
@@ -7164,7 +7166,7 @@ async function materializeSharedImageSnapshot(profile, fingerprint) {
     throw error;
   }
 }
-function rejectUnsafeDockerfile(profile, source) {
+function rejectUnsafeDockerfile(profile, source, buildArgs = {}) {
   const normalized = source.replace(/\r\n/g, `
 `);
   const compact = normalized.replace(/\\\n/g, " ");
@@ -7181,8 +7183,7 @@ function rejectUnsafeDockerfile(profile, source) {
     reasons.push("build SSH forwarding");
   if (/(?:^|\s)--network\s*=\s*host(?:\s|$)/im.test(compact))
     reasons.push("host network");
-  const addSources = dockerfileAddSources(compact);
-  if (addSources === undefined || addSources.some(isRemoteAddSource)) {
+  if (hasUnaccountedRemoteAdd(compact, buildArgs)) {
     reasons.push("remote ADD");
   }
   if (/\$\{[A-Za-z_][A-Za-z0-9_]*\}|(?:^|[^A-Za-z0-9_])\$[A-Za-z_][A-Za-z0-9_]*/m.test(compact) && /(?:^|\s)--mount\s*=/im.test(compact) === false) {}
@@ -7264,11 +7265,21 @@ function isDockerignored(relativePath, isDirectory, patterns) {
   }
   return ignored;
 }
+function isExcludedByDockerignore(relativePath, isDirectory, patterns) {
+  const parts = relativePath.split("/").filter((part) => part.length > 0);
+  let prefix = "";
+  for (let index = 0;index < parts.length; index++) {
+    prefix = prefix ? `${prefix}/${parts[index]}` : parts[index];
+    const last = index === parts.length - 1;
+    if (isDockerignored(prefix, last ? isDirectory : true, patterns))
+      return true;
+  }
+  return false;
+}
 async function collectContextFiles(profile, repoRoot, context, dockerfile, patterns) {
   const files = [];
   let walked = 0;
   let sentBytes = 0;
-  const hasNegation = patterns.some((pattern) => pattern.startsWith("!"));
   const pending = [context];
   while (pending.length > 0) {
     const directory = pending.pop();
@@ -7282,7 +7293,7 @@ async function collectContextFiles(profile, repoRoot, context, dockerfile, patte
       const relativePath = posixRelative(context, absolute);
       if (entry.isSymbolicLink()) {
         const info = await lstat(absolute);
-        if (isDockerignored(relativePath, false, patterns) && !isDockerfilePath(context, dockerfile, absolute))
+        if (!isDockerfilePath(context, dockerfile, absolute) && isExcludedByDockerignore(relativePath, false, patterns))
           continue;
         files.push(await describeContextSymlink(profile, context, absolute, relativePath, info.mode));
         continue;
@@ -7291,7 +7302,7 @@ async function collectContextFiles(profile, repoRoot, context, dockerfile, patte
         if (entry.name === ".git" || relativePath === ".git" || relativePath.startsWith(".git/")) {
           throw new Error(`shared image ${profile}: context includes mutable Git metadata`);
         }
-        if (isDockerignored(relativePath, true, patterns) && !hasNegation)
+        if (isExcludedByDockerignore(relativePath, true, patterns))
           continue;
         pending.push(absolute);
         continue;
@@ -7300,7 +7311,7 @@ async function collectContextFiles(profile, repoRoot, context, dockerfile, patte
         throw new Error(`shared image ${profile}: context contains unsupported file type at ${relativePath}`);
       }
       const alwaysSend = isDockerfilePath(context, dockerfile, absolute);
-      if (!alwaysSend && isDockerignored(relativePath, false, patterns))
+      if (!alwaysSend && isExcludedByDockerignore(relativePath, false, patterns))
         continue;
       const described = await describeContextFile(profile, absolute, relativePath);
       sentBytes += described.size;
@@ -7499,25 +7510,35 @@ function readDockerignoreCharacterClass(pattern, start) {
   }
   return;
 }
-function dockerfileAddSources(source) {
-  const sources = [];
+function hasUnaccountedRemoteAdd(source, buildArgs) {
+  const env = {};
   for (const raw of source.split(`
 `)) {
     const line = raw.trim();
     if (!line || line.startsWith("#"))
       continue;
-    const match = /^ADD\s+(.*)$/i.exec(line);
+    const match = /^(ARG|ENV|ADD)\s+(.*)$/i.exec(line);
     if (!match)
       continue;
-    const body = match[1] ?? "";
+    const instruction = match[1].toUpperCase();
+    const body = match[2] ?? "";
+    if (instruction === "ARG") {
+      applyArgInstruction(body, env, buildArgs);
+      continue;
+    }
+    if (instruction === "ENV") {
+      applyEnvInstruction(body, env);
+      continue;
+    }
     if (/(?:^|\s)<<[-]?["']?\w+["']?/.test(body))
       continue;
     const parsed = parseAddSources(body);
     if (parsed === undefined)
-      return;
-    sources.push(...parsed);
+      return true;
+    if (parsed.some((addSource) => !isProvenLocalAddSource(addSource, env)))
+      return true;
   }
-  return sources;
+  return false;
 }
 function parseAddSources(body) {
   const tokens = tokenizeDockerfileArgs(body);
@@ -7641,6 +7662,128 @@ function isRemoteAddSource(source) {
   if (value.startsWith("git@"))
     return true;
   return /^[A-Za-z0-9._-]+@[^/:]+?:/.test(value);
+}
+function isProvenLocalAddSource(source, env) {
+  const expanded = expandDockerfileValue(source, env);
+  if (!expanded.complete)
+    return false;
+  const value = expanded.value.trim();
+  return value.length > 0 && !isRemoteAddSource(value);
+}
+function applyArgInstruction(body, env, buildArgs) {
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*=\s*(.*))?$/.exec(body.trim());
+  if (!match)
+    return;
+  const name = match[1];
+  if (Object.hasOwn(buildArgs, name)) {
+    env[name] = buildArgs[name];
+    return;
+  }
+  if (match[2] === undefined) {
+    env[name] = undefined;
+    return;
+  }
+  env[name] = expandDockerfileValue(unquoteDockerfileValue(match[2]), env).value;
+}
+function applyEnvInstruction(body, env) {
+  const tokens = tokenizeDockerfileArgs(body);
+  if (tokens === undefined || tokens.length === 0)
+    return;
+  if (tokens.length >= 2 && !tokens[0].includes("=")) {
+    const name = tokens[0];
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+      return;
+    env[name] = expandDockerfileValue(tokens.slice(1).join(" "), env).value;
+    return;
+  }
+  for (const token of tokens) {
+    const separator = token.indexOf("=");
+    if (separator <= 0)
+      continue;
+    const name = token.slice(0, separator);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+      continue;
+    env[name] = expandDockerfileValue(token.slice(separator + 1), env).value;
+  }
+}
+function unquoteDockerfileValue(value) {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const quote = trimmed[0];
+    if ((quote === '"' || quote === "'") && trimmed.endsWith(quote)) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+function expandDockerfileValue(input, env) {
+  let value = "";
+  let complete = true;
+  for (let index = 0;index < input.length; index++) {
+    const char = input[index];
+    if (char === "$" && input[index + 1] === "$") {
+      value += "$";
+      index += 1;
+      continue;
+    }
+    if (char === "$" && input[index + 1] === "{") {
+      const closing = input.indexOf("}", index + 2);
+      if (closing < 0) {
+        complete = false;
+        value += input.slice(index);
+        break;
+      }
+      const expanded = expandDockerfileBrace(input.slice(index + 2, closing), env);
+      if (!expanded.complete)
+        complete = false;
+      value += expanded.value;
+      index = closing;
+      continue;
+    }
+    if (char === "$" && /[A-Za-z_]/.test(input[index + 1] ?? "")) {
+      const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(input.slice(index + 1))?.[0];
+      if (!name) {
+        complete = false;
+        value += char;
+        continue;
+      }
+      value += env[name] ?? "";
+      index += name.length;
+      continue;
+    }
+    value += char;
+  }
+  return { value, complete };
+}
+function expandDockerfileBrace(inner, env) {
+  const nameMatch = /^[A-Za-z_][A-Za-z0-9_]*/.exec(inner);
+  if (!nameMatch)
+    return { value: "", complete: false };
+  const name = nameMatch[0];
+  const rest = inner.slice(name.length);
+  const current = env[name];
+  const set = current !== undefined;
+  const empty = !set || current.length === 0;
+  if (rest === "")
+    return { value: current ?? "", complete: true };
+  const operator = rest.startsWith(":-") || rest.startsWith(":+") || rest.startsWith(":?") ? rest.slice(0, 2) : rest.startsWith("-") || rest.startsWith("+") || rest.startsWith("?") ? rest[0] : undefined;
+  if (operator === undefined)
+    return { value: "", complete: false };
+  const word = expandDockerfileValue(rest.slice(operator.length), env);
+  if (operator === ":-")
+    return empty ? word : { value: current ?? "", complete: true };
+  if (operator === "-")
+    return set ? { value: current ?? "", complete: true } : word;
+  if (operator === ":+")
+    return empty ? { value: "", complete: true } : word;
+  if (operator === "+")
+    return set ? word : { value: "", complete: true };
+  if (operator === ":?" || operator === "?") {
+    if (operator === ":?" && empty || operator === "?" && !set)
+      return { value: "", complete: false };
+    return { value: current ?? "", complete: true };
+  }
+  return { value: "", complete: false };
 }
 function escapeRegex(value) {
   return value.replace(/[\\^$+*?()[\]{}|.]/g, "\\$&");
@@ -10513,6 +10656,13 @@ async function listSharedImageRecords(stateRoot) {
   }
   return records;
 }
+async function summarizeSharedImageCatalog(stateRoot) {
+  const records = await listSharedImageRecords(stateRoot);
+  return {
+    cataloged: records.length,
+    activeLeases: records.reduce((sum, record) => sum + record.leases.length, 0)
+  };
+}
 async function ensureSharedImageRecord(stateRoot, reference, now = new Date) {
   const timestamp = now.toISOString();
   const existing = await readSharedImageRecord(stateRoot, reference.digest);
@@ -10990,6 +11140,8 @@ async function ensureSharedImageBuilder(docker, stateRoot, builderName = SHARED_
       builderName,
       "--driver",
       SHARED_IMAGE_BUILDER_DRIVER,
+      "--driver-opt",
+      `env.${SHARED_IMAGE_BUILDER_IDENTITY_ENV}=${SHARED_IMAGE_BUILDER_IDENTITY}`,
       "--bootstrap"
     ], { allowFailure: true, timeoutMs: 120000, maxOutputBytes: 64 * 1024 });
     if (created.code !== 0) {
@@ -11024,7 +11176,31 @@ ${inspected.stderr.toString()}`;
   const driver = text.match(/^\s*Driver:\s+(\S+)/m)?.[1];
   if (name !== builderName || driver !== SHARED_IMAGE_BUILDER_DRIVER)
     return "mismatch";
-  return "matching";
+  return await builderHasSkizzlesIdentity(docker, builderName, text) ? "matching" : "mismatch";
+}
+async function builderHasSkizzlesIdentity(docker, builderName, inspectText) {
+  const names = [...inspectText.matchAll(/^\s*Name:\s+(\S+)/gm)].map((match) => match[1]);
+  const nodeName = names[1] ?? `${builderName}0`;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(nodeName))
+    return false;
+  const container = `buildx_buildkit_${nodeName}`;
+  const inspected = await docker.run([
+    "inspect",
+    "--format",
+    "{{json .Config.Env}}",
+    container
+  ], { allowFailure: true, timeoutMs: 1e4, maxOutputBytes: 16 * 1024 });
+  if (inspected.code !== 0)
+    return false;
+  let env;
+  try {
+    env = JSON.parse(inspected.stdout.toString());
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(env) || env.some((item) => typeof item !== "string"))
+    return false;
+  return env.includes(`${SHARED_IMAGE_BUILDER_IDENTITY_ENV}=${SHARED_IMAGE_BUILDER_IDENTITY}`);
 }
 async function buildSharedImage(docker, options) {
   const directory = await mkdtemp2(join5(tmpdir3(), "skizzles-shared-image-"));
@@ -11759,10 +11935,19 @@ class ContainerLabService {
     }
     const docker = await dockerAvailable(this.docker, [], this.environment);
     const labResources = docker.available ? await countManagedLabResources(this.docker) : { containers: 0, volumes: 0, networks: 0 };
+    const catalog = await summarizeSharedImageCatalog(this.roots.stateRoot);
     const shared = docker.available ? await inventorySharedImages(this.roots, this.docker, {
       maxAgeMs: (options.maxAgeHours ?? 168) * 3600000,
       budgetBytes: options.budgetBytes
-    }) : { cataloged: 0, present: 0, activeLeases: 0, eligible: 0, bytes: 0, reclaimableBytes: 0, untracked: 0 };
+    }) : {
+      cataloged: catalog.cataloged,
+      present: null,
+      activeLeases: catalog.activeLeases,
+      eligible: null,
+      bytes: null,
+      reclaimableBytes: null,
+      untracked: null
+    };
     const builderCache = docker.available ? await inventorySharedImageBuilderCache(this.docker) : { present: false, namespaceOwned: false, bytes: 0 };
     return {
       ok: true,

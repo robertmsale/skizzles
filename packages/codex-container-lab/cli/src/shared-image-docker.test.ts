@@ -8,6 +8,8 @@ import type { DockerRunner } from "./docker";
 import type { CommandResult, RunOptions } from "./process";
 import {
   SHARED_IMAGE_BUILDER_NAME,
+  SHARED_IMAGE_BUILDER_IDENTITY,
+  SHARED_IMAGE_BUILDER_IDENTITY_ENV,
   fingerprintSharedImage,
   sharedImageLabels,
 } from "./shared-image";
@@ -215,6 +217,18 @@ describe("shared image GC", () => {
     expect(foreign.calls.some((args) => args.includes("system"))).toBe(false);
   });
 
+  test("refuses cache GC against a same-name foreign docker-container builder", async () => {
+    const roots = await stateRoots();
+    const foreign = new ScriptedDocker();
+    foreign.builderPresent = true;
+    foreign.builderDriver = "docker-container";
+    foreign.builderOwned = false;
+    const mismatch = await gcSharedImageCache(foreign, { stateRoot: roots.stateRoot, mode: "apply" });
+    expect(mismatch.applied).toBe(false);
+    expect(mismatch.findings.some((finding) => finding.code === "builder-mismatch")).toBe(true);
+    expect(foreign.calls.some((args) => args.includes("prune"))).toBe(false);
+  });
+
   test("builder cache inventory reports bytes only for the verified namespace", async () => {
     const matching = new ScriptedDocker();
     matching.builderPresent = true;
@@ -290,6 +304,7 @@ class ScriptedDocker implements DockerRunner {
   builderPresent = false;
   builderName = SHARED_IMAGE_BUILDER_NAME;
   builderDriver = "docker-container";
+  builderOwned = true;
   buildDelayMs = 0;
   buildArgs: string[] = [];
   onBuild?: (args: string[]) => Promise<void>;
@@ -338,11 +353,19 @@ class ScriptedDocker implements DockerRunner {
       if (!this.builderPresent || args[2] !== this.builderName) {
         return resultWithError(`ERROR: no builder "${args[2]}" found`);
       }
-      return result(`Name:          ${this.builderName}\nDriver:        ${this.builderDriver}\n`);
+      return result(`Name:          ${this.builderName}\nDriver:        ${this.builderDriver}\n\nNodes:\nName:          ${this.builderName}0\n`);
     }
     if (args[0] === "buildx" && args[1] === "create") {
       this.builderPresent = true;
+      this.builderOwned = true;
       return result("");
+    }
+    if (args[0] === "inspect") {
+      if (!this.builderPresent) return resultWithError("Error: No such object");
+      const env = this.builderOwned
+        ? [`${SHARED_IMAGE_BUILDER_IDENTITY_ENV}=${SHARED_IMAGE_BUILDER_IDENTITY}`]
+        : ["PATH=/usr/bin"];
+      return result(JSON.stringify(env));
     }
     if (args[0] === "buildx" && args[1] === "build") {
       this.builds += 1;
