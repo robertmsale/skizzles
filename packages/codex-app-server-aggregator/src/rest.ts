@@ -63,6 +63,9 @@ export class RestApiServer {
   }
 
   private async route(request: Request): Promise<Response> {
+    if (!this.options.token && !trustedLoopbackRequest(request, this.server?.url)) {
+      return json({ error: { code: "forbidden_origin", message: "request Host or Origin is not allowed" } }, 403);
+    }
     if (!authorized(request, this.options.token)) {
       return json({ error: { code: "unauthorized", message: "missing or invalid bearer token" } }, 401, {
         "www-authenticate": "Bearer",
@@ -307,6 +310,20 @@ function authorized(request: Request, token: string | undefined): boolean {
   const supplied = Buffer.from(authorization.slice("Bearer ".length));
   const expected = Buffer.from(token);
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function trustedLoopbackRequest(request: Request, serverUrl: URL | undefined): boolean {
+  if (!serverUrl || request.headers.get("host")?.toLowerCase() !== serverUrl.host.toLowerCase()) return false;
+  const origin = request.headers.get("origin");
+  if (origin !== null) {
+    try {
+      if (new URL(origin).origin.toLowerCase() !== serverUrl.origin.toLowerCase()) return false;
+    } catch {
+      return false;
+    }
+  }
+  const fetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
+  return fetchSite === undefined || fetchSite === "none" || fetchSite === "same-origin";
 }
 
 function isLoopbackHost(hostname: string): boolean {

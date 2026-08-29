@@ -35,6 +35,7 @@ export class AggregatorDaemon {
   private started = false;
   private closed = false;
   private ownsSocket = false;
+  private releaseDatabaseLease: (() => Promise<void>) | undefined;
 
   constructor(private readonly options: AggregatorDaemonOptions) {
     this.registry = new ProjectRegistry(options.state);
@@ -63,6 +64,7 @@ export class AggregatorDaemon {
     if (this.closed) throw new Error("daemon is closed");
     this.started = true;
     try {
+      this.releaseDatabaseLease = await this.options.state.acquireDaemonLease();
       await prepareSocketDirectory(dirname(this.options.socketPath));
       await prepareSocket(this.options.socketPath);
       await new Promise<void>((resolve, reject) => {
@@ -80,6 +82,8 @@ export class AggregatorDaemon {
       await closeServer(this.server).catch(() => undefined);
       if (this.ownsSocket) await unlink(this.options.socketPath).catch(() => undefined);
       this.ownsSocket = false;
+      await this.releaseDatabaseLease?.().catch(() => undefined);
+      this.releaseDatabaseLease = undefined;
       this.started = false;
       throw error;
     }
@@ -100,7 +104,12 @@ export class AggregatorDaemon {
     await this.bridge.close();
     if (this.ownsSocket) await unlink(this.options.socketPath).catch(() => undefined);
     this.ownsSocket = false;
-    this.options.state.close();
+    try {
+      this.options.state.close();
+    } finally {
+      await this.releaseDatabaseLease?.();
+      this.releaseDatabaseLease = undefined;
+    }
   }
 
   private accept(socket: Socket): void {

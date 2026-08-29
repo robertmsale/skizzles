@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 export type RegisteredProject = {
   cwd: string;
@@ -28,10 +28,12 @@ export type StoredThread = {
 
 export class AggregatorState {
   private readonly database: Database;
+  private readonly databasePath: string | undefined;
 
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.database = new Database(path, { create: true, strict: true });
+    this.databasePath = path === ":memory:" ? undefined : realpathSync(resolve(path));
     this.database.exec("PRAGMA journal_mode = WAL");
     this.database.exec("PRAGMA foreign_keys = ON");
     this.database.exec(`
@@ -66,6 +68,29 @@ export class AggregatorState {
 
   close(): void {
     this.database.close();
+  }
+
+  async acquireDaemonLease(): Promise<() => Promise<void>> {
+    if (!this.databasePath) return async () => undefined;
+    const leasePath = `${this.databasePath}.daemon-lock.sqlite`;
+    const lease = new Database(leasePath, { create: true, strict: true });
+    try {
+      lease.exec("PRAGMA busy_timeout = 0");
+      lease.exec("BEGIN EXCLUSIVE");
+    } catch (error) {
+      lease.close();
+      if (error instanceof Error && error.message.includes("database is locked")) {
+        throw new Error(`aggregator database is already owned: ${this.databasePath}`);
+      }
+      throw error;
+    }
+    return async () => {
+      try {
+        lease.exec("ROLLBACK");
+      } finally {
+        lease.close();
+      }
+    };
   }
 
   project(cwd: string): RegisteredProject | undefined {

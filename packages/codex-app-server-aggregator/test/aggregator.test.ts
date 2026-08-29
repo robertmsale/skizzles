@@ -289,6 +289,15 @@ describe("Codex app-server aggregation", () => {
     const harness = createHarness(undefined, recovered);
     await initialize(harness);
 
+    expect(harness.state.threads().every((thread) => !("turns" in (thread.snapshot ?? {})))).toBe(true);
+    await harness.aggregator.handle({
+      method: "thread/read",
+      id: "recovered-read",
+      params: { threadId: archivedId, includeTurns: false },
+    });
+    const recoveredRead = resultFor(harness.output.messages, "recovered-read") as { thread: Record<string, unknown> };
+    expect(recoveredRead.thread).not.toHaveProperty("turns");
+
     await harness.aggregator.handle({ method: "thread/archive", id: 2, params: { threadId: archivedId } });
     await harness.aggregator.handle({ method: "thread/delete", id: 3, params: { threadId: deletedId } });
 

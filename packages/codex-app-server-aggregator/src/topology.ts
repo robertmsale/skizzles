@@ -23,14 +23,16 @@ export class Topology {
   constructor(options: { threads?: StoredThread[]; persist?: (thread: StoredThread) => void } = {}) {
     this.persist = options.persist;
     for (const thread of options.threads ?? []) {
+      const snapshot = sanitizeSnapshot(thread.snapshot);
       this.threads.set(thread.threadId, {
         machineId: thread.machineId,
         projectCwd: thread.projectCwd,
-        snapshot: thread.snapshot,
+        snapshot,
         loaded: false,
         archived: thread.archived,
         deleted: thread.deleted,
       });
+      if (thread.snapshot && "turns" in thread.snapshot) this.persistEntry(thread.threadId);
     }
   }
 
@@ -42,7 +44,7 @@ export class Topology {
     this.threads.set(threadId, {
       machineId,
       projectCwd,
-      snapshot: snapshot ?? current?.snapshot,
+      snapshot: sanitizeSnapshot(snapshot) ?? current?.snapshot,
       loaded: loadedFromStatus(snapshot?.status) ?? current?.loaded ?? true,
       archived: current?.archived ?? false,
       deleted: current?.deleted ?? false,
@@ -86,7 +88,7 @@ export class Topology {
 
   snapshot(threadId: string): ThreadSnapshot | undefined {
     const entry = this.threads.get(threadId);
-    return entry && !entry.deleted && entry.snapshot ? structuredClone(entry.snapshot) : undefined;
+    return entry && !entry.deleted ? sanitizeSnapshot(entry.snapshot) : undefined;
   }
 
   has(threadId: string): boolean {
@@ -206,8 +208,14 @@ export class Topology {
   private persistEntry(threadId: string): void {
     const entry = this.threads.get(threadId);
     if (!entry) return;
-    this.persist?.({ threadId, ...entry });
+    this.persist?.({ threadId, ...entry, snapshot: sanitizeSnapshot(entry.snapshot) });
   }
+}
+
+function sanitizeSnapshot(snapshot: ThreadSnapshot | undefined): ThreadSnapshot | undefined {
+  if (!snapshot) return undefined;
+  const { turns: _turns, ...metadata } = snapshot;
+  return structuredClone(metadata) as ThreadSnapshot;
 }
 
 function loadedMachine(entry: ThreadEntry, machineIds: ReadonlySet<string>): boolean {

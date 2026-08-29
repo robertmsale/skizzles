@@ -22,9 +22,10 @@ describe("aggregator REST API", () => {
     await run("git", "init", cwd);
     await run("git", "-C", cwd, "remote", "add", "origin", "https://example.test/owner/project.git");
     const factory = new RestFactory();
+    const databasePath = join(directory, "aggregator.sqlite3");
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
-      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      state: new AggregatorState(databasePath),
       factory,
       http: { hostname: "127.0.0.1", port: 0 },
     });
@@ -99,8 +100,12 @@ describe("aggregator REST API", () => {
     expect(factory.transport.destroyed).toBe(true);
     const snapshot = await fetchJson(`${origin}/v1/threads/${factory.threadId}?includeTurns=false`);
     expect(snapshot.body).toMatchObject({ thread: { id: factory.threadId, cwd } });
+    expect((snapshot.body as { thread: Record<string, unknown> }).thread).not.toHaveProperty("turns");
 
     await daemon.close();
+    const persisted = new AggregatorState(databasePath);
+    expect(persisted.threads()[0]?.snapshot).not.toHaveProperty("turns");
+    persisted.close();
   });
 
   test("keeps live backends when a JSONL relay disconnects and allows REST concurrently", async () => {
@@ -215,6 +220,28 @@ describe("aggregator REST API", () => {
     const origin = daemon.httpUrl!.origin;
     expect((await fetch(`${origin}/healthz`)).status).toBe(401);
     expect((await fetch(`${origin}/healthz`, { headers: { authorization: "Bearer test-secret" } })).status).toBe(200);
+    await daemon.close();
+  });
+
+  test("rejects hostile browser origins on the unauthenticated loopback listener", async () => {
+    const directory = temporaryDirectory();
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      factory: new RestFactory(),
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    await daemon.start();
+    const origin = daemon.httpUrl!.origin;
+
+    const hostile = await fetchJson(`${origin}/v1/projects`, {
+      headers: { origin: "https://attacker.example", "sec-fetch-site": "cross-site" },
+    });
+    expect(hostile).toEqual({
+      status: 403,
+      body: { error: { code: "forbidden_origin", message: "request Host or Origin is not allowed" } },
+    });
+    expect((await fetch(`${origin}/healthz`, { headers: { origin } })).status).toBe(200);
     await daemon.close();
   });
 

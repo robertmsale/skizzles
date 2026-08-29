@@ -87,10 +87,41 @@ describe("aggregator daemon boundary", () => {
   test("does not recover active machines until it owns the daemon socket", async () => {
     const directory = temporaryDirectory();
     const socketPath = join(directory, "aggregator.sock");
+    const ownerState = new AggregatorState(join(directory, "owner.sqlite3"));
+    const owner = new AggregatorDaemon({
+      socketPath,
+      state: ownerState,
+      factory: new UnusedFactory(),
+    });
+    await owner.start();
+    const contenderState = new AggregatorState(join(directory, "contender.sqlite3"));
+    contenderState.saveMachine({
+      machineId: "machine-owned",
+      projectCwd: join(directory, "project"),
+      containerId: "container-owned",
+    });
+
+    const removed: string[] = [];
+    const contender = new AggregatorDaemon({
+      socketPath,
+      state: contenderState,
+      factory: new UnusedFactory(),
+      removeOrphan: async (machine) => { removed.push(machine.containerId); },
+    });
+    await expect(contender.start()).rejects.toThrow("aggregator daemon is already running");
+    await contender.close();
+
+    expect(removed).toEqual([]);
+    expect(statSync(socketPath).isSocket()).toBe(true);
+    await owner.close();
+  });
+
+  test("does not recover active machines until it owns the database lease", async () => {
+    const directory = temporaryDirectory();
     const databasePath = join(directory, "aggregator.sqlite3");
     const ownerState = new AggregatorState(databasePath);
     const owner = new AggregatorDaemon({
-      socketPath,
+      socketPath: join(directory, "owner.sock"),
       state: ownerState,
       factory: new UnusedFactory(),
     });
@@ -103,16 +134,17 @@ describe("aggregator daemon boundary", () => {
 
     const removed: string[] = [];
     const contender = new AggregatorDaemon({
-      socketPath,
+      socketPath: join(directory, "contender.sock"),
       state: new AggregatorState(databasePath),
       factory: new UnusedFactory(),
       removeOrphan: async (machine) => { removed.push(machine.containerId); },
     });
-    await expect(contender.start()).rejects.toThrow("aggregator daemon is already running");
+    await expect(contender.start()).rejects.toThrow("aggregator database is already owned");
     await contender.close();
 
     expect(removed).toEqual([]);
-    expect(statSync(socketPath).isSocket()).toBe(true);
+    expect(statSync(join(directory, "owner.sock")).isSocket()).toBe(true);
+    expect(ownerState.threads()).toEqual([]);
     await owner.close();
   });
 
