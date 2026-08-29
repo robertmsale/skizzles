@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ApiError, boardApi, eventCursorRecovery } from "../src/web/api.ts";
 import {
   approvalResult,
   classifyThread,
@@ -50,7 +51,7 @@ describe("board client mapping", () => {
     expect(entries[0]?.text).toBe("Hello world");
   });
 
-  test("maps journal deltas and current approval decisions", () => {
+  test("maps journal deltas and only protocol-compatible approval decisions", () => {
     expect(eventDelta({ method: "item/agentMessage/delta", params: { itemId: "agent-1", delta: "hello" } }))
       .toEqual({ itemId: "agent-1", delta: "hello" });
     const request = {
@@ -60,5 +61,45 @@ describe("board client mapping", () => {
     } as ServerRequestDto;
     expect(approvalResult(request, true)).toEqual({ decision: "accept" });
     expect(approvalResult(request, false)).toEqual({ decision: "decline" });
+    expect(approvalResult({
+      id: "input-1",
+      method: "item/tool/requestUserInput",
+      params: { threadId: "thread-1", questions: [] },
+    } as ServerRequestDto, true)).toBeNull();
+    expect(approvalResult({
+      id: "permissions-1",
+      method: "item/permissions/requestApproval",
+      params: { threadId: "thread-1" },
+    } as ServerRequestDto, false)).toBeNull();
+  });
+
+  test("resumes an expired event journal at the server-provided retained boundary", () => {
+    const error = new ApiError(410, "expired", {
+      error: { code: "event_cursor_expired", oldestCursor: 41, streamId: "daemon-2", restarted: true },
+    });
+    expect(eventCursorRecovery(error)).toEqual({ after: 40, stream: "daemon-2" });
+    expect(eventCursorRecovery(new ApiError(410, "malformed", { error: {} }))).toBeNull();
+  });
+
+  test("follows every thread-list cursor and forwards server-backed search", async () => {
+    const originalFetch = globalThis.fetch;
+    const requested: URL[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = new URL(String(input), "http://board.test");
+      requested.push(url);
+      const cursor = url.searchParams.get("cursor");
+      return Response.json(cursor
+        ? { data: [{ ...baseThread, id: "thread-2" }], nextCursor: null, backwardsCursor: "cursor-1" }
+        : { data: [baseThread], nextCursor: "cursor-1", backwardsCursor: null });
+    }) as typeof fetch;
+    try {
+      const result = await boardApi.threads("/host/project", false, "build");
+      expect(result.data.map((thread) => thread.id)).toEqual(["thread-1", "thread-2"]);
+      expect(requested).toHaveLength(2);
+      expect(requested[0]?.searchParams.get("searchTerm")).toBe("build");
+      expect(requested[1]?.searchParams.get("cursor")).toBe("cursor-1");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

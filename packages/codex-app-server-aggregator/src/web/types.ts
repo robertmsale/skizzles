@@ -44,6 +44,12 @@ export type EventPageDto = {
   restarted: false;
 };
 
+export type ThreadPageDto = {
+  data: ThreadDto[];
+  nextCursor: string | null;
+  backwardsCursor?: string | null;
+};
+
 export type TimelineEntry = {
   key: string;
   role: "user" | "assistant" | "tool";

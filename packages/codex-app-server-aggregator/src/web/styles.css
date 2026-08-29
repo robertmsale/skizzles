@@ -112,12 +112,15 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .tool-card[open] .chevron { transform: rotate(180deg); }
 .tool-card pre { margin: 0 9px 9px; max-height: 360px; }
 .approval-card { width: calc(100% - 43px); display: grid; grid-template-columns: 29px 1fr; gap: 12px; margin: 0 0 20px 43px; border: 1px solid #5a4525; border-radius: 10px; background: linear-gradient(135deg, #211b12, #17150f); padding: 13px; }
+.approval-card.structured-request, .inbox-item.structured-request { border-color: #3b4655; background: linear-gradient(135deg, #171d25, #141719); }
 .approval-icon { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 50%; color: #271d0c; background: var(--amber); font-weight: 800; }
+.structured-request .approval-icon { color: #111923; background: var(--blue); }
 .eyebrow { color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .11em; }
 .approval-card h3 { margin: 4px 0 8px; font-size: 13px; }
 .approval-card pre { max-height: 200px; }
 .approval-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .approval-actions button.primary, button.primary { color: #15170f; border-color: var(--lime); background: var(--lime); }
+.request-note { margin: 9px 0 0; color: #9bb1ca; font-size: 10px; line-height: 1.55; }
 .working-row { display: flex; align-items: center; gap: 9px; margin: 4px 0 4px 43px; color: var(--muted); font-size: 11px; }
 .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--lime); animation: dot-pulse 1.2s infinite; }
 .thread-welcome { display: grid; place-items: center; min-height: 52vh; align-content: center; text-align: center; }

@@ -21,14 +21,20 @@ export function threadIsRunning(thread: ThreadDto): boolean {
 
 export function requestThreadId(request: ServerRequestDto): string | undefined {
   const params = record(request.params);
-  return typeof params.threadId === "string" ? params.threadId : undefined;
+  return typeof params.threadId === "string"
+    ? params.threadId
+    : typeof params.conversationId === "string" ? params.conversationId : undefined;
 }
 
 export function requestLabel(request: ServerRequestDto): string {
   if (request.method.includes("commandExecution") || request.method === "execCommandApproval") return "Run command";
   if (request.method.includes("fileChange") || request.method === "applyPatchApproval") return "Apply file changes";
-  if (request.method.includes("permissions")) return "Grant permissions";
+  if (request.method.includes("permissions")) return "Additional permissions requested";
   if (request.method.includes("requestUserInput")) return "Input requested";
+  if (request.method === "mcpServer/elicitation/request") return "MCP input requested";
+  if (request.method === "account/chatgptAuthTokens/refresh") return "Authentication refresh requested";
+  if (request.method === "attestation/generate") return "Attestation requested";
+  if (request.method.includes("tool") || request.method.includes("Tool")) return "Client tool requested";
   return words(request.method.split("/").at(-1) ?? "Request");
 }
 
@@ -40,14 +46,17 @@ export function requestDetail(request: ServerRequestDto): string {
   for (const key of ["reason", "message", "description"]) {
     if (typeof params[key] === "string") return params[key];
   }
-  return "Codex is waiting for your decision.";
+  return "Codex is waiting for a response.";
 }
 
-export function approvalResult(request: ServerRequestDto, accepted: boolean): Record<string, unknown> {
+export function approvalResult(request: ServerRequestDto, accepted: boolean): Record<string, unknown> | null {
   if (request.method === "applyPatchApproval" || request.method === "execCommandApproval") {
     return { decision: accepted ? "approved" : "denied" };
   }
-  return { decision: accepted ? "accept" : "decline" };
+  if (request.method === "item/commandExecution/requestApproval" || request.method === "item/fileChange/requestApproval") {
+    return { decision: accepted ? "accept" : "decline" };
+  }
+  return null;
 }
 
 export function timelineEntries(thread: ThreadDto | null, deltas: ReadonlyMap<string, string>): TimelineEntry[] {

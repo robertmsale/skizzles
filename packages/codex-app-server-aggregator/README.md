@@ -34,9 +34,13 @@ them. The daemon accepts one active outer app-server connection at a time; that 
 threads from every registered project. REST calls can run concurrently with it. The REST listener
 defaults to `http://127.0.0.1:8788`; use `--http-host` and `--http-port` to override it.
 
-The same origin serves the built React board at `http://127.0.0.1:8788/`. The checked-in `dist/`
-is produced from `src/web/` with Vite. During UI development, run the daemon on its default port
-and start Vite's loopback dev server and REST proxy separately:
+The same origin serves the built React board at `http://127.0.0.1:8788/` when the listener uses its
+default unauthenticated loopback configuration. The board is deliberately disabled when a bearer
+token is configured or the daemon binds beyond loopback: normal browser navigation cannot safely
+bootstrap that token into the first document request. Authenticated configurations remain REST and
+JSONL-only and can use `codex-app-server-ctl`. The checked-in `dist/` is produced from `src/web/`
+with Vite. During UI development, run the daemon on its default port and start Vite's loopback dev
+server and REST proxy separately:
 
 ```sh
 bun run --cwd packages/codex-app-server-aggregator dev
@@ -108,9 +112,10 @@ must reconcile through `thread/list`, `thread/read`, and `server-requests`. Thre
 project registry retain their existing SQLite persistence.
 
 The HTTP listener is loopback-only by default. Set `--http-token-env NAME` to require a bearer
-token read from the named environment variable. A non-loopback bind is rejected unless a token is
-configured; use a trusted TLS reverse proxy rather than sending that token over an untrusted
-plaintext network.
+token read from the named environment variable. Doing so disables the browser board; use the
+authenticated scripted client instead. A non-loopback bind is rejected unless a token is
+configured and likewise never serves board assets. Use a trusted TLS reverse proxy rather than
+sending that token over an untrusted plaintext network.
 
 ### Scripted HTTP client
 

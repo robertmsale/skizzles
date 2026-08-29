@@ -9,7 +9,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { ApiError, boardApi } from "./api.ts";
+import { ApiError, boardApi, eventCursorRecovery } from "./api.ts";
 import {
   approvalResult,
   classifyThread,
@@ -37,6 +37,7 @@ export function App() {
   const [requests, setRequests] = useState<ServerRequestDto[]>([]);
   const [filter, setFilter] = useState<ThreadFilter>("current");
   const [search, setSearch] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [mutating, setMutating] = useState(false);
@@ -44,6 +45,9 @@ export function App() {
   const [showInbox, setShowInbox] = useState(false);
   const [deltas, setDeltas] = useState<Map<string, string>>(new Map());
   const selected = threads.find((candidate) => candidate.id === selectedId) ?? null;
+  const selectedRef = useRef<ThreadView | null>(null);
+  const eventCursorRef = useRef(0);
+  const eventStreamRef = useRef<string | null>(null);
 
   const refreshProjects = useCallback(async () => {
     const response = await boardApi.projects();
@@ -54,8 +58,8 @@ export function App() {
     return response.data;
   }, []);
 
-  const refreshBoard = useCallback(async (cwd = projectCwd) => {
-    const projectData = projects.length ? projects : await refreshProjects();
+  const refreshBoard = useCallback(async (cwd = projectCwd, knownProjects?: ProjectDto[]) => {
+    const projectData = knownProjects ?? (projects.length ? projects : await refreshProjects());
     if (projectData.length === 0) {
       setThreads([]);
       setMachines([]);
@@ -64,8 +68,8 @@ export function App() {
       return;
     }
     const [active, archived, loaded, machineData, approvals] = await Promise.all([
-      boardApi.threads(cwd, false),
-      boardApi.threads(cwd, true),
+      boardApi.threads(cwd, false, searchTerm || undefined),
+      boardApi.threads(cwd, true, searchTerm || undefined),
       boardApi.loaded(),
       boardApi.machines(),
       boardApi.approvals(),
@@ -80,7 +84,7 @@ export function App() {
     setRequests(approvals.data);
     setSelectedId((current) => current && next.some((item) => item.id === current) ? current : next[0]?.id ?? null);
     setLoading(false);
-  }, [projectCwd, projects, refreshProjects]);
+  }, [projectCwd, projects, refreshProjects, searchTerm]);
 
   const readThread = useCallback(async (view: ThreadView | null) => {
     if (!view) {
@@ -104,30 +108,38 @@ export function App() {
   }, [refreshProjects]);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => setSearchTerm(search.trim()), 180);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
     if (!projects.length) return;
     setLoading(true);
     refreshBoard(projectCwd).catch((cause) => {
       setError(message(cause));
       setLoading(false);
     });
-  }, [projectCwd, projects.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectCwd, projects.length, searchTerm]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { void readThread(selected); }, [selectedId, selected?.lifecycle, readThread]);
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
 
   useEffect(() => {
     let stopped = false;
     let timer = 0;
-    let cursor = 0;
-    let stream: string | null = null;
     const poll = async () => {
       try {
-        const [page, approvals] = await Promise.all([boardApi.events(cursor, stream), boardApi.approvals()]);
+        const [page, approvals] = await Promise.all([
+          boardApi.events(eventCursorRef.current, eventStreamRef.current),
+          boardApi.approvals(),
+        ]);
         if (stopped) return;
-        cursor = page.nextCursor;
-        stream = page.streamId;
+        eventCursorRef.current = page.nextCursor;
+        eventStreamRef.current = page.streamId;
         setRequests(approvals.data);
         if (page.data.length) {
-          const selectedChanged = page.data.some((record) => eventThreadId(record.event) === selectedId);
+          const currentSelection = selectedRef.current;
+          const selectedChanged = page.data.some((record) => eventThreadId(record.event) === currentSelection?.id);
           setDeltas((current) => {
             const next = new Map(current);
             for (const record of page.data) {
@@ -137,16 +149,18 @@ export function App() {
             return next;
           });
           await refreshBoard();
-          if (selectedChanged) await readThread(selected);
+          if (selectedChanged) await readThread(currentSelection);
         }
         setError(null);
       } catch (cause) {
-        if (cause instanceof ApiError && cause.status === 410) {
-          cursor = 0;
-          stream = null;
+        const recovery = cause instanceof ApiError ? eventCursorRecovery(cause) : null;
+        if (recovery) {
+          eventCursorRef.current = recovery.after;
+          eventStreamRef.current = recovery.stream;
           setDeltas(new Map());
           await refreshBoard().catch(() => undefined);
-          await readThread(selected).catch(() => undefined);
+          await readThread(selectedRef.current).catch(() => undefined);
+          if (!stopped) setError(null);
         } else if (!stopped) {
           setError(message(cause));
         }
@@ -156,14 +170,14 @@ export function App() {
     };
     void poll();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [refreshBoard, readThread, selectedId, selected?.lifecycle]);
+  }, [refreshBoard, readThread]);
 
-  const act = async (operation: () => Promise<unknown>) => {
+  const act = async (operation: () => Promise<unknown>, reconcile = true) => {
     setMutating(true);
     setError(null);
     try {
       await operation();
-      await refreshBoard();
+      if (reconcile) await refreshBoard();
     } catch (cause) {
       setError(message(cause));
     } finally {
@@ -171,11 +185,22 @@ export function App() {
     }
   };
 
+  const respond = (request: ServerRequestDto, accepted: boolean) => {
+    const result = approvalResult(request, accepted);
+    if (!result) {
+      setError(`${requestLabel(request)} needs a structured response that this board does not support.`);
+      return;
+    }
+    void act(() => boardApi.respond(request.id, result));
+  };
+
   const visibleThreads = useMemo(() => threads.filter((candidate) => {
     if (filter === "snapshot" && candidate.lifecycle !== "snapshot") return false;
     if (filter === "archived" && candidate.lifecycle !== "archived") return false;
     if (filter === "current" && candidate.lifecycle === "archived") return false;
-    return !search.trim() || threadTitle(candidate).toLowerCase().includes(search.trim().toLowerCase());
+    if (!search.trim()) return true;
+    const name = typeof candidate.name === "string" ? candidate.name : "";
+    return `${name}\n${threadTitle(candidate)}`.toLowerCase().includes(search.trim().toLowerCase());
   }), [threads, filter, search]);
 
   const currentMachine = selected
@@ -198,7 +223,13 @@ export function App() {
         onFilter={setFilter}
         pending={requests}
         onAdd={() => setShowAdd(true)}
-        onRemove={(cwd) => void act(() => boardApi.removeProject(cwd))}
+        onRemove={(cwd) => void act(async () => {
+          await boardApi.removeProject(cwd);
+          const projectData = await refreshProjects();
+          const nextCwd = projectData[0]?.cwd ?? null;
+          setProjectCwd(nextCwd);
+          await refreshBoard(nextCwd, projectData);
+        }, false)}
         onNew={() => projectCwd && void act(async () => {
           const started = await boardApi.startThread(projectCwd);
           setSelectedId(started.thread.id);
@@ -225,7 +256,7 @@ export function App() {
               requests={pendingForThread}
               deltas={deltas}
               disabled={mutating}
-              onRespond={(request, accepted) => void act(() => boardApi.respond(request.id, approvalResult(request, accepted)))}
+              onRespond={respond}
               onSend={(text) => void act(async () => { await boardApi.sendTurn(selected.id, text); await readThread(selected); })}
               onInterrupt={() => {
                 const turnId = thread?.turns?.at(-1)?.id;
@@ -234,7 +265,7 @@ export function App() {
             />}
       </main>
       {showAdd && <AddProject onClose={() => setShowAdd(false)} onSubmit={(cwd) => void act(async () => { const result = await boardApi.addProject(cwd); setProjectCwd(result.project.cwd); setShowAdd(false); await refreshProjects(); })} disabled={mutating} />}
-      {showInbox && <Inbox requests={requests} onClose={() => setShowInbox(false)} onSelect={(id) => { if (id) setSelectedId(id); setShowInbox(false); }} onRespond={(request, accepted) => void act(() => boardApi.respond(request.id, approvalResult(request, accepted)))} disabled={mutating} />}
+      {showInbox && <Inbox requests={requests} onClose={() => setShowInbox(false)} onSelect={(id) => { if (id) setSelectedId(id); setShowInbox(false); }} onRespond={respond} disabled={mutating} />}
     </div>
   );
 }
@@ -270,7 +301,7 @@ function Sidebar(props: {
         return <button key={item.id} className={`thread-row ${props.selectedId === item.id ? "selected" : ""}`} onClick={() => props.onSelect(item.id)}>
           <span className={`state-dot ${item.lifecycle} ${threadIsRunning(item) ? "working" : ""}`} />
           <span className="thread-copy"><strong>{threadTitle(item)}</strong><small>{item.lifecycle === "snapshot" ? "Snapshot only" : item.lifecycle === "archived" ? "Archived" : threadIsRunning(item) ? "Working" : "Live · idle"}</small></span>
-          <span className="thread-meta">{count > 0 ? <b title={`${count} pending approval`}>{count}</b> : relativeTime(item.recencyAt ?? item.updatedAt)}</span>
+          <span className="thread-meta">{count > 0 ? <b title={`${count} pending request${count === 1 ? "" : "s"}`}>{count}</b> : relativeTime(item.recencyAt ?? item.updatedAt)}</span>
         </button>;
       })}
       {!props.threads.length && <p className="list-empty">No matching threads.</p>}
@@ -286,7 +317,7 @@ function Topbar(props: { thread: ThreadView | null; machine: MachineDto | null; 
       {props.machine && <span className={`status-chip machine ${props.machine.dockerStatus ?? props.machine.state}`}>{props.machine.dockerStatus ?? props.machine.state}</span>}
     </div>
     <div className="topbar-actions">
-      <button className="inbox-button" onClick={props.onInbox}>Approvals {props.approvalCount > 0 && <b>{props.approvalCount}</b>}</button>
+      <button className="inbox-button" onClick={props.onInbox}>Requests {props.approvalCount > 0 && <b>{props.approvalCount}</b>}</button>
       {props.thread && <><button onClick={props.onArchive} disabled={props.disabled || props.thread.lifecycle !== "live"}>Archive</button><button className="danger-quiet" onClick={props.onDelete} disabled={props.disabled}>Delete</button></>}
     </div>
   </header>;
@@ -335,7 +366,10 @@ function ToolCard({ label, text, status }: { label: string; text: string; status
 }
 
 function ApprovalCard({ request, onRespond, disabled }: { request: ServerRequestDto; onRespond: (request: ServerRequestDto, accepted: boolean) => void; disabled: boolean }) {
-  return <section className="approval-card"><div className="approval-icon">!</div><div><span className="eyebrow">Approval required</span><h3>{requestLabel(request)}</h3><pre>{requestDetail(request)}</pre><div className="approval-actions"><button onClick={() => onRespond(request, false)} disabled={disabled}>Deny</button><button className="primary" onClick={() => onRespond(request, true)} disabled={disabled}>Approve once</button></div></div></section>;
+  const actionable = approvalResult(request, true) !== null;
+  return <section className={actionable ? "approval-card" : "approval-card structured-request"}><div className="approval-icon">!</div><div><span className="eyebrow">{actionable ? "Approval required" : "Structured response required"}</span><h3>{requestLabel(request)}</h3><pre>{requestDetail(request)}</pre>{actionable
+    ? <div className="approval-actions"><button onClick={() => onRespond(request, false)} disabled={disabled}>Deny</button><button className="primary" onClick={() => onRespond(request, true)} disabled={disabled}>Approve once</button></div>
+    : <p className="request-note">This request cannot be answered safely by the board yet. It remains pending for a protocol-aware client.</p>}</div></section>;
 }
 
 function Markdown({ text }: { text: string }) {
@@ -362,7 +396,12 @@ function AddProject({ onClose, onSubmit, disabled }: { onClose: () => void; onSu
 }
 
 function Inbox({ requests, onClose, onSelect, onRespond, disabled }: { requests: ServerRequestDto[]; onClose: () => void; onSelect: (threadId?: string) => void; onRespond: (request: ServerRequestDto, accepted: boolean) => void; disabled: boolean }) {
-  return <div className="scrim drawer-scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="inbox"><div className="dialog-head"><div><span className="eyebrow">Aggregator-wide</span><h2>Approvals inbox</h2></div><button className="icon-button" onClick={onClose}>×</button></div>{requests.length ? requests.map((request) => <div className="inbox-item" key={String(request.id)}><button className="inbox-main" onClick={() => onSelect(requestThreadId(request))}><strong>{requestLabel(request)}</strong><span>{requestDetail(request)}</span></button><div className="approval-actions"><button onClick={() => onRespond(request, false)} disabled={disabled}>Deny</button><button className="primary" onClick={() => onRespond(request, true)} disabled={disabled}>Approve</button></div></div>) : <Empty title="Nothing is waiting" detail="Pending requests from every live machine appear here." />}</aside></div>;
+  return <div className="scrim drawer-scrim" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="inbox"><div className="dialog-head"><div><span className="eyebrow">Aggregator-wide</span><h2>Requests inbox</h2></div><button className="icon-button" onClick={onClose}>×</button></div>{requests.length ? requests.map((request) => {
+    const actionable = approvalResult(request, true) !== null;
+    return <div className={actionable ? "inbox-item" : "inbox-item structured-request"} key={String(request.id)}><button className="inbox-main" onClick={() => onSelect(requestThreadId(request))}><strong>{requestLabel(request)}</strong><span>{requestDetail(request)}</span></button>{actionable
+      ? <div className="approval-actions"><button onClick={() => onRespond(request, false)} disabled={disabled}>Deny</button><button className="primary" onClick={() => onRespond(request, true)} disabled={disabled}>Approve</button></div>
+      : <p className="request-note">Needs a structured response; left pending.</p>}</div>;
+  }) : <Empty title="Nothing is waiting" detail="Pending requests from every live machine appear here." />}</aside></div>;
 }
 
 function Empty({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) { return <div className="empty"><div className="empty-orbit"><span>·</span></div><h2>{title}</h2><p>{detail}</p>{action}</div>; }

@@ -4,6 +4,7 @@ import type {
   ProjectDto,
   ServerRequestDto,
   ThreadDto,
+  ThreadPageDto,
 } from "./types.ts";
 
 export class ApiError extends Error {
@@ -25,15 +26,20 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+export function eventCursorRecovery(error: ApiError): { after: number; stream: string } | null {
+  if (error.status !== 410) return null;
+  const detail = object(object(error.body).error);
+  const oldestCursor = detail.oldestCursor;
+  const streamId = detail.streamId;
+  if (typeof oldestCursor !== "number" || !Number.isSafeInteger(oldestCursor) || oldestCursor < 1 || typeof streamId !== "string" || !streamId) return null;
+  return { after: oldestCursor - 1, stream: streamId };
+}
+
 export const boardApi = {
   projects: () => api<{ data: ProjectDto[] }>("/v1/projects"),
   addProject: (cwd: string) => api<{ project: ProjectDto }>("/v1/projects", { method: "POST", body: JSON.stringify({ cwd }) }),
   removeProject: (cwd: string) => api<{ removed: boolean }>(`/v1/projects?cwd=${encodeURIComponent(cwd)}`, { method: "DELETE" }),
-  threads: (cwd: string | null, archived: boolean) => {
-    const query = new URLSearchParams({ archived: String(archived), limit: "100", sortKey: "recency_at", sortDirection: "desc" });
-    if (cwd) query.set("cwd", cwd);
-    return api<{ data: ThreadDto[] }>(`/v1/threads?${query}`);
-  },
+  threads: (cwd: string | null, archived: boolean, searchTerm?: string) => allThreads(cwd, archived, searchTerm),
   loaded: () => api<{ data: string[] }>("/v1/threads/loaded?limit=500"),
   readThread: (id: string, includeTurns: boolean) => api<{ thread: ThreadDto }>(`/v1/threads/${encodeURIComponent(id)}?includeTurns=${includeTurns}`),
   startThread: (cwd: string) => api<{ thread: ThreadDto }>("/v1/threads", { method: "POST", body: JSON.stringify({ cwd }) }),
@@ -50,6 +56,24 @@ export const boardApi = {
     return api<EventPageDto>(`/v1/events?${query}`);
   },
 };
+
+async function allThreads(cwd: string | null, archived: boolean, searchTerm?: string): Promise<ThreadPageDto> {
+  const data: ThreadDto[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const query = new URLSearchParams({ archived: String(archived), limit: "100", sortKey: "recency_at", sortDirection: "desc" });
+    if (cwd) query.set("cwd", cwd);
+    if (searchTerm) query.set("searchTerm", searchTerm);
+    if (cursor) query.set("cursor", cursor);
+    const page = await api<ThreadPageDto>(`/v1/threads?${query}`);
+    data.push(...page.data);
+    cursor = page.nextCursor;
+    if (cursor && seenCursors.has(cursor)) throw new Error("thread pagination returned a repeated cursor");
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor);
+  return { data, nextCursor: null };
+}
 
 function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};

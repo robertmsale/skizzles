@@ -19,10 +19,17 @@ export type RestServerOptions = {
 export class RestApiServer {
   private server: ReturnType<typeof Bun.serve> | undefined;
   private readonly log: (message: string) => void;
+  private readonly staticDirectory: string | undefined;
   private readonly activeRequests = new Set<Promise<Response>>();
 
   constructor(private readonly bridge: AggregatorBridge, private readonly options: RestServerOptions) {
     this.log = options.log ?? (() => undefined);
+    this.staticDirectory = options.staticDirectory && isLoopbackHost(options.hostname) && options.token === undefined
+      ? options.staticDirectory
+      : undefined;
+    if (options.staticDirectory && !this.staticDirectory) {
+      this.log("React board disabled: static assets are served only on an unauthenticated loopback listener");
+    }
   }
 
   start(): URL {
@@ -99,8 +106,16 @@ export class RestApiServer {
     if (threadRoute) {
       return this.thread(request, decodeURIComponent(threadRoute[1]!), threadRoute[2], url);
     }
-    if ((request.method === "GET" || request.method === "HEAD") && this.options.staticDirectory && !path.startsWith("/v1/")) {
+    if ((request.method === "GET" || request.method === "HEAD") && this.staticDirectory && !path.startsWith("/v1/")) {
       return this.staticAsset(path, request.method === "HEAD");
+    }
+    if ((request.method === "GET" || request.method === "HEAD") && this.options.staticDirectory && !path.startsWith("/v1/")) {
+      return json({
+        error: {
+          code: "board_disabled",
+          message: "browser board is available only on an unauthenticated loopback listener",
+        },
+      }, 503);
     }
     return json({ error: { code: "not_found", message: "route not found" } }, 404);
   }
@@ -119,7 +134,7 @@ export class RestApiServer {
   }
 
   private async staticAsset(pathname: string, head: boolean): Promise<Response> {
-    const root = resolve(this.options.staticDirectory!);
+    const root = resolve(this.staticDirectory!);
     let decoded: string;
     try {
       decoded = decodeURIComponent(pathname);

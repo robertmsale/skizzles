@@ -99,10 +99,18 @@ describe("aggregator REST API", () => {
     });
     const events = await fetchJson(`${origin}/v1/events?after=0`);
     expect(events.body).toMatchObject({ gap: false, oldestCursor: 1 });
+    const eventPage = events.body as { oldestCursor: number; streamId: string };
     const wrongStream = await fetchJson(`${origin}/v1/events?after=0&stream=previous-daemon`);
     expect(wrongStream).toMatchObject({
       status: 410,
-      body: { error: { code: "event_cursor_expired", restarted: true } },
+      body: {
+        error: {
+          code: "event_cursor_expired",
+          oldestCursor: eventPage.oldestCursor,
+          streamId: eventPage.streamId,
+          restarted: true,
+        },
+      },
     });
 
     await waitFor(async () => {
@@ -258,16 +266,27 @@ describe("aggregator REST API", () => {
 
   test("requires the configured bearer token", async () => {
     const directory = temporaryDirectory();
+    const staticDirectory = join(directory, "dist");
+    mkdirSync(staticDirectory);
+    writeFileSync(join(staticDirectory, "index.html"), "<!doctype html><title>Must not leak</title>");
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
       factory: new RestFactory(),
-      http: { hostname: "127.0.0.1", port: 0, token: "test-secret" },
+      http: { hostname: "127.0.0.1", port: 0, token: "test-secret", staticDirectory },
     });
     await daemon.start();
     const origin = daemon.httpUrl!.origin;
     expect((await fetch(`${origin}/healthz`)).status).toBe(401);
     expect((await fetch(`${origin}/healthz`, { headers: { authorization: "Bearer test-secret" } })).status).toBe(200);
+    const board = await fetch(origin, { headers: { authorization: "Bearer test-secret" } });
+    expect(board.status).toBe(503);
+    expect(await board.json()).toEqual({
+      error: {
+        code: "board_disabled",
+        message: "browser board is available only on an unauthenticated loopback listener",
+      },
+    });
     await daemon.close();
   });
 
