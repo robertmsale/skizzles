@@ -107,8 +107,10 @@ export class RestApiServer {
 
   private async machines(): Promise<Response> {
     const machines = this.options.state?.machines() ?? [];
+    const threads = this.options.state?.threads() ?? [];
     const data = await Promise.all(machines.map(async (machine) => ({
       ...machine,
+      threadIds: threads.filter((thread) => thread.machineId === machine.machineId && !thread.deleted).map((thread) => thread.threadId),
       dockerStatus: machine.state === "removed"
         ? null
         : await this.options.inspectContainer?.(machine.containerId) ?? null,

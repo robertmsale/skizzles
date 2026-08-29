@@ -30,6 +30,7 @@ export type MachineDto = {
   containerId: string;
   state: "active" | "orphaned" | "removed";
   dockerStatus: string | null;
+  threadIds: string[];
 };
 
 export type ServerRequestDto = RpcRequest;

@@ -57,7 +57,7 @@ export function timelineEntries(thread: ThreadDto | null, deltas: ReadonlyMap<st
     for (const [index, item] of (turn.items ?? []).entries()) {
       const type = item.type ?? "activity";
       const key = item.id ?? `${turn.id}-${index}`;
-      const text = itemText(item) + (deltas.get(key) ?? "");
+      const text = mergeStreamedText(itemText(item), deltas.get(key));
       if (/user.*message/i.test(type)) {
         result.push({ key, role: "user", label: "You", text: text || "Message", raw: item });
       } else if (/agent.*message|assistant.*message/i.test(type)) {
@@ -101,7 +101,8 @@ export function threadTitle(thread: ThreadDto): string {
 
 export function relativeTime(value: number | undefined, now = Date.now()): string {
   if (!value) return "";
-  const seconds = Math.max(0, Math.round((now - value) / 1000));
+  const milliseconds = value < 1_000_000_000_000 ? value * 1_000 : value;
+  const seconds = Math.max(0, Math.round((now - milliseconds) / 1000));
   if (seconds < 60) return "now";
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
@@ -123,6 +124,14 @@ function itemText(item: ThreadItemDto): string {
     }).filter(Boolean).join("\n");
   }
   return "";
+}
+
+function mergeStreamedText(base: string, delta: string | undefined): string {
+  if (!delta) return base;
+  if (!base) return delta;
+  if (base.endsWith(delta)) return base;
+  if (delta.startsWith(base)) return delta;
+  return base + delta;
 }
 
 function toolLabel(item: ThreadItemDto): string {

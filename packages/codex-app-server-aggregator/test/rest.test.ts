@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -61,6 +61,16 @@ describe("aggregator REST API", () => {
     expect(started.body).toMatchObject({ thread: { id: factory.threadId, cwd } });
     expect(factory.transport.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
 
+    const machines = await fetchJson(`${origin}/v1/machines`);
+    expect(machines.body).toMatchObject({
+      data: [{
+        machineId: factory.transport.machineId,
+        threadIds: [factory.threadId],
+        state: "active",
+        dockerStatus: null,
+      }],
+    });
+
     const listed = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
     expect(listed.body).toMatchObject({ data: [{ id: factory.threadId, cwd }] });
 
@@ -120,6 +130,27 @@ describe("aggregator REST API", () => {
     const persisted = new AggregatorState(databasePath);
     expect(persisted.threads()[0]?.snapshot).not.toHaveProperty("turns");
     persisted.close();
+  });
+
+  test("serves built SPA assets and falls back to index for client routes", async () => {
+    const directory = temporaryDirectory();
+    const staticDirectory = join(directory, "dist");
+    mkdirSync(staticDirectory);
+    writeFileSync(join(staticDirectory, "index.html"), "<!doctype html><title>Codex board</title>");
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      factory: new RestFactory(),
+      http: { hostname: "127.0.0.1", port: 0, staticDirectory },
+    });
+    await daemon.start();
+    const root = await fetch(daemon.httpUrl!);
+    const fallback = await fetch(new URL("/threads/example", daemon.httpUrl!));
+    expect(root.status).toBe(200);
+    expect(root.headers.get("cache-control")).toBe("no-cache");
+    expect(await root.text()).toContain("Codex board");
+    expect(await fallback.text()).toContain("Codex board");
+    await daemon.close();
   });
 
   test("keeps live backends when a JSONL relay disconnects and allows REST concurrently", async () => {

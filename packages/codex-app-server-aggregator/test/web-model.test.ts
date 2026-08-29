@@ -3,6 +3,7 @@ import {
   approvalResult,
   classifyThread,
   eventDelta,
+  relativeTime,
   timelineEntries,
 } from "../src/web/model.ts";
 import type { ServerRequestDto, ThreadDto } from "../src/web/types.ts";
@@ -19,6 +20,7 @@ describe("board client mapping", () => {
     expect(classifyThread(baseThread, new Set(), false).lifecycle).toBe("snapshot");
     expect(classifyThread(baseThread, new Set([baseThread.id]), false).lifecycle).toBe("live");
     expect(classifyThread(baseThread, new Set([baseThread.id]), true).lifecycle).toBe("archived");
+    expect(relativeTime(1_700_000_000, 1_700_000_120_000)).toBe("2m");
   });
 
   test("maps user, assistant, and command items into a stable timeline", () => {
@@ -38,6 +40,14 @@ describe("board client mapping", () => {
       { role: "assistant", label: "Codex", text: "Working…done" },
       { role: "tool", label: "Command", text: "bun test" },
     ]);
+  });
+
+  test("does not duplicate a streamed suffix already present in thread/read", () => {
+    const entries = timelineEntries({
+      ...baseThread,
+      turns: [{ id: "turn-1", items: [{ id: "agent-1", type: "agentMessage", text: "Hello world" }] }],
+    }, new Map([["agent-1", " world"]]));
+    expect(entries[0]?.text).toBe("Hello world");
   });
 
   test("maps journal deltas and current approval decisions", () => {

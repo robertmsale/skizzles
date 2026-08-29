@@ -34,7 +34,7 @@ export const boardApi = {
     if (cwd) query.set("cwd", cwd);
     return api<{ data: ThreadDto[] }>(`/v1/threads?${query}`);
   },
-  loaded: () => api<{ data: Array<{ id: string }> }>("/v1/threads/loaded?limit=500"),
+  loaded: () => api<{ data: string[] }>("/v1/threads/loaded?limit=500"),
   readThread: (id: string, includeTurns: boolean) => api<{ thread: ThreadDto }>(`/v1/threads/${encodeURIComponent(id)}?includeTurns=${includeTurns}`),
   startThread: (cwd: string) => api<{ thread: ThreadDto }>("/v1/threads", { method: "POST", body: JSON.stringify({ cwd }) }),
   sendTurn: (id: string, text: string) => api(`/v1/threads/${encodeURIComponent(id)}/turns`, { method: "POST", body: JSON.stringify({ input: [{ type: "text", text }] }) }),

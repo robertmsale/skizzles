@@ -162,8 +162,10 @@ button:disabled { opacity: .42; cursor: not-allowed; }
   .sidebar { padding-inline: 8px; }
   .brand div, .project-path, .composer-footer > span, .status-chip.machine { display: none; }
   .topbar { padding-inline: 11px; }
-  .topbar-title > strong { max-width: 28vw; }
+  .topbar-title > strong { max-width: 80px; }
+  .topbar-actions { flex-shrink: 0; }
   .timeline-inner { width: calc(100% - 22px); }
   .tool-card, .approval-card { width: calc(100% - 34px); margin-left: 34px; }
   .composer { padding-inline: 10px; }
+  .composer-footer { justify-content: flex-end; }
 }

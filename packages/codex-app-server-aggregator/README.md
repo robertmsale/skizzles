@@ -34,6 +34,18 @@ them. The daemon accepts one active outer app-server connection at a time; that 
 threads from every registered project. REST calls can run concurrently with it. The REST listener
 defaults to `http://127.0.0.1:8788`; use `--http-host` and `--http-port` to override it.
 
+The same origin serves the built React board at `http://127.0.0.1:8788/`. The checked-in `dist/`
+is produced from `src/web/` with Vite. During UI development, run the daemon on its default port
+and start Vite's loopback dev server and REST proxy separately:
+
+```sh
+bun run --cwd packages/codex-app-server-aggregator dev
+bun run --cwd packages/codex-app-server-aggregator build
+```
+
+The board uses only the routes below. Its event loop polls the daemon-local journal and fully
+reconciles projects, thread topology, loaded IDs, machines, and pending requests after HTTP 410.
+
 Before a normal app-server client initializes, register a Git checkout through the same JSON-RPC
 surface. The path must be an absolute checkout root with a container-reachable `origin` remote:
 
@@ -68,6 +80,7 @@ parameter/result DTOs; the resource path supplies identifiers such as `threadId`
 | `POST /v1/threads/:id/{fork,resume,interrupt}` | The corresponding thread/turn operation. |
 | `POST /v1/threads/:id/archive`, `DELETE /v1/threads/:id` | Intentional destructive release. |
 | `GET /v1/threads/loaded` | Aggregate `thread/loaded/list`. |
+| `GET /v1/machines` | Stored machine/container associations plus best-effort live Docker status. |
 | `GET /v1/events?after=N&stream=ID` | Poll the bounded in-memory app-server notification journal. |
 | `GET /v1/server-requests` | List pending app-server callbacks such as approvals. |
 | `POST /v1/server-requests/:id/responses` | Complete a pending callback with a JSON-RPC `result` or `error` outcome. |

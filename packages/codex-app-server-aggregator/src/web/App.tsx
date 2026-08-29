@@ -70,7 +70,7 @@ export function App() {
       boardApi.machines(),
       boardApi.approvals(),
     ]);
-    const loadedIds = new Set(loaded.data.map((item) => item.id));
+    const loadedIds = new Set(loaded.data);
     const next = [
       ...active.data.map((item) => classifyThread(item, loadedIds, false)),
       ...archived.data.map((item) => classifyThread(item, loadedIds, true)),
@@ -180,7 +180,7 @@ export function App() {
   }), [threads, filter, search]);
 
   const currentMachine = selected
-    ? machines.find((machine) => machine.machineId === selected.machineId) ?? null
+    ? machines.find((machine) => machine.threadIds.includes(selected.id)) ?? null
     : null;
   const pendingForThread = requests.filter((request) => requestThreadId(request) === selectedId);
 
