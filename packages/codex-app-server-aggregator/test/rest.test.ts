@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -61,6 +61,16 @@ describe("aggregator REST API", () => {
     expect(started.body).toMatchObject({ thread: { id: factory.threadId, cwd } });
     expect(factory.transport.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
 
+    const machines = await fetchJson(`${origin}/v1/machines`);
+    expect(machines.body).toMatchObject({
+      data: [{
+        machineId: factory.transport.machineId,
+        threadIds: [factory.threadId],
+        state: "active",
+        dockerStatus: null,
+      }],
+    });
+
     const listed = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
     expect(listed.body).toMatchObject({ data: [{ id: factory.threadId, cwd }] });
 
@@ -89,10 +99,18 @@ describe("aggregator REST API", () => {
     });
     const events = await fetchJson(`${origin}/v1/events?after=0`);
     expect(events.body).toMatchObject({ gap: false, oldestCursor: 1 });
+    const eventPage = events.body as { oldestCursor: number; streamId: string };
     const wrongStream = await fetchJson(`${origin}/v1/events?after=0&stream=previous-daemon`);
     expect(wrongStream).toMatchObject({
       status: 410,
-      body: { error: { code: "event_cursor_expired", restarted: true } },
+      body: {
+        error: {
+          code: "event_cursor_expired",
+          oldestCursor: eventPage.oldestCursor,
+          streamId: eventPage.streamId,
+          restarted: true,
+        },
+      },
     });
 
     await waitFor(async () => {
@@ -120,6 +138,142 @@ describe("aggregator REST API", () => {
     const persisted = new AggregatorState(databasePath);
     expect(persisted.threads()[0]?.snapshot).not.toHaveProperty("turns");
     persisted.close();
+  });
+
+  test("serves built SPA assets and falls back to index for client routes", async () => {
+    const directory = temporaryDirectory();
+    const staticDirectory = join(directory, "dist");
+    mkdirSync(staticDirectory);
+    writeFileSync(join(staticDirectory, "index.html"), "<!doctype html><title>Codex board</title>");
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      factory: new RestFactory(),
+      http: { hostname: "127.0.0.1", port: 0, staticDirectory },
+    });
+    await daemon.start();
+    const root = await fetch(daemon.httpUrl!);
+    const fallback = await fetch(new URL("/threads/example", daemon.httpUrl!));
+    const unknownApi = await fetch(new URL("/v1/not-a-route", daemon.httpUrl!));
+    expect(root.status).toBe(200);
+    expect(root.headers.get("cache-control")).toBe("no-cache");
+    expect(await root.text()).toContain("Codex board");
+    expect(await fallback.text()).toContain("Codex board");
+    expect(unknownApi.status).toBe(404);
+    expect(await unknownApi.json()).toEqual({ error: { code: "not_found", message: "route not found" } });
+    await daemon.close();
+  });
+
+  test("keeps machine projection available when container inspection rejects", async () => {
+    const directory = temporaryDirectory();
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    const projectCwd = join(directory, "project");
+    state.saveMachine({ machineId: "machine-orphan", projectCwd, containerId: "container-missing-docker" });
+    state.saveThread({
+      threadId: "thread-orphan",
+      machineId: "machine-orphan",
+      projectCwd,
+      snapshot: { id: "thread-orphan", cwd: projectCwd },
+      loaded: true,
+      archived: false,
+      deleted: false,
+    });
+    const inspected: string[] = [];
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state,
+      factory: new RestFactory(),
+      inspectContainer: async (containerId) => {
+        inspected.push(containerId);
+        throw new Error("Docker binary is unavailable");
+      },
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    await daemon.start();
+
+    const machines = await fetchJson(`${daemon.httpUrl!.origin}/v1/machines`);
+    expect(machines).toEqual({
+      status: 200,
+      body: {
+        data: [{
+          machineId: "machine-orphan",
+          projectCwd,
+          containerId: "container-missing-docker",
+          state: "orphaned",
+          threadIds: ["thread-orphan"],
+          dockerStatus: null,
+        }],
+      },
+    });
+    expect(inspected).toEqual(["container-missing-docker"]);
+    await daemon.close();
+  });
+
+  test("projects only the visible fleet without scanning removed machine history", async () => {
+    const directory = temporaryDirectory();
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    const projectCwd = join(directory, "project");
+    for (let index = 0; index < 120; index += 1) {
+      const machineId = `machine-removed-${String(index).padStart(3, "0")}`;
+      state.saveMachine({ machineId, projectCwd, containerId: `container-removed-${index}` });
+      state.saveThread({
+        threadId: `thread-removed-${index}`,
+        machineId,
+        projectCwd,
+        snapshot: undefined,
+        loaded: false,
+        archived: true,
+        deleted: index % 2 === 0,
+      });
+      state.markMachine(machineId, "removed");
+    }
+    state.saveMachine({ machineId: "machine-visible", projectCwd, containerId: "container-visible" });
+    state.saveThread({
+      threadId: "thread-visible",
+      machineId: "machine-visible",
+      projectCwd,
+      snapshot: undefined,
+      loaded: true,
+      archived: false,
+      deleted: false,
+    });
+    state.saveThread({
+      threadId: "thread-deleted",
+      machineId: "machine-visible",
+      projectCwd,
+      snapshot: undefined,
+      loaded: false,
+      archived: false,
+      deleted: true,
+    });
+    const inspected: string[] = [];
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state,
+      factory: new RestFactory(),
+      inspectContainer: async (containerId) => {
+        inspected.push(containerId);
+        return "running";
+      },
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    await daemon.start();
+
+    expect(await fetchJson(`${daemon.httpUrl!.origin}/v1/machines`)).toEqual({
+      status: 200,
+      body: {
+        data: [{
+          machineId: "machine-visible",
+          projectCwd,
+          containerId: "container-visible",
+          state: "orphaned",
+          threadIds: ["thread-visible"],
+          dockerStatus: "running",
+        }],
+      },
+    });
+    expect(inspected).toEqual(["container-visible"]);
+    await daemon.close();
   });
 
   test("keeps live backends when a JSONL relay disconnects and allows REST concurrently", async () => {
@@ -224,16 +378,27 @@ describe("aggregator REST API", () => {
 
   test("requires the configured bearer token", async () => {
     const directory = temporaryDirectory();
+    const staticDirectory = join(directory, "dist");
+    mkdirSync(staticDirectory);
+    writeFileSync(join(staticDirectory, "index.html"), "<!doctype html><title>Must not leak</title>");
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
       factory: new RestFactory(),
-      http: { hostname: "127.0.0.1", port: 0, token: "test-secret" },
+      http: { hostname: "127.0.0.1", port: 0, token: "test-secret", staticDirectory },
     });
     await daemon.start();
     const origin = daemon.httpUrl!.origin;
     expect((await fetch(`${origin}/healthz`)).status).toBe(401);
     expect((await fetch(`${origin}/healthz`, { headers: { authorization: "Bearer test-secret" } })).status).toBe(200);
+    const board = await fetch(origin, { headers: { authorization: "Bearer test-secret" } });
+    expect(board.status).toBe(503);
+    expect(await board.json()).toEqual({
+      error: {
+        code: "board_disabled",
+        message: "browser board is available only on an unauthenticated loopback listener",
+      },
+    });
     await daemon.close();
   });
 

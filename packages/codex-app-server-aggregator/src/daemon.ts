@@ -17,6 +17,7 @@ export type AggregatorDaemonOptions = {
   state: AggregatorState;
   factory: BackendFactory;
   removeOrphan?: (machine: StoredMachine) => Promise<void>;
+  inspectContainer?: (containerId: string) => Promise<string | null>;
   http?: Omit<RestServerOptions, "log">;
   log?: (message: string) => void;
 };
@@ -51,7 +52,12 @@ export class AggregatorDaemon {
       log: this.log,
     });
     this.bridge.bind(this.aggregator);
-    this.rest = options.http ? new RestApiServer(this.bridge, { ...options.http, log: this.log }) : undefined;
+    this.rest = options.http ? new RestApiServer(this.bridge, {
+      ...options.http,
+      state: options.state,
+      ...(options.inspectContainer ? { inspectContainer: options.inspectContainer } : {}),
+      log: this.log,
+    }) : undefined;
     this.server = createServer({ allowHalfOpen: true }, (socket) => this.accept(socket));
   }
 

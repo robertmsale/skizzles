@@ -85,6 +85,18 @@ export class DockerBackendFactory implements BackendFactory {
   async remove(containerId: string): Promise<void> {
     await removeContainer(this.options.dockerBinary, containerId);
   }
+
+  async inspect(containerId: string): Promise<string | null> {
+    const process = Bun.spawn([
+      this.options.dockerBinary,
+      "inspect",
+      "--format",
+      "{{.State.Status}}",
+      containerId,
+    ], { stdout: "pipe", stderr: "ignore" });
+    const [stdout, exitCode] = await Promise.all([new Response(process.stdout).text(), process.exited]);
+    return exitCode === 0 ? stdout.trim() || "unknown" : null;
+  }
 }
 
 class DockerTransport implements BackendTransport {

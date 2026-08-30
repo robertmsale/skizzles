@@ -34,6 +34,22 @@ them. The daemon accepts one active outer app-server connection at a time; that 
 threads from every registered project. REST calls can run concurrently with it. The REST listener
 defaults to `http://127.0.0.1:8788`; use `--http-host` and `--http-port` to override it.
 
+The same origin serves the built React board at `http://127.0.0.1:8788/` when the listener uses its
+default unauthenticated loopback configuration. The board is deliberately disabled when a bearer
+token is configured or the daemon binds beyond loopback: normal browser navigation cannot safely
+bootstrap that token into the first document request. Authenticated configurations remain REST and
+JSONL-only and can use `codex-app-server-ctl`. The checked-in `dist/` is produced from `src/web/`
+with Vite. During UI development, run the daemon on its default port and start Vite's loopback dev
+server and REST proxy separately:
+
+```sh
+bun run --cwd packages/codex-app-server-aggregator dev
+bun run --cwd packages/codex-app-server-aggregator build
+```
+
+The board uses only the routes below. Its event loop polls the daemon-local journal and fully
+reconciles projects, thread topology, loaded IDs, machines, and pending requests after HTTP 410.
+
 Before a normal app-server client initializes, register a Git checkout through the same JSON-RPC
 surface. The path must be an absolute checkout root with a container-reachable `origin` remote:
 
@@ -68,6 +84,7 @@ parameter/result DTOs; the resource path supplies identifiers such as `threadId`
 | `POST /v1/threads/:id/{fork,resume,interrupt}` | The corresponding thread/turn operation. |
 | `POST /v1/threads/:id/archive`, `DELETE /v1/threads/:id` | Intentional destructive release. |
 | `GET /v1/threads/loaded` | Aggregate `thread/loaded/list`. |
+| `GET /v1/machines` | Stored machine/container associations plus best-effort live Docker status. |
 | `GET /v1/events?after=N&stream=ID` | Poll the bounded in-memory app-server notification journal. |
 | `GET /v1/server-requests` | List pending app-server callbacks such as approvals. |
 | `POST /v1/server-requests/:id/responses` | Complete a pending callback with a JSON-RPC `result` or `error` outcome. |
@@ -95,9 +112,10 @@ must reconcile through `thread/list`, `thread/read`, and `server-requests`. Thre
 project registry retain their existing SQLite persistence.
 
 The HTTP listener is loopback-only by default. Set `--http-token-env NAME` to require a bearer
-token read from the named environment variable. A non-loopback bind is rejected unless a token is
-configured; use a trusted TLS reverse proxy rather than sending that token over an untrusted
-plaintext network.
+token read from the named environment variable. Doing so disables the browser board; use the
+authenticated scripted client instead. A non-loopback bind is rejected unless a token is
+configured and likewise never serves board assets. Use a trusted TLS reverse proxy rather than
+sending that token over an untrusted plaintext network.
 
 ### Scripted HTTP client
 

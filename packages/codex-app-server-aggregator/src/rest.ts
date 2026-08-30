@@ -1,6 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
+import { resolve, sep } from "node:path";
 import type { AggregatorBridge } from "./bridge.ts";
 import type { RpcError, RpcOutcome } from "./protocol.ts";
+import type { AggregatorState } from "./state.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -8,16 +10,26 @@ export type RestServerOptions = {
   hostname: string;
   port: number;
   token?: string;
+  staticDirectory?: string;
+  state?: AggregatorState;
+  inspectContainer?: (containerId: string) => Promise<string | null>;
   log?: (message: string) => void;
 };
 
 export class RestApiServer {
   private server: ReturnType<typeof Bun.serve> | undefined;
   private readonly log: (message: string) => void;
+  private readonly staticDirectory: string | undefined;
   private readonly activeRequests = new Set<Promise<Response>>();
 
   constructor(private readonly bridge: AggregatorBridge, private readonly options: RestServerOptions) {
     this.log = options.log ?? (() => undefined);
+    this.staticDirectory = options.staticDirectory && isLoopbackHost(options.hostname) && options.token === undefined
+      ? options.staticDirectory
+      : undefined;
+    if (options.staticDirectory && !this.staticDirectory) {
+      this.log("React board disabled: static assets are served only on an unauthenticated loopback listener");
+    }
   }
 
   start(): URL {
@@ -78,6 +90,7 @@ export class RestApiServer {
       return json({ ok: true });
     }
     if (path === "/v1/projects") return this.projects(request, url);
+    if (request.method === "GET" && path === "/v1/machines") return this.machines();
     if (request.method === "GET" && path === "/v1/events") return this.events(url);
     if (path === "/v1/server-requests") return this.serverRequests(request);
     if (request.method === "GET" && path === "/v1/threads/loaded") {
@@ -93,7 +106,54 @@ export class RestApiServer {
     if (threadRoute) {
       return this.thread(request, decodeURIComponent(threadRoute[1]!), threadRoute[2], url);
     }
+    if ((request.method === "GET" || request.method === "HEAD") && this.staticDirectory && !path.startsWith("/v1/")) {
+      return this.staticAsset(path, request.method === "HEAD");
+    }
+    if ((request.method === "GET" || request.method === "HEAD") && this.options.staticDirectory && !path.startsWith("/v1/")) {
+      return json({
+        error: {
+          code: "board_disabled",
+          message: "browser board is available only on an unauthenticated loopback listener",
+        },
+      }, 503);
+    }
     return json({ error: { code: "not_found", message: "route not found" } }, 404);
+  }
+
+  private async machines(): Promise<Response> {
+    const machines = this.options.state?.machineFleet() ?? [];
+    const data = await Promise.all(machines.map(async (machine) => ({
+      ...machine,
+      dockerStatus: await inspectContainerStatus(this.options.inspectContainer, machine.containerId),
+    })));
+    return json({ data });
+  }
+
+  private async staticAsset(pathname: string, head: boolean): Promise<Response> {
+    const root = resolve(this.staticDirectory!);
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(pathname);
+    } catch {
+      return badRequest("invalid asset path");
+    }
+    const candidate = resolve(root, `.${decoded}`);
+    if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) {
+      return json({ error: { code: "not_found", message: "asset not found" } }, 404);
+    }
+    let file = Bun.file(candidate);
+    const assetExists = await file.exists();
+    if (!assetExists) file = Bun.file(resolve(root, "index.html"));
+    if (!(await file.exists())) {
+      return json({ error: { code: "spa_not_built", message: "run bun run build in the aggregator package" } }, 503);
+    }
+    const isIndex = !assetExists || decoded === "/" || candidate.endsWith(`${sep}index.html`);
+    return new Response(head ? null : file, {
+      headers: {
+        "content-type": file.type || "application/octet-stream",
+        "cache-control": isIndex ? "no-cache" : "public, max-age=31536000, immutable",
+      },
+    });
   }
 
   private async projects(request: Request, url: URL): Promise<Response> {
@@ -232,6 +292,18 @@ async function jsonObject(request: Request): Promise<Record<string, unknown>> {
     throw new HttpError(400, "request body must be a JSON object");
   }
   return parsed as Record<string, unknown>;
+}
+
+async function inspectContainerStatus(
+  inspectContainer: RestServerOptions["inspectContainer"],
+  containerId: string,
+): Promise<string | null> {
+  if (!inspectContainer) return null;
+  try {
+    return await inspectContainer(containerId);
+  } catch {
+    return null;
+  }
 }
 
 async function boundedBody(request: Request): Promise<Uint8Array> {
