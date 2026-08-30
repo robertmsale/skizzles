@@ -21,6 +21,7 @@ import {
   threadForSelection,
   threadHasSystemError,
   threadIsRunning,
+  threadTitle,
   timelineEntries,
 } from "../src/web/model.ts";
 import type { MachineDto, ServerRequestDto, ThreadDto } from "../src/web/types.ts";
@@ -48,6 +49,11 @@ describe("board client mapping", () => {
     expect(threadHasSystemError({ ...baseThread, status: { type: "systemError" } })).toBe(true);
   });
 
+  test("prefers a non-empty explicit thread name over its preview", () => {
+    expect(threadTitle({ ...baseThread, name: "  Release   board  " })).toBe("Release board");
+    expect(threadTitle({ ...baseThread, name: "  " })).toBe("Build the board");
+  });
+
   test("maps user, assistant, and command items into a stable timeline", () => {
     const entries = timelineEntries({
       ...baseThread,
@@ -64,6 +70,67 @@ describe("board client mapping", () => {
       { role: "user", label: "You", text: "Ship it" },
       { role: "assistant", label: "Codex", text: "Working…done" },
       { role: "tool", label: "Command", text: "bun test" },
+    ]);
+    expect(timelineEntries({
+      ...baseThread,
+      turns: [{ id: "turn-2", items: [{ id: "cmd-live", type: "commandExecution", command: "bun test", aggregatedOutput: null }] }],
+    }, new Map([["cmd-live", "running test suite"]]))[0]?.text).toBe("bun test\n\nrunning test suite");
+  });
+
+  test("preserves protocol-shaped file, MCP, function, and command activity", () => {
+    const entries = timelineEntries({
+      ...baseThread,
+      turns: [{
+        id: "turn-1",
+        items: [
+          {
+            id: "file-1",
+            type: "fileChange",
+            status: "completed",
+            changes: [{
+              path: "src/web/model.ts",
+              kind: { type: "update", move_path: null },
+              diff: "@@ -1 +1 @@\n-old\n+new",
+            }],
+          },
+          {
+            id: "mcp-1",
+            type: "mcpToolCall",
+            server: "github",
+            tool: "search_code",
+            arguments: { query: "threadTitle" },
+            result: { content: [{ type: "text", text: "1 match" }], structuredContent: null },
+            error: null,
+            status: "completed",
+          },
+          {
+            id: "mcp-2",
+            type: "mcpToolCall",
+            server: "filesystem",
+            tool: "read_file",
+            arguments: { path: "/workspace/missing.txt" },
+            result: null,
+            error: { message: "File not found" },
+            status: "failed",
+          },
+          { id: "function-1", type: "functionCallOutput", output: { ok: true, changed: 1 } },
+          { id: "command-1", type: "commandExecution", command: "bun test", aggregatedOutput: "77 pass\n0 fail", status: "completed" },
+        ],
+      }],
+    }, new Map());
+
+    expect(entries.map(({ label, text }) => ({ label, text }))).toEqual([
+      { label: "File changes", text: "Update · src/web/model.ts\n@@ -1 +1 @@\n-old\n+new" },
+      {
+        label: "MCP · github",
+        text: "Tool: search_code\n\nArguments:\n{\n  \"query\": \"threadTitle\"\n}\n\nResult:\n{\n  \"content\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"1 match\"\n    }\n  ],\n  \"structuredContent\": null\n}",
+      },
+      {
+        label: "MCP · filesystem",
+        text: "Tool: read_file\n\nArguments:\n{\n  \"path\": \"/workspace/missing.txt\"\n}\n\nError:\n{\n  \"message\": \"File not found\"\n}",
+      },
+      { label: "Function Call Output", text: "Output:\n{\n  \"ok\": true,\n  \"changed\": 1\n}" },
+      { label: "Command", text: "bun test\n\n77 pass\n0 fail" },
     ]);
   });
 

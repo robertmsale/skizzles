@@ -167,7 +167,11 @@ export function timelineEntries(thread: ThreadDto | null, deltas: ReadonlyMap<st
     for (const [index, item] of (turn.items ?? []).entries()) {
       const type = item.type ?? "activity";
       const key = item.id ?? `${turn.id}-${index}`;
-      const text = mergeStreamedText(itemText(item), deltas.get(key));
+      const baseText = itemText(item);
+      const streamed = deltas.get(key);
+      const text = type === "commandExecution" && baseText && streamed && !item.aggregatedOutput
+        ? joinSections(baseText, streamed)
+        : mergeStreamedText(baseText, streamed);
       if (/user.*message/i.test(type)) {
         result.push({ key, role: "user", label: "You", text: text || "Message", raw: item });
       } else if (/agent.*message|assistant.*message/i.test(type)) {
@@ -271,8 +275,9 @@ export function pruneIncorporatedDeltas(
 }
 
 export function threadTitle(thread: ThreadDto): string {
+  const name = typeof thread.name === "string" ? thread.name.replace(/\s+/g, " ").trim() : "";
   const preview = thread.preview?.replace(/\s+/g, " ").trim();
-  return preview || "New Codex thread";
+  return name || preview || "New Codex thread";
 }
 
 export function relativeTime(value: number | undefined, now = Date.now()): string {
@@ -288,6 +293,8 @@ export function relativeTime(value: number | undefined, now = Date.now()): strin
 }
 
 function itemText(item: ThreadItemDto): string {
+  const structured = structuredToolText(item);
+  if (structured) return structured;
   for (const key of ["text", "output", "aggregatedOutput", "result", "summary"]) {
     if (typeof item[key] === "string") return item[key] as string;
   }
@@ -309,6 +316,60 @@ function itemText(item: ThreadItemDto): string {
   return "";
 }
 
+function structuredToolText(item: ThreadItemDto): string {
+  switch (item.type) {
+    case "commandExecution": {
+      const command = commandText(item.command);
+      const output = typeof item.aggregatedOutput === "string" ? item.aggregatedOutput : "";
+      return joinSections(command, output);
+    }
+    case "fileChange":
+      return Array.isArray(item.changes)
+        ? item.changes.map(formatFileChange).filter(Boolean).join("\n\n")
+        : "";
+    case "mcpToolCall": {
+      const sections: string[] = [];
+      if (typeof item.tool === "string" && item.tool) sections.push(`Tool: ${item.tool}`);
+      if (item.arguments !== undefined) sections.push(`Arguments:\n${formatPayload(item.arguments)}`);
+      if (item.result !== null && item.result !== undefined) sections.push(`Result:\n${formatPayload(item.result)}`);
+      if (item.error !== null && item.error !== undefined) sections.push(`Error:\n${formatPayload(item.error)}`);
+      return sections.join("\n\n");
+    }
+    case "functionCallOutput":
+      return item.output === undefined ? "" : `Output:\n${formatPayload(item.output)}`;
+    default:
+      return "";
+  }
+}
+
+function commandText(value: unknown): string {
+  if (typeof value === "string") return value;
+  return Array.isArray(value) ? value.filter((part): part is string => typeof part === "string").join(" ") : "";
+}
+
+function formatFileChange(value: unknown): string {
+  const change = record(value);
+  if (typeof change.path !== "string") return formatPayload(value);
+  const kind = record(change.kind);
+  const type = typeof kind.type === "string"
+    ? words(kind.type)
+    : typeof change.kind === "string" ? words(change.kind) : "Change";
+  const movePath = typeof kind.move_path === "string" ? ` → ${kind.move_path}` : "";
+  const heading = `${type} · ${change.path}${movePath}`;
+  return typeof change.diff === "string" && change.diff ? `${heading}\n${change.diff}` : heading;
+}
+
+function formatPayload(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "";
+  const serialized = JSON.stringify(value, null, 2);
+  return serialized ?? String(value);
+}
+
+function joinSections(...sections: string[]): string {
+  return sections.filter(Boolean).join("\n\n");
+}
+
 function mergeStreamedText(base: string, delta: string | undefined): string {
   if (!delta) return base;
   if (!base) return delta;
@@ -328,8 +389,8 @@ function toolLabel(item: ThreadItemDto): string {
 }
 
 function toolFallback(item: ThreadItemDto): string {
-  if (Array.isArray(item.command)) return item.command.join(" ");
-  if (typeof item.command === "string") return item.command;
+  const command = commandText(item.command);
+  if (command) return command;
   if (typeof item.path === "string") return item.path;
   return "Activity details are not available.";
 }
