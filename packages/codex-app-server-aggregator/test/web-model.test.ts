@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ApiError, boardApi, eventCursorRecovery } from "../src/web/api.ts";
 import {
+  afterSuccessfulReconciliation,
   appendSelectedDeltas,
   approvalResult,
   classifyThread,
@@ -107,6 +108,14 @@ describe("board client mapping", () => {
       cursor: 141,
       event: { method: "item/agentMessage/completed", params: { threadId: "thread-1", itemId: "agent-139" } },
     }])).toBe(true);
+  });
+
+  test("does not clear polling errors after failed reconciliation", async () => {
+    let cleared = false;
+    expect(await afterSuccessfulReconciliation(async () => false, () => { cleared = true; })).toBe(false);
+    expect(cleared).toBe(false);
+    expect(await afterSuccessfulReconciliation(async () => true, () => { cleared = true; })).toBe(true);
+    expect(cleared).toBe(true);
   });
 
   test("prunes deltas incorporated by an authoritative thread snapshot", () => {

@@ -128,7 +128,7 @@ export class RestApiServer {
       threadIds: threads.filter((thread) => thread.machineId === machine.machineId && !thread.deleted).map((thread) => thread.threadId),
       dockerStatus: machine.state === "removed"
         ? null
-        : await this.options.inspectContainer?.(machine.containerId) ?? null,
+        : await inspectContainerStatus(this.options.inspectContainer, machine.containerId),
     })));
     return json({ data });
   }
@@ -296,6 +296,18 @@ async function jsonObject(request: Request): Promise<Record<string, unknown>> {
     throw new HttpError(400, "request body must be a JSON object");
   }
   return parsed as Record<string, unknown>;
+}
+
+async function inspectContainerStatus(
+  inspectContainer: RestServerOptions["inspectContainer"],
+  containerId: string,
+): Promise<string | null> {
+  if (!inspectContainer) return null;
+  try {
+    return await inspectContainer(containerId);
+  } catch {
+    return null;
+  }
 }
 
 async function boundedBody(request: Request): Promise<Uint8Array> {

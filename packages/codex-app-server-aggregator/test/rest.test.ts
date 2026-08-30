@@ -164,6 +164,51 @@ describe("aggregator REST API", () => {
     await daemon.close();
   });
 
+  test("keeps machine projection available when container inspection rejects", async () => {
+    const directory = temporaryDirectory();
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    const projectCwd = join(directory, "project");
+    state.saveMachine({ machineId: "machine-orphan", projectCwd, containerId: "container-missing-docker" });
+    state.saveThread({
+      threadId: "thread-orphan",
+      machineId: "machine-orphan",
+      projectCwd,
+      snapshot: { id: "thread-orphan", cwd: projectCwd },
+      loaded: true,
+      archived: false,
+      deleted: false,
+    });
+    const inspected: string[] = [];
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state,
+      factory: new RestFactory(),
+      inspectContainer: async (containerId) => {
+        inspected.push(containerId);
+        throw new Error("Docker binary is unavailable");
+      },
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    await daemon.start();
+
+    const machines = await fetchJson(`${daemon.httpUrl!.origin}/v1/machines`);
+    expect(machines).toEqual({
+      status: 200,
+      body: {
+        data: [{
+          machineId: "machine-orphan",
+          projectCwd,
+          containerId: "container-missing-docker",
+          state: "orphaned",
+          threadIds: ["thread-orphan"],
+          dockerStatus: null,
+        }],
+      },
+    });
+    expect(inspected).toEqual(["container-missing-docker"]);
+    await daemon.close();
+  });
+
   test("keeps live backends when a JSONL relay disconnects and allows REST concurrently", async () => {
     const directory = temporaryDirectory();
     const cwd = join(directory, "project");

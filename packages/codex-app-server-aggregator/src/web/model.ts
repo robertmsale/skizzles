@@ -34,6 +34,15 @@ export class LatestRequest {
   }
 }
 
+export async function afterSuccessfulReconciliation(
+  reconcile: () => Promise<boolean>,
+  onSuccess: () => void | Promise<void>,
+): Promise<boolean> {
+  if (!await reconcile()) return false;
+  await onSuccess();
+  return true;
+}
+
 export function projectRegistriesMatch(current: ProjectDto[], incoming: ProjectDto[]): boolean {
   if (current.length !== incoming.length) return false;
   const byCwd = new Map(current.map((project) => [project.cwd, project]));

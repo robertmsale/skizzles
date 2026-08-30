@@ -11,6 +11,7 @@ import {
 } from "react";
 import { ApiError, boardApi, eventCursorRecovery } from "./api.ts";
 import {
+  afterSuccessfulReconciliation,
   appendSelectedDeltas,
   approvalResult,
   classifyThread,
@@ -136,6 +137,7 @@ export function App() {
       boardRequests.commit(controller, () => {
         setError(message(cause));
         setLoading(false);
+        lastBoardRefreshAtRef.current = 0;
       });
       return false;
     } finally {
@@ -233,20 +235,25 @@ export function App() {
           const currentSelection = selectedRef.current;
           const selectedChanged = page.data.some((record) => eventThreadId(record.event) === currentSelection?.id
             && eventNeedsReconciliation(record.event));
-          await refreshBoard();
-          if (selectedChanged && selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
+          const reconciled = await afterSuccessfulReconciliation(refreshBoard, async () => {
+            if (!stopped) setError(null);
+            if (selectedChanged && selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
+          });
+          if (!reconciled) return;
+        } else {
+          setError(null);
         }
-        setError(null);
       } catch (cause) {
         const recovery = cause instanceof ApiError ? eventCursorRecovery(cause) : null;
         if (recovery) {
           eventCursorRef.current = recovery.after;
           eventStreamRef.current = recovery.stream;
           setDeltas(new Map());
-          await refreshBoard();
           const currentSelection = selectedRef.current;
-          if (selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
-          if (!stopped) setError(null);
+          await afterSuccessfulReconciliation(refreshBoard, async () => {
+            if (!stopped) setError(null);
+            if (selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
+          });
         } else if (!stopped) {
           setError(message(cause));
         }
