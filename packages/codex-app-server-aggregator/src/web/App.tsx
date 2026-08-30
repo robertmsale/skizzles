@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { ApiError, boardApi, eventCursorRecovery } from "./api.ts";
+import { parseMarkdownBlocks } from "./markdown.ts";
 import {
   appendSelectedDeltas,
   approvalResult,
@@ -555,10 +556,10 @@ function ApprovalCard({ request, onRespond, disabled }: { request: ServerRequest
 }
 
 function Markdown({ text }: { text: string }) {
-  const blocks = text.split(/```/);
-  return <div className="markdown">{blocks.map((block, index) => index % 2
-    ? <pre className="code-block" key={index}><code>{block.replace(/^\w+\n/, "")}</code></pre>
-    : <Fragment key={index}>{block.split("\n").map((line, lineIndex) => {
+  const blocks = parseMarkdownBlocks(text);
+  return <div className="markdown">{blocks.map((block, index) => block.type === "code"
+    ? <pre className="code-block" key={index}><code {...(block.language ? { "data-language": block.language } : {})}>{block.text}</code></pre>
+    : <Fragment key={index}>{block.text.split("\n").map((line, lineIndex) => {
         if (!line) return <br key={lineIndex} />;
         if (line.startsWith("### ")) return <h3 key={lineIndex}>{inline(line.slice(4))}</h3>;
         if (line.startsWith("## ")) return <h2 key={lineIndex}>{inline(line.slice(3))}</h2>;

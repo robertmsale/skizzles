@@ -159,7 +159,13 @@ export function approvalResult(request: ServerRequestDto, accepted: boolean): Re
   }
   if (request.method === "item/commandExecution/requestApproval") {
     const params = record(request.params);
-    if (!commandText(params.command) || typeof params.cwd !== "string" || !params.cwd.trim()) return null;
+    const completeCommand = Boolean(commandText(params.command) && typeof params.cwd === "string" && params.cwd.trim());
+    const network = record(params.networkApprovalContext);
+    const completeNetwork = Boolean(
+      typeof network.host === "string" && network.host
+      && typeof network.protocol === "string" && network.protocol,
+    );
+    if (!completeCommand && !completeNetwork) return null;
     return { decision: accepted ? "accept" : "decline" };
   }
   return null;
@@ -207,6 +213,7 @@ export function eventThreadId(event: { params?: unknown }): string | undefined {
 
 export function eventDelta(event: { method: string; params?: unknown }): { itemId: string; delta: string } | null {
   if (!/delta$/i.test(event.method)) return null;
+  if (event.method === "item/reasoning/textDelta") return null;
   const params = record(event.params);
   const itemId = typeof params.itemId === "string" ? params.itemId : undefined;
   const delta = typeof params.delta === "string" ? params.delta : typeof params.text === "string" ? params.text : undefined;
@@ -342,6 +349,9 @@ function structuredToolText(item: ThreadItemDto): string {
     }
     case "functionCallOutput":
       return item.output === undefined ? "" : `Output:\n${formatPayload(item.output)}`;
+    case "enteredReviewMode":
+    case "exitedReviewMode":
+      return typeof item.review === "string" ? item.review : "";
     case "webSearch": {
       const sections: string[] = [];
       if (typeof item.query === "string" && item.query) sections.push(`Query: ${item.query}`);
@@ -372,6 +382,9 @@ function commandApprovalDetail(params: Record<string, unknown>): string {
   }
   if (Array.isArray(params.commandActions) && params.commandActions.length) {
     sections.push(`Parsed actions:\n${formatPayload(params.commandActions)}`);
+  }
+  if (params.additionalPermissions !== null && params.additionalPermissions !== undefined) {
+    sections.push(`Additional permissions:\n${formatPayload(params.additionalPermissions)}`);
   }
   if (params.proposedExecpolicyAmendment !== null && params.proposedExecpolicyAmendment !== undefined) {
     sections.push(`Proposed execution policy:\n${formatPayload(params.proposedExecpolicyAmendment)}`);

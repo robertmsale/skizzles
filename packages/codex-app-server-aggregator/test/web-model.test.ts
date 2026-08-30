@@ -78,7 +78,7 @@ describe("board client mapping", () => {
     }, new Map([["cmd-live", "running test suite"]]))[0]?.text).toBe("bun test\n\nrunning test suite");
   });
 
-  test("preserves protocol-shaped file, MCP, function, command, and web-search activity", () => {
+  test("preserves protocol-shaped tool, web-search, and final review activity", () => {
     const entries = timelineEntries({
       ...baseThread,
       turns: [{
@@ -121,6 +121,7 @@ describe("board client mapping", () => {
             action: { type: "search", query: null, queries: ["Codex app-server protocol"] },
             results: [{ title: "Protocol guide", url: "https://example.test/protocol" }],
           },
+          { id: "review-1", type: "exitedReviewMode", review: "Found one blocking issue in the retry path." },
           { id: "function-1", type: "functionCallOutput", output: { ok: true, changed: 1 } },
           { id: "command-1", type: "commandExecution", command: "bun test", aggregatedOutput: "77 pass\n0 fail", status: "completed" },
         ],
@@ -141,6 +142,7 @@ describe("board client mapping", () => {
         label: "Web search",
         text: "Query: Codex app-server protocol\n\nAction:\n{\n  \"type\": \"search\",\n  \"query\": null,\n  \"queries\": [\n    \"Codex app-server protocol\"\n  ]\n}\n\nResults:\n[\n  {\n    \"title\": \"Protocol guide\",\n    \"url\": \"https://example.test/protocol\"\n  }\n]",
       },
+      { label: "Exited Review Mode", text: "Found one blocking issue in the retry path." },
       { label: "Function Call Output", text: "Output:\n{\n  \"ok\": true,\n  \"changed\": 1\n}" },
       { label: "Command", text: "bun test\n\n77 pass\n0 fail" },
     ]);
@@ -216,6 +218,10 @@ describe("board client mapping", () => {
         reason: "Needs network access",
         networkApprovalContext: { host: "registry.npmjs.org", protocol: "https" },
         commandActions: [{ type: "unknown", command: "bun test && rm -rf dist" }],
+        additionalPermissions: {
+          network: { enabled: true },
+          fileSystem: { read: ["/workspace/shared"], write: ["/workspace/repo/dist"] },
+        },
       },
     } as ServerRequestDto;
     expect(approvalResult(request, true)).toEqual({ decision: "accept" });
@@ -226,7 +232,8 @@ describe("board client mapping", () => {
       + "Environment: container-7\n\n"
       + "Reason:\nNeeds network access\n\n"
       + "Network approval:\n{\n  \"host\": \"registry.npmjs.org\",\n  \"protocol\": \"https\"\n}\n\n"
-      + "Parsed actions:\n[\n  {\n    \"type\": \"unknown\",\n    \"command\": \"bun test && rm -rf dist\"\n  }\n]",
+      + "Parsed actions:\n[\n  {\n    \"type\": \"unknown\",\n    \"command\": \"bun test && rm -rf dist\"\n  }\n]\n\n"
+      + "Additional permissions:\n{\n  \"network\": {\n    \"enabled\": true\n  },\n  \"fileSystem\": {\n    \"read\": [\n      \"/workspace/shared\"\n    ],\n    \"write\": [\n      \"/workspace/repo/dist\"\n    ]\n  }\n}",
     );
     expect(approvalResult({
       ...request,
@@ -240,6 +247,26 @@ describe("board client mapping", () => {
         environmentId: null,
       },
     } as ServerRequestDto, true)).toBeNull();
+    const networkOnly = {
+      id: "network-approval-1",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-2",
+        startedAtMs: 1_700_000_000_000,
+        command: null,
+        cwd: null,
+        environmentId: null,
+        reason: "Connect to the package registry",
+        networkApprovalContext: { host: "registry.npmjs.org", protocol: "https" },
+        commandActions: null,
+        additionalPermissions: null,
+      },
+    } as ServerRequestDto;
+    expect(approvalResult(networkOnly, true)).toEqual({ decision: "accept" });
+    expect(approvalResult(networkOnly, false)).toEqual({ decision: "decline" });
+    expect(requestDetail(networkOnly)).toContain("Network approval:\n{\n  \"host\": \"registry.npmjs.org\"");
     const fileChange = {
       id: "file-change-1",
       method: "item/fileChange/requestApproval",
@@ -294,6 +321,30 @@ describe("board client mapping", () => {
     ];
     expect(eventPageNeedsReconciliation(incidental)).toBe(false);
     expect(eventPageNeedsSelectedThreadRead(incidental, "thread-1")).toBe(false);
+  });
+
+  test("renders only summary reasoning deltas and prunes them after the authoritative read", () => {
+    const records = [
+      {
+        cursor: 1,
+        event: { method: "item/reasoning/summaryTextDelta", params: { threadId: "thread-1", itemId: "reasoning-1", summaryIndex: 0, delta: "Readable" } },
+      },
+      {
+        cursor: 2,
+        event: { method: "item/reasoning/textDelta", params: { threadId: "thread-1", itemId: "reasoning-1", contentIndex: 0, delta: "hidden raw chain of thought" } },
+      },
+      {
+        cursor: 3,
+        event: { method: "item/reasoning/summaryTextDelta", params: { threadId: "thread-1", itemId: "reasoning-1", summaryIndex: 0, delta: " summary" } },
+      },
+    ];
+    const deltas = appendSelectedDeltas(new Map(), records, "thread-1");
+    expect(deltas.get("reasoning-1")).toBe("Readable summary");
+    expect(eventDelta(records[1]!.event)).toBeNull();
+    expect(pruneIncorporatedDeltas({
+      ...baseThread,
+      turns: [{ id: "turn-1", items: [{ id: "reasoning-1", type: "reasoning", summary: ["Readable summary"], content: ["hidden raw chain of thought"] }] }],
+    }, deltas).has("reasoning-1")).toBe(false);
   });
 
   test("does not clear polling errors after failed reconciliation", async () => {
