@@ -205,7 +205,7 @@ export function eventDelta(event: { method: string; params?: unknown }): { itemI
 }
 
 export function eventNeedsReconciliation(event: { method: string; params?: unknown }): boolean {
-  return eventDelta(event) === null;
+  return BOARD_RECONCILIATION_METHODS.has(event.method);
 }
 
 export function eventMaterializesThread(event: { method: string; params?: unknown }): boolean {
@@ -214,6 +214,15 @@ export function eventMaterializesThread(event: { method: string; params?: unknow
 
 export function eventPageNeedsReconciliation(records: EventRecordDto[]): boolean {
   return records.some((record) => eventNeedsReconciliation(record.event));
+}
+
+export function eventPageNeedsSelectedThreadRead(
+  records: EventRecordDto[],
+  selectedThreadId: string | null,
+): boolean {
+  return Boolean(selectedThreadId && records.some((record) =>
+    eventThreadId(record.event) === selectedThreadId
+    && SELECTED_THREAD_READ_METHODS.has(record.event.method)));
 }
 
 export function appendSelectedDeltas(
@@ -291,7 +300,10 @@ function itemText(item: ThreadItemDto): string {
     return content.map((part) => {
       if (typeof part === "string") return part;
       const value = record(part);
-      return typeof value.text === "string" ? value.text : typeof value.value === "string" ? value.value : "";
+      if (value.type === "image" || value.type === "localImage") return "[Image attachment]";
+      if (typeof value.text === "string") return value.text;
+      if (typeof value.value === "string") return value.value;
+      return "";
     }).filter(Boolean).join("\n");
   }
   return "";
@@ -333,3 +345,20 @@ function record(value: unknown): Record<string, unknown> {
 function optionalStatus(value: unknown): { status: string } | Record<string, never> {
   return typeof value === "string" ? { status: value } : {};
 }
+
+const BOARD_RECONCILIATION_METHODS = new Set([
+  "thread/started",
+  "thread/status/changed",
+  "thread/archived",
+  "thread/deleted",
+  "thread/closed",
+  "thread/name/updated",
+]);
+
+const SELECTED_THREAD_READ_METHODS = new Set([
+  "thread/status/changed",
+  "turn/started",
+  "turn/completed",
+  "item/started",
+  "item/completed",
+]);

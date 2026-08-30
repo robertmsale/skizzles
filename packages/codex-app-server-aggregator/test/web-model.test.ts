@@ -10,6 +10,7 @@ import {
   eventDelta,
   eventMaterializesThread,
   eventPageNeedsReconciliation,
+  eventPageNeedsSelectedThreadRead,
   LatestRequest,
   PendingFirstTurnThreads,
   projectRegistriesMatch,
@@ -63,6 +64,23 @@ describe("board client mapping", () => {
       { role: "user", label: "You", text: "Ship it" },
       { role: "assistant", label: "Codex", text: "Working…done" },
       { role: "tool", label: "Command", text: "bun test" },
+    ]);
+  });
+
+  test("preserves image attachments in image-only and mixed user prompts", () => {
+    const entries = timelineEntries({
+      ...baseThread,
+      turns: [{
+        id: "turn-1",
+        items: [
+          { id: "image-only", type: "userMessage", content: [{ type: "image", url: "data:image/png;base64,ignored" }] },
+          { id: "mixed", type: "userMessage", content: [{ type: "text", text: "Explain this" }, { type: "localImage", path: "/workspace/chart.png" }] },
+        ],
+      }],
+    }, new Map());
+    expect(entries.map((entry) => entry.text)).toEqual([
+      "[Image attachment]",
+      "Explain this\n[Image attachment]",
     ]);
   });
 
@@ -124,7 +142,7 @@ describe("board client mapping", () => {
     } as ServerRequestDto, false)).toBeNull();
   });
 
-  test("keeps delta-only pages incremental and bounds output to the selected thread", () => {
+  test("keeps routine turn traffic local and bounds output to the selected thread", () => {
     const deltas = Array.from({ length: 140 }, (_, index) => ({
       cursor: index + 1,
       event: {
@@ -141,7 +159,24 @@ describe("board client mapping", () => {
     expect(eventPageNeedsReconciliation([{
       cursor: 141,
       event: { method: "item/agentMessage/completed", params: { threadId: "thread-1", itemId: "agent-139" } },
+    }])).toBe(false);
+    const lifecycle = [{
+      cursor: 142,
+      event: { method: "item/completed", params: { threadId: "thread-1", item: { id: "agent-139" } } },
+    }];
+    expect(eventPageNeedsReconciliation(lifecycle)).toBe(false);
+    expect(eventPageNeedsSelectedThreadRead(lifecycle, "thread-1")).toBe(true);
+    expect(eventPageNeedsSelectedThreadRead(lifecycle, "other-thread")).toBe(false);
+    expect(eventPageNeedsReconciliation([{
+      cursor: 143,
+      event: { method: "thread/status/changed", params: { threadId: "thread-1", status: { type: "active" } } },
     }])).toBe(true);
+    const incidental = [
+      { cursor: 144, event: { method: "thread/tokenUsage/updated", params: { threadId: "thread-1" } } },
+      { cursor: 145, event: { method: "configWarning", params: { summary: "warning" } } },
+    ];
+    expect(eventPageNeedsReconciliation(incidental)).toBe(false);
+    expect(eventPageNeedsSelectedThreadRead(incidental, "thread-1")).toBe(false);
   });
 
   test("does not clear polling errors after failed reconciliation", async () => {

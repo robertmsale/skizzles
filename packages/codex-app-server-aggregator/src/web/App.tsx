@@ -11,15 +11,14 @@ import {
 } from "react";
 import { ApiError, boardApi, eventCursorRecovery } from "./api.ts";
 import {
-  afterSuccessfulReconciliation,
   appendSelectedDeltas,
   approvalResult,
   classifyThread,
   clearOwnedError,
   DirtyThreadReads,
   eventMaterializesThread,
-  eventNeedsReconciliation,
   eventPageNeedsReconciliation,
+  eventPageNeedsSelectedThreadRead,
   eventThreadId,
   LatestRequest,
   PendingFirstTurnThreads,
@@ -178,7 +177,7 @@ export function App() {
       setThread(pendingSnapshot);
       setDeltas((current) => pruneIncorporatedDeltas(pendingSnapshot, current));
       dirtyThreadReads.resolve(view.id);
-      clearError("read");
+      clearError(errorOwner);
       return true;
     }
     const controller = threadRequests.begin();
@@ -190,7 +189,7 @@ export function App() {
         setThread(response.thread);
         setDeltas((current) => pruneIncorporatedDeltas(response.thread, current));
         dirtyThreadReads.resolve(view.id);
-        clearError("read");
+        clearError(errorOwner);
       });
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -253,8 +252,7 @@ export function App() {
           if (threadId && eventMaterializesThread(record.event)) pendingFirstTurns.materialized(threadId);
         }
         const selectedAtPage = selectedIdRef.current;
-        if (page.data.some((record) => eventThreadId(record.event) === selectedAtPage
-          && eventNeedsReconciliation(record.event))) {
+        if (eventPageNeedsSelectedThreadRead(page.data, selectedAtPage)) {
           dirtyThreadReads.mark(selectedAtPage);
         }
         eventCursorRef.current = page.nextCursor;
@@ -274,20 +272,17 @@ export function App() {
           setDeltas((current) => appendSelectedDeltas(current, page.data, currentSelectedId));
         }
         const currentSelection = selectedRef.current?.id === selectedIdRef.current ? selectedRef.current : null;
-        if (structuralEvents || periodicRefresh || (registryChanged && !selectedProjectRemoved)
-          || dirtyThreadReads.has(selectedIdRef.current)) {
-          const reconciled = await afterSuccessfulReconciliation(
-            () => refreshBoard(undefined, undefined, "background"),
-            async () => {
-              if (!stopped) clearError("background");
-              if (currentSelection && dirtyThreadReads.has(currentSelection.id)
-                && selectedIdRef.current === currentSelection.id) {
-                await readThread(currentSelection, "background");
-              }
-            },
-          );
+        const boardNeedsReconciliation = structuralEvents || periodicRefresh
+          || (registryChanged && !selectedProjectRemoved);
+        if (boardNeedsReconciliation) {
+          const reconciled = await refreshBoard(undefined, undefined, "background");
           if (!reconciled) return;
-        } else {
+          if (!stopped) clearError("background");
+        }
+        if (currentSelection && dirtyThreadReads.has(currentSelection.id)
+          && selectedIdRef.current === currentSelection.id) {
+          await readThread(currentSelection, "background");
+        } else if (!boardNeedsReconciliation) {
           clearError("background");
         }
       } catch (cause) {
@@ -298,16 +293,13 @@ export function App() {
           eventStreamRef.current = recovery.stream;
           setDeltas(new Map());
           const currentSelection = selectedRef.current?.id === selectedIdRef.current ? selectedRef.current : null;
-          await afterSuccessfulReconciliation(
-            () => refreshBoard(undefined, undefined, "background"),
-            async () => {
-              if (!stopped) clearError("background");
-              if (currentSelection && dirtyThreadReads.has(currentSelection.id)
-                && selectedIdRef.current === currentSelection.id) {
-                await readThread(currentSelection, "background");
-              }
-            },
-          );
+          const reconciled = await refreshBoard(undefined, undefined, "background");
+          if (!reconciled) return;
+          if (!stopped) clearError("background");
+          if (currentSelection && dirtyThreadReads.has(currentSelection.id)
+            && selectedIdRef.current === currentSelection.id) {
+            await readThread(currentSelection, "background");
+          }
         } else if (!stopped) {
           reportError("background", message(cause));
         }
