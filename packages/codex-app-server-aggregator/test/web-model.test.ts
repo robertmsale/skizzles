@@ -8,8 +8,10 @@ import {
   clearOwnedError,
   DirtyThreadReads,
   eventDelta,
+  eventMaterializesThread,
   eventPageNeedsReconciliation,
   LatestRequest,
+  PendingFirstTurnThreads,
   projectRegistriesMatch,
   projectForThread,
   pruneIncorporatedDeltas,
@@ -62,6 +64,34 @@ describe("board client mapping", () => {
       { role: "assistant", label: "Codex", text: "Working…done" },
       { role: "tool", label: "Command", text: "bun test" },
     ]);
+  });
+
+  test("preserves protocol reasoning summary arrays with content as fallback", () => {
+    const entries = timelineEntries({
+      ...baseThread,
+      turns: [{
+        id: "turn-1",
+        items: [
+          { id: "reasoning-summary", type: "reasoning", summary: ["Checked the protocol.", "Selected the safe path."], content: ["Hidden fallback."] },
+          { id: "reasoning-content", type: "reasoning", summary: [], content: ["Fallback reasoning."] },
+        ],
+      }],
+    }, new Map());
+    expect(entries.map((entry) => entry.text)).toEqual([
+      "Checked the protocol.\nSelected the safe path.",
+      "Fallback reasoning.",
+    ]);
+  });
+
+  test("retains the thread/start snapshot until a first-turn event materializes it", () => {
+    const pending = new PendingFirstTurnThreads();
+    pending.remember(baseThread);
+    expect(pending.snapshot(baseThread.id)).toBe(baseThread);
+    expect(eventMaterializesThread({ method: "thread/started", params: { thread: baseThread } })).toBe(false);
+    expect(eventMaterializesThread({ method: "turn/started", params: { threadId: baseThread.id } })).toBe(true);
+    expect(eventMaterializesThread({ method: "item/reasoning/summaryTextDelta", params: { threadId: baseThread.id } })).toBe(true);
+    pending.materialized(baseThread.id);
+    expect(pending.snapshot(baseThread.id)).toBeUndefined();
   });
 
   test("does not duplicate a streamed suffix already present in thread/read", () => {

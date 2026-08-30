@@ -17,10 +17,12 @@ import {
   classifyThread,
   clearOwnedError,
   DirtyThreadReads,
+  eventMaterializesThread,
   eventNeedsReconciliation,
   eventPageNeedsReconciliation,
   eventThreadId,
   LatestRequest,
+  PendingFirstTurnThreads,
   projectRegistriesMatch,
   projectForThread,
   pruneIncorporatedDeltas,
@@ -69,14 +71,17 @@ export function App() {
   const eventStreamRef = useRef<string | null>(null);
   const lastBoardRefreshAtRef = useRef(0);
   const dirtyThreadReadsRef = useRef<DirtyThreadReads | null>(null);
+  const pendingFirstTurnsRef = useRef<PendingFirstTurnThreads | null>(null);
   const boardRequestRef = useRef<LatestRequest | null>(null);
   const threadRequestRef = useRef<LatestRequest | null>(null);
   if (!boardRequestRef.current) boardRequestRef.current = new LatestRequest();
   if (!threadRequestRef.current) threadRequestRef.current = new LatestRequest();
   if (!dirtyThreadReadsRef.current) dirtyThreadReadsRef.current = new DirtyThreadReads();
+  if (!pendingFirstTurnsRef.current) pendingFirstTurnsRef.current = new PendingFirstTurnThreads();
   const boardRequests = boardRequestRef.current;
   const threadRequests = threadRequestRef.current;
   const dirtyThreadReads = dirtyThreadReadsRef.current;
+  const pendingFirstTurns = pendingFirstTurnsRef.current;
 
   const clearError = useCallback((owner: ErrorOwner) => {
     setError((current) => clearOwnedError(current, owner));
@@ -168,6 +173,14 @@ export function App() {
     errorOwner: "background" | "read" = "read",
   ): Promise<boolean> => {
     if (!view || selectedIdRef.current !== view.id) return false;
+    const pendingSnapshot = pendingFirstTurns.snapshot(view.id);
+    if (pendingSnapshot) {
+      setThread(pendingSnapshot);
+      setDeltas((current) => pruneIncorporatedDeltas(pendingSnapshot, current));
+      dirtyThreadReads.resolve(view.id);
+      clearError("read");
+      return true;
+    }
     const controller = threadRequests.begin();
     setThread(null);
     try {
@@ -187,7 +200,7 @@ export function App() {
     } finally {
       threadRequests.finish(controller);
     }
-  }, [clearError, dirtyThreadReads, reportError, threadRequests]);
+  }, [clearError, dirtyThreadReads, pendingFirstTurns, reportError, threadRequests]);
 
   useEffect(() => {
     setLoading(true);
@@ -235,6 +248,10 @@ export function App() {
           boardApi.projects(),
         ]);
         if (stopped) return;
+        for (const record of page.data) {
+          const threadId = eventThreadId(record.event);
+          if (threadId && eventMaterializesThread(record.event)) pendingFirstTurns.materialized(threadId);
+        }
         const selectedAtPage = selectedIdRef.current;
         if (page.data.some((record) => eventThreadId(record.event) === selectedAtPage
           && eventNeedsReconciliation(record.event))) {
@@ -300,7 +317,7 @@ export function App() {
     };
     void poll();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [changeProject, clearError, dirtyThreadReads, refreshBoard, readThread, reportError]);
+  }, [changeProject, clearError, dirtyThreadReads, pendingFirstTurns, refreshBoard, readThread, reportError]);
 
   const act = async (operation: () => Promise<unknown>, reconcile = true) => {
     setMutating(true);
@@ -322,6 +339,20 @@ export function App() {
       return;
     }
     void act(() => boardApi.respond(request.id, result));
+  };
+
+  const startNewThread = () => {
+    const cwd = projectCwdRef.current;
+    if (!cwd) return;
+    void act(async () => {
+      const result = await boardApi.startThread(cwd);
+      pendingFirstTurns.remember(result.thread);
+      setThreads((current) => [
+        { ...result.thread, lifecycle: "live" },
+        ...current.filter((candidate) => candidate.id !== result.thread.id),
+      ]);
+      selectThread(result.thread.id);
+    });
   };
 
   const visibleThreads = useMemo(() => threads.filter((candidate) => {
@@ -374,10 +405,7 @@ export function App() {
         pending={requests}
         onAdd={() => setShowAdd(true)}
         onRemove={(cwd) => void act(() => boardApi.removeProject(cwd))}
-        onNew={() => projectCwd && void act(async () => {
-          const started = await boardApi.startThread(projectCwd);
-          selectThread(started.thread.id);
-        })}
+        onNew={startNewThread}
         disabled={mutating || loading}
       />
       <main className="main-pane">
@@ -386,14 +414,14 @@ export function App() {
           machine={currentMachine}
           approvalCount={requests.length}
           onInbox={() => setShowInbox(true)}
-          onArchive={() => selected && window.confirm("Archive permanently removes its container and rollout. Continue?") && void act(async () => { await boardApi.archive(selected.id); setDeltas(new Map()); })}
-          onDelete={() => selected && window.confirm("Delete this thread permanently?") && void act(async () => { await boardApi.delete(selected.id); setDeltas(new Map()); })}
+          onArchive={() => selected && window.confirm("Archive permanently removes its container and rollout. Continue?") && void act(async () => { await boardApi.archive(selected.id); pendingFirstTurns.materialized(selected.id); setDeltas(new Map()); })}
+          onDelete={() => selected && window.confirm("Delete this thread permanently?") && void act(async () => { await boardApi.delete(selected.id); pendingFirstTurns.materialized(selected.id); setDeltas(new Map()); })}
           disabled={mutating || loading}
         />
         {error && <div className="error-banner" role="alert"><span>{error.message}</span><button onClick={() => setError(null)} aria-label="Dismiss">×</button></div>}
         {loading ? <Empty title="Loading board…" detail="Reading the aggregator state." />
           : !projects.length ? <Empty title="Register a project to begin" detail="Choose a host Git checkout with a container-reachable origin." action={<button className="primary" onClick={() => setShowAdd(true)}>Add project</button>} />
-          : !selected ? <Empty title="No threads here" detail="Start a Codex thread in the selected project." action={<button className="primary" onClick={() => projectCwd && void act(async () => { const result = await boardApi.startThread(projectCwd); selectThread(result.thread.id); })}>New thread</button>} />
+          : !selected ? <Empty title="No threads here" detail="Start a Codex thread in the selected project." action={<button className="primary" onClick={startNewThread}>New thread</button>} />
           : <Conversation
               key={selected.id}
               view={selected}
@@ -405,6 +433,7 @@ export function App() {
               onSend={(text) => void act(async () => {
                 const sentView = selected;
                 await boardApi.sendTurn(sentView.id, text);
+                pendingFirstTurns.materialized(sentView.id);
                 if (selectedIdRef.current === sentView.id) await readThread(sentView);
               })}
               onInterrupt={() => {

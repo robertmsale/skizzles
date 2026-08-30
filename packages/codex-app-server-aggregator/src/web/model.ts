@@ -51,6 +51,22 @@ export class DirtyThreadReads {
   }
 }
 
+export class PendingFirstTurnThreads {
+  private readonly snapshots = new Map<string, ThreadDto>();
+
+  remember(thread: ThreadDto): void {
+    this.snapshots.set(thread.id, thread);
+  }
+
+  snapshot(threadId: string): ThreadDto | undefined {
+    return this.snapshots.get(threadId);
+  }
+
+  materialized(threadId: string): void {
+    this.snapshots.delete(threadId);
+  }
+}
+
 export type OwnedError = { owner: "background" | "read" | "mutation"; message: string };
 
 export function clearOwnedError(current: OwnedError | null, owner: OwnedError["owner"]): OwnedError | null {
@@ -192,6 +208,10 @@ export function eventNeedsReconciliation(event: { method: string; params?: unkno
   return eventDelta(event) === null;
 }
 
+export function eventMaterializesThread(event: { method: string; params?: unknown }): boolean {
+  return event.method.startsWith("turn/") || event.method.startsWith("item/");
+}
+
 export function eventPageNeedsReconciliation(records: EventRecordDto[]): boolean {
   return records.some((record) => eventNeedsReconciliation(record.event));
 }
@@ -261,6 +281,10 @@ export function relativeTime(value: number | undefined, now = Date.now()): strin
 function itemText(item: ThreadItemDto): string {
   for (const key of ["text", "output", "aggregatedOutput", "result", "summary"]) {
     if (typeof item[key] === "string") return item[key] as string;
+  }
+  if (Array.isArray(item.summary)) {
+    const summary = item.summary.filter((part): part is string => typeof part === "string").join("\n");
+    if (summary) return summary;
   }
   const content = item.content;
   if (Array.isArray(content)) {
