@@ -130,6 +130,13 @@ describe("board client mapping", () => {
     } as ServerRequestDto;
     expect(approvalResult(request, true)).toEqual({ decision: "accept" });
     expect(approvalResult(request, false)).toEqual({ decision: "decline" });
+    const fileChange = {
+      id: "file-change-1",
+      method: "item/fileChange/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "file-change-item", reason: "Update files" },
+    } as ServerRequestDto;
+    expect(approvalResult(fileChange, true)).toBeNull();
+    expect(approvalResult(fileChange, false)).toBeNull();
     expect(approvalResult({
       id: "input-1",
       method: "item/tool/requestUserInput",

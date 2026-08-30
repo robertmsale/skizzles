@@ -333,9 +333,19 @@ export function App() {
     void act(() => boardApi.respond(request.id, result));
   };
 
+  const clearThreadSearch = useCallback(() => {
+    if (search) setSearch("");
+    if (!searchTermRef.current) return;
+    boardRequests.cancel();
+    searchTermRef.current = "";
+    setSearchTerm("");
+    setLoading(true);
+  }, [boardRequests, search]);
+
   const startNewThread = () => {
     const cwd = projectCwdRef.current;
     if (!cwd) return;
+    clearThreadSearch();
     void act(async () => {
       const result = await boardApi.startThread(cwd);
       pendingFirstTurns.remember(result.thread);
@@ -369,17 +379,11 @@ export function App() {
       return;
     }
     clearError("mutation");
-    if (search) setSearch("");
-    if (searchTermRef.current) {
-      boardRequests.cancel();
-      searchTermRef.current = "";
-      setSearchTerm("");
-      setLoading(true);
-    }
+    clearThreadSearch();
     if (projectCwdRef.current !== targetProject) changeProject(targetProject);
     selectThread(threadId);
     setShowInbox(false);
-  }, [boardRequests, changeProject, clearError, machines, reportError, search, selectThread]);
+  }, [changeProject, clearError, clearThreadSearch, machines, reportError, selectThread]);
 
   return (
     <div className="app-shell">

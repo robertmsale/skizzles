@@ -154,7 +154,7 @@ export function approvalResult(request: ServerRequestDto, accepted: boolean): Re
   if (request.method === "applyPatchApproval" || request.method === "execCommandApproval") {
     return { decision: accepted ? "approved" : "denied" };
   }
-  if (request.method === "item/commandExecution/requestApproval" || request.method === "item/fileChange/requestApproval") {
+  if (request.method === "item/commandExecution/requestApproval") {
     return { decision: accepted ? "accept" : "decline" };
   }
   return null;
