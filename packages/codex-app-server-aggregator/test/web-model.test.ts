@@ -212,7 +212,20 @@ describe("board client mapping", () => {
     expect(replaceOwnedError(read, background)).toBe(read);
     expect(clearOwnedError(mutation, "background")).toBe(mutation);
     expect(clearOwnedError(mutation, "read")).toBe(mutation);
+    expect(clearOwnedError(read, "read")).toBeNull();
     expect(clearOwnedError(background, "background")).toBeNull();
+  });
+
+  test("keeps a failed selected-thread read dirty until its retry succeeds", () => {
+    const dirty = new DirtyThreadReads();
+    dirty.mark("thread-1");
+    expect(dirty.has("thread-1")).toBe(true);
+    expect(dirty.has("thread-2")).toBe(false);
+
+    // A failed retry leaves the marker intact; only an authoritative read resolves it.
+    expect(dirty.has("thread-1")).toBe(true);
+    dirty.resolve("thread-1");
+    expect(dirty.has("thread-1")).toBe(false);
   });
 
   test("resolves aggregator-wide request threads to their project", () => {

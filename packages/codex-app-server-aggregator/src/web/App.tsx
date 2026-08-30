@@ -177,6 +177,7 @@ export function App() {
       setThread(pendingSnapshot);
       setDeltas((current) => pruneIncorporatedDeltas(pendingSnapshot, current));
       dirtyThreadReads.resolve(view.id);
+      clearError("read");
       clearError(errorOwner);
       return true;
     }
@@ -189,11 +190,16 @@ export function App() {
         setThread(response.thread);
         setDeltas((current) => pruneIncorporatedDeltas(response.thread, current));
         dirtyThreadReads.resolve(view.id);
+        clearError("read");
         clearError(errorOwner);
       });
     } catch (cause) {
       if (!controller.signal.aborted) {
-        threadRequests.commit(controller, () => reportError(errorOwner, message(cause)));
+        threadRequests.commit(controller, () => {
+          if (selectedIdRef.current !== view.id) return;
+          dirtyThreadReads.mark(view.id);
+          reportError(errorOwner, message(cause));
+        });
       }
       return false;
     } finally {
