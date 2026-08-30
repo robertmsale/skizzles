@@ -1,6 +1,7 @@
 import type {
   ServerRequestDto,
   EventRecordDto,
+  MachineDto,
   ProjectDto,
   ThreadDto,
   ThreadItemDto,
@@ -32,6 +33,32 @@ export class LatestRequest {
     this.current?.abort();
     this.current = null;
   }
+}
+
+export class DirtyThreadReads {
+  private readonly threadIds = new Set<string>();
+
+  mark(threadId: string | null | undefined): void {
+    if (threadId) this.threadIds.add(threadId);
+  }
+
+  has(threadId: string | null | undefined): boolean {
+    return Boolean(threadId && this.threadIds.has(threadId));
+  }
+
+  resolve(threadId: string): void {
+    this.threadIds.delete(threadId);
+  }
+}
+
+export type OwnedError = { owner: "background" | "read" | "mutation"; message: string };
+
+export function clearOwnedError(current: OwnedError | null, owner: OwnedError["owner"]): OwnedError | null {
+  return current?.owner === owner ? null : current;
+}
+
+export function replaceOwnedError(current: OwnedError | null, incoming: OwnedError): OwnedError {
+  return current && current.owner !== "background" && incoming.owner === "background" ? current : incoming;
 }
 
 export async function afterSuccessfulReconciliation(
@@ -77,6 +104,11 @@ export function requestThreadId(request: ServerRequestDto): string | undefined {
   return typeof params.threadId === "string"
     ? params.threadId
     : typeof params.conversationId === "string" ? params.conversationId : undefined;
+}
+
+export function projectForThread(machines: MachineDto[], threadId: string | undefined): string | undefined {
+  if (!threadId) return undefined;
+  return machines.find((machine) => machine.threadIds.includes(threadId))?.projectCwd;
 }
 
 export function requestLabel(request: ServerRequestDto): string {

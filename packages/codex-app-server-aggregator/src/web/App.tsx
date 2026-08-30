@@ -15,16 +15,20 @@ import {
   appendSelectedDeltas,
   approvalResult,
   classifyThread,
+  clearOwnedError,
+  DirtyThreadReads,
   eventNeedsReconciliation,
   eventPageNeedsReconciliation,
   eventThreadId,
   LatestRequest,
   projectRegistriesMatch,
+  projectForThread,
   pruneIncorporatedDeltas,
   relativeTime,
   requestDetail,
   requestLabel,
   requestThreadId,
+  replaceOwnedError,
   threadHasSystemError,
   threadIsRunning,
   threadForSelection,
@@ -34,6 +38,8 @@ import {
 import type { MachineDto, ProjectDto, ServerRequestDto, ThreadDto, ThreadView } from "./types.ts";
 
 type ThreadFilter = "current" | "snapshot" | "archived";
+type ErrorOwner = "background" | "read" | "mutation";
+type BoardError = { owner: ErrorOwner; message: string };
 const BOARD_RECONCILIATION_INTERVAL_MS = 15_000;
 
 export function App() {
@@ -47,7 +53,7 @@ export function App() {
   const [filter, setFilter] = useState<ThreadFilter>("current");
   const [search, setSearch] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<BoardError | null>(null);
   const [loading, setLoading] = useState(true);
   const [mutating, setMutating] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
@@ -62,12 +68,23 @@ export function App() {
   const eventCursorRef = useRef(0);
   const eventStreamRef = useRef<string | null>(null);
   const lastBoardRefreshAtRef = useRef(0);
+  const dirtyThreadReadsRef = useRef<DirtyThreadReads | null>(null);
   const boardRequestRef = useRef<LatestRequest | null>(null);
   const threadRequestRef = useRef<LatestRequest | null>(null);
   if (!boardRequestRef.current) boardRequestRef.current = new LatestRequest();
   if (!threadRequestRef.current) threadRequestRef.current = new LatestRequest();
+  if (!dirtyThreadReadsRef.current) dirtyThreadReadsRef.current = new DirtyThreadReads();
   const boardRequests = boardRequestRef.current;
   const threadRequests = threadRequestRef.current;
+  const dirtyThreadReads = dirtyThreadReadsRef.current;
+
+  const clearError = useCallback((owner: ErrorOwner) => {
+    setError((current) => clearOwnedError(current, owner));
+  }, []);
+
+  const reportError = useCallback((owner: ErrorOwner, errorMessage: string) => {
+    setError((current) => replaceOwnedError(current, { owner, message: errorMessage }));
+  }, []);
 
   const selectThread = useCallback((id: string | null) => {
     if (selectedIdRef.current !== id) {
@@ -82,6 +99,7 @@ export function App() {
   const refreshBoard = useCallback(async (
     requestedCwd = projectCwdRef.current,
     requestedSearch = searchTermRef.current,
+    errorOwner: ErrorOwner = "background",
   ): Promise<boolean> => {
     const controller = boardRequests.begin();
     try {
@@ -100,7 +118,7 @@ export function App() {
           setRequests([]);
           selectThread(null);
           setLoading(false);
-          setError(null);
+          clearError(errorOwner);
           lastBoardRefreshAtRef.current = Date.now();
         });
       }
@@ -129,13 +147,13 @@ export function App() {
         setRequests(approvals.data);
         selectThread(nextSelectedId);
         setLoading(false);
-        setError(null);
+        clearError(errorOwner);
         lastBoardRefreshAtRef.current = Date.now();
       });
     } catch (cause) {
       if (controller.signal.aborted) return false;
       boardRequests.commit(controller, () => {
-        setError(message(cause));
+        reportError(errorOwner, message(cause));
         setLoading(false);
         lastBoardRefreshAtRef.current = 0;
       });
@@ -143,31 +161,33 @@ export function App() {
     } finally {
       boardRequests.finish(controller);
     }
-  }, [boardRequests, selectThread]);
+  }, [boardRequests, clearError, reportError, selectThread]);
 
-  const readThread = useCallback(async (view: ThreadView | null) => {
+  const readThread = useCallback(async (
+    view: ThreadView | null,
+    errorOwner: "background" | "read" = "read",
+  ): Promise<boolean> => {
+    if (!view || selectedIdRef.current !== view.id) return false;
     const controller = threadRequests.begin();
     setThread(null);
-    if (!view) {
-      threadRequests.finish(controller);
-      return;
-    }
     try {
       const response = await boardApi.readThread(view.id, view.lifecycle === "live", controller.signal);
-      threadRequests.commit(controller, () => {
+      return threadRequests.commit(controller, () => {
         if (selectedIdRef.current !== view.id || response.thread.id !== view.id) return;
         setThread(response.thread);
         setDeltas((current) => pruneIncorporatedDeltas(response.thread, current));
-        setError(null);
+        dirtyThreadReads.resolve(view.id);
+        clearError("read");
       });
     } catch (cause) {
       if (!controller.signal.aborted) {
-        threadRequests.commit(controller, () => setError(message(cause)));
+        threadRequests.commit(controller, () => reportError(errorOwner, message(cause)));
       }
+      return false;
     } finally {
       threadRequests.finish(controller);
     }
-  }, [threadRequests]);
+  }, [clearError, dirtyThreadReads, reportError, threadRequests]);
 
   useEffect(() => {
     setLoading(true);
@@ -215,6 +235,11 @@ export function App() {
           boardApi.projects(),
         ]);
         if (stopped) return;
+        const selectedAtPage = selectedIdRef.current;
+        if (page.data.some((record) => eventThreadId(record.event) === selectedAtPage
+          && eventNeedsReconciliation(record.event))) {
+          dirtyThreadReads.mark(selectedAtPage);
+        }
         eventCursorRef.current = page.nextCursor;
         eventStreamRef.current = page.streamId;
         setRequests(approvals.data);
@@ -231,31 +256,43 @@ export function App() {
           const currentSelectedId = selectedIdRef.current;
           setDeltas((current) => appendSelectedDeltas(current, page.data, currentSelectedId));
         }
-        if (structuralEvents || periodicRefresh || (registryChanged && !selectedProjectRemoved)) {
-          const currentSelection = selectedRef.current;
-          const selectedChanged = page.data.some((record) => eventThreadId(record.event) === currentSelection?.id
-            && eventNeedsReconciliation(record.event));
-          const reconciled = await afterSuccessfulReconciliation(refreshBoard, async () => {
-            if (!stopped) setError(null);
-            if (selectedChanged && selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
-          });
+        const currentSelection = selectedRef.current?.id === selectedIdRef.current ? selectedRef.current : null;
+        if (structuralEvents || periodicRefresh || (registryChanged && !selectedProjectRemoved)
+          || dirtyThreadReads.has(selectedIdRef.current)) {
+          const reconciled = await afterSuccessfulReconciliation(
+            () => refreshBoard(undefined, undefined, "background"),
+            async () => {
+              if (!stopped) clearError("background");
+              if (currentSelection && dirtyThreadReads.has(currentSelection.id)
+                && selectedIdRef.current === currentSelection.id) {
+                await readThread(currentSelection, "background");
+              }
+            },
+          );
           if (!reconciled) return;
         } else {
-          setError(null);
+          clearError("background");
         }
       } catch (cause) {
         const recovery = cause instanceof ApiError ? eventCursorRecovery(cause) : null;
         if (recovery) {
+          dirtyThreadReads.mark(selectedIdRef.current);
           eventCursorRef.current = recovery.after;
           eventStreamRef.current = recovery.stream;
           setDeltas(new Map());
-          const currentSelection = selectedRef.current;
-          await afterSuccessfulReconciliation(refreshBoard, async () => {
-            if (!stopped) setError(null);
-            if (selectedIdRef.current === currentSelection?.id) await readThread(currentSelection);
-          });
+          const currentSelection = selectedRef.current?.id === selectedIdRef.current ? selectedRef.current : null;
+          await afterSuccessfulReconciliation(
+            () => refreshBoard(undefined, undefined, "background"),
+            async () => {
+              if (!stopped) clearError("background");
+              if (currentSelection && dirtyThreadReads.has(currentSelection.id)
+                && selectedIdRef.current === currentSelection.id) {
+                await readThread(currentSelection, "background");
+              }
+            },
+          );
         } else if (!stopped) {
-          setError(message(cause));
+          reportError("background", message(cause));
         }
       } finally {
         if (!stopped) timer = window.setTimeout(poll, 900);
@@ -263,16 +300,16 @@ export function App() {
     };
     void poll();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [changeProject, refreshBoard, readThread]);
+  }, [changeProject, clearError, dirtyThreadReads, refreshBoard, readThread, reportError]);
 
   const act = async (operation: () => Promise<unknown>, reconcile = true) => {
     setMutating(true);
-    setError(null);
+    clearError("mutation");
     try {
       await operation();
-      if (reconcile) await refreshBoard();
+      if (reconcile) await refreshBoard(undefined, undefined, "mutation");
     } catch (cause) {
-      setError(message(cause));
+      reportError("mutation", message(cause));
     } finally {
       setMutating(false);
     }
@@ -281,7 +318,7 @@ export function App() {
   const respond = (request: ServerRequestDto, accepted: boolean) => {
     const result = approvalResult(request, accepted);
     if (!result) {
-      setError(`${requestLabel(request)} needs a structured response that this board does not support.`);
+      reportError("mutation", `${requestLabel(request)} needs a structured response that this board does not support.`);
       return;
     }
     void act(() => boardApi.respond(request.id, result));
@@ -301,6 +338,25 @@ export function App() {
     : null;
   const pendingForThread = requests.filter((request) => requestThreadId(request) === selectedId);
   const selectedThread = threadForSelection(thread, selectedId);
+  const openInboxThread = useCallback((threadId?: string) => {
+    const targetProject = projectForThread(machines, threadId);
+    if (!threadId || !targetProject || !projectsRef.current.some((project) => project.cwd === targetProject)) {
+      reportError("mutation", "The request's project is no longer available.");
+      setShowInbox(false);
+      return;
+    }
+    clearError("mutation");
+    if (search) setSearch("");
+    if (searchTermRef.current) {
+      boardRequests.cancel();
+      searchTermRef.current = "";
+      setSearchTerm("");
+      setLoading(true);
+    }
+    if (projectCwdRef.current !== targetProject) changeProject(targetProject);
+    selectThread(threadId);
+    setShowInbox(false);
+  }, [boardRequests, changeProject, clearError, machines, reportError, search, selectThread]);
 
   return (
     <div className="app-shell">
@@ -334,18 +390,23 @@ export function App() {
           onDelete={() => selected && window.confirm("Delete this thread permanently?") && void act(async () => { await boardApi.delete(selected.id); setDeltas(new Map()); })}
           disabled={mutating || loading}
         />
-        {error && <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss">×</button></div>}
+        {error && <div className="error-banner" role="alert"><span>{error.message}</span><button onClick={() => setError(null)} aria-label="Dismiss">×</button></div>}
         {loading ? <Empty title="Loading board…" detail="Reading the aggregator state." />
           : !projects.length ? <Empty title="Register a project to begin" detail="Choose a host Git checkout with a container-reachable origin." action={<button className="primary" onClick={() => setShowAdd(true)}>Add project</button>} />
           : !selected ? <Empty title="No threads here" detail="Start a Codex thread in the selected project." action={<button className="primary" onClick={() => projectCwd && void act(async () => { const result = await boardApi.startThread(projectCwd); selectThread(result.thread.id); })}>New thread</button>} />
           : <Conversation
+              key={selected.id}
               view={selected}
               thread={selectedThread}
               requests={pendingForThread}
               deltas={deltas}
               disabled={mutating || !selectedThread}
               onRespond={respond}
-              onSend={(text) => void act(async () => { await boardApi.sendTurn(selected.id, text); await readThread(selected); })}
+              onSend={(text) => void act(async () => {
+                const sentView = selected;
+                await boardApi.sendTurn(sentView.id, text);
+                if (selectedIdRef.current === sentView.id) await readThread(sentView);
+              })}
               onInterrupt={() => {
                 const turnId = selectedThread?.turns?.at(-1)?.id;
                 if (turnId) void act(() => boardApi.interrupt(selected.id, turnId));
@@ -353,7 +414,7 @@ export function App() {
             />}
       </main>
       {showAdd && <AddProject onClose={() => setShowAdd(false)} onSubmit={(cwd) => void act(async () => { const result = await boardApi.addProject(cwd); changeProject(result.project.cwd); setShowAdd(false); })} disabled={mutating} />}
-      {showInbox && <Inbox requests={requests} onClose={() => setShowInbox(false)} onSelect={(id) => { if (id) selectThread(id); setShowInbox(false); }} onRespond={respond} disabled={mutating} />}
+      {showInbox && <Inbox requests={requests} onClose={() => setShowInbox(false)} onSelect={openInboxThread} onRespond={respond} disabled={mutating} />}
     </div>
   );
 }

@@ -5,18 +5,22 @@ import {
   appendSelectedDeltas,
   approvalResult,
   classifyThread,
+  clearOwnedError,
+  DirtyThreadReads,
   eventDelta,
   eventPageNeedsReconciliation,
   LatestRequest,
   projectRegistriesMatch,
+  projectForThread,
   pruneIncorporatedDeltas,
   relativeTime,
+  replaceOwnedError,
   threadForSelection,
   threadHasSystemError,
   threadIsRunning,
   timelineEntries,
 } from "../src/web/model.ts";
-import type { ServerRequestDto, ThreadDto } from "../src/web/types.ts";
+import type { MachineDto, ServerRequestDto, ThreadDto } from "../src/web/types.ts";
 
 const baseThread: ThreadDto = {
   id: "thread-1",
@@ -111,11 +115,45 @@ describe("board client mapping", () => {
   });
 
   test("does not clear polling errors after failed reconciliation", async () => {
+    const dirty = new DirtyThreadReads();
+    dirty.mark("thread-1");
     let cleared = false;
-    expect(await afterSuccessfulReconciliation(async () => false, () => { cleared = true; })).toBe(false);
+    expect(await afterSuccessfulReconciliation(async () => false, () => {
+      cleared = true;
+      dirty.resolve("thread-1");
+    })).toBe(false);
     expect(cleared).toBe(false);
-    expect(await afterSuccessfulReconciliation(async () => true, () => { cleared = true; })).toBe(true);
+    expect(dirty.has("thread-1")).toBe(true);
+    expect(await afterSuccessfulReconciliation(async () => true, () => {
+      cleared = true;
+      dirty.resolve("thread-1");
+    })).toBe(true);
     expect(cleared).toBe(true);
+    expect(dirty.has("thread-1")).toBe(false);
+  });
+
+  test("keeps read and mutation errors owned while background polling recovers", () => {
+    const mutation = { owner: "mutation" as const, message: "Turn failed" };
+    const read = { owner: "read" as const, message: "Thread read failed" };
+    const background = { owner: "background" as const, message: "Poll failed" };
+    expect(replaceOwnedError(mutation, background)).toBe(mutation);
+    expect(replaceOwnedError(read, background)).toBe(read);
+    expect(clearOwnedError(mutation, "background")).toBe(mutation);
+    expect(clearOwnedError(mutation, "read")).toBe(mutation);
+    expect(clearOwnedError(background, "background")).toBeNull();
+  });
+
+  test("resolves aggregator-wide request threads to their project", () => {
+    const machines: MachineDto[] = [{
+      machineId: "machine-b",
+      projectCwd: "/host/project-b",
+      containerId: "container-b",
+      state: "active",
+      dockerStatus: "running",
+      threadIds: ["thread-b"],
+    }];
+    expect(projectForThread(machines, "thread-b")).toBe("/host/project-b");
+    expect(projectForThread(machines, "thread-a")).toBeUndefined();
   });
 
   test("prunes deltas incorporated by an authoritative thread snapshot", () => {
