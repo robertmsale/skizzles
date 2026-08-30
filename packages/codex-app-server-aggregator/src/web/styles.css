@@ -160,7 +160,7 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .inbox-main { display: block; width: 100%; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .inbox-main strong, .inbox-main span { display: block; }
 .inbox-main strong { font-size: 12px; }
-.inbox-main span { margin: 5px 0 12px; color: var(--muted); font: 10px/1.5 DM Mono, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inbox-main span { margin: 5px 0 12px; color: var(--muted); font: 10px/1.5 DM Mono, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 @keyframes dot-pulse { 50% { opacity: .35; transform: scale(.75); } }
 @media (max-width: 760px) {

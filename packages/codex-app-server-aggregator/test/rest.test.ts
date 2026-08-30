@@ -209,6 +209,73 @@ describe("aggregator REST API", () => {
     await daemon.close();
   });
 
+  test("projects only the visible fleet without scanning removed machine history", async () => {
+    const directory = temporaryDirectory();
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    const projectCwd = join(directory, "project");
+    for (let index = 0; index < 120; index += 1) {
+      const machineId = `machine-removed-${String(index).padStart(3, "0")}`;
+      state.saveMachine({ machineId, projectCwd, containerId: `container-removed-${index}` });
+      state.saveThread({
+        threadId: `thread-removed-${index}`,
+        machineId,
+        projectCwd,
+        snapshot: undefined,
+        loaded: false,
+        archived: true,
+        deleted: index % 2 === 0,
+      });
+      state.markMachine(machineId, "removed");
+    }
+    state.saveMachine({ machineId: "machine-visible", projectCwd, containerId: "container-visible" });
+    state.saveThread({
+      threadId: "thread-visible",
+      machineId: "machine-visible",
+      projectCwd,
+      snapshot: undefined,
+      loaded: true,
+      archived: false,
+      deleted: false,
+    });
+    state.saveThread({
+      threadId: "thread-deleted",
+      machineId: "machine-visible",
+      projectCwd,
+      snapshot: undefined,
+      loaded: false,
+      archived: false,
+      deleted: true,
+    });
+    const inspected: string[] = [];
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state,
+      factory: new RestFactory(),
+      inspectContainer: async (containerId) => {
+        inspected.push(containerId);
+        return "running";
+      },
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    await daemon.start();
+
+    expect(await fetchJson(`${daemon.httpUrl!.origin}/v1/machines`)).toEqual({
+      status: 200,
+      body: {
+        data: [{
+          machineId: "machine-visible",
+          projectCwd,
+          containerId: "container-visible",
+          state: "orphaned",
+          threadIds: ["thread-visible"],
+          dockerStatus: "running",
+        }],
+      },
+    });
+    expect(inspected).toEqual(["container-visible"]);
+    await daemon.close();
+  });
+
   test("keeps live backends when a JSONL relay disconnects and allows REST concurrently", async () => {
     const directory = temporaryDirectory();
     const cwd = join(directory, "project");

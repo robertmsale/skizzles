@@ -141,6 +141,9 @@ export function requestLabel(request: ServerRequestDto): string {
 
 export function requestDetail(request: ServerRequestDto): string {
   const params = record(request.params);
+  if (request.method === "item/commandExecution/requestApproval" || request.method === "execCommandApproval") {
+    return commandApprovalDetail(params);
+  }
   const command = params.command;
   if (typeof command === "string") return command;
   if (Array.isArray(command)) return command.filter((part): part is string => typeof part === "string").join(" ");
@@ -155,6 +158,8 @@ export function approvalResult(request: ServerRequestDto, accepted: boolean): Re
     return { decision: accepted ? "approved" : "denied" };
   }
   if (request.method === "item/commandExecution/requestApproval") {
+    const params = record(request.params);
+    if (!commandText(params.command) || typeof params.cwd !== "string" || !params.cwd.trim()) return null;
     return { decision: accepted ? "accept" : "decline" };
   }
   return null;
@@ -337,6 +342,13 @@ function structuredToolText(item: ThreadItemDto): string {
     }
     case "functionCallOutput":
       return item.output === undefined ? "" : `Output:\n${formatPayload(item.output)}`;
+    case "webSearch": {
+      const sections: string[] = [];
+      if (typeof item.query === "string" && item.query) sections.push(`Query: ${item.query}`);
+      if (item.action !== null && item.action !== undefined) sections.push(`Action:\n${formatPayload(item.action)}`);
+      if (item.results !== null && item.results !== undefined) sections.push(`Results:\n${formatPayload(item.results)}`);
+      return sections.join("\n\n");
+    }
     default:
       return "";
   }
@@ -345,6 +357,29 @@ function structuredToolText(item: ThreadItemDto): string {
 function commandText(value: unknown): string {
   if (typeof value === "string") return value;
   return Array.isArray(value) ? value.filter((part): part is string => typeof part === "string").join(" ") : "";
+}
+
+function commandApprovalDetail(params: Record<string, unknown>): string {
+  const command = commandText(params.command);
+  const sections = [
+    `Command:\n${command || "Not provided"}`,
+    `Working directory: ${typeof params.cwd === "string" && params.cwd ? params.cwd : "Not provided"}`,
+    `Environment: ${typeof params.environmentId === "string" && params.environmentId ? params.environmentId : "Not specified"}`,
+  ];
+  if (typeof params.reason === "string" && params.reason) sections.push(`Reason:\n${params.reason}`);
+  if (params.networkApprovalContext !== null && params.networkApprovalContext !== undefined) {
+    sections.push(`Network approval:\n${formatPayload(params.networkApprovalContext)}`);
+  }
+  if (Array.isArray(params.commandActions) && params.commandActions.length) {
+    sections.push(`Parsed actions:\n${formatPayload(params.commandActions)}`);
+  }
+  if (params.proposedExecpolicyAmendment !== null && params.proposedExecpolicyAmendment !== undefined) {
+    sections.push(`Proposed execution policy:\n${formatPayload(params.proposedExecpolicyAmendment)}`);
+  }
+  if (Array.isArray(params.proposedNetworkPolicyAmendments) && params.proposedNetworkPolicyAmendments.length) {
+    sections.push(`Proposed network policy:\n${formatPayload(params.proposedNetworkPolicyAmendments)}`);
+  }
+  return sections.join("\n\n");
 }
 
 function formatFileChange(value: unknown): string {

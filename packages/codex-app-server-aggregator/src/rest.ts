@@ -121,14 +121,10 @@ export class RestApiServer {
   }
 
   private async machines(): Promise<Response> {
-    const machines = this.options.state?.machines() ?? [];
-    const threads = this.options.state?.threads() ?? [];
+    const machines = this.options.state?.machineFleet() ?? [];
     const data = await Promise.all(machines.map(async (machine) => ({
       ...machine,
-      threadIds: threads.filter((thread) => thread.machineId === machine.machineId && !thread.deleted).map((thread) => thread.threadId),
-      dockerStatus: machine.state === "removed"
-        ? null
-        : await inspectContainerStatus(this.options.inspectContainer, machine.containerId),
+      dockerStatus: await inspectContainerStatus(this.options.inspectContainer, machine.containerId),
     })));
     return json({ data });
   }

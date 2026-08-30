@@ -16,6 +16,8 @@ export type StoredMachine = {
   state: "active" | "orphaned" | "removed";
 };
 
+export type StoredMachineFleet = StoredMachine & { threadIds: string[] };
+
 export type StoredThread = {
   threadId: string;
   machineId: string;
@@ -62,7 +64,13 @@ export class AggregatorState {
         archived INTEGER NOT NULL CHECK (archived IN (0, 1)),
         deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
         updated_at INTEGER NOT NULL
-      ) STRICT
+      ) STRICT;
+
+      CREATE INDEX IF NOT EXISTS machines_by_state
+      ON machines (state, machine_id);
+
+      CREATE INDEX IF NOT EXISTS visible_threads_by_machine
+      ON threads (machine_id, deleted, thread_id)
     `);
   }
 
@@ -170,6 +178,26 @@ export class AggregatorState {
     `).all().map(machineFromRow);
   }
 
+  machineFleet(): StoredMachineFleet[] {
+    const rows = this.database.query<MachineFleetRow, []>(`
+      SELECT m.machine_id, m.project_cwd, m.container_id, m.state, t.thread_id
+      FROM machines AS m
+      LEFT JOIN threads AS t ON t.machine_id = m.machine_id AND t.deleted = 0
+      WHERE m.state IN ('active', 'orphaned')
+      ORDER BY m.machine_id, t.thread_id
+    `).all();
+    const fleet: StoredMachineFleet[] = [];
+    for (const row of rows) {
+      let machine = fleet.at(-1);
+      if (machine?.machineId !== row.machine_id) {
+        machine = { ...machineFromRow(row), threadIds: [] };
+        fleet.push(machine);
+      }
+      if (row.thread_id !== null) machine.threadIds.push(row.thread_id);
+    }
+    return fleet;
+  }
+
   saveThread(thread: StoredThread, now = Date.now()): void {
     this.database.query(`
       INSERT INTO threads (
@@ -226,6 +254,8 @@ type MachineRow = {
   container_id: string;
   state: StoredMachine["state"];
 };
+
+type MachineFleetRow = MachineRow & { thread_id: string | null };
 
 function machineFromRow(row: MachineRow): StoredMachine {
   return {

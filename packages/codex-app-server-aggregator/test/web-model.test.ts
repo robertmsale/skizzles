@@ -17,6 +17,7 @@ import {
   projectForThread,
   pruneIncorporatedDeltas,
   relativeTime,
+  requestDetail,
   replaceOwnedError,
   threadForSelection,
   threadHasSystemError,
@@ -77,7 +78,7 @@ describe("board client mapping", () => {
     }, new Map([["cmd-live", "running test suite"]]))[0]?.text).toBe("bun test\n\nrunning test suite");
   });
 
-  test("preserves protocol-shaped file, MCP, function, and command activity", () => {
+  test("preserves protocol-shaped file, MCP, function, command, and web-search activity", () => {
     const entries = timelineEntries({
       ...baseThread,
       turns: [{
@@ -113,6 +114,13 @@ describe("board client mapping", () => {
             error: { message: "File not found" },
             status: "failed",
           },
+          {
+            id: "search-1",
+            type: "webSearch",
+            query: "Codex app-server protocol",
+            action: { type: "search", query: null, queries: ["Codex app-server protocol"] },
+            results: [{ title: "Protocol guide", url: "https://example.test/protocol" }],
+          },
           { id: "function-1", type: "functionCallOutput", output: { ok: true, changed: 1 } },
           { id: "command-1", type: "commandExecution", command: "bun test", aggregatedOutput: "77 pass\n0 fail", status: "completed" },
         ],
@@ -128,6 +136,10 @@ describe("board client mapping", () => {
       {
         label: "MCP · filesystem",
         text: "Tool: read_file\n\nArguments:\n{\n  \"path\": \"/workspace/missing.txt\"\n}\n\nError:\n{\n  \"message\": \"File not found\"\n}",
+      },
+      {
+        label: "Web search",
+        text: "Query: Codex app-server protocol\n\nAction:\n{\n  \"type\": \"search\",\n  \"query\": null,\n  \"queries\": [\n    \"Codex app-server protocol\"\n  ]\n}\n\nResults:\n[\n  {\n    \"title\": \"Protocol guide\",\n    \"url\": \"https://example.test/protocol\"\n  }\n]",
       },
       { label: "Function Call Output", text: "Output:\n{\n  \"ok\": true,\n  \"changed\": 1\n}" },
       { label: "Command", text: "bun test\n\n77 pass\n0 fail" },
@@ -193,10 +205,41 @@ describe("board client mapping", () => {
     const request = {
       id: "approval-1",
       method: "item/commandExecution/requestApproval",
-      params: { threadId: "thread-1" },
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        startedAtMs: 1_700_000_000_000,
+        command: "bun test && rm -rf dist",
+        cwd: "/workspace/repo",
+        environmentId: "container-7",
+        reason: "Needs network access",
+        networkApprovalContext: { host: "registry.npmjs.org", protocol: "https" },
+        commandActions: [{ type: "unknown", command: "bun test && rm -rf dist" }],
+      },
     } as ServerRequestDto;
     expect(approvalResult(request, true)).toEqual({ decision: "accept" });
     expect(approvalResult(request, false)).toEqual({ decision: "decline" });
+    expect(requestDetail(request)).toBe(
+      "Command:\nbun test && rm -rf dist\n\n"
+      + "Working directory: /workspace/repo\n\n"
+      + "Environment: container-7\n\n"
+      + "Reason:\nNeeds network access\n\n"
+      + "Network approval:\n{\n  \"host\": \"registry.npmjs.org\",\n  \"protocol\": \"https\"\n}\n\n"
+      + "Parsed actions:\n[\n  {\n    \"type\": \"unknown\",\n    \"command\": \"bun test && rm -rf dist\"\n  }\n]",
+    );
+    expect(approvalResult({
+      ...request,
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        startedAtMs: 1_700_000_000_000,
+        command: "bun test",
+        cwd: null,
+        environmentId: null,
+      },
+    } as ServerRequestDto, true)).toBeNull();
     const fileChange = {
       id: "file-change-1",
       method: "item/fileChange/requestApproval",
