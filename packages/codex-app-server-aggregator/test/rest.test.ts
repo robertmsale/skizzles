@@ -26,7 +26,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state: new AggregatorState(databasePath),
-      factory,
+      containerFactory: factory,
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0 },
     });
     await daemon.start();
@@ -62,13 +63,20 @@ describe("aggregator REST API", () => {
     expect(factory.transport.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
 
     const machines = await fetchJson(`${origin}/v1/machines`);
-    expect(machines.body).toMatchObject({
-      data: [{
-        machineId: factory.transport.machineId,
-        threadIds: [factory.threadId],
-        state: "active",
-        dockerStatus: null,
-      }],
+    const fleet = (machines.body as { data: Array<Record<string, unknown>> }).data;
+    expect(fleet).toHaveLength(2);
+    expect(fleet.find((machine) => machine.machineId === "host")).toMatchObject({
+      kind: "host",
+      containerId: null,
+      threadIds: [],
+      state: "active",
+    });
+    expect(fleet.find((machine) => machine.machineId === factory.transport.machineId)).toMatchObject({
+      kind: "container",
+      threadIds: [factory.threadId],
+      threads: [{ threadId: factory.threadId, projectCwd: cwd, executionMode: "container" }],
+      state: "active",
+      dockerStatus: null,
     });
 
     const listed = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
@@ -148,7 +156,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
-      factory: new RestFactory(),
+      containerFactory: new RestFactory(),
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0, staticDirectory },
     });
     await daemon.start();
@@ -182,7 +191,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state,
-      factory: new RestFactory(),
+      containerFactory: new RestFactory(),
+      hostFactory: new RestFactory("host"),
       inspectContainer: async (containerId) => {
         inspected.push(containerId);
         throw new Error("Docker binary is unavailable");
@@ -197,10 +207,12 @@ describe("aggregator REST API", () => {
       body: {
         data: [{
           machineId: "machine-orphan",
+          kind: "container",
           projectCwd,
           containerId: "container-missing-docker",
           state: "orphaned",
           threadIds: ["thread-orphan"],
+          threads: [{ threadId: "thread-orphan", projectCwd, executionMode: "container" }],
           dockerStatus: null,
         }],
       },
@@ -250,7 +262,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state,
-      factory: new RestFactory(),
+      containerFactory: new RestFactory(),
+      hostFactory: new RestFactory("host"),
       inspectContainer: async (containerId) => {
         inspected.push(containerId);
         return "running";
@@ -264,10 +277,12 @@ describe("aggregator REST API", () => {
       body: {
         data: [{
           machineId: "machine-visible",
+          kind: "container",
           projectCwd,
           containerId: "container-visible",
           state: "orphaned",
           threadIds: ["thread-visible"],
+          threads: [{ threadId: "thread-visible", projectCwd, executionMode: "container" }],
           dockerStatus: "running",
         }],
       },
@@ -286,7 +301,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath,
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
-      factory,
+      containerFactory: factory,
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0 },
     });
     await daemon.start();
@@ -322,7 +338,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath,
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
-      factory,
+      containerFactory: factory,
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0 },
     });
     await daemon.start();
@@ -358,7 +375,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath,
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
-      factory,
+      containerFactory: factory,
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0 },
     });
     await daemon.start();
@@ -384,7 +402,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
-      factory: new RestFactory(),
+      containerFactory: new RestFactory(),
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0, token: "test-secret", staticDirectory },
     });
     await daemon.start();
@@ -407,7 +426,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
-      factory: new RestFactory(),
+      containerFactory: new RestFactory(),
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0 },
     });
     await daemon.start();
@@ -429,7 +449,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
-      factory: new RestFactory(),
+      containerFactory: new RestFactory(),
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0 },
     });
     await daemon.start();
@@ -467,7 +488,8 @@ describe("aggregator REST API", () => {
     const daemon = new AggregatorDaemon({
       socketPath: join(directory, "aggregator.sock"),
       state: new AggregatorState(join(directory, "aggregator.sqlite3")),
-      factory,
+      containerFactory: factory,
+      hostFactory: new RestFactory("host"),
       http: { hostname: "127.0.0.1", port: 0 },
     });
     await daemon.start();
@@ -494,14 +516,18 @@ describe("aggregator REST API", () => {
 
 class RestFactory implements BackendFactory {
   readonly threadId = "0198f000-7000-7000-8000-000000000000";
-  readonly transport = new RestTransport((message) => this.handle(message));
+  readonly transport: RestTransport;
   delayNextRead = false;
   pauseNextCreate = false;
   createBlocked = false;
   private pendingReadId: RpcId | undefined;
   private releaseBlockedCreate: (() => void) | undefined;
 
-  async create(_project: RegisteredProject): Promise<BackendTransport> {
+  constructor(mode: "host" | "container" = "container") {
+    this.transport = new RestTransport(mode, (message) => this.handle(message));
+  }
+
+  async create(_project?: RegisteredProject): Promise<BackendTransport> {
     if (this.pauseNextCreate) {
       this.pauseNextCreate = false;
       this.createBlocked = true;
@@ -553,6 +579,10 @@ class RestFactory implements BackendFactory {
       this.transport.emit({ method: "thread/started", params: { thread } });
       return;
     }
+    if (message.method === "model/list") {
+      this.transport.emit({ id: message.id, result: { data: [{ id: "fake-model" }], nextCursor: null } });
+      return;
+    }
     if (message.method === "turn/start") {
       this.transport.emit({ id: message.id, result: { turn: { id: "turn-1" } } });
       this.transport.emit({
@@ -590,16 +620,23 @@ class RestFactory implements BackendFactory {
 }
 
 class RestTransport implements BackendTransport {
-  readonly machineId = "rest-machine";
-  readonly containerId = "rest-container";
-  readonly workspace = CONTAINER_WORKSPACE;
+  readonly machineId: string;
+  readonly containerId: string | undefined;
+  readonly workspace: string | undefined;
+  readonly kind: "host" | "container";
+  readonly disposable: boolean;
   readonly ready = Promise.resolve();
   readonly stdout: ReadableStream<Uint8Array>;
   readonly writes: RpcMessage[] = [];
   destroyed = false;
   private controller!: ReadableStreamDefaultController<Uint8Array>;
 
-  constructor(private readonly onWrite: (message: RpcMessage) => Promise<void>) {
+  constructor(kind: "host" | "container", private readonly onWrite: (message: RpcMessage) => Promise<void>) {
+    this.kind = kind;
+    this.machineId = kind === "host" ? "host" : "rest-machine";
+    this.containerId = kind === "container" ? "rest-container" : undefined;
+    this.workspace = kind === "container" ? CONTAINER_WORKSPACE : undefined;
+    this.disposable = kind === "container";
     this.stdout = new ReadableStream<Uint8Array>({ start: (controller) => { this.controller = controller; } });
   }
 

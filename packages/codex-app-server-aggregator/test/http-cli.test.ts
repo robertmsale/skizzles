@@ -53,6 +53,19 @@ describe("aggregator HTTP control CLI", () => {
         path: "/v1/server-requests/approval-1/responses",
         body: { result: { decision: "acceptForSession" } },
       });
+
+    expect((await parseHttpCliArgs([
+      "threads", "start", "/tmp/project", "--mode", "host",
+      "--params", '{"skizzlesExecutionMode":"container","approvalPolicy":"on-request"}',
+    ], { env: {} })).command).toEqual({
+      method: "POST",
+      path: "/v1/threads",
+      body: {
+        cwd: "/tmp/project",
+        skizzlesExecutionMode: "host",
+        approvalPolicy: "on-request",
+      },
+    });
   });
 
   test("rejects ambiguous messages and malformed advanced JSON", async () => {
@@ -60,6 +73,8 @@ describe("aggregator HTTP control CLI", () => {
       .rejects.toThrow("exactly one of --message or --stdin");
     await expect(parseHttpCliArgs(["threads", "start", "/tmp/project", "--params", "[]"], { env: {} }))
       .rejects.toThrow("--params must be a JSON object");
+    await expect(parseHttpCliArgs(["threads", "start", "/tmp/project", "--mode", "hybrid"], { env: {} }))
+      .rejects.toThrow("--mode must be host or container");
     await expect(parseHttpCliArgs(["requests", "respond", "approval-1", "--result", "{"], { env: {} }))
       .rejects.toThrow("--result must be valid JSON");
   });

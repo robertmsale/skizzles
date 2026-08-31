@@ -4,7 +4,7 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { AppServerAggregator } from "./aggregator.ts";
-import type { BackendFactory } from "./backend.ts";
+import type { BackendFactory, HostBackendFactory } from "./backend.ts";
 import { AggregatorBridge, type AggregatorClientSession } from "./bridge.ts";
 import { readJsonLines, SerialMessageSink } from "./jsonl.ts";
 import { ProjectRegistry } from "./projects.ts";
@@ -15,7 +15,8 @@ import { AggregatorState, type StoredMachine } from "./state.ts";
 export type AggregatorDaemonOptions = {
   socketPath: string;
   state: AggregatorState;
-  factory: BackendFactory;
+  containerFactory: BackendFactory;
+  hostFactory: HostBackendFactory;
   removeOrphan?: (machine: StoredMachine) => Promise<void>;
   inspectContainer?: (containerId: string) => Promise<string | null>;
   http?: Omit<RestServerOptions, "log">;
@@ -43,7 +44,8 @@ export class AggregatorDaemon {
     this.log = options.log ?? (() => undefined);
     this.bridge = new AggregatorBridge(this.log);
     this.aggregator = new AppServerAggregator({
-      factory: this.options.factory,
+      containerFactory: this.options.containerFactory,
+      hostFactory: this.options.hostFactory,
       registry: this.registry,
       state: this.options.state,
       output: this.bridge,
@@ -178,6 +180,10 @@ export class AggregatorDaemon {
 
   private async recoverOrphans(): Promise<void> {
     for (const machine of this.options.state.recoverOrphanedMachines()) {
+      if (machine.kind === "host") {
+        this.options.state.markMachine(machine.machineId, "removed");
+        continue;
+      }
       if (!this.options.removeOrphan) {
         this.log(`orphaned container requires cleanup: ${machine.containerId}`);
         continue;

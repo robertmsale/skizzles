@@ -26,10 +26,10 @@ before implementation against the local T3 Code checkout and the current public 
 - No T3 worktrees, reviews, merge controls, campaign state, terminal/file panes, or repository source
   was copied. T3 Code is only a feel and interaction reference.
 - No model/provider marketplace, personas, knowledge base, sharing, analytics, or generic dashboard
-  from the public chat products. The aggregator owns projects, disposable machines, live threads,
-  snapshot-only records, approvals, and an in-memory event journal; the UI mirrors that truth.
-- No optimistic fiction after restart. An unloaded retained thread is readable only from its stored
-  snapshot and cannot send, interrupt, resume, or unarchive. Archive is presented as irreversible
-  container/rollout removal.
+  from the public chat products. The aggregator owns projects, one shared host backend, disposable
+  container machines, live threads, snapshots, approvals, and an in-memory event journal.
+- No optimistic fiction after restart. A stale container thread remains snapshot-only. Persisted
+  host threads retain their host binding, but the board does not silently resume them. Archive copy
+  distinguishes destructive container release from a host thread that leaves the shared server up.
 - No new streaming protocol. Cursor polling remains the source of incremental activity; HTTP 410
   causes a full reconciliation from REST resources and pending requests.

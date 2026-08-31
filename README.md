@@ -13,6 +13,7 @@ Skizzles also includes a Grok Build harness with full root/Worker/Explorer/Revie
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **T3 Code orchestration** — a worktree-first task collaboration skill plus bundled CLI/daemon for local or private-tailnet coordination across T3 projects, with an optional host-only settled-worktree artifact reaper. 🌳
+- **Host/container app-server aggregation** — a source-only backend with host-native discovery, sticky per-thread execution modes, disposable Docker writers, and one REST/React management surface. It is deliberately not a plugin payload. 🐳
 - **ompweb orchestration** — a small `ompctl` HTTP client for listing, creating, messaging, reading, and checking default OMP sessions through an existing community ompweb server. 🥧
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
 - **Durable role brains** — tiny generated Default/Worker/Explorer/Reviewer overlays bind each duty to a configured model and reasoning effort that survives eviction and rework. 🧠✨
@@ -20,7 +21,7 @@ Skizzles also includes a Grok Build harness with full root/Worker/Explorer/Revie
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
 - **A polite config handshake** — enable the hooks, then choose passive native orchestration or proactive lean fan-out without trampling the rest of `config.toml`. 🤝
 
-Everything is maintained once in the canonical roots and workspace packages, then staged into a versioned plugin. 🎯
+Plugin-owned content is maintained once in the canonical roots and workspace packages, then staged into a versioned plugin. Source-only backends keep their own explicit package boundary. 🎯
 
 ## Pick your ride
 
@@ -49,6 +50,10 @@ bunx skills add ./skills --skill install-skizzles
 ```
 
 Container Lab, T3 orchestration, and the ompweb orchestration client are fully included in this repository—not merely documented here. A source-linked installation runs the canonical runtimes directly from the checkout, while the stable plugin carries dependency-self-contained bundles. If you install only a copied skill, `install-skizzles` guides Codex through obtaining a selected Skizzles version and installing the complete surface; launchers can also use existing distinct PATH commands. Host PATH, LaunchAgent, Keychain, and Tailscale wiring are optional, explicit, and machine-local.
+
+The [Codex app-server aggregator](packages/codex-app-server-aggregator/README.md) is a separate
+source workspace package. Run it from a checkout when you want its host/container backend; plugin
+installation and staging do not install or configure it.
 
 After installing the complete plugin surface, Skizzles can safely finish the Codex-side handshake:
 

@@ -2,6 +2,7 @@ import type { RpcMessage } from "./protocol.ts";
 import type { ThreadListParams } from "./generated/v2/ThreadListParams.ts";
 import type { ThreadSourceKind } from "./generated/v2/ThreadSourceKind.ts";
 import type { StoredThread } from "./state.ts";
+import { DEFAULT_EXECUTION_MODE, type ExecutionMode } from "./execution.ts";
 
 export type { ThreadListParams } from "./generated/v2/ThreadListParams.ts";
 
@@ -10,6 +11,7 @@ export type ThreadSnapshot = Record<string, unknown> & { id: string };
 type ThreadEntry = {
   machineId: string;
   projectCwd: string;
+  executionMode: ExecutionMode;
   snapshot: ThreadSnapshot | undefined;
   loaded: boolean;
   archived: boolean;
@@ -27,6 +29,7 @@ export class Topology {
       this.threads.set(thread.threadId, {
         machineId: thread.machineId,
         projectCwd: thread.projectCwd,
+        executionMode: thread.executionMode,
         snapshot,
         loaded: false,
         archived: thread.archived,
@@ -36,14 +39,25 @@ export class Topology {
     }
   }
 
-  bind(machineId: string, projectCwd: string, threadId: string, snapshot?: ThreadSnapshot): void {
+  bind(
+    machineId: string,
+    projectCwd: string,
+    threadId: string,
+    snapshot?: ThreadSnapshot,
+    executionMode: ExecutionMode = DEFAULT_EXECUTION_MODE,
+  ): void {
     const current = this.threads.get(threadId);
-    if (current && current.machineId !== machineId) {
-      throw new Error(`thread ${threadId} was minted by more than one backend`);
+    if (current && (
+      current.machineId !== machineId ||
+      current.projectCwd !== projectCwd ||
+      current.executionMode !== executionMode
+    )) {
+      throw new Error(`thread ${threadId} cannot change its execution backend`);
     }
     this.threads.set(threadId, {
       machineId,
       projectCwd,
+      executionMode,
       snapshot: sanitizeSnapshot(snapshot) ?? current?.snapshot,
       loaded: loadedFromStatus(snapshot?.status) ?? current?.loaded ?? true,
       archived: current?.archived ?? false,
@@ -52,15 +66,20 @@ export class Topology {
     this.persistEntry(threadId);
   }
 
-  observe(machineId: string, projectCwd: string, message: RpcMessage): void {
+  observe(
+    machineId: string,
+    projectCwd: string,
+    message: RpcMessage,
+    executionMode: ExecutionMode = DEFAULT_EXECUTION_MODE,
+  ): void {
     const envelope = message as Record<string, unknown>;
     const result = asRecord(envelope.result);
     const params = asRecord(envelope.params);
     const thread = asThread(result?.thread) ?? asThread(params?.thread);
-    if (thread) this.bind(machineId, projectCwd, thread.id, thread);
+    if (thread) this.bind(machineId, projectCwd, thread.id, thread, executionMode);
 
     const reviewThreadId = result?.reviewThreadId;
-    if (typeof reviewThreadId === "string") this.bind(machineId, projectCwd, reviewThreadId);
+    if (typeof reviewThreadId === "string") this.bind(machineId, projectCwd, reviewThreadId, undefined, executionMode);
 
     const method = typeof envelope.method === "string" ? envelope.method : undefined;
     const threadId = typeof params?.threadId === "string" ? params.threadId : undefined;
@@ -84,6 +103,16 @@ export class Topology {
   machineFor(threadId: string): string | undefined {
     const entry = this.threads.get(threadId);
     return entry && !entry.deleted ? entry.machineId : undefined;
+  }
+
+  projectFor(threadId: string): string | undefined {
+    const entry = this.threads.get(threadId);
+    return entry && !entry.deleted ? entry.projectCwd : undefined;
+  }
+
+  modeFor(threadId: string): ExecutionMode | undefined {
+    const entry = this.threads.get(threadId);
+    return entry && !entry.deleted ? entry.executionMode : undefined;
   }
 
   snapshot(threadId: string): ThreadSnapshot | undefined {
@@ -116,6 +145,12 @@ export class Topology {
 
   hasLiveThreads(machineId: string): boolean {
     return [...this.threads.values()].some((entry) => entry.machineId === machineId && !entry.archived && !entry.deleted);
+  }
+
+  hasLiveThreadsForProject(projectCwd: string): boolean {
+    return [...this.threads.values()].some((entry) => (
+      entry.projectCwd === projectCwd && !entry.archived && !entry.deleted
+    ));
   }
 
   loaded(machineIds: ReadonlySet<string>, params: { cursor?: string | null; limit?: number | null }): {

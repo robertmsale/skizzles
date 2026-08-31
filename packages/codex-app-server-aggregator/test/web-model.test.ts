@@ -392,11 +392,13 @@ describe("board client mapping", () => {
   test("resolves aggregator-wide request threads to their project", () => {
     const machines: MachineDto[] = [{
       machineId: "machine-b",
+      kind: "container",
       projectCwd: "/host/project-b",
       containerId: "container-b",
       state: "active",
       dockerStatus: "running",
       threadIds: ["thread-b"],
+      threads: [{ threadId: "thread-b", projectCwd: "/host/project-b", executionMode: "container" }],
     }];
     expect(projectForThread(machines, "thread-b")).toBe("/host/project-b");
     expect(projectForThread(machines, "thread-a")).toBeUndefined();

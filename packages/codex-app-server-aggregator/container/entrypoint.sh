@@ -10,6 +10,12 @@ if [ -d /codex-home-seed ]; then
   cp -R /codex-home-seed/. "$CODEX_HOME"/
 fi
 
+if [ -f "$CODEX_HOME/config.toml" ]; then
+  container_host="${CODEX_AGGREGATOR_CONTAINER_HOST:-host.docker.internal}"
+  sed "s/{{SKIZZLES_CONTAINER_HOST}}/$container_host/g" "$CODEX_HOME/config.toml" > "$CODEX_HOME/config.toml.tmp"
+  mv "$CODEX_HOME/config.toml.tmp" "$CODEX_HOME/config.toml"
+fi
+
 git clone -- "$CODEX_AGGREGATOR_REPO_URL" "$workspace"
 if [ -n "${CODEX_AGGREGATOR_REPO_REF:-}" ]; then
   git -C "$workspace" fetch --depth=1 origin "$CODEX_AGGREGATOR_REPO_REF"
