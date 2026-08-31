@@ -1,5 +1,5 @@
-import { statSync } from "node:fs";
-import { resolve } from "node:path";
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { BackendFactory, BackendTransport } from "./backend.ts";
 import type { RegisteredProject } from "./state.ts";
 
@@ -14,12 +14,21 @@ export type DockerBackendOptions = {
   providerReadyUrl?: string | undefined;
   passEnv?: string[] | undefined;
   dockerBinary?: string | undefined;
+  containerHost?: string | undefined;
+  hostGatewayMode?: HostGatewayMode | undefined;
 };
 
+export type HostGatewayMode = "auto" | "native" | "host-gateway";
+
 export class DockerBackendFactory implements BackendFactory {
-  private readonly options: Omit<DockerBackendOptions, "image" | "dockerBinary"> & {
+  private readonly options: Omit<
+    DockerBackendOptions,
+    "image" | "dockerBinary" | "containerHost" | "hostGatewayMode"
+  > & {
     image: string;
     dockerBinary: string;
+    containerHost: string;
+    hostGatewayMode: HostGatewayMode;
   };
 
   constructor(options: DockerBackendOptions) {
@@ -28,17 +37,25 @@ export class DockerBackendFactory implements BackendFactory {
     validateText("image", image);
     validateText("docker binary", dockerBinary);
     if (options.codexHomeTemplate) {
-      const path = resolve(options.codexHomeTemplate);
-      if (!statSync(path).isDirectory()) throw new Error(`Codex home template is not a directory: ${path}`);
+      const path = validateCodexHomeTemplate(options.codexHomeTemplate);
       options = { ...options, codexHomeTemplate: path };
+    }
+    const containerHost = options.containerHost ?? "host.docker.internal";
+    validateHostname(containerHost);
+    const hostGatewayMode = options.hostGatewayMode ?? "auto";
+    if (!(["auto", "native", "host-gateway"] as const).includes(hostGatewayMode)) {
+      throw new Error(`invalid host gateway mode: ${hostGatewayMode}`);
     }
     for (const name of options.passEnv ?? []) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`invalid environment variable name: ${name}`);
     }
-    this.options = { ...options, image, dockerBinary };
+    this.options = { ...options, image, dockerBinary, containerHost, hostGatewayMode };
   }
 
   async create(project: RegisteredProject): Promise<BackendTransport> {
+    if (project.cloneUrl === null) {
+      throw new Error(`project is host-only because it has no container-reachable Git origin: ${project.cwd}`);
+    }
     validateText("repo URL", project.cloneUrl);
     const machineId = crypto.randomUUID();
     const name = `skizzles-codex-${machineId}`;
@@ -48,10 +65,17 @@ export class DockerBackendFactory implements BackendFactory {
       "--name", name,
       "--label", "dev.skizzles.codex-aggregator=true",
       "--label", `dev.skizzles.machine-id=${machineId}`,
-      "--add-host", "host.docker.internal:host-gateway",
       "--env", `CODEX_AGGREGATOR_REPO_URL=${project.cloneUrl}`,
       "--env", `CODEX_AGGREGATOR_WORKSPACE=${CONTAINER_WORKSPACE}`,
+      "--env", `CODEX_AGGREGATOR_CONTAINER_HOST=${this.options.containerHost}`,
     ];
+    const gatewayMode = await resolveHostGatewayMode(
+      this.options.dockerBinary,
+      this.options.hostGatewayMode,
+    );
+    if (gatewayMode === "host-gateway") {
+      args.push("--add-host", `${this.options.containerHost}:host-gateway`);
+    }
     if (this.options.providerCommand) args.push("--env", `CODEX_AGGREGATOR_PROVIDER_COMMAND=${this.options.providerCommand}`);
     if (this.options.providerReadyUrl) args.push("--env", `CODEX_AGGREGATOR_PROVIDER_READY_URL=${this.options.providerReadyUrl}`);
     for (const name of this.options.passEnv ?? []) args.push("--env", name);
@@ -103,6 +127,8 @@ class DockerTransport implements BackendTransport {
   readonly machineId: string;
   readonly containerId: string;
   readonly workspace: string;
+  readonly kind = "container" as const;
+  readonly disposable = true;
   readonly ready: Promise<void>;
   readonly stdout: ReadableStream<Uint8Array>;
   readonly stderr: ReadableStream<Uint8Array>;
@@ -243,4 +269,133 @@ async function removeContainer(binary: string, containerId: string): Promise<voi
 
 function validateText(label: string, value: string): void {
   if (!value.trim() || /[\0\r\n]/.test(value)) throw new Error(`invalid ${label}`);
+}
+
+function validateHostname(value: string): void {
+  if (
+    value.length > 253 ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(value) ||
+    value.split(".").some((part) => part.length > 63 || part.startsWith("-") || part.endsWith("-"))
+  ) {
+    throw new Error(`invalid container host name: ${value}`);
+  }
+}
+
+async function resolveHostGatewayMode(binary: string, requested: HostGatewayMode): Promise<Exclude<HostGatewayMode, "auto">> {
+  if (requested !== "auto") return requested;
+  try {
+    const context = (await runDocker(binary, ["context", "show"])).trim();
+    if (/orbstack|desktop|colima|rancher/.test(context.toLowerCase())) return "native";
+    const inspected = JSON.parse(await runDocker(binary, ["context", "inspect", context])) as unknown;
+    const first = Array.isArray(inspected) ? inspected[0] : undefined;
+    const endpoints = first !== null && typeof first === "object"
+      ? (first as Record<string, unknown>).Endpoints
+      : undefined;
+    const docker = endpoints !== null && typeof endpoints === "object"
+      ? (endpoints as Record<string, unknown>).docker
+      : undefined;
+    const endpoint = docker !== null && typeof docker === "object"
+      ? (docker as Record<string, unknown>).Host
+      : undefined;
+    if (typeof endpoint === "string" && /orbstack|docker\.desktop|colima|rancher/.test(endpoint.toLowerCase())) {
+      return "native";
+    }
+    if (typeof endpoint === "string" && /^(?:tcp|ssh):\/\//.test(endpoint)) return "host-gateway";
+    if (typeof endpoint === "string" && endpoint.startsWith("unix://") && process.platform !== "linux") {
+      return "native";
+    }
+  } catch {
+    // Fall back to the platform default when context discovery is unavailable.
+  }
+  return process.platform === "linux" ? "host-gateway" : "native";
+}
+
+export function validateCodexHomeTemplate(rawPath: string): string {
+  const path = resolve(rawPath);
+  const root = lstatSync(path);
+  if (root.isSymbolicLink() || !root.isDirectory()) {
+    throw new Error(`Codex home template is not a regular directory: ${path}`);
+  }
+
+  const forbidden = new Set([
+    ".env",
+    "auth.json",
+    "credentials.json",
+    "history.jsonl",
+    "sessions",
+    "rollouts",
+    "logs",
+    "log",
+    "cache",
+    "tmp",
+  ]);
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = resolve(directory, entry.name);
+      const relativePath = relative(path, entryPath);
+      const normalizedName = entry.name.toLowerCase();
+      const isSecret = normalizedName === ".env"
+        || normalizedName.startsWith(".env.")
+        || normalizedName === "auth.json"
+        || normalizedName === "credentials.json";
+      if (forbidden.has(normalizedName) || isSecret || /(?:^|\.)sqlite3?$|\.db$/i.test(entry.name)) {
+        throw new Error(`Codex home template contains runtime or secret state: ${relativePath}`);
+      }
+      if (entry.isSymbolicLink()) throw new Error(`Codex home template contains a symlink: ${relativePath}`);
+      if (entry.isDirectory()) visit(entryPath);
+      else if (!entry.isFile()) throw new Error(`Codex home template contains a special file: ${relativePath}`);
+    }
+  };
+  visit(path);
+
+  const configPath = resolve(path, "config.toml");
+  const config = lstatSync(configPath);
+  if (!config.isFile() || config.isSymbolicLink()) {
+    throw new Error(`Codex home template must contain a regular config.toml: ${path}`);
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = Bun.TOML.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`Codex home template config.toml is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  for (const catalog of namedStringValues(parsed, "model_catalog_json")) {
+    if (isAbsolute(catalog)) throw new Error("model_catalog_json must be relative to the Codex home template");
+    const catalogPath = resolve(path, catalog);
+    const withinRoot = relative(path, catalogPath);
+    if (withinRoot.startsWith("..") || isAbsolute(withinRoot)) {
+      throw new Error("model_catalog_json escapes the Codex home template");
+    }
+    const catalogStat = lstatSync(catalogPath);
+    if (!catalogStat.isFile() || catalogStat.isSymbolicLink()) {
+      throw new Error(`model_catalog_json is not a regular template file: ${catalog}`);
+    }
+    let catalogJson: unknown;
+    try {
+      catalogJson = JSON.parse(readFileSync(catalogPath, "utf8")) as unknown;
+    } catch (error) {
+      throw new Error(`model_catalog_json is invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const models = catalogJson !== null && typeof catalogJson === "object" && !Array.isArray(catalogJson)
+      ? (catalogJson as Record<string, unknown>).models
+      : undefined;
+    if (!Array.isArray(models) || models.length === 0) {
+      throw new Error("model_catalog_json must contain a non-empty models array");
+    }
+  }
+  return path;
+}
+
+function namedStringValues(value: unknown, key: string): string[] {
+  if (Array.isArray(value)) return value.flatMap((item) => namedStringValues(item, key));
+  if (value === null || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const own = record[key];
+  if (own !== undefined && typeof own !== "string") throw new Error(`${key} must be a string path`);
+  return [
+    ...(typeof own === "string" ? [own] : []),
+    ...Object.entries(record)
+      .filter(([name]) => name !== key)
+      .flatMap(([, child]) => namedStringValues(child, key)),
+  ];
 }

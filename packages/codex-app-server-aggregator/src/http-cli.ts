@@ -11,7 +11,7 @@ import {
 const USAGE = `codex-app-server-ctl [global options] health
 codex-app-server-ctl [global options] projects {list|add CWD|remove CWD}
 codex-app-server-ctl [global options] threads list [filters]
-codex-app-server-ctl [global options] threads start CWD [--params JSON]
+codex-app-server-ctl [global options] threads start CWD [--mode host|container] [--params JSON]
 codex-app-server-ctl [global options] threads read ID [--no-turns]
 codex-app-server-ctl [global options] threads send ID (--message TEXT|--stdin) [--params JSON]
 codex-app-server-ctl [global options] threads {archive|delete} ID
@@ -139,11 +139,19 @@ async function commandFor(argv: string[], readInput: () => Promise<string>): Pro
   }
   if (group === "threads" && action === "start") {
     exactPositionals(parsed, 1);
-    assertOptions(parsed, ["params"]);
+    assertOptions(parsed, ["mode", "params"]);
+    const mode = parsed.options.get("mode")?.at(-1);
+    if (mode !== undefined && mode !== "host" && mode !== "container") {
+      throw new Error("--mode must be host or container");
+    }
     return {
       method: "POST",
       path: "/v1/threads",
-      body: { ...jsonObjectOption(parsed, "params"), cwd: requiredPositional(parsed, 0, "project CWD") },
+      body: {
+        ...jsonObjectOption(parsed, "params"),
+        cwd: requiredPositional(parsed, 0, "project CWD"),
+        ...(mode === undefined ? {} : { skizzlesExecutionMode: mode }),
+      },
     };
   }
   if (group === "threads" && action === "read") {

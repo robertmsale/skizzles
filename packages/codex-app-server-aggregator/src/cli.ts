@@ -3,7 +3,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AggregatorDaemon, connectStdio } from "./daemon.ts";
-import { DEFAULT_IMAGE, DockerBackendFactory } from "./docker.ts";
+import { DEFAULT_IMAGE, DockerBackendFactory, type HostGatewayMode } from "./docker.ts";
+import { CodexHostBackendFactory } from "./host.ts";
 import { AggregatorState } from "./state.ts";
 
 const DEFAULT_RUNTIME_DIRECTORY = join(tmpdir(), `skizzles-${typeof process.getuid === "function" ? process.getuid() : "user"}`);
@@ -31,6 +32,9 @@ Serve options:
   --provider-ready-url URL    Wait for this provider URL before app-server
   --pass-env NAME             Pass an auth/provider env var (repeatable)
   --docker PATH               Docker CLI path (default: docker)
+  --host-codex PATH           Host Codex-compatible CLI (default: codex)
+  --container-host HOST       Host name visible inside containers (default: host.docker.internal)
+  --host-gateway-mode MODE    auto, native, or host-gateway (default: auto)
   -h, --help                  Show this help`;
 
 export type CliOptions = {
@@ -46,6 +50,9 @@ export type CliOptions = {
   providerReadyUrl: string | undefined;
   passEnv: string[];
   dockerBinary: string;
+  hostCodexBinary: string;
+  containerHost: string;
+  hostGatewayMode: HostGatewayMode;
   httpHost: string;
   httpPort: number;
   httpTokenEnv: string | undefined;
@@ -60,13 +67,15 @@ export async function cliMain(argv: string[]): Promise<number> {
   if (options.mode === "connect") return connectStdio(options.socketPath);
 
   const state = new AggregatorState(options.databasePath);
-  const factory = new DockerBackendFactory(options);
+  const containerFactory = new DockerBackendFactory(options);
+  const hostFactory = new CodexHostBackendFactory({ codexBinary: options.hostCodexBinary });
   const daemon = new AggregatorDaemon({
     socketPath: options.socketPath,
     state,
-    factory,
-    removeOrphan: (machine) => factory.remove(machine.containerId),
-    inspectContainer: (containerId) => factory.inspect(containerId),
+    containerFactory,
+    hostFactory,
+    removeOrphan: (machine) => containerFactory.remove(machine.containerId!),
+    inspectContainer: (containerId) => containerFactory.inspect(containerId),
     http: {
       hostname: options.httpHost,
       port: options.httpPort,
@@ -104,6 +113,9 @@ export function parseArgs(argv: string[]): CliOptions {
       "--provider-command",
       "--provider-ready-url",
       "--docker",
+      "--host-codex",
+      "--container-host",
+      "--host-gateway-mode",
     ].includes(flag)) values.set(flag, value);
     else throw new Error(`unknown option: ${flag}`);
     index++;
@@ -124,10 +136,18 @@ export function parseArgs(argv: string[]): CliOptions {
     providerReadyUrl: values.get("--provider-ready-url"),
     passEnv,
     dockerBinary: values.get("--docker") ?? "docker",
+    hostCodexBinary: values.get("--host-codex") ?? "codex",
+    containerHost: values.get("--container-host") ?? "host.docker.internal",
+    hostGatewayMode: parseHostGatewayMode(values.get("--host-gateway-mode") ?? "auto"),
     httpHost: values.get("--http-host") ?? DEFAULT_HTTP_HOST,
     httpPort: parsePort(values.get("--http-port") ?? String(DEFAULT_HTTP_PORT)),
     httpTokenEnv: values.get("--http-token-env"),
   };
+}
+
+function parseHostGatewayMode(value: string): HostGatewayMode {
+  if (value === "auto" || value === "native" || value === "host-gateway") return value;
+  throw new Error("--host-gateway-mode must be auto, native, or host-gateway");
 }
 
 function parsePort(value: string): number {

@@ -40,6 +40,7 @@ import {
 import type { MachineDto, ProjectDto, ServerRequestDto, ThreadDto, ThreadView } from "./types.ts";
 
 type ThreadFilter = "current" | "snapshot" | "archived";
+type ExecutionMode = "host" | "container";
 type ErrorOwner = "background" | "read" | "mutation";
 type BoardError = { owner: ErrorOwner; message: string };
 const BOARD_RECONCILIATION_INTERVAL_MS = 15_000;
@@ -60,6 +61,7 @@ export function App() {
   const [mutating, setMutating] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
+  const [newThreadMode, setNewThreadMode] = useState<ExecutionMode>("container");
   const [deltas, setDeltas] = useState<Map<string, string>>(new Map());
   const selected = threads.find((candidate) => candidate.id === selectedId) ?? null;
   const selectedIdRef = useRef<string | null>(null);
@@ -82,6 +84,11 @@ export function App() {
   const threadRequests = threadRequestRef.current;
   const dirtyThreadReads = dirtyThreadReadsRef.current;
   const pendingFirstTurns = pendingFirstTurnsRef.current;
+
+  useEffect(() => {
+    const project = projects.find((candidate) => candidate.cwd === projectCwd);
+    if (project?.cloneUrl === null) setNewThreadMode("host");
+  }, [projectCwd, projects]);
 
   const clearError = useCallback((owner: ErrorOwner) => {
     setError((current) => clearOwnedError(current, owner));
@@ -354,7 +361,7 @@ export function App() {
     if (!cwd) return;
     clearThreadSearch();
     void act(async () => {
-      const result = await boardApi.startThread(cwd);
+      const result = await boardApi.startThread(cwd, newThreadMode);
       pendingFirstTurns.remember(result.thread);
       setThreads((current) => [
         { ...result.thread, lifecycle: "live" },
@@ -409,6 +416,8 @@ export function App() {
         onAdd={() => setShowAdd(true)}
         onRemove={(cwd) => void act(() => boardApi.removeProject(cwd))}
         onNew={startNewThread}
+        newThreadMode={newThreadMode}
+        onNewThreadMode={setNewThreadMode}
         disabled={mutating || loading}
       />
       <main className="main-pane">
@@ -417,13 +426,15 @@ export function App() {
           machine={currentMachine}
           approvalCount={requests.length}
           onInbox={() => setShowInbox(true)}
-          onArchive={() => selected && window.confirm("Archive permanently removes its container and rollout. Continue?") && void act(async () => { await boardApi.archive(selected.id); pendingFirstTurns.materialized(selected.id); setDeltas(new Map()); })}
+          onArchive={() => selected && window.confirm(currentMachine?.kind === "container"
+            ? "Archive permanently removes this thread's container. Continue?"
+            : "Archive this host thread? The shared host app-server will remain running.") && void act(async () => { await boardApi.archive(selected.id); pendingFirstTurns.materialized(selected.id); setDeltas(new Map()); })}
           onDelete={() => selected && window.confirm("Delete this thread permanently?") && void act(async () => { await boardApi.delete(selected.id); pendingFirstTurns.materialized(selected.id); setDeltas(new Map()); })}
           disabled={mutating || loading}
         />
         {error && <div className="error-banner" role="alert"><span>{error.message}</span><button onClick={() => setError(null)} aria-label="Dismiss">×</button></div>}
         {loading ? <Empty title="Loading board…" detail="Reading the aggregator state." />
-          : !projects.length ? <Empty title="Register a project to begin" detail="Choose a host Git checkout with a container-reachable origin." action={<button className="primary" onClick={() => setShowAdd(true)}>Add project</button>} />
+          : !projects.length ? <Empty title="Register a project to begin" detail="Choose any host directory. Git roots with remote origins can also run in containers." action={<button className="primary" onClick={() => setShowAdd(true)}>Add project</button>} />
           : !selected ? <Empty title="No threads here" detail="Start a Codex thread in the selected project." action={<button className="primary" onClick={startNewThread}>New thread</button>} />
           : <Conversation
               key={selected.id}
@@ -443,6 +454,7 @@ export function App() {
                 const turnId = selectedThread?.turns?.at(-1)?.id;
                 if (turnId) void act(() => boardApi.interrupt(selected.id, turnId));
               }}
+              executionMode={currentMachine?.kind ?? null}
             />}
       </main>
       {showAdd && <AddProject onClose={() => setShowAdd(false)} onSubmit={(cwd) => void act(async () => { const result = await boardApi.addProject(cwd); changeProject(result.project.cwd); setShowAdd(false); })} disabled={mutating} />}
@@ -456,6 +468,7 @@ function Sidebar(props: {
   threads: ThreadView[]; selectedId: string | null; onSelect: (id: string) => void;
   search: string; onSearch: (value: string) => void; filter: ThreadFilter; onFilter: (value: ThreadFilter) => void;
   pending: ServerRequestDto[]; onAdd: () => void; onRemove: (cwd: string) => void; onNew: () => void; disabled: boolean;
+  newThreadMode: ExecutionMode; onNewThreadMode: (mode: ExecutionMode) => void;
 }) {
   const selectedProject = props.projects.find((project) => project.cwd === props.projectCwd);
   return <aside className="sidebar">
@@ -469,9 +482,15 @@ function Sidebar(props: {
         <button className="icon-button" onClick={props.onAdd} aria-label="Add project">＋</button>
         {selectedProject && <button className="icon-button danger-quiet" onClick={() => props.onRemove(selectedProject.cwd)} disabled={props.disabled} aria-label="Remove project">−</button>}
       </div>
-      {selectedProject && <span className="project-path" title={selectedProject.cwd}>{selectedProject.cwd}</span>}
+      {selectedProject && <span className="project-path" title={selectedProject.cwd}>{selectedProject.cwd} · {selectedProject.cloneUrl ? "host + container" : "host only"}</span>}
     </section>
-    <button className="new-thread" onClick={props.onNew} disabled={props.disabled || !props.projectCwd}><span>＋</span> New thread</button>
+    <div className="new-thread-controls">
+      <select aria-label="New thread execution mode" value={props.newThreadMode} onChange={(event) => props.onNewThreadMode(event.target.value as ExecutionMode)}>
+        <option value="container" disabled={selectedProject?.cloneUrl === null}>Container</option>
+        <option value="host">Host</option>
+      </select>
+      <button className="new-thread" onClick={props.onNew} disabled={props.disabled || !props.projectCwd || (props.newThreadMode === "container" && selectedProject?.cloneUrl === null)}><span>＋</span> New thread</button>
+    </div>
     <div className="search-wrap"><span>⌕</span><input aria-label="Search threads" placeholder="Search threads" value={props.search} onChange={(event) => props.onSearch(event.target.value)} /></div>
     <div className="filter-tabs" role="tablist">
       {(["current", "snapshot", "archived"] as const).map((value) => <button key={value} className={props.filter === value ? "active" : ""} onClick={() => props.onFilter(value)}>{value === "snapshot" ? "Snapshots" : capitalize(value)}</button>)}
@@ -496,7 +515,7 @@ function Topbar(props: { thread: ThreadView | null; machine: MachineDto | null; 
       <strong>{props.thread ? threadTitle(props.thread) : "Agent board"}</strong>
       {props.thread && <span className={`status-chip ${props.thread.lifecycle}`}>{props.thread.lifecycle === "snapshot" ? "Snapshot only" : capitalize(props.thread.lifecycle)}</span>}
       {props.thread && threadHasSystemError(props.thread) && <span className="status-chip system-error">System error</span>}
-      {props.machine && <span className={`status-chip machine ${props.machine.dockerStatus ?? props.machine.state}`}>{props.machine.dockerStatus ?? props.machine.state}</span>}
+      {props.machine && <span className={`status-chip machine ${props.machine.dockerStatus ?? props.machine.state}`}>{props.machine.kind} · {props.machine.dockerStatus ?? props.machine.state}</span>}
     </div>
     <div className="topbar-actions">
       <button className="inbox-button" onClick={props.onInbox}>Requests {props.approvalCount > 0 && <b>{props.approvalCount}</b>}</button>
@@ -505,7 +524,7 @@ function Topbar(props: { thread: ThreadView | null; machine: MachineDto | null; 
   </header>;
 }
 
-function Conversation(props: { view: ThreadView; thread: ThreadDto | null; requests: ServerRequestDto[]; deltas: ReadonlyMap<string, string>; disabled: boolean; onRespond: (request: ServerRequestDto, accepted: boolean) => void; onSend: (text: string) => void; onInterrupt: () => void }) {
+function Conversation(props: { view: ThreadView; thread: ThreadDto | null; requests: ServerRequestDto[]; deltas: ReadonlyMap<string, string>; disabled: boolean; onRespond: (request: ServerRequestDto, accepted: boolean) => void; onSend: (text: string) => void; onInterrupt: () => void; executionMode: ExecutionMode | null }) {
   const entries = useMemo(() => timelineEntries(props.thread, props.deltas), [props.thread, props.deltas]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
@@ -522,11 +541,11 @@ function Conversation(props: { view: ThreadView; thread: ThreadDto | null; reque
   };
   const running = props.view.lifecycle === "live" && threadIsRunning(props.thread ?? props.view);
   return <div className="conversation">
-    {props.view.lifecycle !== "live" && <div className={`truth-banner ${props.view.lifecycle}`}><strong>{props.view.lifecycle === "snapshot" ? "This thread is not live" : "This thread is archived"}</strong><span>{props.view.lifecycle === "snapshot" ? "The daemon retained its summary after restart, but the original container cannot be reattached. Turn history may be unavailable." : "Its container and rollout were removed. Archive is irreversible."}</span></div>}
+    {props.view.lifecycle !== "live" && <div className={`truth-banner ${props.view.lifecycle}`}><strong>{props.view.lifecycle === "snapshot" ? "This thread is not live" : "This thread is archived"}</strong><span>{props.view.lifecycle === "snapshot" ? props.executionMode === "host" ? "Its host binding is retained, but the board does not resume unloaded threads automatically." : "The daemon retained its summary after restart, but the original container cannot be reattached." : props.executionMode === "host" ? "The shared host app-server remains available; this archived thread is read-only here." : "Its disposable container was removed. Archive is irreversible."}</span></div>}
     {props.view.lifecycle === "live" && threadHasSystemError(props.thread ?? props.view) && <div className="truth-banner system-error"><strong>Codex stopped with a system error</strong><span>Review the timeline or send a new message to retry.</span></div>}
     <div className="timeline" ref={scrollRef} onScroll={(event) => { const node = event.currentTarget; setAtBottom(node.scrollHeight - node.scrollTop - node.clientHeight < 88); }}>
       <div className="timeline-inner">
-        {!entries.length && <div className="thread-welcome"><span className="brand-mark large">C</span><h1>{props.view.lifecycle === "live" ? "What should Codex do?" : "No retained turn history"}</h1><p>{props.view.lifecycle === "live" ? "Work happens in an isolated container cloned from this project's origin." : "The aggregate snapshot preserves identity and status, not a second copy of the rollout."}</p></div>}
+        {!entries.length && <div className="thread-welcome"><span className="brand-mark large">C</span><h1>{props.view.lifecycle === "live" ? "What should Codex do?" : "No retained turn history"}</h1><p>{props.view.lifecycle === "live" ? props.executionMode === "host" ? "Work happens directly in the registered host directory with the selected permission profile." : "Work happens in an isolated container cloned from this project's origin." : "The aggregate snapshot preserves identity and status, not a second copy of the rollout."}</p></div>}
         {entries.map((entry) => entry.role === "tool"
           ? <ToolCard key={entry.key} label={entry.label} text={entry.text} {...(entry.status ? { status: entry.status } : {})} />
           : <article key={entry.key} className={`message ${entry.role}`}><div className="avatar">{entry.role === "user" ? "R" : "C"}</div><div className="message-body"><span className="speaker">{entry.label}</span><Markdown text={entry.text} /></div></article>)}
@@ -538,7 +557,7 @@ function Conversation(props: { view: ThreadView; thread: ThreadDto | null; reque
     <form className="composer" onSubmit={send}>
       <div className="composer-box">
         <textarea aria-label="Message Codex" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={props.view.lifecycle === "live" ? "Message Codex…" : "This retained thread is read-only"} disabled={props.disabled || props.view.lifecycle !== "live"} rows={2} />
-        <div className="composer-footer"><span>{props.view.lifecycle === "live" ? "Enter to send · Shift+Enter for a new line" : "Snapshot-only and archived threads cannot be resumed"}</span>{running ? <button type="button" className="stop" onClick={props.onInterrupt} disabled={props.disabled}>■ Stop</button> : <button className="send" disabled={props.disabled || props.view.lifecycle !== "live" || !draft.trim()} aria-label="Send message">↑</button>}</div>
+        <div className="composer-footer"><span>{props.view.lifecycle === "live" ? "Enter to send · Shift+Enter for a new line" : "Snapshot-only and archived threads are read-only in the board"}</span>{running ? <button type="button" className="stop" onClick={props.onInterrupt} disabled={props.disabled}>■ Stop</button> : <button className="send" disabled={props.disabled || props.view.lifecycle !== "live" || !draft.trim()} aria-label="Send message">↑</button>}</div>
       </div>
     </form>
   </div>;
@@ -575,7 +594,7 @@ function inline(text: string): ReactNode {
 
 function AddProject({ onClose, onSubmit, disabled }: { onClose: () => void; onSubmit: (cwd: string) => void; disabled: boolean }) {
   const [cwd, setCwd] = useState("");
-  return <div className="scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><form className="dialog" onSubmit={(event) => { event.preventDefault(); onSubmit(cwd.trim()); }}><div className="dialog-head"><div><span className="eyebrow">Host checkout</span><h2>Register a project</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><p>The checkout must be a Git root with a container-reachable origin. Its host files are never mounted into the agent container.</p><label>Absolute path<input autoFocus value={cwd} onChange={(event) => setCwd(event.target.value)} placeholder="/Users/you/Code/project" /></label><div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={disabled || !cwd.trim()}>Register project</button></div></form></div>;
+  return <div className="scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><form className="dialog" onSubmit={(event) => { event.preventDefault(); onSubmit(cwd.trim()); }}><div className="dialog-head"><div><span className="eyebrow">Host directory</span><h2>Register a project</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><p>Any directory can run host threads. A Git root with a container-reachable origin can also run isolated container threads; host files are never mounted into those containers.</p><label>Absolute path<input autoFocus value={cwd} onChange={(event) => setCwd(event.target.value)} placeholder="/Users/you/Code/project" /></label><div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={disabled || !cwd.trim()}>Register project</button></div></form></div>;
 }
 
 function Inbox({ requests, onClose, onSelect, onRespond, disabled }: { requests: ServerRequestDto[]; onClose: () => void; onSelect: (threadId?: string) => void; onRespond: (request: ServerRequestDto, accepted: boolean) => void; disabled: boolean }) {

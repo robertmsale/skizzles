@@ -124,7 +124,9 @@ export class RestApiServer {
     const machines = this.options.state?.machineFleet() ?? [];
     const data = await Promise.all(machines.map(async (machine) => ({
       ...machine,
-      dockerStatus: await inspectContainerStatus(this.options.inspectContainer, machine.containerId),
+      dockerStatus: machine.kind === "container" && machine.containerId
+        ? await inspectContainerStatus(this.options.inspectContainer, machine.containerId)
+        : null,
     })));
     return json({ data });
   }

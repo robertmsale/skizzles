@@ -76,6 +76,7 @@ describe("aggregator daemon boundary", () => {
     const socketPath = join(directory, "aggregator.sock");
     const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
     state.saveMachine({ machineId: "machine-a", projectCwd: join(directory, "project"), containerId: "container-a" });
+    state.saveMachine({ machineId: "host", kind: "host" });
     state.saveThread({
       threadId: "thread-a",
       machineId: "machine-a",
@@ -89,12 +90,14 @@ describe("aggregator daemon boundary", () => {
     const daemon = new AggregatorDaemon({
       socketPath,
       state,
-      factory: new UnusedFactory(),
-      removeOrphan: async (machine) => { removed.push(machine.containerId); },
+      containerFactory: new UnusedFactory(),
+      hostFactory: new UnusedFactory(),
+      removeOrphan: async (machine) => { removed.push(machine.containerId!); },
     });
 
     await daemon.start();
     expect(removed).toEqual(["container-a"]);
+    expect(state.machines().find((machine) => machine.machineId === "host")?.state).toBe("removed");
     expect(state.threads()).toMatchObject([{
       threadId: "thread-a",
       loaded: false,
@@ -110,7 +113,8 @@ describe("aggregator daemon boundary", () => {
     const owner = new AggregatorDaemon({
       socketPath,
       state: ownerState,
-      factory: new UnusedFactory(),
+      containerFactory: new UnusedFactory(),
+      hostFactory: new UnusedFactory(),
     });
     await owner.start();
     const contenderState = new AggregatorState(join(directory, "contender.sqlite3"));
@@ -124,8 +128,9 @@ describe("aggregator daemon boundary", () => {
     const contender = new AggregatorDaemon({
       socketPath,
       state: contenderState,
-      factory: new UnusedFactory(),
-      removeOrphan: async (machine) => { removed.push(machine.containerId); },
+      containerFactory: new UnusedFactory(),
+      hostFactory: new UnusedFactory(),
+      removeOrphan: async (machine) => { removed.push(machine.containerId!); },
     });
     await expect(contender.start()).rejects.toThrow("aggregator daemon is already running");
     await contender.close();
@@ -142,7 +147,8 @@ describe("aggregator daemon boundary", () => {
     const owner = new AggregatorDaemon({
       socketPath: join(directory, "owner.sock"),
       state: ownerState,
-      factory: new UnusedFactory(),
+      containerFactory: new UnusedFactory(),
+      hostFactory: new UnusedFactory(),
     });
     await owner.start();
     ownerState.saveMachine({
@@ -155,8 +161,9 @@ describe("aggregator daemon boundary", () => {
     const contender = new AggregatorDaemon({
       socketPath: join(directory, "contender.sock"),
       state: new AggregatorState(databasePath),
-      factory: new UnusedFactory(),
-      removeOrphan: async (machine) => { removed.push(machine.containerId); },
+      containerFactory: new UnusedFactory(),
+      hostFactory: new UnusedFactory(),
+      removeOrphan: async (machine) => { removed.push(machine.containerId!); },
     });
     await expect(contender.start()).rejects.toThrow("aggregator database is already owned");
     await contender.close();
@@ -180,7 +187,7 @@ describe("aggregator daemon boundary", () => {
 });
 
 class UnusedFactory implements BackendFactory {
-  async create(_project: RegisteredProject): Promise<BackendTransport> {
+  async create(_project?: RegisteredProject): Promise<BackendTransport> {
     throw new Error("backend creation was not expected");
   }
 }
@@ -189,7 +196,8 @@ function daemonFor(socketPath: string, databasePath: string): AggregatorDaemon {
   return new AggregatorDaemon({
     socketPath,
     state: new AggregatorState(databasePath),
-    factory: new UnusedFactory(),
+    containerFactory: new UnusedFactory(),
+    hostFactory: new UnusedFactory(),
   });
 }
 

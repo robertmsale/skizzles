@@ -1,1037 +1,816 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { AppServerAggregator } from "../src/aggregator.ts";
-import type { BackendFactory, BackendTransport } from "../src/backend.ts";
-import { AggregatorBridge } from "../src/bridge.ts";
+import type { BackendFactory, BackendTransport, HostBackendFactory } from "../src/backend.ts";
 import { CONTAINER_WORKSPACE } from "../src/docker.ts";
 import type { MessageSink } from "../src/jsonl.ts";
 import { ProjectRegistry } from "../src/projects.ts";
 import type { RpcId, RpcMessage } from "../src/protocol.ts";
 import { AggregatorState, type RegisteredProject, type StoredThread } from "../src/state.ts";
 
-const HOST_PROJECT_A = join(tmpdir(), "skizzles-aggregator-project-a");
-const HOST_PROJECT_B = join(tmpdir(), "skizzles-aggregator-project-b");
+const PROJECT_A = "/host/project-a";
+const PROJECT_B = "/host/project-b";
 
-describe("Codex app-server aggregation", () => {
-  test("allows initialization to retry after a failed provisioning attempt", async () => {
-    const harness = createHarness();
-    harness.factory.createFailures = 1;
-    const params = {
-      clientInfo: { name: "test", title: "Test", version: "0.1.0" },
-      capabilities: { experimentalApi: true },
-    };
-
-    await harness.aggregator.handle({ method: "initialize", id: "failed-init", params });
-    expect(errorFor(harness.output.messages, "failed-init")).toEqual({
-      code: -32603,
-      message: "fake provisioning failure",
-    });
-    await harness.aggregator.handle({ method: "initialize", id: "retry-init", params });
-    expect(resultFor(harness.output.messages, "retry-init")).toMatchObject({ platformOs: "linux" });
-    await harness.aggregator.close();
-  });
-
-  test("preserves minted thread ids, forces container cwd, and answers topology reads itself", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_B } });
-
-    const firstId = harness.factory.threadId(0);
-    const secondId = harness.factory.threadId(1);
-    expect(resultFor(harness.output.messages, 2)).toMatchObject({ thread: { id: firstId, cwd: HOST_PROJECT_A } });
-    expect(resultFor(harness.output.messages, 3)).toMatchObject({ thread: { id: secondId, cwd: HOST_PROJECT_B } });
-    expect(harness.factory.transports[0]!.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
-    expect(harness.factory.transports[1]!.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
-    expect(harness.factory.projects.map((project) => project.cloneUrl)).toEqual([
-      "https://example.test/project-a.git",
-      "https://example.test/project-b.git",
-    ]);
-
-    await harness.aggregator.handle({
-      method: "thread/list",
-      id: 4,
-      params: { limit: 10 },
-    });
-    const listed = resultFor(harness.output.messages, 4) as { data: Array<{ id: string }> };
-    expect(listed.data.map((thread) => thread.id).sort()).toEqual([firstId, secondId].sort());
-    expect(harness.factory.transports.every((transport) => transport.request("thread/list") === undefined)).toBe(true);
-    await harness.aggregator.handle({ method: "thread/list", id: "cwd-list", params: { cwd: HOST_PROJECT_B } });
-    expect(resultFor(harness.output.messages, "cwd-list")).toMatchObject({ data: [{ id: secondId, cwd: HOST_PROJECT_B }] });
-    expect(harness.state.threads().map((thread) => [thread.threadId, thread.projectCwd]).sort()).toEqual([
-      [firstId, HOST_PROJECT_A],
-      [secondId, HOST_PROJECT_B],
-    ].sort());
-
-    await harness.aggregator.handle({ method: "thread/fork", id: 5, params: { threadId: firstId } });
-    const forkId = harness.factory.forkId(0);
-    expect(resultFor(harness.output.messages, 5)).toMatchObject({ thread: { id: forkId, forkedFromId: firstId } });
-    await harness.aggregator.handle({ method: "turn/start", id: 6, params: { threadId: forkId, input: [] } });
-    expect(harness.factory.transports[0]!.request("turn/start")).toBeDefined();
-    expect(harness.factory.transports[1]!.request("turn/start")).toBeUndefined();
-
-    await harness.aggregator.close();
-  });
-
-  test("rejects an unknown cwd without provisioning a container", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({
-      method: "thread/start",
-      id: 2,
-      params: { cwd: join(tmpdir(), "skizzles-unregistered-project") },
-    });
-
-    expect(errorFor(harness.output.messages, 2)).toEqual({
-      code: -32004,
-      message: "thread/start cwd is not a registered project",
-    });
-    expect(harness.factory.transports).toHaveLength(1);
-    expect(harness.factory.transports[0]!.request("thread/start")).toBeUndefined();
-    await harness.aggregator.close();
-  });
-
-  test("archives through the machine belonging to the selected project", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_B } });
-
-    await harness.aggregator.handle({
-      method: "thread/archive",
-      id: 4,
-      params: { threadId: harness.factory.threadId(1) },
-    });
-    expect(harness.factory.transports[0]!.request("thread/archive")).toBeUndefined();
-    expect(harness.factory.transports[0]!.destroyed).toBe(false);
-    expect(harness.factory.transports[1]!.request("thread/archive")).toBeDefined();
-    expect(harness.factory.transports[1]!.destroyed).toBe(true);
-    await harness.aggregator.close();
-  });
-
-  test("refuses to remove a project with active container-backed threads", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    await harness.aggregator.handle({
-      method: "skizzles/project/remove",
-      id: 3,
-      params: { cwd: HOST_PROJECT_A },
-    });
-
-    expect(errorFor(harness.output.messages, 3)).toEqual({ code: -32005, message: "project has active threads" });
-    expect(harness.registry.list().map((project) => project.cwd)).toContain(HOST_PROJECT_A);
-    expect(harness.factory.transports[0]!.destroyed).toBe(false);
-    await harness.aggregator.close();
-  });
-
-  test("serializes project removal with delayed thread provisioning", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    harness.factory.pauseNextCreate = true;
-
-    const starting = harness.aggregator.handle({
-      method: "thread/start",
-      id: 2,
-      params: { cwd: HOST_PROJECT_B },
-    });
-    await waitFor(() => harness.factory.createBlocked);
-    const removing = harness.aggregator.handle({
-      method: "skizzles/project/remove",
-      id: 3,
-      params: { cwd: HOST_PROJECT_B },
-    });
-    await Bun.sleep(0);
-    harness.factory.releaseCreate();
-    await Promise.all([starting, removing]);
-
-    expect(resultFor(harness.output.messages, 2)).toMatchObject({ thread: { cwd: HOST_PROJECT_B } });
-    expect(errorFor(harness.output.messages, 3)).toEqual({ code: -32005, message: "project has active threads" });
-    expect(harness.registry.list().map((project) => project.cwd)).toContain(HOST_PROJECT_B);
-    expect(harness.factory.transports[1]!.destroyed).toBe(false);
-    await harness.aggregator.close();
-  });
-
-  test("replaces an unused warm backend after the registered origin changes", async () => {
-    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-origin-")));
-    const oldOrigin = "https://example.test/owner/old.git";
-    const newOrigin = "https://example.test/owner/new.git";
-    await runGit("init", projectCwd);
-    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
-    const harness = createHarness([{ cwd: projectCwd, cloneUrl: oldOrigin }]);
+describe("host and container app-server aggregation", () => {
+  test("initializes one durable host app-server and serves global discovery without a project", async () => {
+    const harness = createHarness([]);
     try {
       await initialize(harness);
-      expect(harness.factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin]);
-
-      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
-      await harness.aggregator.handle({
-        method: "skizzles/project/add",
-        id: 2,
-        params: { cwd: projectCwd },
+      expect(harness.hostFactory.transports).toHaveLength(1);
+      expect(harness.containerFactory.transports).toHaveLength(0);
+      expect(resultFor(harness.output.messages, 1)).toMatchObject({
+        codexHome: "/host-codex-home",
+        platformOs: "macos",
       });
-      expect(resultFor(harness.output.messages, 2)).toMatchObject({ project: { cloneUrl: newOrigin } });
-      expect(harness.factory.transports[0]!.destroyed).toBe(true);
 
-      await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: projectCwd } });
-      expect(harness.factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, newOrigin]);
-      expect(harness.factory.transports[1]!.request("thread/start")).toBeDefined();
+      await harness.aggregator.handle({
+        method: "skills/list",
+        id: 2,
+        params: { cwds: [PROJECT_A, PROJECT_B], forceReload: true },
+      });
+      expect(resultFor(harness.output.messages, 2)).toEqual({
+        backend: "host",
+        params: { cwds: [PROJECT_A, PROJECT_B], forceReload: true },
+      });
+      expect(requestFor(harness.host, "skills/list")?.params).toEqual({
+        cwds: [PROJECT_A, PROJECT_B],
+        forceReload: true,
+      });
     } finally {
       await harness.aggregator.close();
-      rmSync(projectCwd, { recursive: true, force: true });
+      harness.state.close();
     }
   });
 
-  test("serializes an origin refresh with in-flight thread provisioning", async () => {
-    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-origin-race-")));
-    const oldOrigin = "https://example.test/owner/old.git";
-    const newOrigin = "https://example.test/owner/new.git";
-    await runGit("init", projectCwd);
-    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
-    const state = new AggregatorState(":memory:");
-    state.saveProject({ cwd: projectCwd, cloneUrl: oldOrigin });
-    const registry = new SignalingProjectRegistry(state);
-    const factory = new FakeFactory();
-    const output = new CaptureSink();
-    const aggregator = new AppServerAggregator({ factory, registry, state, output });
-    const harness = { factory, output, aggregator, registry, state };
+  test("allows host initialization to retry after provisioning fails", async () => {
+    const harness = createHarness([]);
+    harness.hostFactory.createFailures = 1;
+    try {
+      await harness.aggregator.handle({ method: "initialize", id: "first", params: initializeParams() });
+      expect(errorFor(harness.output.messages, "first").message).toContain("fake host provisioning failure");
+
+      await harness.aggregator.handle({ method: "initialize", id: "second", params: initializeParams() });
+      expect(resultFor(harness.output.messages, "second")).toMatchObject({ platformOs: "macos" });
+      expect(harness.hostFactory.transports).toHaveLength(1);
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
+  test("defaults new threads to containers and forces danger-full-access", async () => {
+    const harness = createHarness();
     try {
       await initialize(harness);
-      await aggregator.handle({ method: "thread/start", id: 2, params: { cwd: projectCwd } });
-      factory.pauseNextCreate = true;
-      const starting = aggregator.handle({ method: "thread/start", id: 3, params: { cwd: projectCwd } });
-      await waitFor(() => factory.createBlocked);
+      await harness.aggregator.handle({
+        method: "thread/start",
+        id: 2,
+        params: {
+          cwd: PROJECT_A,
+          permissions: ":read-only",
+          sandbox: "workspace-write",
+          approvalPolicy: "on-request",
+          runtimeWorkspaceRoots: [PROJECT_A, "/tmp/elsewhere"],
+          config: {
+            feature: true,
+            sandbox_mode: "read-only",
+            permissions: ":read-only",
+          },
+        },
+      });
 
-      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
-      let refreshSettled = false;
-      const refreshing = aggregator.handle({
-        method: "skizzles/project/add",
+      const container = harness.containerFactory.transports[0]!;
+      const start = requestFor(container, "thread/start")!;
+      expect(start.params).toEqual({
+        cwd: CONTAINER_WORKSPACE,
+        sandbox: "danger-full-access",
+        approvalPolicy: "on-request",
+        runtimeWorkspaceRoots: [CONTAINER_WORKSPACE],
+        config: { feature: true, sandbox_mode: "danger-full-access" },
+      });
+      const result = resultFor(harness.output.messages, 2) as { thread: { id: string; cwd: string } };
+      expect(result.thread.cwd).toBe(PROJECT_A);
+      expect(harness.state.threads()).toMatchObject([{
+        threadId: result.thread.id,
+        projectCwd: PROJECT_A,
+        executionMode: "container",
+        machineId: container.machineId,
+      }]);
+
+      await harness.aggregator.handle({ method: "thread/list", id: 3, params: { cwd: PROJECT_A } });
+      expect(resultFor(harness.output.messages, 3)).toMatchObject({
+        data: [{ id: result.thread.id, cwd: PROJECT_A }],
+      });
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
+  test("runs host threads in the canonical host cwd and preserves their permission selection", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      const permissions = ":workspace";
+      await harness.aggregator.handle({
+        method: "thread/start",
+        id: 2,
+        params: {
+          cwd: PROJECT_A,
+          skizzlesExecutionMode: "host",
+          permissions,
+          approvalPolicy: "untrusted",
+        },
+      });
+      await harness.aggregator.handle({
+        method: "thread/start",
+        id: 3,
+        params: { cwd: PROJECT_B, skizzlesExecutionMode: "host" },
+      });
+
+      expect(harness.hostFactory.transports).toHaveLength(1);
+      expect(harness.containerFactory.transports).toHaveLength(0);
+      expect(requestFor(harness.host, "thread/start", 0)?.params).toEqual({
+        cwd: PROJECT_A,
+        permissions,
+        approvalPolicy: "untrusted",
+      });
+      expect(requestFor(harness.host, "thread/start", 1)?.params).toEqual({ cwd: PROJECT_B });
+      expect(harness.state.threads().map((thread) => ({
+        mode: thread.executionMode,
+        project: thread.projectCwd,
+        machine: thread.machineId,
+      }))).toEqual([
+        { mode: "host", project: PROJECT_A, machine: "host" },
+        { mode: "host", project: PROJECT_B, machine: "host" },
+      ]);
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
+  test("allows host-only directories but rejects their default container mode clearly", async () => {
+    const harness = createHarness([{ cwd: PROJECT_A, cloneUrl: null }]);
+    try {
+      await initialize(harness);
+      await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: PROJECT_A } });
+      expect(errorFor(harness.output.messages, 2).message).toContain("host-only");
+      expect(harness.containerFactory.transports).toHaveLength(0);
+
+      await harness.aggregator.handle({
+        method: "thread/start",
+        id: 3,
+        params: { cwd: PROJECT_A, skizzlesExecutionMode: "host" },
+      });
+      expect(resultFor(harness.output.messages, 3)).toMatchObject({ thread: { cwd: PROJECT_A } });
+
+      await harness.aggregator.handle({
+        method: "thread/start",
         id: 4,
-        params: { cwd: projectCwd },
-      }).then(() => { refreshSettled = true; });
-      await registry.waitForCanonicalization();
-      await Bun.sleep(0);
-      expect(refreshSettled).toBe(false);
-      expect(registry.list()[0]?.cloneUrl).toBe(oldOrigin);
-
-      factory.releaseCreate();
-      await Promise.all([starting, refreshing]);
-      expect(resultFor(output.messages, 3)).toMatchObject({ thread: { cwd: projectCwd } });
-      expect(resultFor(output.messages, 4)).toMatchObject({ project: { cloneUrl: newOrigin } });
-      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, oldOrigin]);
-
-      await aggregator.handle({ method: "thread/start", id: 5, params: { cwd: projectCwd } });
-      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, oldOrigin, newOrigin]);
-    } finally {
-      await aggregator.close();
-      state.close();
-      rmSync(projectCwd, { recursive: true, force: true });
-    }
-  });
-
-  test("serializes an origin refresh with initialization warm provisioning", async () => {
-    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-init-origin-race-")));
-    const oldOrigin = "https://example.test/owner/old.git";
-    const newOrigin = "https://example.test/owner/new.git";
-    await runGit("init", projectCwd);
-    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
-    const state = new AggregatorState(":memory:");
-    state.saveProject({ cwd: projectCwd, cloneUrl: oldOrigin });
-    const registry = new SignalingProjectRegistry(state);
-    const factory = new FakeFactory();
-    factory.pauseNextCreate = true;
-    const output = new CaptureSink();
-    const aggregator = new AppServerAggregator({ factory, registry, state, output });
-    try {
-      const initializing = aggregator.handle({
-        method: "initialize",
-        id: 1,
-        params: {
-          clientInfo: { name: "test", title: "Test", version: "0.1.0" },
-          capabilities: { experimentalApi: true },
-        },
+        params: { cwd: PROJECT_A, skizzlesExecutionMode: "moon" },
       });
-      await waitFor(() => factory.createBlocked);
-
-      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
-      let refreshSettled = false;
-      const refreshing = aggregator.handle({
-        method: "skizzles/project/add",
-        id: 2,
-        params: { cwd: projectCwd },
-      }).then(() => { refreshSettled = true; });
-      await registry.waitForCanonicalization();
-      await Bun.sleep(0);
-      expect(refreshSettled).toBe(false);
-
-      factory.releaseCreate();
-      await Promise.all([initializing, refreshing]);
-      expect(resultFor(output.messages, 1)).toMatchObject({ platformOs: "linux" });
-      expect(resultFor(output.messages, 2)).toMatchObject({ project: { cloneUrl: newOrigin } });
-      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin]);
-      expect(factory.transports[0]!.destroyed).toBe(true);
-
-      await aggregator.handle({ method: "initialized" });
-      await aggregator.handle({ method: "thread/start", id: 3, params: { cwd: projectCwd } });
-      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, newOrigin]);
-    } finally {
-      await aggregator.close();
-      state.close();
-      rmSync(projectCwd, { recursive: true, force: true });
-    }
-  });
-
-  test("serializes an origin refresh with later representative warm provisioning", async () => {
-    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-read-origin-race-")));
-    const oldOrigin = "https://example.test/owner/old.git";
-    const newOrigin = "https://example.test/owner/new.git";
-    await runGit("init", projectCwd);
-    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
-    const state = new AggregatorState(":memory:");
-    state.saveProject({ cwd: projectCwd, cloneUrl: oldOrigin });
-    const registry = new SignalingProjectRegistry(state);
-    const factory = new FakeFactory();
-    const output = new CaptureSink();
-    const aggregator = new AppServerAggregator({ factory, registry, state, output });
-    const harness = { factory, output, aggregator, registry, state };
-    try {
-      await initialize(harness);
-      await aggregator.handle({ method: "thread/start", id: 2, params: { cwd: projectCwd } });
-      await aggregator.handle({
-        method: "thread/archive",
-        id: 3,
-        params: { threadId: factory.threadId(0) },
-      });
-      expect(factory.transports[0]!.destroyed).toBe(true);
-
-      factory.pauseNextCreate = true;
-      const reading = aggregator.handle({ method: "model/list", id: 4, params: {} });
-      await waitFor(() => factory.createBlocked);
-      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
-      let refreshSettled = false;
-      const refreshing = aggregator.handle({
-        method: "skizzles/project/add",
-        id: 5,
-        params: { cwd: projectCwd },
-      }).then(() => { refreshSettled = true; });
-      await registry.waitForCanonicalization();
-      await Bun.sleep(0);
-      expect(refreshSettled).toBe(false);
-
-      factory.releaseCreate();
-      await Promise.all([reading, refreshing]);
-      expect(resultFor(output.messages, 4)).toEqual({});
-      expect(resultFor(output.messages, 5)).toMatchObject({ project: { cloneUrl: newOrigin } });
-      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, oldOrigin]);
-      expect(factory.transports[1]!.destroyed).toBe(true);
-
-      await aggregator.handle({ method: "thread/start", id: 6, params: { cwd: projectCwd } });
-      expect(factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, oldOrigin, newOrigin]);
-    } finally {
-      await aggregator.close();
-      state.close();
-      rmSync(projectCwd, { recursive: true, force: true });
-    }
-  });
-
-  test("retains a stale warm backend when refresh teardown fails so retry can remove it", async () => {
-    const projectCwd = realpathSync(mkdtempSync(join(tmpdir(), "skizzles-aggregator-origin-retry-")));
-    const oldOrigin = "https://example.test/owner/old.git";
-    const newOrigin = "https://example.test/owner/new.git";
-    await runGit("init", projectCwd);
-    await runGit("-C", projectCwd, "remote", "add", "origin", oldOrigin);
-    const harness = createHarness([{ cwd: projectCwd, cloneUrl: oldOrigin }]);
-    try {
-      await initialize(harness);
-      const stale = harness.factory.transports[0]!;
-      stale.destroyFailures = 1;
-      await runGit("-C", projectCwd, "remote", "set-url", "origin", newOrigin);
-
-      await harness.aggregator.handle({
-        method: "skizzles/project/add",
-        id: 2,
-        params: { cwd: projectCwd },
-      });
-      expect(errorFor(harness.output.messages, 2)).toEqual({ code: -32602, message: "fake destroy failure" });
-      expect(stale.destroyCalls).toBe(1);
-      expect(stale.destroyed).toBe(false);
-      expect(harness.registry.list()[0]?.cloneUrl).toBe(newOrigin);
-
-      await harness.aggregator.handle({
-        method: "skizzles/project/add",
-        id: 3,
-        params: { cwd: projectCwd },
-      });
-      expect(resultFor(harness.output.messages, 3)).toMatchObject({ project: { cloneUrl: newOrigin } });
-      expect(stale.destroyCalls).toBe(2);
-      expect(stale.destroyed).toBe(true);
-
-      await harness.aggregator.handle({ method: "thread/start", id: 4, params: { cwd: projectCwd } });
-      expect(harness.factory.projects.map((project) => project.cloneUrl)).toEqual([oldOrigin, newOrigin]);
+      expect(errorFor(harness.output.messages, 4).message).toContain("host' or 'container");
     } finally {
       await harness.aggregator.close();
-      rmSync(projectCwd, { recursive: true, force: true });
+      harness.state.close();
     }
   });
 
-  test("disconnects a backpressured relay without blocking backend responses", async () => {
-    const state = new AggregatorState(":memory:");
-    state.saveProject({ cwd: HOST_PROJECT_A, cloneUrl: "https://example.test/project-a.git" });
-    const registry = new ProjectRegistry(state);
-    const factory = new FakeFactory();
-    factory.notificationsBeforeThreadStartResponse = 300;
-    const bridge = new AggregatorBridge();
-    const aggregator = new AppServerAggregator({
-      factory,
-      registry,
-      state,
-      output: bridge,
-      applyClientNotificationOptOuts: false,
-    });
-    bridge.bind(aggregator);
-    const relay = new BlockingRelaySink();
-    let disconnected = false;
-    const session = bridge.attachClient(relay, () => {
-      disconnected = true;
-      relay.release();
-    });
+  test("rejects unregistered directories without provisioning either backend mode", async () => {
+    const harness = createHarness();
     try {
-      const initializing = session.handle({
-        method: "initialize",
-        id: "relay-init",
+      await initialize(harness);
+      for (const [id, mode] of [["container", "container"], ["host", "host"]] as const) {
+        await harness.aggregator.handle({
+          method: "thread/start",
+          id,
+          params: { cwd: "/host/not-registered", skizzlesExecutionMode: mode },
+        });
+        expect(errorFor(harness.output.messages, id).message).toContain("not a registered project");
+      }
+      expect(harness.containerFactory.transports).toHaveLength(0);
+      expect(requestFor(harness.host, "thread/start")).toBeUndefined();
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
+  test("returns a provisioning error without poisoning the next container start", async () => {
+    const harness = createHarness();
+    harness.containerFactory.createFailures = 1;
+    try {
+      await initialize(harness);
+      await harness.aggregator.handle({ method: "thread/start", id: "failed", params: { cwd: PROJECT_A } });
+      expect(errorFor(harness.output.messages, "failed").message).toContain("fake container provisioning failure");
+      expect(harness.containerFactory.transports).toHaveLength(0);
+
+      await harness.aggregator.handle({ method: "thread/start", id: "retry", params: { cwd: PROJECT_A } });
+      expect(resultFor(harness.output.messages, "retry")).toMatchObject({ thread: { cwd: PROJECT_A } });
+      expect(harness.containerFactory.transports).toHaveLength(1);
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
+  test("keeps forks and resumes sticky while allowing fresh cross-mode threads", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      const containerThread = await startThread(harness, PROJECT_A, "container", "container-start");
+      const container = harness.containerFactory.transports[0]!;
+
+      await harness.aggregator.handle({
+        method: "thread/fork",
+        id: "bad-fork",
+        params: { threadId: containerThread, skizzlesExecutionMode: "host" },
+      });
+      expect(errorFor(harness.output.messages, "bad-fork").message).toContain("only be selected");
+      expect(requestFor(container, "thread/fork")).toBeUndefined();
+
+      await harness.aggregator.handle({
+        method: "skizzles/project/list",
+        id: "bad-project-extension",
+        params: { skizzlesExecutionMode: "host" },
+      });
+      expect(errorFor(harness.output.messages, "bad-project-extension").message).toContain("only be selected");
+
+      await harness.aggregator.handle({
+        method: "thread/fork",
+        id: "fork",
         params: {
-          clientInfo: { name: "slow-relay", title: "Slow relay", version: "1.0.0" },
-          capabilities: { experimentalApi: true },
+          threadId: containerThread,
+          permissions: ":host-request",
+          sandbox: "read-only",
         },
       });
-      await relay.waitUntilBlocked();
+      const fork = resultFor(harness.output.messages, "fork") as { thread: { id: string } };
+      expect(requestFor(container, "thread/fork")?.params).toEqual({
+        threadId: containerThread,
+        sandbox: "danger-full-access",
+      });
+      expect(harness.state.threads().find((thread) => thread.threadId === fork.thread.id)).toMatchObject({
+        machineId: container.machineId,
+        executionMode: "container",
+      });
 
-      const outcome = await withTimeout(
-        bridge.call("thread/start", { cwd: HOST_PROJECT_A }),
-        1_000,
-        "backend response remained blocked behind the relay",
-      );
-      expect(outcome).toMatchObject({ result: { thread: { cwd: HOST_PROJECT_A } } });
-      expect(disconnected).toBe(true);
-      await initializing;
+      await harness.aggregator.handle({
+        method: "thread/resume",
+        id: "container-resume",
+        params: { threadId: containerThread, sandbox: "read-only" },
+      });
+      expect(requestFor(container, "thread/resume")?.params).toEqual({
+        threadId: containerThread,
+        sandbox: "danger-full-access",
+      });
+
+      const hostThread = await startThread(harness, PROJECT_A, "host", "host-start");
+      expect(hostThread).toStartWith("host-thread-");
+      expect(harness.state.threads().find((thread) => thread.threadId === hostThread)).toMatchObject({
+        machineId: "host",
+        executionMode: "host",
+      });
+      await harness.aggregator.handle({
+        method: "thread/resume",
+        id: "host-resume",
+        params: { threadId: hostThread, sandbox: "workspace-write" },
+      });
+      expect(requestFor(harness.host, "thread/resume")?.params).toEqual({
+        threadId: hostThread,
+        sandbox: "workspace-write",
+      });
+      expect(harness.containerFactory.transports).toHaveLength(1);
     } finally {
-      session.close();
-      relay.release();
-      await aggregator.close();
-      await bridge.close();
-      state.close();
+      await harness.aggregator.close();
+      harness.state.close();
     }
   });
 
-  test("does not reorder backend initialization notifications ahead of the initialize result", async () => {
+  test("forces per-turn container policy but forwards host turn policy unchanged", async () => {
     const harness = createHarness();
-    await initialize(harness);
-    expect(harness.output.messages[0]).toMatchObject({ id: 1, result: { platformOs: "linux" } });
-    expect(harness.output.messages[1]).toMatchObject({ method: "configWarning" });
-    await harness.aggregator.close();
+    try {
+      await initialize(harness);
+      const containerThread = await startThread(harness, PROJECT_A, "container", 2);
+      const container = harness.containerFactory.transports[0]!;
+      await harness.aggregator.handle({
+        method: "turn/start",
+        id: 3,
+        params: {
+          threadId: containerThread,
+          permissions: ":read-only",
+          sandboxPolicy: { type: "readOnly" },
+          approvalPolicy: "on-request",
+          input: [],
+        },
+      });
+      expect(requestFor(container, "turn/start")?.params).toEqual({
+        threadId: containerThread,
+        sandboxPolicy: { type: "dangerFullAccess" },
+        approvalPolicy: "on-request",
+        input: [],
+      });
+
+      const hostThread = await startThread(harness, PROJECT_A, "host", 4);
+      const hostTurnParams = {
+        threadId: hostThread,
+        permissions: ":workspace",
+        sandboxPolicy: { type: "workspaceWrite", writableRoots: [PROJECT_A] },
+        approvalPolicy: "on-request",
+        input: [],
+      };
+      await harness.aggregator.handle({ method: "turn/start", id: 5, params: hostTurnParams });
+      expect(requestFor(harness.host, "turn/start")?.params).toEqual(hostTurnParams);
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
   });
 
-  test("does not route aggregate or mutating global requests to an arbitrary container", async () => {
+  test("rejects and removes a container whose visible model catalog differs from the host", async () => {
     const harness = createHarness();
-    await initialize(harness);
+    harness.runtime.containerModels = ["codex", "grok"];
+    harness.runtime.hostModels = ["codex", "grok", "grok-fast"];
+    try {
+      await initialize(harness);
+      await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: PROJECT_A } });
 
-    await harness.aggregator.handle({ method: "project/list", id: 2, params: {} });
-    expect(errorFor(harness.output.messages, 2)?.message).toContain("aggregate topology method");
-    await harness.aggregator.handle({ method: "config/value/write", id: 3, params: {} });
-    expect(errorFor(harness.output.messages, 3)?.message).toContain("no thread routing key");
-    await harness.aggregator.close();
+      expect(errorFor(harness.output.messages, 2).message).toContain("missing in container: grok-fast");
+      expect(harness.containerFactory.transports[0]?.destroyed).toBe(true);
+      expect(requestFor(harness.containerFactory.transports[0]!, "thread/start")).toBeUndefined();
+      expect(harness.state.threads()).toEqual([]);
+      expect(harness.state.machines().find((machine) => machine.kind === "container")?.state).toBe("removed");
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
   });
 
-  test("routes project-sensitive representative reads by cwd and rejects multi-project cwds", async () => {
+  test("compares every hidden-model page before starting a container thread", async () => {
     const harness = createHarness();
-    await initialize(harness);
+    harness.runtime.hostModels = ["codex", "grok", "grok-fast"];
+    harness.runtime.containerModels = [...harness.runtime.hostModels];
+    harness.runtime.modelPageSize = 1;
+    try {
+      await initialize(harness);
+      await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: PROJECT_A } });
+      expect(resultFor(harness.output.messages, 2)).toMatchObject({ thread: { cwd: PROJECT_A } });
 
-    await harness.aggregator.handle({ method: "config/read", id: 2, params: { cwd: HOST_PROJECT_B } });
-    expect(resultFor(harness.output.messages, 2)).toEqual({});
-    expect(harness.factory.projects.map((project) => project.cwd)).toEqual([HOST_PROJECT_A, HOST_PROJECT_B]);
-    expect(harness.factory.transports[0]!.request("config/read")).toBeUndefined();
-    expect(harness.factory.transports[1]!.request("config/read")?.params).toEqual({ cwd: CONTAINER_WORKSPACE });
-
-    await harness.aggregator.handle({ method: "hooks/list", id: 3, params: { cwds: [HOST_PROJECT_B] } });
-    expect(resultFor(harness.output.messages, 3)).toEqual({});
-    expect(harness.factory.transports[1]!.request("hooks/list")?.params).toEqual({ cwds: [CONTAINER_WORKSPACE] });
-
-    await harness.aggregator.handle({
-      method: "skills/list",
-      id: 4,
-      params: { cwds: [HOST_PROJECT_A, HOST_PROJECT_B] },
-    });
-    expect(errorFor(harness.output.messages, 4)).toEqual({
-      code: -32602,
-      message: "representative read cannot span multiple registered projects",
-    });
-    expect(harness.factory.transports.every((transport) => transport.request("skills/list") === undefined)).toBe(true);
-    await harness.aggregator.close();
+      for (const transport of [harness.host, harness.containerFactory.transports[0]!]) {
+        expect(transport.writes
+          .filter((message) => "method" in message && message.method === "model/list")
+          .map((message) => record((message as { params?: unknown }).params)))
+          .toEqual([
+            { includeHidden: true },
+            { includeHidden: true, cursor: "model-page:1" },
+            { includeHidden: true, cursor: "model-page:2" },
+          ]);
+      }
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
   });
 
-  test("correlates colliding backend approval ids without changing approval payloads", async () => {
+  test("archives exact containers without draining the shared host app-server", async () => {
     const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_A } });
+    try {
+      await initialize(harness);
+      const containerThread = await startThread(harness, PROJECT_A, "container", 2);
+      const hostThread = await startThread(harness, PROJECT_A, "host", 3);
+      const container = harness.containerFactory.transports[0]!;
 
-    harness.factory.transports[0]!.emit({
-      method: "item/commandExecution/requestApproval",
-      id: 7,
-      params: { threadId: harness.factory.threadId(0), command: "echo one" },
-    });
-    harness.factory.transports[1]!.emit({
-      method: "item/commandExecution/requestApproval",
-      id: 7,
-      params: { threadId: harness.factory.threadId(1), command: "echo two" },
-    });
-    await waitFor(() => approvalRequests(harness.output.messages).length === 2);
+      await harness.aggregator.handle({ method: "thread/archive", id: 4, params: { threadId: containerThread } });
+      expect(resultFor(harness.output.messages, 4)).toEqual({});
+      expect(container.destroyed).toBe(true);
 
-    const approvals = approvalRequests(harness.output.messages);
-    expect(approvals[0]!.id).not.toBe(approvals[1]!.id);
-    expect(approvals.map((message) => message.params)).toEqual([
-      { threadId: harness.factory.threadId(0), command: "echo one" },
-      { threadId: harness.factory.threadId(1), command: "echo two" },
-    ]);
+      await harness.aggregator.handle({ method: "thread/archive", id: 5, params: { threadId: hostThread } });
+      expect(resultFor(harness.output.messages, 5)).toEqual({});
+      expect(harness.host.destroyed).toBe(false);
 
-    await harness.aggregator.handle({ id: approvals[0]!.id, result: { decision: "accept" } });
-    await harness.aggregator.handle({ id: approvals[1]!.id, result: { decision: "decline" } });
-    expect(harness.factory.transports[0]!.response(7)).toEqual({ id: 7, result: { decision: "accept" } });
-    expect(harness.factory.transports[1]!.response(7)).toEqual({ id: 7, result: { decision: "decline" } });
-
-    await harness.aggregator.close();
+      await harness.aggregator.handle({ method: "permissionProfile/list", id: 6, params: { cwd: PROJECT_A } });
+      expect(resultFor(harness.output.messages, 6)).toEqual({
+        backend: "host",
+        params: { cwd: PROJECT_A },
+      });
+      expect(harness.state.machines().find((machine) => machine.kind === "host")?.state).toBe("active");
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
   });
 
-  test("removes a drained container after archive and retains an archived topology record", async () => {
+  test("retains a failed container teardown so daemon close can retry it", async () => {
     const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    const threadId = harness.factory.threadId(0);
+    let closed = false;
+    try {
+      await initialize(harness);
+      const threadId = await startThread(harness, PROJECT_A, "container", 2);
+      const container = harness.containerFactory.transports[0]!;
+      container.destroyFailures = 1;
 
-    await harness.aggregator.handle({ method: "thread/archive", id: 3, params: { threadId } });
-    expect(resultFor(harness.output.messages, 3)).toEqual({});
-    expect(harness.output.messages).toContainEqual(expect.objectContaining({
-      method: "thread/archived",
-      params: { threadId },
-    }));
-    expect(harness.factory.transports[0]!.destroyed).toBe(true);
+      await harness.aggregator.handle({ method: "thread/archive", id: 3, params: { threadId } });
+      expect(container.destroyed).toBe(false);
+      expect(container.destroyCalls).toBe(1);
+      expect(harness.state.machines().find((machine) => machine.machineId === container.machineId)?.state)
+        .toBe("active");
 
-    await harness.aggregator.handle({
-      method: "thread/list",
-      id: 4,
-      params: { archived: true },
-    });
-    expect(resultFor(harness.output.messages, 4)).toMatchObject({
-      data: [{ id: threadId, status: { type: "notLoaded" } }],
-    });
-    await harness.aggregator.handle({ method: "thread/read", id: 5, params: { threadId, includeTurns: false } });
-    expect(resultFor(harness.output.messages, 5)).toMatchObject({ thread: { id: threadId } });
-    await harness.aggregator.handle({ method: "thread/unarchive", id: 6, params: { threadId } });
-    expect(resultFor(harness.output.messages, 6)).toEqual({});
-    await harness.aggregator.handle({ method: "thread/unarchive", id: "unarchive-again", params: { threadId } });
-    expect(resultFor(harness.output.messages, "unarchive-again")).toEqual({});
-    expect(harness.factory.transports[0]!.request("thread/unarchive")).toBeUndefined();
-    expect(harness.factory.transports).toHaveLength(1);
-    await harness.aggregator.handle({ method: "thread/list", id: 7, params: { archived: true } });
-    expect(resultFor(harness.output.messages, 7)).toMatchObject({ data: [{ id: threadId }] });
-    await harness.aggregator.handle({ method: "thread/list", id: 8, params: {} });
-    expect(resultFor(harness.output.messages, 8)).toEqual({ data: [], nextCursor: null, backwardsCursor: null });
-    await harness.aggregator.handle({ method: "thread/unarchive", id: 9, params: { threadId: "unknown-thread" } });
-    expect(errorFor(harness.output.messages, 9)).toEqual({ code: -32004, message: "unknown thread: unknown-thread" });
-    await harness.aggregator.close();
+      await harness.aggregator.close();
+      closed = true;
+      expect(container.destroyed).toBe(true);
+      expect(container.destroyCalls).toBe(2);
+      expect(harness.state.machines().find((machine) => machine.machineId === container.machineId)?.state)
+        .toBe("removed");
+    } finally {
+      if (!closed) await harness.aggregator.close();
+      harness.state.close();
+    }
   });
 
-  test("archives and deletes recovered threads without their removed backends", async () => {
-    const archivedId = "0198f100-7000-7000-8000-000000000000";
-    const deletedId = "0198f100-7000-7000-8000-000000000001";
-    const recovered = [archivedId, deletedId].map((threadId): StoredThread => ({
-      threadId,
-      machineId: `recovered-${threadId}`,
-      projectCwd: HOST_PROJECT_A,
-      snapshot: { ...threadSnapshot(threadId, 10), cwd: HOST_PROJECT_A },
-      loaded: false,
-      archived: false,
-      deleted: false,
-    }));
+  test("keeps a fork-bearing container until every thread in its tree is archived", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      const parentId = await startThread(harness, PROJECT_A, "container", 2);
+      const container = harness.containerFactory.transports[0]!;
+      await harness.aggregator.handle({ method: "thread/fork", id: 3, params: { threadId: parentId } });
+      const childId = (resultFor(harness.output.messages, 3) as { thread: { id: string } }).thread.id;
+
+      await harness.aggregator.handle({ method: "thread/archive", id: 4, params: { threadId: parentId } });
+      expect(container.destroyed).toBe(false);
+      await harness.aggregator.handle({ method: "thread/archive", id: 5, params: { threadId: childId } });
+      expect(container.destroyed).toBe(true);
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
+  test("blocks project removal for either mode and keeps the host when a drained project is removed", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      const hostThread = await startThread(harness, PROJECT_A, "host", 2);
+      const containerThread = await startThread(harness, PROJECT_B, "container", "container-start");
+      await harness.aggregator.handle({
+        method: "skizzles/project/remove",
+        id: 3,
+        params: { cwd: PROJECT_A },
+      });
+      expect(errorFor(harness.output.messages, 3).message).toBe("project has active threads");
+      await harness.aggregator.handle({
+        method: "skizzles/project/remove",
+        id: "container-remove",
+        params: { cwd: PROJECT_B },
+      });
+      expect(errorFor(harness.output.messages, "container-remove").message).toBe("project has active threads");
+
+      await harness.aggregator.handle({ method: "thread/archive", id: 4, params: { threadId: hostThread } });
+      await harness.aggregator.handle({
+        method: "thread/archive",
+        id: "container-archive",
+        params: { threadId: containerThread },
+      });
+      await harness.aggregator.handle({
+        method: "skizzles/project/remove",
+        id: 5,
+        params: { cwd: PROJECT_A },
+      });
+      expect(resultFor(harness.output.messages, 5)).toEqual({ removed: true });
+      await harness.aggregator.handle({
+        method: "skizzles/project/remove",
+        id: "container-remove-after-archive",
+        params: { cwd: PROJECT_B },
+      });
+      expect(resultFor(harness.output.messages, "container-remove-after-archive")).toEqual({ removed: true });
+      expect(harness.host.destroyed).toBe(false);
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
+  test("correlates colliding reverse requests from host and container independently", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness);
+      await startThread(harness, PROJECT_A, "container", 2);
+      harness.host.emit({
+        method: "item/commandExecution/requestApproval",
+        id: 7,
+        params: { threadId: "host-thread-1", command: "echo host" },
+      });
+      harness.containerFactory.transports[0]!.emit({
+        method: "item/commandExecution/requestApproval",
+        id: 7,
+        params: { threadId: "container-thread-1", command: "echo container" },
+      });
+      await waitFor(() => harness.output.messages.filter(isServerRequest).length === 2);
+      const requests = harness.output.messages.filter(isServerRequest);
+      expect(requests[0]!.id).not.toBe(requests[1]!.id);
+
+      await harness.aggregator.handle({ id: requests[0]!.id, result: { decision: "accept" } });
+      await harness.aggregator.handle({ id: requests[1]!.id, result: { decision: "decline" } });
+      expect(harness.host.response(7)).toMatchObject({ id: 7, result: { decision: "accept" } });
+      expect(harness.containerFactory.transports[0]!.response(7)).toMatchObject({
+        id: 7,
+        result: { decision: "decline" },
+      });
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
+  test("routes recovered host threads to the new host process but never migrates stale containers", async () => {
+    const recovered: StoredThread[] = [
+      {
+        threadId: "recovered-host",
+        machineId: "host",
+        projectCwd: PROJECT_A,
+        executionMode: "host",
+        snapshot: snapshot("recovered-host", PROJECT_A),
+        loaded: false,
+        archived: false,
+        deleted: false,
+      },
+      {
+        threadId: "recovered-container",
+        machineId: "old-container-machine",
+        projectCwd: PROJECT_A,
+        executionMode: "container",
+        snapshot: snapshot("recovered-container", PROJECT_A),
+        loaded: false,
+        archived: false,
+        deleted: false,
+      },
+    ];
     const harness = createHarness(undefined, recovered);
-    await initialize(harness);
+    try {
+      await initialize(harness);
+      await harness.aggregator.handle({
+        method: "thread/read",
+        id: 2,
+        params: { threadId: "recovered-host", includeTurns: true },
+      });
+      expect(requestFor(harness.host, "thread/read")?.params).toEqual({
+        threadId: "recovered-host",
+        includeTurns: true,
+      });
 
-    expect(harness.state.threads().every((thread) => !("turns" in (thread.snapshot ?? {})))).toBe(true);
-    await harness.aggregator.handle({
-      method: "thread/read",
-      id: "recovered-read",
-      params: { threadId: archivedId, includeTurns: false },
-    });
-    const recoveredRead = resultFor(harness.output.messages, "recovered-read") as { thread: Record<string, unknown> };
-    expect(recoveredRead.thread).not.toHaveProperty("turns");
+      await harness.aggregator.handle({
+        method: "thread/read",
+        id: 3,
+        params: { threadId: "recovered-container", includeTurns: true },
+      });
+      expect(errorFor(harness.output.messages, 3).message).toContain("unavailable");
+      expect(harness.containerFactory.transports).toHaveLength(0);
 
-    await harness.aggregator.handle({ method: "thread/archive", id: 2, params: { threadId: archivedId } });
-    await harness.aggregator.handle({ method: "thread/delete", id: 3, params: { threadId: deletedId } });
+      await harness.aggregator.handle({
+        method: "thread/read",
+        id: 4,
+        params: { threadId: "recovered-container", includeTurns: false },
+      });
+      expect(resultFor(harness.output.messages, 4)).toMatchObject({
+        thread: { id: "recovered-container", cwd: PROJECT_A },
+      });
 
-    expect(resultFor(harness.output.messages, 2)).toEqual({});
-    expect(resultFor(harness.output.messages, 3)).toEqual({});
-    expect(harness.output.messages).toContainEqual(expect.objectContaining({
-      method: "thread/archived",
-      params: { threadId: archivedId },
-    }));
-    expect(harness.output.messages).toContainEqual(expect.objectContaining({
-      method: "thread/deleted",
-      params: { threadId: deletedId },
-    }));
-    expect(harness.factory.transports[0]!.request("thread/archive")).toBeUndefined();
-    expect(harness.factory.transports[0]!.request("thread/delete")).toBeUndefined();
-    expect(harness.state.threads()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ threadId: archivedId, archived: true, deleted: false }),
-      expect.objectContaining({ threadId: deletedId, archived: false, deleted: true }),
-    ]));
-    await harness.aggregator.close();
+      await harness.aggregator.handle({
+        method: "thread/archive",
+        id: 5,
+        params: { threadId: "recovered-container" },
+      });
+      expect(resultFor(harness.output.messages, 5)).toEqual({});
+      expect(harness.state.threads().find((thread) => thread.threadId === "recovered-container"))
+        .toMatchObject({ archived: true, executionMode: "container", machineId: "old-container-machine" });
+      expect(harness.containerFactory.transports).toHaveLength(0);
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
   });
 
-  test("waits for backend cascade notifications before removing a fork-bearing container", async () => {
+  test("retains topology notifications internally when the client opts out", async () => {
     const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    const threadId = harness.factory.threadId(0);
-    await harness.aggregator.handle({ method: "thread/fork", id: 3, params: { threadId } });
-    harness.factory.archiveMode = "cascade";
+    try {
+      await initialize(harness, { experimentalApi: true, optOutNotificationMethods: ["thread/started"] });
+      const threadId = await startThread(harness, PROJECT_A, "container", 2);
+      expect(harness.output.messages.some((message) => (
+        "method" in message && message.method === "thread/started"
+      ))).toBe(false);
 
-    await harness.aggregator.handle({ method: "thread/archive", id: 4, params: { threadId } });
-    await waitFor(() => harness.factory.transports[0]!.destroyed);
-    await harness.aggregator.handle({
-      method: "thread/list",
-      id: 5,
-      params: { archived: true },
-    });
-    const listed = resultFor(harness.output.messages, 5) as { data: Array<{ id: string }> };
-    expect(listed.data.map((thread) => thread.id).sort()).toEqual([
-      threadId,
-      harness.factory.forkId(0),
-    ].sort());
-    await harness.aggregator.close();
-  });
-
-  test("does not let an archive notification overtake its backend response", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    const threadId = harness.factory.threadId(0);
-    harness.factory.archiveMode = "notificationFirst";
-
-    await harness.aggregator.handle({ method: "thread/archive", id: 3, params: { threadId } });
-    expect(resultFor(harness.output.messages, 3)).toEqual({});
-    expect(harness.factory.transports[0]!.destroyed).toBe(true);
-    await harness.aggregator.close();
-  });
-
-  test("retries a failed transport teardown during aggregate close", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    const transport = harness.factory.transports[0]!;
-    transport.destroyFailures = 1;
-
-    await expect(harness.aggregator.handle({
-      method: "thread/archive",
-      id: 3,
-      params: { threadId: harness.factory.threadId(0) },
-    })).rejects.toThrow("fake destroy failure");
-    expect(transport.destroyCalls).toBe(1);
-    await harness.aggregator.close();
-    expect(transport.destroyCalls).toBe(2);
-    expect(transport.destroyed).toBe(true);
-  });
-
-  test("returns a backend error without stranding a timed pending call when transport write fails", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    harness.factory.transports[0]!.writeFailures = 1;
-
-    await harness.aggregator.handle({
-      method: "turn/start",
-      id: 3,
-      params: { threadId: harness.factory.threadId(0), input: [] },
-    });
-    expect(errorFor(harness.output.messages, 3)).toEqual({
-      code: -32003,
-      message: "backend request failed: turn/start",
-    });
-    await harness.aggregator.close();
-  });
-
-  test("includes non-interactive descendants when a relation filter supplies the topology", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    const parentId = harness.factory.threadId(0);
-    const childId = `${parentId}-child`;
-    harness.factory.transports[0]!.emit({
-      method: "thread/started",
-      params: {
-        thread: {
-          ...threadSnapshot(childId, 1),
-          parentThreadId: parentId,
-          source: { subAgent: { thread_spawn: { parent_thread_id: parentId, depth: 1 } } },
-        },
-      },
-    });
-    await waitFor(() => harness.output.messages.some((message) =>
-      "method" in message && message.method === "thread/started"
-      && (message.params as { thread?: { id?: string } } | undefined)?.thread?.id === childId));
-
-    await harness.aggregator.handle({ method: "thread/list", id: 3, params: {} });
-    expect((resultFor(harness.output.messages, 3) as { data: Array<{ id: string }> }).data)
-      .toEqual([expect.objectContaining({ id: parentId })]);
-    await harness.aggregator.handle({
-      method: "thread/list",
-      id: 4,
-      params: { ancestorThreadId: parentId },
-    });
-    expect(resultFor(harness.output.messages, 4)).toMatchObject({ data: [{ id: childId }] });
-    await harness.aggregator.close();
-  });
-
-  test("coalesces concurrent representative-backend provisioning", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    await harness.aggregator.handle({
-      method: "thread/archive",
-      id: 3,
-      params: { threadId: harness.factory.threadId(0) },
-    });
-
-    harness.factory.initializeDelayMs = 5;
-    const modelList = harness.aggregator.handle({ method: "model/list", id: 4, params: {} });
-    await waitFor(() => harness.factory.transports[1]?.request("initialize") !== undefined);
-    const configRead = harness.aggregator.handle({ method: "config/read", id: 5, params: {} });
-    await Promise.all([modelList, configRead]);
-    expect(harness.factory.transports).toHaveLength(2);
-    expect(resultFor(harness.output.messages, 4)).toEqual({});
-    expect(resultFor(harness.output.messages, 5)).toEqual({});
-    await harness.aggregator.close();
-  });
-
-  test("excludes a closed thread from loaded topology while its backend remains ready", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    const parentId = harness.factory.threadId(0);
-    await harness.aggregator.handle({ method: "thread/fork", id: 3, params: { threadId: parentId } });
-    const forkId = harness.factory.forkId(0);
-
-    await harness.aggregator.handle({ method: "thread/loaded/list", id: 4, params: {} });
-    expect(resultFor(harness.output.messages, 4)).toEqual({
-      data: [parentId, forkId].sort(),
-      nextCursor: null,
-    });
-
-    harness.factory.transports[0]!.emit({ method: "thread/closed", params: { threadId: parentId } });
-    await waitFor(() => harness.output.messages.some((message) =>
-      "method" in message && message.method === "thread/closed"));
-    await harness.aggregator.handle({ method: "thread/loaded/list", id: 5, params: {} });
-    expect(resultFor(harness.output.messages, 5)).toEqual({ data: [forkId], nextCursor: null });
-    expect(harness.factory.transports[0]!.destroyed).toBe(false);
-    await harness.aggregator.close();
-  });
-
-  test("refreshes preview and activity timestamps before aggregate list filtering and sorting", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_A } });
-    const activeId = harness.factory.threadId(0);
-    const otherId = harness.factory.threadId(1);
-    harness.factory.transports[0]!.emit({
-      method: "thread/started",
-      params: { thread: { ...threadSnapshot(activeId, 0), preview: "" } },
-    });
-    harness.factory.transports[0]!.emit({
-      method: "turn/started",
-      params: {
-        threadId: activeId,
-        turn: { id: "turn-1", items: [], startedAt: 100, completedAt: null },
-      },
-      emittedAtMs: 100_000,
-    });
-    harness.factory.transports[0]!.emit({
-      method: "item/completed",
-      params: {
-        threadId: activeId,
-        turnId: "turn-1",
-        completedAtMs: 110_000,
-        item: {
-          type: "userMessage",
-          id: "user-1",
-          clientId: null,
-          content: [{
-            type: "text",
-            text: "ignored model context\n## My request for Codex: fresh searchable request",
-            text_elements: [],
-          }],
-        },
-      },
-      emittedAtMs: 110_000,
-    });
-    harness.factory.transports[0]!.emit({
-      method: "turn/completed",
-      params: {
-        threadId: activeId,
-        turn: { id: "turn-1", items: [], startedAt: 100, completedAt: 120 },
-      },
-      emittedAtMs: 120_000,
-    });
-    harness.factory.transports[0]!.emit({
-      method: "item/started",
-      params: {
-        threadId: activeId,
-        turnId: "turn-1",
-        startedAtMs: 90_000,
-        item: { type: "plan", id: "late-item", text: "out-of-order event" },
-      },
-      emittedAtMs: 90_000,
-    });
-    await waitFor(() => harness.output.messages.some((message) =>
-      "method" in message && message.method === "item/started"
-      && (message.params as { item?: { id?: string } } | undefined)?.item?.id === "late-item"));
-
-    await harness.aggregator.handle({ method: "thread/list", id: 4, params: { searchTerm: "searchable" } });
-    expect(resultFor(harness.output.messages, 4)).toMatchObject({
-      data: [{ id: activeId, preview: "fresh searchable request", updatedAt: 120, recencyAt: 100 }],
-    });
-    await harness.aggregator.handle({ method: "thread/list", id: 5, params: { sortKey: "updated_at" } });
-    expect((resultFor(harness.output.messages, 5) as { data: Array<{ id: string }> }).data[0]?.id).toBe(activeId);
-    await harness.aggregator.handle({ method: "thread/list", id: 6, params: { sortKey: "recency_at" } });
-    expect((resultFor(harness.output.messages, 6) as { data: Array<{ id: string }> }).data.map((thread) => thread.id))
-      .toEqual([activeId, otherId]);
-    await harness.aggregator.close();
-  });
-
-  test("keeps topology notifications enabled internally while honoring the client opt-out", async () => {
-    const harness = createHarness();
-    await initialize(harness, {
-      experimentalApi: true,
-      optOutNotificationMethods: [
-        "configWarning",
-        ...TOPOLOGY_NOTIFICATION_METHODS,
-      ],
-    });
-
-    expect(harness.factory.transports[0]!.request("initialize")?.params).toMatchObject({
-      capabilities: { optOutNotificationMethods: ["configWarning"] },
-    });
-    expect(harness.output.messages.some((message) => "method" in message && message.method === "configWarning")).toBe(false);
-
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    const parentId = harness.factory.threadId(0);
-    const childId = `${parentId}-child`;
-    harness.factory.transports[0]!.emit({
-      method: "thread/started",
-      params: {
-        thread: {
-          ...threadSnapshot(childId, 1),
-          parentThreadId: parentId,
-          source: { subAgent: { thread_spawn: { parent_thread_id: parentId, depth: 1 } } },
-        },
-      },
-    });
-    await waitForThread(harness, parentId, childId);
-    await harness.aggregator.handle({ method: "turn/start", id: 3, params: { threadId: childId, input: [] } });
-    expect(resultFor(harness.output.messages, 3)).toEqual({});
-
-    harness.factory.archiveMode = "cascade";
-    await harness.aggregator.handle({ method: "thread/archive", id: 4, params: { threadId: parentId } });
-    harness.factory.transports[0]!.emit({ method: "thread/archived", params: { threadId: childId } });
-    await waitFor(() => harness.factory.transports[0]!.destroyed);
-    expect(harness.output.messages.some((message) =>
-      "method" in message && TOPOLOGY_NOTIFICATION_METHODS.has(message.method))).toBe(false);
-    await harness.aggregator.close();
-  });
-
-  test("answers thread/start when later backend provisioning rejects", async () => {
-    const harness = createHarness();
-    await initialize(harness);
-    await harness.aggregator.handle({ method: "thread/start", id: 2, params: { cwd: HOST_PROJECT_A } });
-    harness.factory.createFailures = 1;
-
-    await harness.aggregator.handle({ method: "thread/start", id: 3, params: { cwd: HOST_PROJECT_A } });
-    expect(errorFor(harness.output.messages, 3)).toEqual({
-      code: -32603,
-      message: "failed to provision app-server backend",
-    });
-    expect(harness.factory.transports).toHaveLength(1);
-    await harness.aggregator.close();
+      await harness.aggregator.handle({ method: "thread/list", id: 3, params: { cwd: PROJECT_A } });
+      expect(resultFor(harness.output.messages, 3)).toMatchObject({ data: [{ id: threadId }] });
+      const initializeRequest = requestFor(harness.host, "initialize")!;
+      expect(initializeRequest.params).toMatchObject({
+        capabilities: { optOutNotificationMethods: [] },
+      });
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
   });
 });
 
-const TOPOLOGY_NOTIFICATION_METHODS = new Set([
-  "thread/started",
-  "thread/status/changed",
-  "thread/archived",
-  "thread/deleted",
-  "thread/closed",
-  "thread/name/updated",
-  "turn/started",
-  "turn/completed",
-  "item/started",
-  "item/completed",
-]);
+type ProjectSeed = { cwd: string; cloneUrl: string | null };
 
-class CaptureSink implements MessageSink {
-  readonly messages: RpcMessage[] = [];
+function createHarness(
+  projects: ProjectSeed[] | undefined = [
+    { cwd: PROJECT_A, cloneUrl: "https://example.test/project-a.git" },
+    { cwd: PROJECT_B, cloneUrl: "https://example.test/project-b.git" },
+  ],
+  threads: StoredThread[] = [],
+) {
+  const runtime = new FakeRuntime();
+  const hostFactory = new FakeHostFactory(runtime);
+  const containerFactory = new FakeContainerFactory(runtime);
+  const output = new CaptureSink();
+  const state = new AggregatorState(":memory:");
+  for (const project of projects ?? []) state.saveProject(project);
+  for (const thread of threads) state.saveThread(thread);
+  const registry = new ProjectRegistry(state);
+  const aggregator = new AppServerAggregator({
+    hostFactory,
+    containerFactory,
+    registry,
+    state,
+    output,
+  });
+  return {
+    runtime,
+    hostFactory,
+    containerFactory,
+    output,
+    state,
+    registry,
+    aggregator,
+    get host(): FakeTransport {
+      return hostFactory.transports[0]!;
+    },
+  };
+}
 
-  async send(message: RpcMessage): Promise<void> {
-    this.messages.push(structuredClone(message));
+async function initialize(
+  harness: ReturnType<typeof createHarness>,
+  capabilities: Record<string, unknown> = { experimentalApi: true },
+): Promise<void> {
+  await harness.aggregator.handle({ method: "initialize", id: 1, params: initializeParams(capabilities) });
+  expect(resultFor(harness.output.messages, 1)).toMatchObject({ platformFamily: "unix" });
+  await harness.aggregator.handle({ method: "initialized" });
+}
+
+function initializeParams(capabilities: Record<string, unknown> = { experimentalApi: true }) {
+  return {
+    clientInfo: { name: "test", title: "Test", version: "0.1.0" },
+    capabilities,
+  };
+}
+
+async function startThread(
+  harness: ReturnType<typeof createHarness>,
+  cwd: string,
+  mode: "host" | "container",
+  id: RpcId,
+): Promise<string> {
+  await harness.aggregator.handle({
+    method: "thread/start",
+    id,
+    params: { cwd, skizzlesExecutionMode: mode },
+  });
+  const result = resultFor(harness.output.messages, id) as { thread: { id: string } };
+  return result.thread.id;
+}
+
+class FakeHostFactory implements HostBackendFactory {
+  readonly transports: FakeTransport[] = [];
+  createFailures = 0;
+
+  constructor(private readonly runtime: FakeRuntime) {}
+
+  async create(): Promise<BackendTransport> {
+    if (this.createFailures > 0) {
+      this.createFailures--;
+      throw new Error("fake host provisioning failure");
+    }
+    const transport = new FakeTransport("host", this.transports.length, this.runtime);
+    this.transports.push(transport);
+    return transport;
   }
 }
 
-class BlockingRelaySink implements MessageSink {
-  private sends = 0;
-  private readonly blocked = Promise.withResolvers<void>();
-  private readonly writable = Promise.withResolvers<void>();
-
-  async send(_message: RpcMessage): Promise<void> {
-    this.sends++;
-    if (this.sends === 1) return;
-    this.blocked.resolve();
-    await this.writable.promise;
-  }
-
-  waitUntilBlocked(): Promise<void> {
-    return this.blocked.promise;
-  }
-
-  release(): void {
-    this.writable.resolve();
-  }
-}
-
-class SignalingProjectRegistry extends ProjectRegistry {
-  private readonly canonicalized = Promise.withResolvers<void>();
-
-  override async canonicalCwd(rawCwd: string): Promise<string> {
-    const cwd = await super.canonicalCwd(rawCwd);
-    this.canonicalized.resolve();
-    return cwd;
-  }
-
-  waitForCanonicalization(): Promise<void> {
-    return this.canonicalized.promise;
-  }
-}
-
-class FakeFactory implements BackendFactory {
+class FakeContainerFactory implements BackendFactory {
   readonly transports: FakeTransport[] = [];
   readonly projects: RegisteredProject[] = [];
-  archiveMode: "missing" | "cascade" | "notificationFirst" = "missing";
-  initializeDelayMs = 0;
   createFailures = 0;
-  pauseNextCreate = false;
-  notificationsBeforeThreadStartResponse = 0;
-  createBlocked = false;
-  private releaseBlockedCreate: (() => void) | undefined;
+
+  constructor(private readonly runtime: FakeRuntime) {}
 
   async create(project: RegisteredProject): Promise<BackendTransport> {
     if (this.createFailures > 0) {
       this.createFailures--;
-      throw new Error("fake provisioning failure");
+      throw new Error("fake container provisioning failure");
     }
-    if (this.pauseNextCreate) {
-      this.pauseNextCreate = false;
-      this.createBlocked = true;
-      await new Promise<void>((resolve) => { this.releaseBlockedCreate = resolve; });
-      this.createBlocked = false;
-      this.releaseBlockedCreate = undefined;
-    }
-    const index = this.transports.length;
     this.projects.push(project);
-    const transport = new FakeTransport(index, (message) => this.handle(index, message));
+    const transport = new FakeTransport("container", this.transports.length, this.runtime);
     this.transports.push(transport);
     return transport;
   }
+}
 
-  releaseCreate(): void {
-    const release = this.releaseBlockedCreate;
-    if (!release) throw new Error("no fake provisioning call is blocked");
-    release();
-  }
+class FakeRuntime {
+  hostModels = ["codex", "grok"];
+  containerModels = ["codex", "grok"];
+  modelPageSize = Number.POSITIVE_INFINITY;
+  private threadSequence = 0;
+  private readonly snapshots = new Map<string, Record<string, unknown> & { id: string }>();
 
-  threadId(index: number): string {
-    return `0198f00${index}-7000-7000-8000-00000000000${index}`;
-  }
-
-  forkId(index: number): string {
-    return `0198f00${index}-7001-7000-8000-00000000000${index}`;
-  }
-
-  private async handle(index: number, message: RpcMessage): Promise<void> {
+  async handle(transport: FakeTransport, message: RpcMessage): Promise<void> {
     if (!("method" in message) || !("id" in message)) return;
-    const transport = this.transports[index]!;
     if (message.method === "initialize") {
-      if (this.initializeDelayMs > 0) await Bun.sleep(this.initializeDelayMs);
       transport.initialized = true;
       transport.emit({
         id: message.id,
         result: {
           userAgent: "fake-codex/0.149.1",
-          codexHome: "/codex-home",
+          codexHome: transport.kind === "host" ? "/host-codex-home" : "/codex-home",
           platformFamily: "unix",
-          platformOs: "linux",
+          platformOs: transport.kind === "host" ? "macos" : "linux",
         },
       });
-      transport.emit({ method: "configWarning", params: { summary: "fake warning", details: null } });
+      transport.emit({ method: "configWarning", params: { summary: `${transport.kind} warning`, details: null } });
       return;
     }
     if (!transport.initialized) {
       transport.emit({ id: message.id, error: { code: -32000, message: "Not initialized" } });
       return;
     }
+    if (message.method === "model/list") {
+      const models = transport.kind === "host" ? this.hostModels : this.containerModels;
+      const cursor = record(message.params).cursor;
+      const offset = typeof cursor === "string" && cursor.startsWith("model-page:")
+        ? Number.parseInt(cursor.slice("model-page:".length), 10)
+        : 0;
+      const pageSize = Math.min(this.modelPageSize, models.length || 1);
+      const page = models.slice(offset, offset + pageSize);
+      const nextOffset = offset + page.length;
+      transport.emit({
+        id: message.id,
+        result: {
+          data: page.map((id) => ({ id })),
+          nextCursor: nextOffset < models.length ? `model-page:${nextOffset}` : null,
+        },
+      });
+      return;
+    }
     if (message.method === "thread/start") {
-      const thread = threadSnapshot(this.threadId(index), index);
-      for (let notification = 0; notification < this.notificationsBeforeThreadStartResponse; notification++) {
-        transport.emit({ method: "configWarning", params: { summary: `warning ${notification}`, details: null } });
-      }
-      transport.emit({ id: message.id, result: { thread, cwd: CONTAINER_WORKSPACE } });
+      const params = record(message.params);
+      const id = `${transport.kind}-thread-${++this.threadSequence}`;
+      const thread = snapshot(id, String(params.cwd ?? ""));
+      this.snapshots.set(id, thread);
+      transport.emit({ id: message.id, result: { thread } });
       transport.emit({ method: "thread/started", params: { thread } });
       return;
     }
     if (message.method === "thread/fork") {
-      const sourceId = (message.params as { threadId: string }).threadId;
-      const thread = { ...threadSnapshot(this.forkId(index), index), forkedFromId: sourceId };
-      transport.emit({ id: message.id, result: { thread, cwd: CONTAINER_WORKSPACE } });
+      const params = record(message.params);
+      const parentId = String(params.threadId);
+      const parent = this.snapshots.get(parentId) ?? snapshot(parentId, transport.workspace ?? PROJECT_A);
+      const id = `${transport.kind}-thread-${++this.threadSequence}`;
+      const thread = { ...snapshot(id, String(parent.cwd ?? PROJECT_A)), forkedFromId: parentId, parentThreadId: parentId };
+      this.snapshots.set(id, thread);
+      transport.emit({ id: message.id, result: { thread } });
       transport.emit({ method: "thread/started", params: { thread } });
       return;
     }
+    if (message.method === "thread/read" || message.method === "thread/resume") {
+      const threadId = String(record(message.params).threadId);
+      const existing = this.snapshots.get(threadId) ?? snapshot(threadId, PROJECT_A);
+      const thread = { ...existing, turns: message.method === "thread/read" ? [] : undefined };
+      this.snapshots.set(threadId, thread);
+      transport.emit({ id: message.id, result: { thread } });
+      return;
+    }
     if (message.method === "thread/archive" || message.method === "thread/delete") {
-      const threadId = (message.params as { threadId: string }).threadId;
-      if (this.archiveMode === "notificationFirst") {
-        transport.emit({ method: "thread/archived", params: { threadId } });
-        await Bun.sleep(0);
-        transport.emit({ id: message.id, result: {} });
-        return;
-      }
-      if (this.archiveMode === "cascade") {
-        transport.emit({ id: message.id, result: {} });
-        transport.emit({ method: "thread/archived", params: { threadId } });
-        transport.emit({ method: "thread/archived", params: { threadId: this.forkId(index) } });
-        return;
-      }
+      const threadId = String(record(message.params).threadId);
       transport.emit({
         id: message.id,
         error: { code: -32600, message: `no rollout found for thread id ${threadId}` },
       });
       return;
     }
-    transport.emit({ id: message.id, result: {} });
+    if (message.method === "turn/start") {
+      transport.emit({ id: message.id, result: { turn: { id: `turn-${this.threadSequence}` } } });
+      return;
+    }
+    transport.emit({ id: message.id, result: { backend: transport.kind, params: message.params } });
   }
 }
 
 class FakeTransport implements BackendTransport {
   readonly machineId: string;
-  readonly containerId: string;
-  readonly workspace = CONTAINER_WORKSPACE;
+  readonly containerId: string | undefined;
+  readonly workspace: string | undefined;
+  readonly disposable: boolean;
   readonly ready = Promise.resolve();
   readonly stdout: ReadableStream<Uint8Array>;
   readonly writes: RpcMessage[] = [];
@@ -1039,27 +818,34 @@ class FakeTransport implements BackendTransport {
   destroyCalls = 0;
   destroyFailures = 0;
   initialized = false;
-  writeFailures = 0;
   private controller!: ReadableStreamDefaultController<Uint8Array>;
 
-  constructor(readonly index: number, private readonly onWrite: (message: RpcMessage) => Promise<void>) {
-    this.machineId = `machine-${index}`;
-    this.containerId = `container-${index}`;
-    this.stdout = new ReadableStream<Uint8Array>({ start: (controller) => { this.controller = controller; } });
+  constructor(
+    readonly kind: "host" | "container",
+    index: number,
+    private readonly runtime: FakeRuntime,
+  ) {
+    this.machineId = kind === "host" ? "host" : `container-machine-${index}`;
+    this.containerId = kind === "container" ? `container-${index}` : undefined;
+    this.workspace = kind === "container" ? CONTAINER_WORKSPACE : undefined;
+    this.disposable = kind === "container";
+    this.stdout = new ReadableStream<Uint8Array>({
+      start: (controller) => { this.controller = controller; },
+    });
   }
 
   async write(line: string): Promise<void> {
-    if (this.writeFailures > 0) {
-      this.writeFailures--;
-      throw new Error("fake write failure");
-    }
     const message = JSON.parse(line) as RpcMessage;
     this.writes.push(structuredClone(message));
-    await this.onWrite(message);
+    await this.runtime.handle(this, message);
   }
 
   emit(message: RpcMessage): void {
     this.controller.enqueue(new TextEncoder().encode(`${JSON.stringify(message)}\n`));
+  }
+
+  response(id: RpcId): RpcMessage | undefined {
+    return this.writes.find((message) => !("method" in message) && "id" in message && message.id === id);
   }
 
   async destroy(): Promise<void> {
@@ -1072,94 +858,64 @@ class FakeTransport implements BackendTransport {
     this.destroyed = true;
     this.controller.close();
   }
+}
 
-  request(method: string): Extract<RpcMessage, { method: string; id: RpcId }> | undefined {
-    return this.writes.find((message): message is Extract<RpcMessage, { method: string; id: RpcId }> =>
-      "method" in message && "id" in message && message.method === method);
+class CaptureSink implements MessageSink {
+  readonly messages: RpcMessage[] = [];
+
+  async send(message: RpcMessage): Promise<void> {
+    this.messages.push(structuredClone(message));
   }
-
-  response(id: RpcId): RpcMessage | undefined {
-    return this.writes.find((message) => !("method" in message) && "id" in message && message.id === id);
-  }
 }
 
-function createHarness(projects: Array<{ cwd: string; cloneUrl: string }> = [
-  { cwd: HOST_PROJECT_A, cloneUrl: "https://example.test/project-a.git" },
-  { cwd: HOST_PROJECT_B, cloneUrl: "https://example.test/project-b.git" },
-], threads: StoredThread[] = []) {
-  const factory = new FakeFactory();
-  const output = new CaptureSink();
-  const state = new AggregatorState(":memory:");
-  for (const project of projects) state.saveProject(project);
-  for (const thread of threads) state.saveThread(thread);
-  const registry = new ProjectRegistry(state);
-  const aggregator = new AppServerAggregator({ factory, registry, state, output });
-  return { factory, output, aggregator, registry, state };
-}
-
-async function initialize(
-  harness: ReturnType<typeof createHarness>,
-  capabilities: Record<string, unknown> = { experimentalApi: true },
-): Promise<void> {
-  await harness.aggregator.handle({
-    method: "initialize",
-    id: 1,
-    params: {
-      clientInfo: { name: "test", title: "Test", version: "0.1.0" },
-      capabilities,
-    },
-  });
-  expect(resultFor(harness.output.messages, 1)).toMatchObject({ codexHome: "/codex-home", platformOs: "linux" });
-  await harness.aggregator.handle({ method: "initialized" });
-}
-
-async function waitForThread(
-  harness: ReturnType<typeof createHarness>,
-  ancestorThreadId: string,
-  threadId: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const id = `list-${attempt}`;
-    await harness.aggregator.handle({ method: "thread/list", id, params: { ancestorThreadId } });
-    const result = resultFor(harness.output.messages, id) as { data: Array<{ id: string }> };
-    if (result.data.some((thread) => thread.id === threadId)) return;
-    await Bun.sleep(1);
-  }
-  throw new Error(`timed out waiting for topology thread ${threadId}`);
-}
-
-function threadSnapshot(id: string, index: number) {
+function snapshot(id: string, cwd: string) {
   return {
     id,
     sessionId: id,
     forkedFromId: null,
     parentThreadId: null,
-    preview: `thread ${index}`,
-    modelProvider: "openai",
-    createdAt: index + 1,
-    updatedAt: index + 1,
-    recencyAt: index + 1,
+    preview: `Preview for ${id}`,
+    modelProvider: "fake",
+    createdAt: 1,
+    updatedAt: 1,
+    recencyAt: 1,
     status: { type: "idle" },
-    cwd: CONTAINER_WORKSPACE,
+    cwd,
     source: "vscode",
     turns: [],
   };
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function requestFor(
+  transport: FakeTransport,
+  method: string,
+  index = 0,
+): Extract<RpcMessage, { method: string; id: RpcId }> | undefined {
+  return transport.writes.filter((message): message is Extract<RpcMessage, { method: string; id: RpcId }> => (
+    "method" in message && "id" in message && message.method === method
+  ))[index];
+}
+
 function resultFor(messages: RpcMessage[], id: RpcId): unknown {
-  const message = messages.find((candidate) => !("method" in candidate) && "id" in candidate && candidate.id === id);
+  const message = messages.find((candidate) => !("method" in candidate) && candidate.id === id);
   if (!message || !("result" in message)) throw new Error(`missing result for ${String(id)}`);
   return message.result;
 }
 
-function errorFor(messages: RpcMessage[], id: RpcId): { code: number; message: string } | undefined {
-  const message = messages.find((candidate) => !("method" in candidate) && "id" in candidate && candidate.id === id);
-  return message && "error" in message ? message.error : undefined;
+function errorFor(messages: RpcMessage[], id: RpcId): { code: number; message: string } {
+  const message = messages.find((candidate) => !("method" in candidate) && candidate.id === id);
+  if (!message || !("error" in message)) throw new Error(`missing error for ${String(id)}`);
+  return message.error;
 }
 
-function approvalRequests(messages: RpcMessage[]) {
-  return messages.filter((message): message is Extract<RpcMessage, { method: string; id: RpcId }> =>
-    "method" in message && "id" in message && message.method === "item/commandExecution/requestApproval");
+function isServerRequest(message: RpcMessage): message is Extract<RpcMessage, { method: string; id: RpcId }> {
+  return "method" in message && "id" in message && message.method.includes("requestApproval");
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
@@ -1167,23 +923,5 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     if (predicate()) return;
     await Bun.sleep(1);
   }
-  throw new Error("timed out waiting for fake app-server event");
-}
-
-async function withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => reject(new Error(message)), milliseconds);
-  });
-  try {
-    return await Promise.race([promise, expired]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
-}
-
-async function runGit(...args: string[]): Promise<void> {
-  const process = Bun.spawn(["git", ...args], { stdout: "ignore", stderr: "pipe" });
-  const [stderr, exitCode] = await Promise.all([new Response(process.stderr).text(), process.exited]);
-  if (exitCode !== 0) throw new Error(stderr.trim() || `git ${args[0] ?? "command"} failed`);
+  throw new Error("timed out waiting for condition");
 }

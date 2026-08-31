@@ -43,7 +43,10 @@ export const boardApi = {
   threads: (cwd: string | null, archived: boolean, searchTerm?: string, signal?: AbortSignal) => allThreads(cwd, archived, searchTerm, signal),
   loaded: (signal?: AbortSignal) => allLoadedThreads(signal),
   readThread: (id: string, includeTurns: boolean, signal?: AbortSignal) => api<{ thread: ThreadDto }>(`/v1/threads/${encodeURIComponent(id)}?includeTurns=${includeTurns}`, signalInit(signal)),
-  startThread: (cwd: string) => api<{ thread: ThreadDto }>("/v1/threads", { method: "POST", body: JSON.stringify({ cwd }) }),
+  startThread: (cwd: string, mode: "host" | "container" = "container") => api<{ thread: ThreadDto }>("/v1/threads", {
+    method: "POST",
+    body: JSON.stringify({ cwd, skizzlesExecutionMode: mode }),
+  }),
   sendTurn: (id: string, text: string) => api(`/v1/threads/${encodeURIComponent(id)}/turns`, { method: "POST", body: JSON.stringify({ input: [{ type: "text", text }] }) }),
   interrupt: (id: string, turnId: string) => api(`/v1/threads/${encodeURIComponent(id)}/interrupt`, { method: "POST", body: JSON.stringify({ turnId }) }),
   archive: (id: string) => api(`/v1/threads/${encodeURIComponent(id)}/archive`, { method: "POST", body: "{}" }),

@@ -15,12 +15,7 @@ export class ProjectRegistry {
 
   async register(rawCwd: string): Promise<RegisteredProject> {
     const cwd = await this.canonicalCwd(rawCwd);
-    const root = await git(cwd, "rev-parse", "--show-toplevel");
-    if (await realpath(root) !== cwd) throw new Error("project cwd must be the Git checkout root");
-    const cloneUrl = await git(cwd, "remote", "get-url", "origin");
-    if (!isRemoteCloneUrl(cloneUrl)) {
-      throw new Error("project origin must be a container-reachable Git remote");
-    }
+    const cloneUrl = await discoverCloneUrl(cwd);
     return this.state.saveProject({ cwd, cloneUrl });
   }
 
@@ -32,6 +27,17 @@ export class ProjectRegistry {
   async remove(rawCwd: string): Promise<boolean> {
     const cwd = await canonicalPath(rawCwd);
     return this.state.removeProject(cwd);
+  }
+}
+
+async function discoverCloneUrl(cwd: string): Promise<string | null> {
+  try {
+    const root = await git(cwd, "rev-parse", "--show-toplevel");
+    if (await realpath(root) !== cwd) return null;
+    const cloneUrl = await git(cwd, "remote", "get-url", "origin");
+    return isRemoteCloneUrl(cloneUrl) ? cloneUrl : null;
+  } catch {
+    return null;
   }
 }
 

@@ -1,222 +1,232 @@
 # Codex app-server aggregator
 
-This package is one long-lived, multi-project Codex app-server peer. Codex clients still speak
-Codex's headerless JSON-RPC 2.0 envelopes over JSONL. A mode-0600 Unix socket keeps the daemon
-alive independently of any stdio client, and the `connect` command is a byte-for-byte stdio relay
-for clients that need the usual process shape. A versioned REST projection exposes common project,
-thread, turn, lifecycle, event, and server-request operations to short-lived HTTP clients; both
-transports use the same in-process aggregator and backend connections.
+This package presents one long-lived Codex app-server surface backed by two execution modes:
 
-The daemon starts one real `codex app-server --stdio` inside each managed Docker container. A
-registered host checkout is only a routing key and the source of its Git origin. Each container
-clones that origin into `/workspace/repo`; the host checkout is never mounted as the agent
-workspace.
+| Mode | Backend | Lifetime | Permissions |
+| --- | --- | --- | --- |
+| host | One shared host <code>codex app-server --stdio</code> | Daemon lifetime after initialization | Forward selected permissions, sandbox, and approval policy |
+| container | One Docker app-server per live thread tree | Removed when its tree drains or the daemon stops | Ignore named permissions, force danger-full-access, preserve approval policy |
+
+<code>thread/start</code> accepts the optional Skizzles field
+<code>skizzlesExecutionMode: "host" | "container"</code>. Container is the default. A created
+thread is permanently bound to that backend:
+
+- later requests route by the real backend-minted thread ID;
+- forks, reviews, and other child IDs inherit the same backend;
+- <code>skizzlesExecutionMode</code> is rejected outside <code>thread/start</code>;
+- a fresh thread may explicitly choose either mode, regardless of the caller's mode.
+
+The daemon also owns a mode-0600 Unix socket, unchanged JSONL relay, REST management surface,
+SQLite topology, and React board. This is a workspace package, not a Skizzles plugin or
+installation payload.
+
+## Host control plane
+
+The shared host app-server is the control plane. <code>initialize</code> returns its real host
+description. Global reads such as <code>model/list</code>, <code>permissionProfile/list</code>,
+<code>skills/list</code>, config, plugin/app, account, and diagnostic discovery go directly to it.
+Multi-CWD skill discovery therefore sees the host filesystem rather than a representative
+container.
+
+<code>thread/list</code> and <code>thread/loaded/list</code> remain aggregator-owned views across
+both modes. Backend approvals retain their payloads; only JSON-RPC IDs are remapped so different
+backends cannot collide.
 
 ## Run it
 
-Build the version-locked container image:
-
-```sh
+~~~sh
 docker build \
   --tag skizzles/codex-app-server:0.149.1 \
   packages/codex-app-server-aggregator/container
-```
 
-Start the single daemon:
-
-```sh
 bun run packages/codex-app-server-aggregator/src/cli.ts serve
-```
+~~~
 
-The defaults are a per-user socket below the system temporary directory and a SQLite database at
-`~/.local/state/skizzles/codex-app-server.sqlite3`. Use `--socket` and `--database` to override
-them. The daemon accepts one active outer app-server connection at a time; that connection can host
-threads from every registered project. REST calls can run concurrently with it. The REST listener
-defaults to `http://127.0.0.1:8788`; use `--http-host` and `--http-port` to override it.
+Useful server options:
 
-The same origin serves the built React board at `http://127.0.0.1:8788/` when the listener uses its
-default unauthenticated loopback configuration. The board is deliberately disabled when a bearer
-token is configured or the daemon binds beyond loopback: normal browser navigation cannot safely
-bootstrap that token into the first document request. Authenticated configurations remain REST and
-JSONL-only and can use `codex-app-server-ctl`. The checked-in `dist/` is produced from `src/web/`
-with Vite. During UI development, run the daemon on its default port and start Vite's loopback dev
-server and REST proxy separately:
+~~~text
+--host-codex PATH
+--image IMAGE
+--codex-home-template DIR
+--provider-command COMMAND
+--provider-ready-url URL
+--pass-env NAME
+--docker PATH
+--container-host HOST
+--host-gateway-mode auto|native|host-gateway
+~~~
 
-```sh
-bun run --cwd packages/codex-app-server-aggregator dev
-bun run --cwd packages/codex-app-server-aggregator build
-```
+<code>--host-codex</code> defaults to <code>codex</code> and may name another Codex-compatible
+harness executable. SQLite defaults to
+<code>~/.local/state/skizzles/codex-app-server.sqlite3</code>, and REST defaults to
+<code>http://127.0.0.1:8788</code>.
 
-The board uses only the routes below. Its event loop polls the daemon-local journal and fully
-reconciles projects, thread topology, loaded IDs, machines, and pending requests after HTTP 410.
+Connect a normal JSONL app-server client through the persistent daemon:
 
-Before a normal app-server client initializes, register a Git checkout through the same JSON-RPC
-surface. The path must be an absolute checkout root with a container-reachable `origin` remote:
-
-```sh
-printf '%s\n' \
-  '{"method":"skizzles/project/add","id":1,"params":{"cwd":"/absolute/path/to/project"}}' \
-  | bun run packages/codex-app-server-aggregator/src/cli.ts connect
-```
-
-Then configure the app-server client to launch the relay:
-
-```sh
+~~~sh
 bun run packages/codex-app-server-aggregator/src/cli.ts connect
-```
+~~~
 
-Ending that relay does not close its containers or the daemon. A later relay reconnects to the same
-live aggregator core. Explicit archive/delete and daemon shutdown are the container teardown
-boundaries.
+Ending the connector does not end the daemon or its backends. One JSONL peer and concurrent REST
+clients share the same routing core.
 
-## REST API
+## Projects and mode selection
 
-REST calls initialize the shared app-server core on demand. Register at least one project before
-calling a thread endpoint. Request and response bodies preserve the corresponding app-server
-parameter/result DTOs; the resource path supplies identifiers such as `threadId`.
+Register any absolute host directory:
 
-| HTTP route | App-server operation |
+~~~sh
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- \
+  projects add /absolute/path/to/project
+~~~
+
+Every registered directory is host-eligible. It is container-eligible when it is a Git root whose
+origin is a container-reachable HTTP(S), SSH, Git, or scp-style remote. Otherwise its stored
+<code>cloneUrl</code> is null, the board labels it **host only**, and container starts fail clearly.
+
+The project extensions work before app-server initialization:
+
+| Method | Result |
 | --- | --- |
-| `GET`, `POST`, `DELETE /v1/projects` | List, add, or remove registered projects. Delete uses the `cwd` query parameter. |
-| `GET`, `POST /v1/threads` | `thread/list` or `thread/start`. Common list filters are query parameters. |
-| `GET /v1/threads/:id` | `thread/read`; `includeTurns` defaults to `true`. |
-| `POST /v1/threads/:id/turns` | `turn/start`; the body supplies `input` and other native parameters. |
-| `POST /v1/threads/:id/{fork,resume,interrupt}` | The corresponding thread/turn operation. |
-| `POST /v1/threads/:id/archive`, `DELETE /v1/threads/:id` | Intentional destructive release. |
-| `GET /v1/threads/loaded` | Aggregate `thread/loaded/list`. |
-| `GET /v1/machines` | Stored machine/container associations plus best-effort live Docker status. |
-| `GET /v1/events?after=N&stream=ID` | Poll the bounded in-memory app-server notification journal. |
-| `GET /v1/server-requests` | List pending app-server callbacks such as approvals. |
-| `POST /v1/server-requests/:id/responses` | Complete a pending callback with a JSON-RPC `result` or `error` outcome. |
-| `GET /healthz` | Process liveness without initializing a backend. |
+| <code>skizzles/project/add</code> | Canonicalize the directory and refresh container eligibility |
+| <code>skizzles/project/list</code> | List registered directories |
+| <code>skizzles/project/remove</code> | Remove a project unless either mode has live threads |
 
-For example:
+Host starts use the canonical host path. Container starts clone the origin into
+<code>/workspace/repo</code>; host files are never mounted as the container workspace. Returned
+container thread DTOs expose the host CWD for aggregate filtering.
 
-```sh
-curl --json '{"cwd":"/absolute/path/to/project"}' \
-  http://127.0.0.1:8788/v1/projects
+The scripted client exposes mode directly:
 
-curl --json '{"cwd":"/absolute/path/to/project"}' \
-  http://127.0.0.1:8788/v1/threads
+~~~sh
+# Container is the default.
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- \
+  threads start /absolute/path/to/project
 
-curl --json '{"input":[{"type":"text","text":"Run the focused tests"}]}' \
-  http://127.0.0.1:8788/v1/threads/THREAD_ID/turns
+# Explicit host thread.
+bun run --silent --cwd packages/codex-app-server-aggregator ctl -- \
+  threads start /absolute/path/to/project --mode host
+~~~
 
-curl 'http://127.0.0.1:8788/v1/threads/THREAD_ID?includeTurns=true'
-```
+Equivalent REST bodies:
 
-Events are intentionally not another durable rollout store. Each response contains a daemon-local
-`streamId`, numeric `nextCursor`, and retained `oldestCursor`. Send both `stream` and `after` on the
-next poll. HTTP `410` means either the bounded window was overrun or the daemon restarted; callers
-must reconcile through `thread/list`, `thread/read`, and `server-requests`. Thread snapshots and the
-project registry retain their existing SQLite persistence.
+~~~json
+{"cwd":"/absolute/path/to/project"}
+~~~
 
-The HTTP listener is loopback-only by default. Set `--http-token-env NAME` to require a bearer
-token read from the named environment variable. Doing so disables the browser board; use the
-authenticated scripted client instead. A non-loopback bind is rejected unless a token is
-configured and likewise never serves board assets. Use a trusted TLS reverse proxy rather than
-sending that token over an untrusted plaintext network.
+~~~json
+{
+  "cwd": "/absolute/path/to/project",
+  "skizzlesExecutionMode": "host",
+  "permissions": ":workspace",
+  "approvalPolicy": "on-request"
+}
+~~~
 
-### Scripted HTTP client
+<code>permissions</code> is the profile ID returned by host <code>permissionProfile/list</code>.
+Host mode forwards it after removing only the Skizzles mode field. Container mode removes
+<code>permissions</code> and normalizes sandbox fields to Codex's
+danger-full-access/dangerFullAccess forms on start, resume, fork, turn, and settings requests.
+<code>approvalPolicy</code> is unchanged.
 
-`codex-app-server-ctl` standardizes the REST calls and always emits JSON. In this checkout, invoke
-the package script as follows; the package also publishes that executable name through its `bin`
-map for installed/linkable use.
+## Provider configuration and model parity
 
-```sh
-bun run --silent --cwd packages/codex-app-server-aggregator ctl -- projects list
-bun run --silent --cwd packages/codex-app-server-aggregator ctl -- threads list --cwd /absolute/path/to/project
-bun run --silent --cwd packages/codex-app-server-aggregator ctl -- threads send THREAD_ID --message 'Run the focused tests'
-bun run --silent --cwd packages/codex-app-server-aggregator ctl -- threads read THREAD_ID
-bun run --silent --cwd packages/codex-app-server-aggregator ctl -- events list --after 12 --stream STREAM_ID
-bun run --silent --cwd packages/codex-app-server-aggregator ctl -- requests approve REQUEST_ID
-```
+Skizzles does not depend on OpenCodex or another provider. Containers receive configuration through
+an explicit, operator-owned Codex-home template:
 
-Use `--stdin` instead of `--message` for multiline input. `threads start`, `send`, `fork`, `resume`,
-and `interrupt` accept `--params JSON` for native app-server fields that do not warrant dedicated
-CLI flags. Resource identifiers and query parameters are encoded by the client.
+~~~text
+container-codex-home/
+├── config.toml
+└── models.json
+~~~
 
-The client defaults to `http://127.0.0.1:8788`. Override it with
-`SKIZZLES_AGGREGATOR_URL` or `--url`. If the server requires authentication, export
-`SKIZZLES_AGGREGATOR_TOKEN`; `--token-env NAME` selects another environment variable without
-placing the token in process arguments. HTTP failures produce structured JSON on stderr and a
-nonzero exit status.
+~~~sh
+bun run packages/codex-app-server-aggregator/src/cli.ts serve \
+  --codex-home-template /absolute/path/to/container-codex-home \
+  --pass-env PROVIDER_API_KEY
+~~~
 
-## Project registry extensions
+The template is mounted read-only and copied into isolated <code>/codex-home</code>. It must
+contain parseable <code>config.toml</code>. Symlinks, special files, auth/history/session/log/cache
+state, SQLite databases, and obvious credential files are rejected.
+<code>model_catalog_json</code> paths must be relative, stay inside the template, contain valid
+JSON, and expose a non-empty models array. Do not point this option at live
+<code>~/.codex</code>; prepare a sanitized source tree.
 
-These requests are available before `initialize`, which allows an empty database to be bootstrapped.
-They retain ordinary JSON-RPC request and response envelopes.
+After each container initializes, the aggregator fetches every visible and hidden model ID from
+host and container. A mismatch aborts the start and removes the container. A host configured for a
+Codex-compatible provider—OpenCodex included—therefore stays honest with what container agents can
+select, without coupling Skizzles to that provider.
 
-| Method | Params | Result |
-| --- | --- | --- |
-| `skizzles/project/add` | `{ cwd: string }` | `{ project }`; canonicalizes the Git root and discovers or refreshes its `origin`. |
-| `skizzles/project/list` | `{}` | `{ data: project[] }`. |
-| `skizzles/project/remove` | `{ cwd: string }` | `{ removed: boolean }`; refuses removal while that project has live container-backed threads. |
+<code>--provider-command</code> can start a trusted provider process inside each container, and
+<code>--provider-ready-url</code> gates Codex startup on it. These are generic hooks.
 
-`thread/start` requires a `cwd` that exactly resolves to a registered project. Unknown paths are
-rejected before provisioning. The selected project's stored origin is cloned in a new container,
-the inner request is forced to `/workspace/repo`, and returned thread DTOs expose the registered
-host CWD so normal client filtering remains meaningful. Re-add a checkout after changing its
-`origin` to refresh the persisted clone source.
+## Reaching a provider on the host
 
-## Persistence and process truth
+The default container-visible hostname is <code>host.docker.internal</code>. Auto mode inspects the
+active Docker context:
 
-SQLite retains registered projects, aggregate thread snapshots, lifecycle flags, and the exact
-machine/project/container association. A daemon restart cannot reattach the lost stdio streams,
-so it never labels old threads as loaded or pretends their backend is routable. Instead it removes
-persisted active/orphaned containers by exact container ID, retains snapshot-only `thread/list` and
-`thread/read` data, and returns an unavailable-thread error for operations that require the dead
-writer.
+- OrbStack, Docker Desktop, Colima, and Rancher Desktop keep native host DNS;
+- local Linux engines fall back to an explicit host-gateway mapping;
+- remote TCP/SSH contexts use host-gateway semantics for the daemon host.
 
-Within a live connection, archive is the explicit destructive release operation. It routes by the
-real backend-minted thread ID and runs `docker rm --force` only after every thread mapped to that
-machine is drained. The rollout is intentionally discarded. `thread/unarchive` is an idempotent
-no-op for known threads: it returns success but leaves the snapshot archived and never provisions a
-replacement. Fork and detached review IDs remain on their original writer process.
+OrbStack's documented compatibility hostname is also
+[host.docker.internal](https://docs.orbstack.dev/docker/network). Skizzles does not add an
+unconditional mapping that would shadow OrbStack's native DNS and localhost proxying.
 
-The canonical peer transport is a Unix-domain JSONL socket because direct stdio exits on EOF and
-the pinned Codex runtime's listen-WebSocket surface is experimental. REST is an aggregate-owned
-projection for one-off commands, not a claim that Codex itself exposes those resource routes.
-Inner app-server connections remain direct stdio because they are container-owned and deliberately
-non-reattachable. Tests prove the daemon and live backends survive relay disconnect, REST and JSONL
-share topology, the registry survives daemon restart, stale machines are cleaned by exact ID, two
-CWDs select different clone sources, unknown CWDs provision nothing, and archive removes the
-selected machine.
+Unusual backends can override both decisions:
 
-## Existing app-server behavior
+~~~sh
+--container-host host.orbstack.internal --host-gateway-mode native
+--container-host host.internal.example --host-gateway-mode host-gateway
+~~~
 
-| Method | Aggregator behavior |
+Inside <code>config.toml</code>, <code>{{SKIZZLES_CONTAINER_HOST}}</code> is replaced after copying:
+
+~~~toml
+[model_providers.local]
+base_url = "http://{{SKIZZLES_CONTAINER_HOST}}:8080/v1"
+~~~
+
+## REST and board
+
+| Route | Operation |
 | --- | --- |
-| `initialize`, `initialized` | Initialize a real warm backend from a registered project and preserve the backend's Linux runtime description. |
-| `thread/start` | Route by registered host CWD, clone/provision, force the inner workspace, and preserve the real returned thread ID. |
-| `thread/list`, `thread/loaded/list` | Answer from aggregate topology across projects; persisted but disconnected threads are never reported loaded. |
-| `thread/read` after teardown | Return the retained snapshot when turns are not requested. |
-| Thread-scoped requests | Route by the real Codex thread ID. Fork/review IDs bind to the same backend and project. |
-| Backend approvals and other requests | Rewrite only the JSON-RPC request ID for collision-free correlation, then route the client response back to the originating backend. |
-| `thread/archive` | Pass through, persist the archived snapshot, and intentionally remove the exact container when its thread tree drains. |
-| `thread/unarchive` | Return success for a known thread without changing its archived state or provisioning a replacement. |
-| `thread/delete` | Pass through, persist deletion, and remove the exact container when its thread tree drains. |
-| Native project/section/search topology | Reject rather than return one backend's false partial view; the Skizzles registry extensions are a separate aggregate-owned surface. |
-| Representative reads | Route `cwd`/`cwds` to one registered project's backend and reject cross-project arrays; unscoped homogeneous reads use any warm or running representative. |
-| Other unkeyed requests | Reject until an aggregate, broadcast, or seed-owned meaning exists. |
+| <code>/v1/projects</code> | Project registry |
+| <code>/v1/threads</code> | Aggregate list or mode-selecting thread start |
+| <code>/v1/threads/:id</code> | Read/delete |
+| <code>/v1/threads/:id/turns</code> | Start a turn |
+| <code>/v1/threads/:id/{fork,resume,interrupt,archive}</code> | Thread operation |
+| <code>/v1/threads/loaded</code> | Aggregate loaded IDs |
+| <code>/v1/machines</code> | Host/container fleet and per-thread project/mode bindings |
+| <code>/v1/events</code> | Bounded daemon-local notification journal |
+| <code>/v1/server-requests</code> | Pending backend callbacks |
+| <code>/healthz</code> | Process liveness without backend initialization |
 
-Pass `--codex-home-template DIR` to copy a provider-ready Codex home into every isolated
-`/codex-home`. Keep session rollouts out of this seed. A custom image can start an
-OpenCodex-compatible provider with `--provider-command`; use `--provider-ready-url` to gate
-app-server startup and `--pass-env NAME` for explicitly selected provider credentials.
+The board is served only on an unauthenticated loopback listener. <code>--http-token-env</code>
+enables bearer-authenticated REST and disables board assets. Non-loopback binds require a token.
+Fork and resume deliberately have no mode option.
 
-Run the package boundary with:
+## Persistence and teardown
 
-```sh
+SQLite stores project eligibility, machine kind, exact container IDs, and per-thread project/mode
+bindings. Existing container-only databases migrate in place as container bindings.
+
+After a restart:
+
+- the old host process is removed; the new host process reuses logical machine ID
+  <code>host</code>, preserving host-thread routing identity;
+- old container writers cannot be reattached, so exact persisted container IDs are cleaned and
+  their threads remain unloaded snapshots;
+- no thread migrates between modes.
+
+Archiving/deleting a drained container tree removes only that container. Archiving a host thread
+never shuts down the shared host app-server. Daemon shutdown closes all live processes and
+containers.
+
+## Validation
+
+~~~sh
 bun run --cwd packages/codex-app-server-aggregator check
-```
+~~~
 
-See [PROTOCOL.md](PROTOCOL.md) for the runtime probes, protocol/extension boundary, and remaining
-limitations.
-
-## Protocol lock
-
-`bun run --cwd packages/codex-app-server-aggregator protocol:generate` invokes the installed
-`codex app-server generate-ts --experimental`. The checked-in subset under `src/generated/` is the
-exact 0.149.1 DTO surface synthesized by this middleware; passthrough payloads intentionally remain
-opaque.
+See [PROTOCOL.md](PROTOCOL.md) for routing rationale.

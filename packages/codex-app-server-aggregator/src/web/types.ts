@@ -2,7 +2,7 @@ import type { RpcNotification, RpcRequest } from "../protocol.ts";
 
 export type ProjectDto = {
   cwd: string;
-  cloneUrl: string;
+  cloneUrl: string | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -26,11 +26,17 @@ export type ThreadView = ThreadDto & {
 
 export type MachineDto = {
   machineId: string;
-  projectCwd: string;
-  containerId: string;
+  kind: "host" | "container";
+  projectCwd: string | null;
+  containerId: string | null;
   state: "active" | "orphaned" | "removed";
   dockerStatus: string | null;
   threadIds: string[];
+  threads: Array<{
+    threadId: string;
+    projectCwd: string;
+    executionMode: "host" | "container";
+  }>;
 };
 
 export type ServerRequestDto = RpcRequest;

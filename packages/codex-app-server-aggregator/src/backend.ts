@@ -1,5 +1,6 @@
 import { readJsonLines } from "./jsonl.ts";
 import type { RegisteredProject } from "./state.ts";
+import type { ExecutionMode } from "./execution.ts";
 import {
   errorOutcome,
   idKey,
@@ -16,8 +17,10 @@ import {
 
 export interface BackendTransport {
   readonly machineId: string;
-  readonly containerId: string;
-  readonly workspace: string;
+  readonly kind: ExecutionMode;
+  readonly containerId?: string | undefined;
+  readonly workspace?: string | undefined;
+  readonly disposable: boolean;
   readonly ready: Promise<void>;
   readonly stdout: ReadableStream<Uint8Array>;
   readonly stderr?: ReadableStream<Uint8Array>;
@@ -27,6 +30,10 @@ export interface BackendTransport {
 
 export interface BackendFactory {
   create(project: RegisteredProject): Promise<BackendTransport>;
+}
+
+export interface HostBackendFactory {
+  create(): Promise<BackendTransport>;
 }
 
 export type BackendHandlers = {
@@ -69,8 +76,16 @@ export class BackendConnection {
     return this.transport.machineId;
   }
 
-  get workspace(): string {
+  get kind(): ExecutionMode {
+    return this.transport.kind;
+  }
+
+  get workspace(): string | undefined {
     return this.transport.workspace;
+  }
+
+  get disposable(): boolean {
+    return this.transport.disposable;
   }
 
   async call(method: string, params: unknown): Promise<RpcOutcome> {

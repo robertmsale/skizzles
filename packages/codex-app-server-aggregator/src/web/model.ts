@@ -124,7 +124,11 @@ export function requestThreadId(request: ServerRequestDto): string | undefined {
 
 export function projectForThread(machines: MachineDto[], threadId: string | undefined): string | undefined {
   if (!threadId) return undefined;
-  return machines.find((machine) => machine.threadIds.includes(threadId))?.projectCwd;
+  for (const machine of machines) {
+    const projectCwd = machine.threads.find((thread) => thread.threadId === threadId)?.projectCwd;
+    if (projectCwd) return projectCwd;
+  }
+  return undefined;
 }
 
 export function requestLabel(request: ServerRequestDto): string {

@@ -53,7 +53,7 @@ describe("persistent project registry", () => {
     state.close();
   });
 
-  test("rejects a subdirectory and a host-local clone source", async () => {
+  test("registers host directories and marks non-portable Git locations as host-only", async () => {
     const directory = temporaryDirectory();
     const cwd = join(directory, "project");
     const nested = join(cwd, "nested");
@@ -63,8 +63,14 @@ describe("persistent project registry", () => {
     const state = new AggregatorState(":memory:");
     const registry = new ProjectRegistry(state);
 
-    expect(registry.register(nested)).rejects.toThrow("checkout root");
-    expect(registry.register(cwd)).rejects.toThrow("container-reachable Git remote");
+    expect(await registry.register(nested)).toMatchObject({
+      cwd: realpathSync(nested),
+      cloneUrl: null,
+    });
+    expect(await registry.register(cwd)).toMatchObject({
+      cwd: realpathSync(cwd),
+      cloneUrl: null,
+    });
     state.close();
   });
 });

@@ -1,4 +1,15 @@
-import { BackendConnection, type BackendFactory, type BackendTransport } from "./backend.ts";
+import {
+  BackendConnection,
+  type BackendFactory,
+  type BackendTransport,
+  type HostBackendFactory,
+} from "./backend.ts";
+import {
+  DEFAULT_EXECUTION_MODE,
+  HOST_MACHINE_ID,
+  isExecutionMode,
+  type ExecutionMode,
+} from "./execution.ts";
 import type { MessageSink } from "./jsonl.ts";
 import { ProjectRegistry } from "./projects.ts";
 import {
@@ -14,14 +25,16 @@ import {
   type RpcOutcome,
   type RpcRequest,
 } from "./protocol.ts";
-import { Topology, type ThreadListParams } from "./topology.ts";
 import { AggregatorState, type RegisteredProject } from "./state.ts";
+import { Topology, type ThreadListParams } from "./topology.ts";
 
 type ReverseRequest = { backend: BackendConnection; backendId: RpcId; outerId: RpcId };
 type CreatedBackend = { connection: BackendConnection; outcome: RpcOutcome; activate: () => Promise<void> };
+type BackendContext = { mode: ExecutionMode; project?: RegisteredProject | undefined };
 
 export type AggregatorOptions = {
-  factory: BackendFactory;
+  containerFactory: BackendFactory;
+  hostFactory: HostBackendFactory;
   registry: ProjectRegistry;
   state: AggregatorState;
   output: MessageSink;
@@ -33,27 +46,29 @@ export type AggregatorOptions = {
 export class AppServerAggregator {
   private readonly topology: Topology;
   private readonly backends = new Map<string, BackendConnection>();
-  private readonly backendProjects = new Map<BackendConnection, RegisteredProject>();
+  private readonly backendContexts = new Map<BackendConnection, BackendContext>();
   private readonly readyBackends = new Set<BackendConnection>();
   private readonly reverseRequests = new Map<string, ReverseRequest>();
   private readonly lifecycleCalls = new Map<BackendConnection, number>();
-  private readonly factory: BackendFactory;
+  private readonly containerFactory: BackendFactory;
+  private readonly hostFactory: HostBackendFactory;
   private readonly registry: ProjectRegistry;
   private readonly state: AggregatorState;
   private readonly output: MessageSink;
   private readonly applyClientNotificationOptOuts: boolean;
   private readonly onServerRequestSettled: (id: RpcId) => void;
   private readonly log: (message: string) => void;
-  private initialization?: Promise<RpcOutcome>;
-  private initializeParams?: unknown;
-  private readonly warmBackends = new Map<string, BackendConnection>();
   private readonly projectLocks = new Map<string, Promise<void>>();
   private readonly clientOptOutNotifications = new Set<string>();
+  private initialization?: Promise<RpcOutcome>;
+  private initializeParams?: unknown;
+  private hostBackend: BackendConnection | undefined;
   private initialized = false;
   private closed = false;
 
   constructor(options: AggregatorOptions) {
-    this.factory = options.factory;
+    this.containerFactory = options.containerFactory;
+    this.hostFactory = options.hostFactory;
     this.registry = options.registry;
     this.state = options.state;
     this.output = options.output;
@@ -85,23 +100,32 @@ export class AppServerAggregator {
     const backends = [...this.backends.values()];
     const results = await Promise.allSettled(backends.map((backend) => backend.close()));
     results.forEach((result, index) => {
+      const backend = backends[index]!;
       if (result.status === "rejected") {
         const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        this.log(`failed to close backend ${backends[index]!.machineId}: ${reason}`);
+        this.log(`failed to close backend ${backend.machineId}: ${reason}`);
       } else {
-        this.state.markMachine(backends[index]!.machineId, "removed");
+        this.state.markMachine(backend.machineId, "removed");
       }
     });
     this.backends.clear();
     this.readyBackends.clear();
-    this.backendProjects.clear();
-    this.warmBackends.clear();
+    this.backendContexts.clear();
+    this.hostBackend = undefined;
     for (const reverse of this.reverseRequests.values()) this.onServerRequestSettled(reverse.outerId);
     this.reverseRequests.clear();
     this.lifecycleCalls.clear();
   }
 
   private async handleClientRequest(request: RpcRequest): Promise<void> {
+    const requestParams = asRecord(request.params);
+    if (request.method !== "thread/start" && Object.hasOwn(requestParams, "skizzlesExecutionMode")) {
+      await this.output.send(response(request.id, errorOutcome(
+        -32602,
+        "skizzlesExecutionMode may only be selected when creating a new thread",
+      )));
+      return;
+    }
     if (request.method.startsWith("skizzles/project/")) {
       await this.handleProjectRequest(request);
       return;
@@ -117,21 +141,20 @@ export class AppServerAggregator {
     await this.initialization;
 
     if (request.method === "thread/list") {
-      const result = this.topology.list(asRecord(request.params) as ThreadListParams);
+      const result = this.topology.list(requestParams as ThreadListParams);
       await this.output.send(response(request.id, { result }));
       return;
     }
     if (request.method === "thread/loaded/list") {
-      const params = asRecord(request.params);
       const result = this.topology.loaded(new Set([...this.readyBackends].map((backend) => backend.machineId)), {
-        cursor: typeof params.cursor === "string" ? params.cursor : null,
-        limit: typeof params.limit === "number" ? params.limit : null,
+        cursor: typeof requestParams.cursor === "string" ? requestParams.cursor : null,
+        limit: typeof requestParams.limit === "number" ? requestParams.limit : null,
       });
       await this.output.send(response(request.id, { result }));
       return;
     }
     if (request.method === "thread/unarchive") {
-      const threadId = asRecord(request.params).threadId;
+      const threadId = requestParams.threadId;
       if (typeof threadId !== "string" || !this.topology.has(threadId)) {
         const detail = typeof threadId === "string" ? threadId : "missing thread id";
         await this.output.send(response(request.id, errorOutcome(-32004, `unknown thread: ${detail}`)));
@@ -152,9 +175,8 @@ export class AppServerAggregator {
       return;
     }
 
-    const params = asRecord(request.params);
-    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
-    if (!threadId && !REPRESENTATIVE_GLOBAL_READS.has(request.method)) {
+    const threadId = typeof requestParams.threadId === "string" ? requestParams.threadId : undefined;
+    if (!threadId && !HOST_GLOBAL_READS.has(request.method)) {
       await this.output.send(response(request.id, errorOutcome(
         -32004,
         `request has no thread routing key and no aggregate behavior: ${request.method}`,
@@ -162,12 +184,13 @@ export class AppServerAggregator {
       return;
     }
     if (!threadId) {
-      await this.handleRepresentativeRead(request, params);
+      await this.handleHostRead(request);
       return;
     }
+
     const backend = this.backendForThread(threadId);
     if (!backend) {
-      if (threadId && (request.method === "thread/archive" || request.method === "thread/delete") && this.topology.has(threadId)) {
+      if ((request.method === "thread/archive" || request.method === "thread/delete") && this.topology.has(threadId)) {
         if (request.method === "thread/archive") this.topology.markArchived(threadId);
         else this.topology.markDeleted(threadId);
         await this.output.send(response(request.id, { result: {} }));
@@ -178,46 +201,48 @@ export class AppServerAggregator {
         });
         return;
       }
-      if (request.method === "thread/read" && threadId && params.includeTurns !== true) {
+      if (request.method === "thread/read" && requestParams.includeTurns !== true) {
         const thread = this.topology.snapshot(threadId);
         if (thread) {
           await this.output.send(response(request.id, { result: { thread } }));
           return;
         }
       }
-      const message = threadId ? `unknown or unavailable thread: ${threadId}` : "no app-server backend is available";
-      await this.output.send(response(request.id, errorOutcome(-32004, message)));
+      await this.output.send(response(request.id, errorOutcome(-32004, `unknown or unavailable thread: ${threadId}`)));
       return;
     }
 
-    const lifecycleRequest = threadId !== undefined
-      && (request.method === "thread/archive" || request.method === "thread/delete");
+    const projectCwd = this.topology.projectFor(threadId);
+    const executionMode = this.topology.modeFor(threadId);
+    if (!projectCwd || !executionMode || executionMode !== backend.kind) {
+      await this.output.send(response(request.id, errorOutcome(-32004, `thread has an invalid backend binding: ${threadId}`)));
+      return;
+    }
+
+    const lifecycleRequest = request.method === "thread/archive" || request.method === "thread/delete";
     if (lifecycleRequest) this.beginLifecycleCall(backend);
     let outcome: RpcOutcome;
     try {
-      const rawOutcome = await backend.call(request.method, backendRoutedParams(backend, request.params));
-      outcome = virtualizeOutcome(rawOutcome, this.projectForBackend(backend).cwd);
+      const rawOutcome = await backend.call(
+        request.method,
+        backendRoutedParams(backend, request.method, request.params),
+      );
+      outcome = externalizeOutcome(backend, rawOutcome, projectCwd);
     } finally {
       if (lifecycleRequest) this.endLifecycleCall(backend);
     }
-    const synthesizedLifecycle = threadId !== undefined
-      && lifecycleRequest
-      && isMissingRollout(outcome, threadId);
+    const synthesizedLifecycle = lifecycleRequest && isMissingRollout(outcome, threadId);
     if (synthesizedLifecycle) outcome = { result: {} };
-    this.topology.observe(
-      backend.machineId,
-      this.projectForBackend(backend).cwd,
-      response(request.id, outcome),
-    );
+    this.topology.observe(backend.machineId, projectCwd, response(request.id, outcome), executionMode);
     await this.output.send(response(request.id, outcome));
 
-    if ("result" in outcome && threadId && request.method === "thread/archive") {
+    if ("result" in outcome && request.method === "thread/archive") {
       this.topology.markArchived(threadId);
       if (synthesizedLifecycle) {
         await this.sendClientNotification({ method: "thread/archived", params: { threadId }, emittedAtMs: Date.now() });
       }
       await this.removeIfDrained(backend);
-    } else if ("result" in outcome && threadId && request.method === "thread/delete") {
+    } else if ("result" in outcome && request.method === "thread/delete") {
       this.topology.markDeleted(threadId);
       if (synthesizedLifecycle) {
         await this.sendClientNotification({ method: "thread/deleted", params: { threadId }, emittedAtMs: Date.now() });
@@ -241,10 +266,6 @@ export class AppServerAggregator {
         const projectCwd = await this.registry.canonicalCwd(cwd);
         await this.withProjectLock(projectCwd, async () => {
           const project = await this.registry.register(projectCwd);
-          const warm = this.warmBackends.get(project.cwd);
-          if (warm && this.projectForBackend(warm).cloneUrl !== project.cloneUrl) {
-            await this.removeIfDrained(warm);
-          }
           await this.output.send(response(request.id, { result: { project } }));
         });
         return;
@@ -262,14 +283,14 @@ export class AppServerAggregator {
             await this.output.send(response(request.id, { result: { removed: false } }));
             return;
           }
-          const projectBackends = [...this.backendProjects.entries()]
-            .filter(([, candidate]) => candidate.cwd === current.cwd)
-            .map(([backend]) => backend);
-          if (projectBackends.some((backend) => this.topology.hasLiveThreads(backend.machineId))) {
+          if (this.topology.hasLiveThreadsForProject(current.cwd)) {
             await this.output.send(response(request.id, errorOutcome(-32005, "project has active threads")));
             return;
           }
-          await Promise.all(projectBackends.map((backend) => this.removeIfDrained(backend)));
+          const projectContainers = [...this.backendContexts.entries()]
+            .filter(([, context]) => context.mode === "container" && context.project?.cwd === current.cwd)
+            .map(([backend]) => backend);
+          await Promise.all(projectContainers.map((backend) => this.removeIfDrained(backend)));
           const removed = await this.registry.remove(current.cwd);
           await this.output.send(response(request.id, { result: { removed } }));
         });
@@ -293,38 +314,24 @@ export class AppServerAggregator {
     if (this.applyClientNotificationOptOuts) {
       for (const method of initializeOptOutMethods(request.params)) this.clientOptOutNotifications.add(method);
     }
-    const project = this.registry.list()[0];
-    if (!project) {
-      await this.output.send(response(request.id, errorOutcome(
-        -32004,
-        "no projects are registered; call skizzles/project/add before initialize",
-      )));
-      return;
-    }
-    this.initialization = this.withProjectLock(project.cwd, async () => {
-      const current = await this.registry.find(project.cwd);
-      if (!current) {
-        const outcome = errorOutcome(-32004, "initialization project is no longer registered");
-        await this.output.send(response(request.id, outcome));
-        return outcome;
-      }
-      const backend = await this.createInitializedBackend(current, true);
-      if ("error" in backend.outcome) {
-        this.backends.delete(backend.connection.machineId);
-        this.backendProjects.delete(backend.connection);
-        try {
-          await backend.connection.close();
-          this.state.markMachine(backend.connection.machineId, "removed");
-        } catch (error) {
-          this.log(`failed to clean initialization backend ${backend.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+    this.initialization = (async () => {
+      const staleHost = this.backends.get(HOST_MACHINE_ID);
+      if (staleHost) {
+        await this.discardBackend(staleHost);
+        if (this.backends.has(HOST_MACHINE_ID)) {
+          throw new Error("previous host app-server teardown must succeed before initialization can retry");
         }
-      } else {
-        this.warmBackends.set(current.cwd, backend.connection);
       }
-      await this.output.send(response(request.id, backend.outcome));
-      if ("result" in backend.outcome) await backend.activate();
-      return backend.outcome;
-    }).catch(async (error) => {
+      const created = await this.createInitializedBackend("host", undefined, true);
+      if ("error" in created.outcome) {
+        await this.discardBackend(created.connection);
+      } else {
+        this.hostBackend = created.connection;
+      }
+      await this.output.send(response(request.id, created.outcome));
+      if ("result" in created.outcome) await created.activate();
+      return created.outcome;
+    })().catch(async (error) => {
       const outcome = errorOutcome(-32603, error instanceof Error ? error.message : String(error));
       await this.output.send(response(request.id, outcome));
       return outcome;
@@ -349,7 +356,18 @@ export class AppServerAggregator {
   }
 
   private async handleThreadStart(request: RpcRequest): Promise<void> {
-    const requestedCwd = asRecord(request.params).cwd;
+    const params = asRecord(request.params);
+    const requestedMode = params.skizzlesExecutionMode;
+    const executionMode = requestedMode === undefined ? DEFAULT_EXECUTION_MODE : requestedMode;
+    if (!isExecutionMode(executionMode)) {
+      await this.output.send(response(request.id, errorOutcome(
+        -32602,
+        "skizzlesExecutionMode must be either 'host' or 'container'",
+      )));
+      return;
+    }
+
+    const requestedCwd = params.cwd;
     let project: RegisteredProject | undefined;
     if (typeof requestedCwd === "string") {
       try {
@@ -363,103 +381,99 @@ export class AppServerAggregator {
       }
     }
     if (!project) {
+      await this.output.send(response(request.id, errorOutcome(-32004, "thread/start cwd is not a registered project")));
+      return;
+    }
+    if (executionMode === "container" && project.cloneUrl === null) {
       await this.output.send(response(request.id, errorOutcome(
         -32004,
-        "thread/start cwd is not a registered project",
+        `project is host-only because it has no container-reachable Git origin: ${project.cwd}`,
       )));
       return;
     }
+
     await this.withProjectLock(project.cwd, async () => {
-      let current: RegisteredProject | undefined;
-      try {
-        current = await this.registry.find(project.cwd);
-      } catch (error) {
-        await this.output.send(response(request.id, errorOutcome(
-          -32602,
-          `invalid thread/start cwd: ${error instanceof Error ? error.message : String(error)}`,
-        )));
-        return;
-      }
+      const current = await this.registry.find(project!.cwd);
       if (!current) {
-        await this.output.send(response(request.id, errorOutcome(
-          -32004,
-          "thread/start cwd is not a registered project",
-        )));
+        await this.output.send(response(request.id, errorOutcome(-32004, "thread/start cwd is not a registered project")));
         return;
       }
-      await this.startThread(request, current);
+      await this.startThread(request, current, executionMode);
     });
   }
 
-  private async startThread(request: RpcRequest, project: RegisteredProject): Promise<void> {
-    let backend = this.warmBackends.get(project.cwd);
-    this.warmBackends.delete(project.cwd);
-    if (!backend) {
-      let created: CreatedBackend;
+  private async startThread(
+    request: RpcRequest,
+    project: RegisteredProject,
+    executionMode: ExecutionMode,
+  ): Promise<void> {
+    let backend: BackendConnection;
+    if (executionMode === "host") {
+      if (!this.hostBackend || !this.readyBackends.has(this.hostBackend)) {
+        await this.output.send(response(request.id, errorOutcome(-32004, "host app-server is unavailable")));
+        return;
+      }
+      backend = this.hostBackend;
+    } else {
       try {
-        created = await this.createInitializedBackend(project);
-      } catch (error) {
-        this.log(`failed to provision backend: ${error instanceof Error ? error.message : String(error)}`);
-        await this.output.send(response(request.id, errorOutcome(-32603, "failed to provision app-server backend")));
-        return;
-      }
-      if ("error" in created.outcome) {
-        this.backends.delete(created.connection.machineId);
-        this.backendProjects.delete(created.connection);
-        try {
-          await created.connection.close();
-          this.state.markMachine(created.connection.machineId, "removed");
-        } catch (error) {
-          this.log(`failed to clean rejected backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-        await this.output.send(response(request.id, created.outcome));
-        return;
-      }
-      backend = created.connection;
-      if (this.initialized) {
-        try {
-          await backend.notify("initialized");
-        } catch (error) {
-          this.readyBackends.delete(backend);
-          this.backends.delete(backend.machineId);
-          this.backendProjects.delete(backend);
-          try {
-            await backend.close();
-            this.state.markMachine(backend.machineId, "removed");
-          } catch (closeError) {
-            this.log(`failed to clean unnotified backend ${backend.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
-          }
-          this.log(`failed to notify provisioned backend ${backend.machineId}: ${error instanceof Error ? error.message : String(error)}`);
-          await this.output.send(response(request.id, errorOutcome(-32603, "failed to provision app-server backend")));
+        const created = await this.createInitializedBackend("container", project);
+        if ("error" in created.outcome) {
+          await this.discardBackend(created.connection);
+          await this.output.send(response(request.id, created.outcome));
           return;
         }
+        backend = created.connection;
+        try {
+          if (this.initialized) await backend.notify("initialized");
+          await this.assertModelParity(backend);
+        } catch (error) {
+          await this.discardBackend(backend);
+          await this.output.send(response(request.id, errorOutcome(
+            -32603,
+            error instanceof Error ? error.message : String(error),
+          )));
+          return;
+        }
+      } catch (error) {
+        this.log(`failed to provision backend: ${error instanceof Error ? error.message : String(error)}`);
+        await this.output.send(response(request.id, errorOutcome(
+          -32603,
+          `failed to provision app-server backend: ${error instanceof Error ? error.message : String(error)}`,
+        )));
+        return;
       }
     }
-    const params: Record<string, unknown> = { ...asRecord(request.params), cwd: backend.workspace };
-    if (Array.isArray(params.runtimeWorkspaceRoots)) params.runtimeWorkspaceRoots = [backend.workspace];
+
+    const params = threadStartParams(request.params, backend, project.cwd);
     const rawOutcome = await backend.call("thread/start", params);
-    const outcome = virtualizeOutcome(rawOutcome, project.cwd);
-    this.topology.observe(backend.machineId, project.cwd, response(request.id, outcome));
+    const outcome = externalizeOutcome(backend, rawOutcome, project.cwd);
+    this.topology.observe(backend.machineId, project.cwd, response(request.id, outcome), executionMode);
     await this.output.send(response(request.id, outcome));
-    if ("error" in outcome && !this.topology.hasLiveThreads(backend.machineId)) {
-      this.readyBackends.delete(backend);
-      await backend.close();
-      this.state.markMachine(backend.machineId, "removed");
-      this.backends.delete(backend.machineId);
-      this.backendProjects.delete(backend);
+    if ("error" in outcome && backend.disposable && !this.topology.hasLiveThreads(backend.machineId)) {
+      await this.discardBackend(backend);
     }
   }
 
-  private async createInitializedBackend(project: RegisteredProject, deferEvents = false): Promise<CreatedBackend> {
+  private async createInitializedBackend(
+    mode: ExecutionMode,
+    project?: RegisteredProject,
+    deferEvents = false,
+  ): Promise<CreatedBackend> {
     let transport: BackendTransport | undefined;
     let connection: BackendConnection | undefined;
     try {
-      transport = await this.factory.create(project);
+      transport = mode === "host"
+        ? await this.hostFactory.create()
+        : await this.containerFactory.create(requireProject(project));
+      validateTransport(transport, mode);
+      if (this.backends.has(transport.machineId)) throw new Error(`duplicate backend machine id: ${transport.machineId}`);
       this.state.saveMachine({
         machineId: transport.machineId,
-        projectCwd: project.cwd,
+        kind: mode,
+        projectCwd: project?.cwd,
         containerId: transport.containerId,
       });
+
       let active = !deferEvents;
       const queued: Array<() => Promise<void>> = [];
       const forward = (operation: () => Promise<void>): Promise<void> => {
@@ -469,10 +483,23 @@ export class AppServerAggregator {
       };
       connection = new BackendConnection(transport, {
         onNotification: (backend, notification) => forward(async () => {
-          const outerNotification = virtualizeNotification(notification, project.cwd);
-          this.topology.observe(backend.machineId, project.cwd, outerNotification);
+          const context = this.contextForMessage(backend, notification);
+          const outerNotification = context?.mode === "container" && context.project
+            ? virtualizeNotification(notification, context.project.cwd)
+            : notification;
+          if (context?.project) {
+            this.topology.observe(
+              backend.machineId,
+              context.project.cwd,
+              outerNotification,
+              context.mode,
+            );
+          }
           await this.sendClientNotification(outerNotification);
-          if (outerNotification.method === "thread/archived" || outerNotification.method === "thread/deleted") {
+          if (
+            backend.disposable &&
+            (outerNotification.method === "thread/archived" || outerNotification.method === "thread/deleted")
+          ) {
             queueMicrotask(() => {
               this.removeIfDrained(backend).catch((error) => {
                 this.log(`failed to remove drained backend ${backend.machineId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -488,7 +515,7 @@ export class AppServerAggregator {
         onLog: (backend, text) => this.log(`[${backend.machineId}] ${text.trimEnd()}`),
       });
       this.backends.set(connection.machineId, connection);
-      this.backendProjects.set(connection, project);
+      this.backendContexts.set(connection, { mode, project });
       const outcome = await connection.initialize(backendInitializeParams(
         this.initializeParams,
         this.applyClientNotificationOptOuts,
@@ -504,17 +531,8 @@ export class AppServerAggregator {
         },
       };
     } catch (error) {
-      if (connection) {
-        this.readyBackends.delete(connection);
-        this.backends.delete(connection.machineId);
-        this.backendProjects.delete(connection);
-        try {
-          await connection.close();
-          this.state.markMachine(connection.machineId, "removed");
-        } catch (closeError) {
-          this.log(`failed to clean partial backend ${connection.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
-        }
-      } else if (transport) {
+      if (connection) await this.discardBackend(connection);
+      else if (transport) {
         try {
           await transport.destroy();
           this.state.markMachine(transport.machineId, "removed");
@@ -526,122 +544,63 @@ export class AppServerAggregator {
     }
   }
 
-  private async handleRepresentativeRead(request: RpcRequest, params: Record<string, unknown>): Promise<void> {
-    const requested = representativeCwds(params);
-    if ("error" in requested) {
-      await this.output.send(response(request.id, errorOutcome(-32602, requested.error)));
+  private async handleHostRead(request: RpcRequest): Promise<void> {
+    const backend = this.hostBackend;
+    if (!backend || !this.readyBackends.has(backend)) {
+      await this.output.send(response(request.id, errorOutcome(-32004, "host app-server is unavailable")));
       return;
     }
-    let project: RegisteredProject | undefined;
-    if (requested.cwds.length) {
-      let projects: Array<RegisteredProject | undefined>;
-      try {
-        projects = await Promise.all(requested.cwds.map((cwd) => this.registry.find(cwd)));
-      } catch (error) {
-        await this.output.send(response(request.id, errorOutcome(
-          -32602,
-          error instanceof Error ? error.message : String(error),
-        )));
-        return;
-      }
-      const missing = requested.cwds.find((_cwd, index) => !projects[index]);
-      if (missing) {
-        await this.output.send(response(request.id, errorOutcome(
-          -32004,
-          `representative read cwd is not a registered project: ${missing}`,
-        )));
-        return;
-      }
-      const unique = new Map(projects.map((candidate) => [candidate!.cwd, candidate!]));
-      if (unique.size > 1) {
-        await this.output.send(response(request.id, errorOutcome(
-          -32602,
-          "representative read cannot span multiple registered projects",
-        )));
-        return;
-      }
-      project = unique.values().next().value as RegisteredProject;
-    } else {
-      const warm = this.warmBackends.values().next().value as BackendConnection | undefined;
-      const running = this.readyBackends.values().next().value as BackendConnection | undefined;
-      project = warm ? this.projectForBackend(warm) : running ? this.projectForBackend(running) : this.registry.list()[0];
-    }
-    if (!project) {
-      await this.output.send(response(request.id, errorOutcome(-32004, "no app-server backend is available")));
-      return;
-    }
-
-    await this.withProjectLock(project.cwd, async () => {
-      const current = await this.registry.find(project.cwd);
-      if (!current) {
-        await this.output.send(response(request.id, errorOutcome(-32004, "representative read project is no longer registered")));
-        return;
-      }
-      let warm = this.warmBackends.get(current.cwd);
-      if (warm && this.projectForBackend(warm).cloneUrl !== current.cloneUrl) {
-        await this.removeIfDrained(warm);
-        warm = this.warmBackends.get(current.cwd);
-      }
-      const running = [...this.readyBackends].find((backend) => {
-        const candidate = this.projectForBackend(backend);
-        return candidate.cwd === current.cwd && candidate.cloneUrl === current.cloneUrl;
-      });
-      const backend = warm ?? running ?? await this.createRepresentativeBackend(current);
-      if (!backend) {
-        await this.output.send(response(request.id, errorOutcome(-32004, "no app-server backend is available")));
-        return;
-      }
-      const rawOutcome = await backend.call(request.method, backendRoutedParams(backend, request.params));
-      const outcome = virtualizeOutcome(rawOutcome, current.cwd);
-      this.topology.observe(backend.machineId, current.cwd, response(request.id, outcome));
-      await this.output.send(response(request.id, outcome));
-    });
-  }
-
-  private async createRepresentativeBackend(project: RegisteredProject): Promise<BackendConnection | undefined> {
-    let created: CreatedBackend;
-    try {
-      created = await this.createInitializedBackend(project);
-    } catch (error) {
-      this.log(`failed to provision representative backend: ${error instanceof Error ? error.message : String(error)}`);
-      return undefined;
-    }
-    if ("error" in created.outcome) {
-      this.backends.delete(created.connection.machineId);
-      this.backendProjects.delete(created.connection);
-      try {
-        await created.connection.close();
-        this.state.markMachine(created.connection.machineId, "removed");
-      } catch (error) {
-        this.log(`failed to clean representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      return undefined;
-    }
-    if (this.initialized) {
-      try {
-        await created.connection.notify("initialized");
-      } catch (error) {
-        this.readyBackends.delete(created.connection);
-        this.backends.delete(created.connection.machineId);
-        this.backendProjects.delete(created.connection);
-        try {
-          await created.connection.close();
-          this.state.markMachine(created.connection.machineId, "removed");
-        } catch (closeError) {
-          this.log(`failed to clean unnotified representative backend ${created.connection.machineId}: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
-        }
-        this.log(`failed to notify representative backend ${created.connection.machineId}: ${error instanceof Error ? error.message : String(error)}`);
-        return undefined;
-      }
-    }
-    this.warmBackends.set(project.cwd, created.connection);
-    return created.connection;
+    const outcome = await backend.call(request.method, request.params);
+    await this.output.send(response(request.id, outcome));
   }
 
   private backendForThread(threadId: string): BackendConnection | undefined {
     const machineId = this.topology.machineFor(threadId);
     const backend = machineId ? this.backends.get(machineId) : undefined;
-    return backend && this.readyBackends.has(backend) ? backend : undefined;
+    if (!backend || !this.readyBackends.has(backend)) return undefined;
+    return backend.kind === this.topology.modeFor(threadId) ? backend : undefined;
+  }
+
+  private contextForMessage(backend: BackendConnection, message: RpcMessage): BackendContext | undefined {
+    const backendContext = this.backendContexts.get(backend);
+    if (!backendContext || backendContext.mode === "container") return backendContext;
+
+    const envelope = message as Record<string, unknown>;
+    const params = asRecord(envelope.params);
+    const result = asRecord(envelope.result);
+    const thread = recordWithStringId(result.thread) ?? recordWithStringId(params.thread);
+    const ids = [
+      typeof params.threadId === "string" ? params.threadId : undefined,
+      thread?.id,
+      typeof result.reviewThreadId === "string" ? result.reviewThreadId : undefined,
+      typeof thread?.parentThreadId === "string" ? thread.parentThreadId : undefined,
+    ].filter((value): value is string => typeof value === "string");
+    for (const threadId of ids) {
+      const projectCwd = this.topology.projectFor(threadId);
+      if (projectCwd) {
+        const project = this.registry.list().find((candidate) => candidate.cwd === projectCwd);
+        if (project) return { mode: "host", project };
+      }
+    }
+    if (typeof thread?.cwd === "string") {
+      const project = this.registry.list().find((candidate) => candidate.cwd === thread.cwd);
+      if (project) return { mode: "host", project };
+    }
+    return { mode: "host" };
+  }
+
+  private async assertModelParity(container: BackendConnection): Promise<void> {
+    const host = this.hostBackend;
+    if (!host || !this.readyBackends.has(host)) throw new Error("cannot validate models without the host app-server");
+    const [hostModels, containerModels] = await Promise.all([modelIds(host), modelIds(container)]);
+    const onlyHost = [...hostModels].filter((id) => !containerModels.has(id)).sort();
+    const onlyContainer = [...containerModels].filter((id) => !hostModels.has(id)).sort();
+    if (!onlyHost.length && !onlyContainer.length) return;
+    const details = [
+      onlyHost.length ? `missing in container: ${summarizeIds(onlyHost)}` : undefined,
+      onlyContainer.length ? `container-only: ${summarizeIds(onlyContainer)}` : undefined,
+    ].filter((value): value is string => value !== undefined).join("; ");
+    throw new Error(`host/container model catalogs do not match (${details})`);
   }
 
   private async handleClientResponse(id: RpcId, outcome: RpcOutcome): Promise<void> {
@@ -656,22 +615,30 @@ export class AppServerAggregator {
   }
 
   private async removeIfDrained(backend: BackendConnection): Promise<void> {
+    if (!backend.disposable) return;
     if ((this.lifecycleCalls.get(backend) ?? 0) > 0) return;
     if (this.topology.hasLiveThreads(backend.machineId)) return;
+    await this.discardBackend(backend);
+  }
+
+  private async discardBackend(backend: BackendConnection): Promise<void> {
     this.readyBackends.delete(backend);
-    await backend.close();
-    this.state.markMachine(backend.machineId, "removed");
-    this.backends.delete(backend.machineId);
-    const project = this.backendProjects.get(backend);
-    this.backendProjects.delete(backend);
     this.lifecycleCalls.delete(backend);
+    if (this.hostBackend === backend) this.hostBackend = undefined;
     for (const [key, reverse] of this.reverseRequests) {
       if (reverse.backend === backend) {
         this.reverseRequests.delete(key);
         this.onServerRequestSettled(reverse.outerId);
       }
     }
-    if (project && this.warmBackends.get(project.cwd) === backend) this.warmBackends.delete(project.cwd);
+    try {
+      await backend.close();
+      this.state.markMachine(backend.machineId, "removed");
+      this.backends.delete(backend.machineId);
+      this.backendContexts.delete(backend);
+    } catch (error) {
+      this.log(`failed to clean backend ${backend.machineId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async withProjectLock<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
@@ -687,12 +654,6 @@ export class AppServerAggregator {
       release();
       if (this.projectLocks.get(cwd) === queued) this.projectLocks.delete(cwd);
     }
-  }
-
-  private projectForBackend(backend: BackendConnection): RegisteredProject {
-    const project = this.backendProjects.get(backend);
-    if (!project) throw new Error(`backend ${backend.machineId} has no project`);
-    return project;
   }
 
   private beginLifecycleCall(backend: BackendConnection): void {
@@ -717,38 +678,77 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function representativeCwds(params: Record<string, unknown>): { cwds: string[] } | { error: string } {
-  const cwds: string[] = [];
-  if (params.cwd !== undefined && params.cwd !== null) {
-    if (typeof params.cwd !== "string") return { error: "representative read cwd must be a string" };
-    cwds.push(params.cwd);
-  }
-  if (params.cwds !== undefined && params.cwds !== null) {
-    if (!Array.isArray(params.cwds) || params.cwds.some((cwd) => typeof cwd !== "string")) {
-      return { error: "representative read cwds must be an array of strings" };
-    }
-    cwds.push(...params.cwds as string[]);
-  }
-  return { cwds };
+function recordWithStringId(value: unknown): (Record<string, unknown> & { id: string }) | undefined {
+  const record = asRecord(value);
+  return typeof record.id === "string" ? record as Record<string, unknown> & { id: string } : undefined;
 }
 
-function backendRoutedParams(backend: BackendConnection, value: unknown): unknown {
-  const params = asRecord(value);
-  let changed = false;
+function requireProject(project: RegisteredProject | undefined): RegisteredProject {
+  if (!project) throw new Error("container backend requires a registered project");
+  return project;
+}
+
+function validateTransport(transport: BackendTransport, expectedMode: ExecutionMode): void {
+  if (transport.kind !== expectedMode) {
+    throw new Error(`backend factory returned ${transport.kind} transport for ${expectedMode} mode`);
+  }
+  if (expectedMode === "host") {
+    if (transport.machineId !== HOST_MACHINE_ID) throw new Error(`host backend machine id must be ${HOST_MACHINE_ID}`);
+    if (transport.containerId || transport.workspace || transport.disposable) {
+      throw new Error("host backend transport has container-only properties");
+    }
+  } else if (!transport.containerId || !transport.workspace || !transport.disposable) {
+    throw new Error("container backend transport is missing container lifecycle properties");
+  }
+}
+
+function threadStartParams(value: unknown, backend: BackendConnection, projectCwd: string): Record<string, unknown> {
+  const params = { ...asRecord(value) };
+  delete params.skizzlesExecutionMode;
+  params.cwd = backend.kind === "host" ? projectCwd : backend.workspace;
+  if (backend.kind === "container" && Array.isArray(params.runtimeWorkspaceRoots)) {
+    params.runtimeWorkspaceRoots = [backend.workspace];
+  }
+  return backend.kind === "container" ? enforceContainerAccess("thread/start", params) : params;
+}
+
+function backendRoutedParams(backend: BackendConnection, method: string, value: unknown): unknown {
+  if (backend.kind === "host") return value;
+  const params = { ...asRecord(value) };
+  if ("cwd" in params) params.cwd = backend.workspace;
+  if (Array.isArray(params.cwds)) params.cwds = params.cwds.map(() => backend.workspace);
+  if (Array.isArray(params.runtimeWorkspaceRoots)) params.runtimeWorkspaceRoots = [backend.workspace];
+  return enforceContainerAccess(method, params);
+}
+
+function enforceContainerAccess(method: string, params: Record<string, unknown>): Record<string, unknown> {
   const routed = { ...params };
-  if ("cwd" in params) {
-    routed.cwd = backend.workspace;
-    changed = true;
+  delete routed.permissions;
+  if (CONTAINER_SANDBOX_METHODS.has(method) || "sandbox" in routed) {
+    routed.sandbox = "danger-full-access";
   }
-  if (Array.isArray(params.cwds)) {
-    routed.cwds = params.cwds.map(() => backend.workspace);
-    changed = true;
+  if (CONTAINER_POLICY_METHODS.has(method) || "sandboxPolicy" in routed) {
+    routed.sandboxPolicy = { type: "dangerFullAccess" };
   }
-  if (Array.isArray(params.runtimeWorkspaceRoots)) {
-    routed.runtimeWorkspaceRoots = [backend.workspace];
-    changed = true;
+  const config = optionalRecord(routed.config);
+  if (config) {
+    const forced: Record<string, unknown> = { ...config, sandbox_mode: "danger-full-access" };
+    delete forced.permissions;
+    delete forced.sandbox;
+    delete forced.sandbox_policy;
+    routed.config = forced;
   }
-  return changed ? routed : value;
+  return routed;
+}
+
+function optionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function externalizeOutcome(backend: BackendConnection, outcome: RpcOutcome, cwd: string): RpcOutcome {
+  return backend.kind === "container" ? virtualizeOutcome(outcome, cwd) : outcome;
 }
 
 function virtualizeOutcome(outcome: RpcOutcome, cwd: string): RpcOutcome {
@@ -784,6 +784,39 @@ function backendInitializeParams(params: unknown, applyClientNotificationOptOuts
   return { ...root, capabilities: { ...capabilities, optOutNotificationMethods: filtered } };
 }
 
+async function modelIds(backend: BackendConnection): Promise<Set<string>> {
+  const ids = new Set<string>();
+  let cursor: string | null = null;
+  const seenCursors = new Set<string>();
+  for (let page = 0; page < 100; page++) {
+    const outcome = await backend.call("model/list", {
+      includeHidden: true,
+      ...(cursor === null ? {} : { cursor }),
+    });
+    if ("error" in outcome) throw new Error(`model/list failed on ${backend.kind}: ${outcome.error.message}`);
+    const result = asRecord(outcome.result);
+    if (!Array.isArray(result.data)) throw new Error(`model/list returned invalid data on ${backend.kind}`);
+    for (const value of result.data) {
+      const model = asRecord(value);
+      if (typeof model.id !== "string") throw new Error(`model/list returned a model without an id on ${backend.kind}`);
+      ids.add(model.id);
+    }
+    const next = result.nextCursor;
+    if (next === null || next === undefined) return ids;
+    if (typeof next !== "string" || seenCursors.has(next)) {
+      throw new Error(`model/list returned an invalid cursor on ${backend.kind}`);
+    }
+    seenCursors.add(next);
+    cursor = next;
+  }
+  throw new Error(`model/list exceeded the pagination limit on ${backend.kind}`);
+}
+
+function summarizeIds(ids: string[]): string {
+  const shown = ids.slice(0, 8).join(", ");
+  return ids.length > 8 ? `${shown}, … (+${ids.length - 8})` : shown;
+}
+
 function isMissingRollout(outcome: RpcOutcome, threadId: string): boolean {
   return "error" in outcome
     && outcome.error.code === -32600
@@ -796,6 +829,9 @@ function isAggregateTopologyMethod(method: string): boolean {
     || method.startsWith("project/")
     || method.startsWith("threadSection/");
 }
+
+const CONTAINER_SANDBOX_METHODS = new Set(["thread/start", "thread/resume", "thread/fork"]);
+const CONTAINER_POLICY_METHODS = new Set(["turn/start", "thread/settings/update"]);
 
 const TOPOLOGY_NOTIFICATION_METHODS = new Set([
   "thread/started",
@@ -810,7 +846,7 @@ const TOPOLOGY_NOTIFICATION_METHODS = new Set([
   "item/completed",
 ]);
 
-const REPRESENTATIVE_GLOBAL_READS = new Set([
+const HOST_GLOBAL_READS = new Set([
   "account/read",
   "account/rateLimits/read",
   "account/usage/read",
