@@ -61,6 +61,14 @@ export function idKey(id: RpcId): string {
   return `${typeof id}:${id}`;
 }
 
+export function requestThreadIdFromParams(params: unknown): string | undefined {
+  if (params === null || typeof params !== "object" || Array.isArray(params)) return undefined;
+  const record = params as Record<string, unknown>;
+  return typeof record.threadId === "string"
+    ? record.threadId
+    : typeof record.conversationId === "string" ? record.conversationId : undefined;
+}
+
 function isRpcId(value: unknown): value is RpcId {
   return typeof value === "string" || (typeof value === "number" && Number.isFinite(value));
 }

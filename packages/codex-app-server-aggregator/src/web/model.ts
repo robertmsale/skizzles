@@ -1,3 +1,4 @@
+import { requestThreadIdFromParams } from "../protocol.ts";
 import type {
   ServerRequestDto,
   EventRecordDto,
@@ -116,10 +117,7 @@ export function threadHasSystemError(thread: ThreadDto): boolean {
 }
 
 export function requestThreadId(request: ServerRequestDto): string | undefined {
-  const params = record(request.params);
-  return typeof params.threadId === "string"
-    ? params.threadId
-    : typeof params.conversationId === "string" ? params.conversationId : undefined;
+  return requestThreadIdFromParams(request.params);
 }
 
 export function projectForThread(machines: MachineDto[], threadId: string | undefined): string | undefined {

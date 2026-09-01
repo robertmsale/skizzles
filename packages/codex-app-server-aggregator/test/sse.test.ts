@@ -83,6 +83,59 @@ describe("aggregator SSE API", () => {
     await waitFor(() => bridge.eventSubscriberCount === 0);
   });
 
+  test("routes legacy conversationId approvals through selected-thread snapshots and live events", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveProject({ cwd: "/project", cloneUrl: "https://example.test/project.git" }, 1);
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    bridge.thread = { id: "thread-1", turns: [] };
+    await bridge.send({
+      id: "legacy-snapshot",
+      method: "execCommandApproval",
+      params: { conversationId: "thread-1", command: "bun test" },
+    });
+
+    const reader = new SseReader(await fetch(`${origin}/v1/threads/thread-1/stream`));
+    const snapshot = await reader.through("snapshot.end");
+    const requests = data(snapshot, "snapshot.requests").requests as Array<Record<string, unknown>>;
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      id: "legacy-snapshot",
+      method: "execCommandApproval",
+      threadId: "thread-1",
+      projectCwd: "/project",
+      request: { params: { conversationId: "thread-1" } },
+    });
+
+    bridge.settleServerRequest("legacy-snapshot");
+    expect(await reader.nextEvent()).toMatchObject({
+      event: "server-request.resolved",
+      data: { id: "legacy-snapshot", threadId: "thread-1", projectCwd: "/project" },
+    });
+    await bridge.send({
+      id: "legacy-live",
+      method: "applyPatchApproval",
+      params: { conversationId: "thread-1", patch: "x".repeat(4_300_000) },
+    });
+    expect(await reader.nextEvent()).toMatchObject({
+      event: "server-request.pending",
+      data: {
+        request: {
+          id: "legacy-live",
+          threadId: "thread-1",
+          projectCwd: "/project",
+          hydrationHref: "/v1/server-requests",
+        },
+      },
+    });
+    bridge.settleServerRequest("legacy-live");
+    expect(await reader.nextEvent()).toMatchObject({
+      event: "server-request.resolved",
+      data: { id: "legacy-live", threadId: "thread-1", projectCwd: "/project" },
+    });
+    await reader.cancel();
+  });
+
   test("streams the newest 50 finalized entries, buffers snapshot-time events, collapses deltas, and hydrates oversized items", async () => {
     const { bridge, origin, state } = harness();
     state.saveMachine({ machineId: "host", kind: "host" }, 1);
@@ -156,6 +209,42 @@ describe("aggregator SSE API", () => {
     const hydrated = await fetchJson(`${origin}/v1/threads/thread-1/entries/item-59`);
     expect((hydrated.body as { entry: { item: { text: string } } }).entry.item.text.length).toBeGreaterThan(SSE_HARD_EVENT_BYTES);
     expect(received.every((event) => event.bytes < SSE_HARD_EVENT_BYTES)).toBe(true);
+    await reader.cancel();
+  });
+
+  test("filters and collapses snapshot-handoff traffic before applying subscription bounds", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    bridge.thread = { id: "thread-1", turns: [] };
+    bridge.pauseRead = true;
+
+    const responsePromise = fetch(`${origin}/v1/threads/thread-1/stream`);
+    await waitFor(() => bridge.readStarted);
+    for (let index = 0; index < 2_001; index++) {
+      await bridge.send({
+        method: "item/agentMessage/delta",
+        params: { threadId: "other-thread", itemId: "other-item", delta: `irrelevant-${index}` },
+      });
+    }
+    for (let index = 0; index < 2_001; index++) {
+      await bridge.send({
+        method: "item/agentMessage/delta",
+        params: { threadId: "thread-1", itemId: "selected-item", delta: `discarded-${index}` },
+      });
+    }
+    const subscriberCountDuringSnapshot = bridge.eventSubscriberCount;
+    bridge.releaseRead();
+
+    const response = await responsePromise;
+    expect(subscriberCountDuringSnapshot).toBe(1);
+    expect(response.status).toBe(200);
+    const reader = new SseReader(response);
+    const received = await reader.through("thread.responding");
+    expect(received.filter((event) => event.event === "thread.responding")).toHaveLength(1);
+    expect(received.at(-1)?.data).toMatchObject({ threadId: "thread-1" });
+    expect(JSON.stringify(received)).not.toContain("irrelevant-");
+    expect(JSON.stringify(received)).not.toContain("discarded-");
     await reader.cancel();
   });
 

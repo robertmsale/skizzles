@@ -277,7 +277,7 @@ export class RestApiServer {
     if ("error" in initialized) return outcome(initialized, 200);
     const state = this.requiredSseState();
     const cursor = streamCursor(request, url);
-    let subscription = this.bridge.openEventSubscription(cursor?.cursor, cursor?.streamId);
+    let subscription = this.openSseSubscription("app", state, { cursor });
     let reset: SseSnapshotReset | undefined;
     if (subscription.gap || subscription.overflowed) {
       reset = {
@@ -285,7 +285,7 @@ export class RestApiServer {
         requestedCursor: cursor?.cursor ?? subscription.cursor,
       };
       subscription.close();
-      subscription = this.bridge.openEventSubscription();
+      subscription = this.openSseSubscription("app", state);
     } else if (cursor) {
       return this.replayStream(request, subscription, new SseEventMapper("app", state), "app");
     }
@@ -327,7 +327,7 @@ export class RestApiServer {
 
     const tail = boundedPositiveIntegerQuery(url, "tail", 50, 50);
     const cursor = streamCursor(request, url);
-    let subscription = this.bridge.openEventSubscription(cursor?.cursor, cursor?.streamId);
+    let subscription = this.openSseSubscription("thread", state, { cursor, threadId });
     let reset: SseSnapshotReset | undefined;
     if (subscription.gap || subscription.overflowed) {
       reset = {
@@ -335,7 +335,7 @@ export class RestApiServer {
         requestedCursor: cursor?.cursor ?? subscription.cursor,
       };
       subscription.close();
-      subscription = this.bridge.openEventSubscription();
+      subscription = this.openSseSubscription("thread", state, { threadId });
     } else if (cursor) {
       return this.replayStream(request, subscription, new SseEventMapper("thread", state, threadId), "thread", threadId);
     }
@@ -517,6 +517,22 @@ export class RestApiServer {
       subscription.close();
       throw error;
     }
+  }
+
+  private openSseSubscription(
+    scope: "app" | "thread",
+    state: AggregatorState,
+    options: {
+      cursor?: { cursor: number; streamId?: string } | undefined;
+      threadId?: string | undefined;
+    } = {},
+  ): EventSubscription {
+    const bufferMapper = new SseEventMapper(scope, state, options.threadId);
+    return this.bridge.openEventSubscription(
+      options.cursor?.cursor,
+      options.cursor?.streamId,
+      (record) => bufferMapper.map(record) !== null,
+    );
   }
 
   private requiredSseState(): AggregatorState {

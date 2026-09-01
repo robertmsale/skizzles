@@ -6,6 +6,7 @@ import {
   isNotification,
   isRequest,
   isResponse,
+  requestThreadIdFromParams,
   response,
   type RpcId,
   type RpcMessage,
@@ -64,6 +65,7 @@ export type EventPage = {
 };
 
 type EventListener = (record: EventRecord) => boolean;
+export type EventBufferFilter = (record: EventRecord) => boolean;
 type CompletedItemRecord = { threadId: string; itemId: string; cursor: number };
 
 export class EventSubscription {
@@ -79,6 +81,7 @@ export class EventSubscription {
     readonly gap: boolean,
     readonly restarted: boolean,
     private readonly release: () => void,
+    private readonly bufferFilter?: EventBufferFilter,
   ) {}
 
   get overflowed(): boolean {
@@ -90,6 +93,15 @@ export class EventSubscription {
     if (this.listener) {
       if (!this.listener(record)) this.close();
       return;
+    }
+    if (this.bufferFilter) {
+      try {
+        if (!this.bufferFilter(record)) return;
+      } catch {
+        this.didOverflow = true;
+        this.close();
+        return;
+      }
     }
     this.buffer(record);
   }
@@ -208,7 +220,11 @@ export class AggregatorBridge implements MessageSink {
     };
   }
 
-  openEventSubscription(after?: number, expectedStreamId?: string): EventSubscription {
+  openEventSubscription(
+    after?: number,
+    expectedStreamId?: string,
+    bufferFilter?: EventBufferFilter,
+  ): EventSubscription {
     const oldestCursor = this.events[0]?.cursor ?? this.nextEventCursor;
     const currentCursor = this.nextEventCursor - 1;
     const restarted = expectedStreamId !== undefined && expectedStreamId !== this.streamId;
@@ -223,6 +239,7 @@ export class AggregatorBridge implements MessageSink {
       gap,
       restarted,
       () => this.eventSubscriptions.delete(subscription),
+      bufferFilter,
     );
     this.eventSubscriptions.add(subscription);
     for (const record of replay) subscription.enqueue(record);
@@ -544,6 +561,7 @@ function boundedJournalEvent(event: RpcNotification): RpcNotification {
   if (copy.method === "skizzles/server-request/pending") {
     const request = asRecord(params.request);
     const requestParams = asRecord(request.params);
+    const threadId = requestThreadIdFromParams(requestParams);
     return {
       method: copy.method,
       params: {
@@ -551,7 +569,7 @@ function boundedJournalEvent(event: RpcNotification): RpcNotification {
           id: request.id,
           method: request.method,
           params: {
-            ...(typeof requestParams.threadId === "string" ? { threadId: requestParams.threadId } : {}),
+            ...(threadId === undefined ? {} : { threadId }),
             ...(typeof requestParams.cwd === "string" ? { cwd: requestParams.cwd } : {}),
           },
         },
@@ -585,6 +603,7 @@ function boundedJournalEvent(event: RpcNotification): RpcNotification {
 
 function serverRequestNotification(state: "pending" | "resolved", request: RpcRequest): RpcNotification {
   const params = asRecord(request.params);
+  const threadId = requestThreadIdFromParams(params);
   return {
     method: `skizzles/server-request/${state}`,
     params: state === "pending"
@@ -592,7 +611,7 @@ function serverRequestNotification(state: "pending" | "resolved", request: RpcRe
       : {
         id: request.id,
         method: request.method,
-        ...(typeof params.threadId === "string" ? { threadId: params.threadId } : {}),
+        ...(threadId === undefined ? {} : { threadId }),
         ...(typeof params.cwd === "string" ? { cwd: params.cwd } : {}),
       },
   };

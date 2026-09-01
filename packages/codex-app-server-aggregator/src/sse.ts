@@ -1,5 +1,5 @@
 import type { EventRecord } from "./bridge.ts";
-import type { RpcId, RpcRequest } from "./protocol.ts";
+import { requestThreadIdFromParams, type RpcId, type RpcRequest } from "./protocol.ts";
 import type { AggregatorState, RegisteredProject, StoredThread } from "./state.ts";
 
 export const SSE_HEARTBEAT_MS = 15_000;
@@ -204,7 +204,7 @@ export function appThreadDto(thread: StoredThread): AppThreadDto {
 
 export function serverRequestStreamDto(request: RpcRequest, state: AggregatorState): ServerRequestStreamDto {
   const params = asRecord(request.params);
-  const threadId = typeof params.threadId === "string" ? params.threadId : null;
+  const threadId = requestThreadIdFromParams(params) ?? null;
   const projectCwd = threadId === null
     ? registeredRequestCwd(state, params.cwd)
     : state.threads().find((thread) => thread.threadId === threadId && !thread.deleted)?.projectCwd ?? null;
@@ -351,7 +351,7 @@ export class SseEventMapper {
     if (notification.method === "skizzles/server-request/resolved") {
       const id = params.id;
       if (!isRpcId(id)) return null;
-      const resolvedThreadId = typeof params.threadId === "string" ? params.threadId : null;
+      const resolvedThreadId = requestThreadIdFromParams(params) ?? null;
       if (this.scope === "thread" && resolvedThreadId !== this.selectedThreadId) return null;
       this.pendingRequests.delete(stableRpcId(id));
       return {
@@ -638,8 +638,9 @@ function eventThreadId(method: string, params: Record<string, unknown>): string 
   if (method === "skizzles/server-request/pending") {
     const request = asRpcRequest(params.request);
     const requestParams = asRecord(request?.params);
-    return typeof requestParams.threadId === "string" ? requestParams.threadId : undefined;
+    return requestThreadIdFromParams(requestParams);
   }
+  if (method === "skizzles/server-request/resolved") return requestThreadIdFromParams(params);
   return undefined;
 }
 
