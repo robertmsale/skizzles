@@ -533,6 +533,10 @@ class TestBridge extends AggregatorBridge {
     this.bind({ handle: async () => undefined } as unknown as AppServerAggregator);
   }
 
+  override async ensureReady(): Promise<RpcOutcome> {
+    return { result: {} };
+  }
+
   override async call(method: string, params?: unknown): Promise<RpcOutcome> {
     if (method === "thread/read") {
       this.readStarted = true;

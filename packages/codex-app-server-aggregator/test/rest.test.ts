@@ -16,6 +16,60 @@ afterEach(() => {
 });
 
 describe("aggregator REST API", () => {
+  test("initializes the host backend before serving a first-request global SSE stream", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    state.saveProject({ cwd, cloneUrl: null }, 1);
+    const hostFactory = new RestFactory("host");
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state,
+      containerFactory: new RestFactory(),
+      hostFactory,
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    try {
+      await daemon.start();
+      expect(hostFactory.transport.request("initialize")).toBeUndefined();
+
+      hostFactory.pauseNextInitialized = true;
+      const firstResponse = fetch(`${daemon.httpUrl!.origin}/v1/app-state/stream`);
+      await waitFor(async () => hostFactory.initializedBlocked);
+      let secondSettled = false;
+      const secondResponse = fetch(`${daemon.httpUrl!.origin}/v1/app-state/stream`).then((response) => {
+        secondSettled = true;
+        return response;
+      });
+      await Bun.sleep(5);
+      expect(secondSettled).toBe(false);
+
+      hostFactory.releaseInitialized();
+      const [response, concurrentResponse] = await Promise.all([firstResponse, secondResponse]);
+      expect(response.status).toBe(200);
+      expect(concurrentResponse.status).toBe(200);
+      expect(hostFactory.transport.request("initialize")).toBeDefined();
+      expect(hostFactory.transport.writes).toContainEqual({ method: "initialized" });
+      expect(hostFactory.transport.writes.filter((message) =>
+        "method" in message && message.method === "initialized"
+      )).toHaveLength(1);
+      await concurrentResponse.body?.cancel();
+
+      const threadId = "first-stream-thread";
+      hostFactory.transport.emit({
+        method: "thread/started",
+        params: { thread: { ...threadSnapshot(threadId), cwd } },
+      });
+      const events = await readSseEventsThrough(response, "thread.upsert");
+      expect(events.at(-1)?.data).toMatchObject({
+        thread: { id: threadId, cwd, executionMode: "host" },
+      });
+    } finally {
+      if (hostFactory.initializedBlocked) hostFactory.releaseInitialized();
+      await daemon.close();
+    }
+  });
+
   test("uses one long-lived core for one-off project, thread, turn, read, event, and archive calls", async () => {
     const directory = temporaryDirectory();
     const cwd = join(directory, "project");
@@ -576,8 +630,11 @@ class RestFactory implements BackendFactory {
   readThreadPatch: Record<string, unknown> = {};
   pauseNextCreate = false;
   createBlocked = false;
+  pauseNextInitialized = false;
+  initializedBlocked = false;
   private pendingReadId: RpcId | undefined;
   private releaseBlockedCreate: (() => void) | undefined;
+  private releaseBlockedInitialized: (() => void) | undefined;
 
   constructor(mode: "host" | "container" = "container") {
     this.transport = new RestTransport(mode, (message) => this.handle(message));
@@ -600,6 +657,14 @@ class RestFactory implements BackendFactory {
     release();
   }
 
+  releaseInitialized(): void {
+    const release = this.releaseBlockedInitialized;
+    if (!release) throw new Error("no initialized notification is blocked");
+    this.initializedBlocked = false;
+    this.releaseBlockedInitialized = undefined;
+    release();
+  }
+
   hasPendingRead(): boolean {
     return this.pendingReadId !== undefined;
   }
@@ -615,7 +680,16 @@ class RestFactory implements BackendFactory {
   }
 
   private async handle(message: RpcMessage): Promise<void> {
-    if (!("method" in message) || !("id" in message)) return;
+    if (!("method" in message)) return;
+    if (message.method === "initialized" && !("id" in message)) {
+      if (this.pauseNextInitialized) {
+        this.pauseNextInitialized = false;
+        this.initializedBlocked = true;
+        await new Promise<void>((resolve) => { this.releaseBlockedInitialized = resolve; });
+      }
+      return;
+    }
+    if (!("id" in message)) return;
     if (message.method === "initialize") {
       this.transport.emit({
         id: message.id,

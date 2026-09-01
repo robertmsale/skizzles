@@ -272,7 +272,9 @@ export class RestApiServer {
     return json(page);
   }
 
-  private appStateStream(request: Request, url: URL): Response {
+  private async appStateStream(request: Request, url: URL): Promise<Response> {
+    const initialized = await this.bridge.ensureReady();
+    if ("error" in initialized) return outcome(initialized, 200);
     const state = this.requiredSseState();
     const cursor = streamCursor(request, url);
     let subscription = this.bridge.openEventSubscription(cursor?.cursor, cursor?.streamId);

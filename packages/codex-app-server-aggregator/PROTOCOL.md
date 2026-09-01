@@ -155,6 +155,9 @@ The HTTP control plane remains transactional. Robdex keeps one global
 <code>GET /v1/threads/:threadId/stream?tail=50</code> only for the selected thread. Both routes pass
 through the existing REST Host/Origin and bearer checks before a subscriber is registered. Bearer
 credentials belong in the <code>Authorization</code> header and are never accepted in a stream URL.
+The global route completes the shared host backend's single-flight <code>initialize</code> and
+<code>initialized</code> handshake before it captures the journal cursor or returns HTTP 200, so a
+first-request stream is already able to journal and broadcast native app-server activity.
 
 Responses use <code>text/event-stream</code>, <code>no-cache, no-store, no-transform</code>,
 <code>X-Accel-Buffering: no</code>, standard <code>id</code>/<code>event</code>/JSON

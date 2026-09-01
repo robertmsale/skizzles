@@ -143,7 +143,7 @@ export class AggregatorBridge implements MessageSink {
   private nextEventCursor = 1;
   private initialization: Promise<RpcOutcome> | undefined;
   private initializeOutcome: RpcOutcome | undefined;
-  private initialized = false;
+  private initializedNotification: Promise<void> | undefined;
 
   constructor(private readonly log: (message: string) => void = () => undefined) {}
 
@@ -178,11 +178,17 @@ export class AggregatorBridge implements MessageSink {
 
   async call(method: string, params?: unknown): Promise<RpcOutcome> {
     if (!method.startsWith("skizzles/project/")) {
-      const initialized = await this.ensureInitialized();
+      const initialized = await this.ensureReady();
       if ("error" in initialized) return initialized;
-      await this.ensureInitializedNotification();
     }
     return this.callCore(method, params);
+  }
+
+  async ensureReady(): Promise<RpcOutcome> {
+    const initialized = await this.ensureInitialized();
+    if ("error" in initialized) return initialized;
+    await this.ensureInitializedNotification();
+    return initialized;
   }
 
   eventPage(after = 0, requestedLimit = DEFAULT_EVENT_LIMIT, expectedStreamId?: string): EventPage {
@@ -359,9 +365,16 @@ export class AggregatorBridge implements MessageSink {
   }
 
   private async ensureInitializedNotification(params?: unknown): Promise<void> {
-    if (this.initialized) return;
-    this.initialized = true;
-    await this.requiredAggregator().handle(params === undefined ? { method: "initialized" } : { method: "initialized", params });
+    if (!this.initializedNotification) {
+      const notification = this.requiredAggregator().handle(
+        params === undefined ? { method: "initialized" } : { method: "initialized", params },
+      );
+      this.initializedNotification = notification;
+      notification.catch(() => {
+        if (this.initializedNotification === notification) this.initializedNotification = undefined;
+      });
+    }
+    await this.initializedNotification;
   }
 
   private async callCore(method: string, params?: unknown): Promise<RpcOutcome> {
