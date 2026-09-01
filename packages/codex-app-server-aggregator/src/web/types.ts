@@ -1,5 +1,18 @@
 import type { RpcNotification, RpcRequest } from "../protocol.ts";
 
+export type {
+  AppThreadDto,
+  LiveSseEventDto,
+  ServerRequestStreamDto,
+  SnapshotSseEventDto,
+  SseStreamEventDto,
+  TimelineAvailableDto,
+  TimelineHistoryPageDto as SseTimelineHistoryPageDto,
+  TimelineEntryDto as SseTimelineEntryDto,
+  TimelinePageDto as SseTimelinePageDto,
+  TimelineStreamEntryDto,
+} from "../sse.ts";
+
 export type ProjectDto = {
   cwd: string;
   cloneUrl: string | null;

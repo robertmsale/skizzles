@@ -359,7 +359,10 @@ describe("aggregator REST API", () => {
 
     const events = await fetchJson(`${origin}/v1/events?after=0`);
     expect(events.body).toMatchObject({
-      data: [{ event: { method: "configWarning" } }],
+      data: [
+        { event: { method: "skizzles/project/upsert", params: { project: { cwd } } } },
+        { event: { method: "configWarning" } },
+      ],
       streamId: expect.any(String),
     });
     await daemon.close();
