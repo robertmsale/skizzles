@@ -280,6 +280,23 @@ describe("aggregator SSE API", () => {
     await request;
   });
 
+  test("rejects invalid tail values before registering a journal subscriber", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+
+    expect(await fetchJson(`${origin}/v1/threads/thread-1/stream?tail=0`)).toEqual({
+      status: 400,
+      body: { error: { code: "bad_request", message: "tail must be a positive integer" } },
+    });
+    expect(await fetchJson(`${origin}/v1/threads/thread-1/stream?tail=51`)).toEqual({
+      status: 400,
+      body: { error: { code: "bad_request", message: "tail must not exceed 50" } },
+    });
+    expect(bridge.eventSubscriberCount).toBe(0);
+    expect(bridge.readStarted).toBe(false);
+  });
+
   test("replays Last-Event-ID cursors and snapshots transparently after expiry or restart", async () => {
     const first = harness();
     first.state.saveMachine({ machineId: "host", kind: "host" }, 1);

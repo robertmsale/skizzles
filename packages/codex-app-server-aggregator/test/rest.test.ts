@@ -148,6 +148,58 @@ describe("aggregator REST API", () => {
     persisted.close();
   });
 
+  test("uses metadata refreshed by the authoritative thread read in a selected-thread SSE snapshot", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    await run("git", "init", cwd);
+    await run("git", "-C", cwd, "remote", "add", "origin", "https://example.test/owner/project.git");
+    const factory = new RestFactory();
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state,
+      containerFactory: factory,
+      hostFactory: new RestFactory("host"),
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    try {
+      await daemon.start();
+      const origin = daemon.httpUrl!.origin;
+      await fetchJson(`${origin}/v1/projects`, { method: "POST", body: JSON.stringify({ cwd }) });
+      await fetchJson(`${origin}/v1/threads`, { method: "POST", body: JSON.stringify({ cwd }) });
+
+      const stale = state.threads().find((thread) => thread.threadId === factory.threadId);
+      if (!stale?.snapshot) throw new Error("started thread binding was not persisted");
+      state.saveThread({
+        ...stale,
+        snapshot: { ...stale.snapshot, name: "Stale name", status: { type: "notLoaded" } },
+        loaded: false,
+      });
+      factory.readThreadPatch = {
+        name: "Authoritative name",
+        status: { type: "idle" },
+        updatedAt: 2,
+      };
+
+      const response = await fetch(`${origin}/v1/threads/${factory.threadId}/stream`);
+      expect(response.status).toBe(200);
+      const events = await readSseEventsThrough(response, "snapshot.end");
+      const snapshot = events.find((event) => event.event === "snapshot.threads");
+      expect(snapshot?.data.threads).toEqual([expect.objectContaining({
+        id: factory.threadId,
+        name: "Authoritative name",
+        status: { type: "idle" },
+        loaded: true,
+      })]);
+      expect(state.threads().find((thread) => thread.threadId === factory.threadId)).toMatchObject({
+        snapshot: { name: "Authoritative name", status: { type: "idle" } },
+        loaded: true,
+      });
+    } finally {
+      await daemon.close();
+    }
+  });
+
   test("serves built SPA assets and falls back to index for client routes", async () => {
     const directory = temporaryDirectory();
     const staticDirectory = join(directory, "dist");
@@ -521,6 +573,7 @@ class RestFactory implements BackendFactory {
   readonly threadId = "0198f000-7000-7000-8000-000000000000";
   readonly transport: RestTransport;
   delayNextRead = false;
+  readThreadPatch: Record<string, unknown> = {};
   pauseNextCreate = false;
   createBlocked = false;
   private pendingReadId: RpcId | undefined;
@@ -607,7 +660,13 @@ class RestFactory implements BackendFactory {
       }
       this.transport.emit({
         id: message.id,
-        result: { thread: { ...threadSnapshot(this.threadId), turns: [{ id: "turn-1" }] } },
+        result: {
+          thread: {
+            ...threadSnapshot(this.threadId),
+            ...structuredClone(this.readThreadPatch),
+            turns: [{ id: "turn-1" }],
+          },
+        },
       });
       return;
     }
@@ -693,6 +752,45 @@ async function fetchJson(url: string, init?: RequestInit): Promise<{ status: num
     headers: { "content-type": "application/json", ...init?.headers },
   });
   return { status: response.status, body: await response.json() };
+}
+
+async function readSseEventsThrough(response: Response, endingEvent: string): Promise<Array<{
+  event: string;
+  data: Record<string, unknown>;
+}>> {
+  if (!response.body) throw new Error("SSE response has no body");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+  let buffer = "";
+  try {
+    while (true) {
+      let separator = buffer.indexOf("\n\n");
+      while (separator >= 0) {
+        const raw = buffer.slice(0, separator);
+        buffer = buffer.slice(separator + 2);
+        if (!raw.startsWith(":")) {
+          let event = "message";
+          const data: string[] = [];
+          for (const line of raw.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice("event:".length).trimStart();
+            if (line.startsWith("data:")) data.push(line.slice("data:".length).trimStart());
+          }
+          events.push({ event, data: JSON.parse(data.join("\n") || "{}") as Record<string, unknown> });
+          if (event === endingEvent) return events;
+        }
+        separator = buffer.indexOf("\n\n");
+      }
+      const chunk = await Promise.race([
+        reader.read(),
+        Bun.sleep(5_000).then(() => { throw new Error(`timed out reading ${endingEvent}`); }),
+      ]);
+      if (chunk.done) throw new Error(`SSE stream ended before ${endingEvent}`);
+      buffer += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
 }
 
 function socketRequest(socketPath: string, message: RpcMessage): Promise<RpcMessage> {

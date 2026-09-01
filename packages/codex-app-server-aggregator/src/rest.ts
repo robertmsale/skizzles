@@ -319,9 +319,11 @@ export class RestApiServer {
 
   private async threadStream(request: Request, threadId: string, url: URL): Promise<Response> {
     const state = this.requiredSseState();
-    const stored = state.threads().find((thread) => thread.threadId === threadId && !thread.deleted);
-    if (!stored) return json({ error: { code: "not_found", message: "thread not found" } }, 404);
+    if (!state.threads().some((thread) => thread.threadId === threadId && !thread.deleted)) {
+      return json({ error: { code: "not_found", message: "thread not found" } }, 404);
+    }
 
+    const tail = boundedPositiveIntegerQuery(url, "tail", 50, 50);
     const cursor = streamCursor(request, url);
     let subscription = this.bridge.openEventSubscription(cursor?.cursor, cursor?.streamId);
     let reset: SseSnapshotReset | undefined;
@@ -336,7 +338,6 @@ export class RestApiServer {
       return this.replayStream(request, subscription, new SseEventMapper("thread", state, threadId), "thread", threadId);
     }
 
-    const tail = boundedPositiveIntegerQuery(url, "tail", 50, 50);
     const cancelSnapshot = () => subscription.close();
     request.signal.addEventListener("abort", cancelSnapshot, { once: true });
     let read: Record<string, unknown> | Response;
@@ -359,6 +360,11 @@ export class RestApiServer {
     if (subscription.overflowed) {
       subscription.close();
       return json({ error: { code: "sse_snapshot_overflow", message: "events exceeded the bounded snapshot handoff buffer" } }, 503);
+    }
+    const stored = state.threads().find((thread) => thread.threadId === threadId && !thread.deleted);
+    if (!stored) {
+      subscription.close();
+      return json({ error: { code: "not_found", message: "thread not found" } }, 404);
     }
 
     try {
