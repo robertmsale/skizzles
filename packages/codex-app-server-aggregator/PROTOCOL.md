@@ -161,7 +161,10 @@ Responses use <code>text/event-stream</code>, <code>no-cache, no-store, no-trans
 <code>data</code> fields, and a 3-second retry hint. One daemon-level scheduler writes a
 <code>: heartbeat</code> comment to every live connection every 15 seconds. Disconnect, request
 abort, daemon close, encoder failure, or queue overflow immediately unregisters the journal
-subscriber; the heartbeat timer stops when the last connection leaves.
+subscriber; the heartbeat timer stops when the last connection leaves. After the existing access
+checks pass, the two SSE routes disable Bun's per-request idle timeout so the 15-second heartbeat,
+rather than Bun's default 10-second limit, owns idle-connection liveness. Other HTTP routes retain
+their normal timeout.
 
 ### Snapshot and live handoff
 
@@ -188,7 +191,10 @@ its project CWD, machine ID, host/container execution mode, loaded state, native
 and pending server requests with owning thread/project when known. It never contains historical
 turns. The thread snapshot contains its metadata, relevant pending requests, and the newest
 <code>tail</code> finalized items in chronological order. <code>tail</code> defaults to and is capped at
-50. <code>snapshot.end.data.history</code> contains <code>olderCursor</code> and
+50. Status-less progressive items in an in-progress turn are omitted until their
+<code>item/completed</code> event or a terminal turn snapshot makes them final; they are not inserted
+into the connection's item-deduplication set prematurely. <code>snapshot.end.data.history</code>
+contains <code>olderCursor</code> and
 <code>hasOlder</code>; older pages come from
 <code>GET /v1/threads/:threadId/entries?before=entry:...&amp;limit=50</code>.
 
@@ -219,8 +225,10 @@ cursor outside the retained window or from another daemon begins a fresh snapsho
 <code>stream_restarted</code>.
 
 Journal retention is bounded by both count and bytes. Each subscriber and each response stream has
-a bounded event/byte queue; overflow closes the client so reconnect can reconcile. Snapshot batches
-target 384 KiB. No SSE data event may exceed 880 KiB. An item too large for a conservative batch is
+a bounded live event/byte queue; overflow closes the client so reconnect can reconcile. A finite
+initial snapshot drains ahead of that separately bounded live backlog and is not rejected merely
+because its total size exceeds the live queue's 16 MiB cap. Snapshot batches target 384 KiB. No SSE
+data event may exceed 880 KiB. An item too large for a conservative batch is
 represented by <code>item.available</code> and can be retrieved at
 <code>GET /v1/threads/:threadId/entries/:entryId</code>. These limits are below the transport ceiling
 even though SSE itself is not WebSocket-framed.

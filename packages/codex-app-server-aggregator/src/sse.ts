@@ -230,7 +230,7 @@ export function timelineEntries(thread: Record<string, unknown>): TimelineEntryD
     const items = Array.isArray(turn.items) ? turn.items : [];
     for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
       const item = asRecord(items[itemIndex]);
-      if (!isFinalizedItem(item)) continue;
+      if (!isFinalizedItem(item, turn)) continue;
       const id = typeof item.id === "string" ? item.id : `${turnId}:item:${itemIndex}`;
       entries.push({ kind: "item", id, turnId, item: sanitizeFinalizedValue(item) as Record<string, unknown> });
     }
@@ -475,12 +475,11 @@ export class SseSession {
 
   constructor(initial: Uint8Array[], options: SseSessionOptions = {}) {
     if (initial.some((frame) => frame.byteLength > SSE_HARD_EVENT_BYTES)) throw new Error("oversized initial SSE frame");
-    const initialBytes = initial.reduce((total, frame) => total + frame.byteLength, 0);
     this.maxQueueEvents = options.maxQueueEvents ?? SSE_MAX_QUEUE_EVENTS;
     this.maxQueueBytes = options.maxQueueBytes ?? SSE_MAX_QUEUE_BYTES;
-    if (initial.length > this.maxQueueEvents || initialBytes > this.maxQueueBytes) {
-      throw new Error("initial SSE sequence exceeds queue limits");
-    }
+    // The finite snapshot is drained one frame at a time before live traffic. Only the live
+    // backlog is subject to subscriber queue limits; otherwise 50 valid bounded entries can
+    // exceed the 16 MiB live cap and make the route fail before returning its response.
     this.initial = [...initial];
     this.onClose = options.onClose ?? (() => undefined);
   }
@@ -701,9 +700,26 @@ function compactError(value: unknown): unknown {
   };
 }
 
-function isFinalizedItem(item: Record<string, unknown>): boolean {
-  const status = typeof item.status === "string" ? item.status : asRecord(item.status).type;
-  return status !== "inProgress" && status !== "running" && status !== "started" && status !== "pending";
+function isFinalizedItem(item: Record<string, unknown>, turn: Record<string, unknown>): boolean {
+  const itemStatus = lifecycleStatus(item.status);
+  if (itemStatus !== undefined) {
+    if (["completed", "failed", "declined", "interrupted", "cancelled", "canceled"].includes(itemStatus)) return true;
+    if (["inprogress", "running", "started", "pending"].includes(itemStatus)) return false;
+  }
+
+  const turnStatus = lifecycleStatus(turn.status);
+  if (["completed", "failed", "interrupted"].includes(turnStatus ?? "")) return true;
+
+  // These variants are delivered atomically by app-server and contain no progressive result
+  // fields. Other status-less variants (agent messages, plans, reasoning, searches, sleep,
+  // compaction, and extension items) may be partial while their enclosing turn is in progress.
+  return ["userMessage", "hookPrompt", "imageView", "enteredReviewMode", "exitedReviewMode"]
+    .includes(typeof item.type === "string" ? item.type : "");
+}
+
+function lifecycleStatus(value: unknown): string | undefined {
+  const status = typeof value === "string" ? value : asRecord(value).type;
+  return typeof status === "string" ? status.replaceAll(/[-_\s]/g, "").toLowerCase() : undefined;
 }
 
 function sanitizeFinalizedValue(value: unknown): unknown {

@@ -6,6 +6,7 @@ import { RestApiServer } from "../src/rest.ts";
 import {
   SSE_HARD_EVENT_BYTES,
   SSE_HEARTBEAT_MS,
+  SSE_MAX_QUEUE_BYTES,
   SseHeartbeatHub,
   SseSession,
   batchSseItems,
@@ -87,7 +88,7 @@ describe("aggregator SSE API", () => {
       type: "agentMessage",
       text: index === 59 ? "x".repeat(SSE_HARD_EVENT_BYTES + 10_000) : `message ${index}`,
     }));
-    bridge.thread = { id: "thread-1", turns: [{ id: "turn-1", items }] };
+    bridge.thread = { id: "thread-1", turns: [{ id: "turn-1", status: "completed", items }] };
     bridge.pauseRead = true;
 
     const responsePromise = fetch(`${origin}/v1/threads/thread-1/stream?tail=50`);
@@ -150,6 +151,94 @@ describe("aggregator SSE API", () => {
     });
     const hydrated = await fetchJson(`${origin}/v1/threads/thread-1/entries/item-59`);
     expect((hydrated.body as { entry: { item: { text: string } } }).entry.item.text.length).toBeGreaterThan(SSE_HARD_EVENT_BYTES);
+    expect(received.every((event) => event.bytes < SSE_HARD_EVENT_BYTES)).toBe(true);
+    await reader.cancel();
+  });
+
+  test("does not seed deduplication from a status-less in-flight snapshot item", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    bridge.thread = {
+      id: "thread-1",
+      turns: [
+        {
+          id: "settled-turn",
+          status: "completed",
+          items: [{ id: "settled-item", type: "agentMessage", text: "already final" }],
+        },
+        {
+          id: "active-turn",
+          status: "inProgress",
+          items: [{ id: "active-item", type: "agentMessage", text: "partial" }],
+        },
+      ],
+    };
+    bridge.pauseRead = true;
+
+    const responsePromise = fetch(`${origin}/v1/threads/thread-1/stream`);
+    await waitFor(() => bridge.readStarted);
+    await bridge.send({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "active-turn",
+        item: { id: "active-item", type: "agentMessage", text: "complete" },
+      },
+    });
+    await bridge.send({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "active-turn", status: "completed" } },
+    });
+    bridge.releaseRead();
+
+    const reader = new SseReader(await responsePromise);
+    const received = await reader.through("turn.completed");
+    const snapshotEnd = received.findIndex((event) => event.event === "snapshot.end");
+    const snapshotEntries = received
+      .slice(0, snapshotEnd)
+      .filter((event) => event.event === "snapshot.entries")
+      .flatMap((event) => (event.data.entries ?? []) as Array<Record<string, unknown>>);
+    expect(snapshotEntries.map((entry) => entry.id)).toEqual(["settled-item"]);
+    expect(JSON.stringify(snapshotEntries)).not.toContain("partial");
+
+    const live = received.slice(snapshotEnd + 1);
+    expect(live.map((event) => event.event)).toEqual(["item.completed", "turn.completed"]);
+    expect(live.filter((event) => event.event === "item.completed")).toHaveLength(1);
+    expect(live[0]?.data).toMatchObject({
+      threadId: "thread-1",
+      item: { id: "active-item", item: { text: "complete" } },
+    });
+    await reader.cancel();
+  });
+
+  test("streams a valid initial thread snapshot larger than the bounded live queue", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    bridge.thread = {
+      id: "thread-1",
+      turns: [{
+        id: "large-turn",
+        status: "completed",
+        items: Array.from({ length: 50 }, (_, index) => ({
+          id: `large-${index}`,
+          type: "agentMessage",
+          text: `${index}:`.padEnd(350_000, "x"),
+        })),
+      }],
+    };
+
+    const response = await fetch(`${origin}/v1/threads/thread-1/stream?tail=50`);
+    expect(response.status).toBe(200);
+    const reader = new SseReader(response);
+    const received = await reader.through("snapshot.end");
+    const entries = received
+      .filter((event) => event.event === "snapshot.entries")
+      .flatMap((event) => (event.data.entries ?? []) as Array<Record<string, unknown>>);
+    expect(entries).toHaveLength(50);
+    expect(entries.every((entry) => entry.kind === "item")).toBe(true);
+    expect(received.reduce((bytes, event) => bytes + event.bytes, 0)).toBeGreaterThan(SSE_MAX_QUEUE_BYTES);
     expect(received.every((event) => event.bytes < SSE_HARD_EVENT_BYTES)).toBe(true);
     await reader.cancel();
   });
@@ -233,6 +322,17 @@ describe("aggregator SSE API", () => {
 });
 
 describe("SSE transport bounds", () => {
+  test("keeps a real Bun SSE connection alive beyond its default 10-second idle timeout", async () => {
+    const heartbeatMilliseconds = 11_000;
+    const { origin } = harness({ sseHeartbeatMilliseconds: heartbeatMilliseconds });
+    const startedAt = performance.now();
+    const reader = new SseReader(await fetch(`${origin}/v1/app-state/stream`));
+    await reader.through("snapshot.end");
+    expect(await reader.nextComment(heartbeatMilliseconds + 2_000)).toBe(": heartbeat");
+    expect(performance.now() - startedAt).toBeGreaterThan(10_000);
+    await reader.cancel();
+  }, 15_000);
+
   test("uses one deterministic 15-second heartbeat timer and clears it after cancellation", async () => {
     let callback: (() => void) | undefined;
     let cleared = 0;
@@ -350,24 +450,37 @@ class SseReader {
 
   async nextEvent(): Promise<SseBlock> {
     while (true) {
-      const separator = this.buffer.indexOf("\n\n");
-      if (separator >= 0) {
-        const raw = this.buffer.slice(0, separator);
-        this.buffer = this.buffer.slice(separator + 2);
-        if (raw.startsWith(":")) continue;
-        return parseBlock(raw);
-      }
-      const result = await Promise.race([
-        this.reader.read(),
-        Bun.sleep(5_000).then(() => { throw new Error("timed out reading SSE event"); }),
-      ]);
-      if (result.done) throw new Error("SSE stream ended before the expected event");
-      this.buffer += new TextDecoder().decode(result.value, { stream: true });
+      const raw = await this.nextRawBlock(5_000);
+      if (!raw.startsWith(":")) return parseBlock(raw);
+    }
+  }
+
+  async nextComment(timeoutMilliseconds: number): Promise<string> {
+    while (true) {
+      const raw = await this.nextRawBlock(timeoutMilliseconds);
+      if (raw.startsWith(":")) return raw;
     }
   }
 
   async cancel(): Promise<void> {
     await this.reader.cancel();
+  }
+
+  private async nextRawBlock(timeoutMilliseconds: number): Promise<string> {
+    while (true) {
+      const separator = this.buffer.indexOf("\n\n");
+      if (separator >= 0) {
+        const raw = this.buffer.slice(0, separator);
+        this.buffer = this.buffer.slice(separator + 2);
+        return raw;
+      }
+      const result = await Promise.race([
+        this.reader.read(),
+        Bun.sleep(timeoutMilliseconds).then(() => { throw new Error("timed out reading SSE frame"); }),
+      ]);
+      if (result.done) throw new Error("SSE stream ended before the expected frame");
+      this.buffer += new TextDecoder().decode(result.value, { stream: true });
+    }
   }
 }
 
@@ -400,7 +513,11 @@ function data(events: SseBlock[], eventName: string): Record<string, unknown> {
   return event.data;
 }
 
-function harness(options: { token?: string } = {}): { bridge: TestBridge; origin: string; state: AggregatorState } {
+function harness(options: { token?: string; sseHeartbeatMilliseconds?: number } = {}): {
+  bridge: TestBridge;
+  origin: string;
+  state: AggregatorState;
+} {
   const state = new AggregatorState(":memory:");
   states.push(state);
   const bridge = new TestBridge(state);
@@ -409,6 +526,9 @@ function harness(options: { token?: string } = {}): { bridge: TestBridge; origin
     port: 0,
     state,
     ...(options.token ? { token: options.token } : {}),
+    ...(options.sseHeartbeatMilliseconds === undefined
+      ? {}
+      : { sseHeartbeatMilliseconds: options.sseHeartbeatMilliseconds }),
   });
   servers.push(server);
   return { bridge, origin: server.start().origin, state };

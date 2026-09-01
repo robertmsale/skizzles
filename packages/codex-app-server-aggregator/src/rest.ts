@@ -117,7 +117,10 @@ export class RestApiServer {
     if (path === "/v1/projects") return this.projects(request, url);
     if (request.method === "GET" && path === "/v1/machines") return this.machines();
     if (request.method === "GET" && path === "/v1/events") return this.events(url);
-    if (request.method === "GET" && path === "/v1/app-state/stream") return this.appStateStream(request, url);
+    if (request.method === "GET" && path === "/v1/app-state/stream") {
+      this.disableSseIdleTimeout(request);
+      return this.appStateStream(request, url);
+    }
     if (path === "/v1/server-requests") return this.serverRequests(request);
     if (request.method === "GET" && path === "/v1/threads/loaded") {
       return outcome(await this.bridge.call("thread/loaded/list", listParams(url)), 200);
@@ -126,6 +129,7 @@ export class RestApiServer {
 
     const threadStream = path.match(/^\/v1\/threads\/([^/]+)\/stream$/);
     if (request.method === "GET" && threadStream) {
+      this.disableSseIdleTimeout(request);
       return this.threadStream(request, decodeURIComponent(threadStream[1]!), url);
     }
     const threadEntry = path.match(/^\/v1\/threads\/([^/]+)\/entries\/([^/]+)$/);
@@ -504,6 +508,12 @@ export class RestApiServer {
   private requiredSseState(): AggregatorState {
     if (!this.options.state) throw new HttpError(503, "SSE state projection is unavailable", "sse_unavailable");
     return this.options.state;
+  }
+
+  private disableSseIdleTimeout(request: Request): void {
+    // Bun defaults HTTP requests to a 10-second idle timeout. SSE heartbeats are intentionally
+    // less frequent, so leave timeout/liveness ownership with the heartbeat hub and abort signal.
+    this.server?.timeout(request, 0);
   }
 
   private serverRequests(request: Request): Response {
