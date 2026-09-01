@@ -21,6 +21,7 @@ const MAX_RETAINED_EVENT_BYTES = 32 * 1024 * 1024;
 const MAX_SINGLE_JOURNAL_EVENT_BYTES = 4 * 1024 * 1024;
 const MAX_SUBSCRIPTION_EVENTS = MAX_RETAINED_EVENTS;
 const MAX_SUBSCRIPTION_BYTES = 16 * 1024 * 1024;
+const MAX_COMPLETED_ITEM_IDS = 8_192;
 const MAX_QUEUED_CLIENT_MESSAGES = 256;
 const MAX_QUEUED_CLIENT_BYTES = 16 * 1024 * 1024;
 
@@ -63,6 +64,7 @@ export type EventPage = {
 };
 
 type EventListener = (record: EventRecord) => boolean;
+type CompletedItemRecord = { threadId: string; itemId: string; cursor: number };
 
 export class EventSubscription {
   private readonly records: Array<{ record: EventRecord; bytes: number }> = [];
@@ -136,6 +138,7 @@ export class AggregatorBridge implements MessageSink {
   private readonly events: EventRecord[] = [];
   private retainedEventBytes = 0;
   private readonly eventSubscriptions = new Set<EventSubscription>();
+  private readonly completedItems = new Map<string, CompletedItemRecord>();
   private readonly streamId = crypto.randomUUID();
   private nextEventCursor = 1;
   private initialization: Promise<RpcOutcome> | undefined;
@@ -224,6 +227,14 @@ export class AggregatorBridge implements MessageSink {
     return this.eventSubscriptions.size;
   }
 
+  completedItemIds(threadId: string, throughCursor = this.nextEventCursor - 1): ReadonlySet<string> {
+    const ids = new Set<string>();
+    for (const completed of this.completedItems.values()) {
+      if (completed.threadId === threadId && completed.cursor <= throughCursor) ids.add(completed.itemId);
+    }
+    return ids;
+  }
+
   pendingServerRequests(): RpcRequest[] {
     return [...this.serverRequests.values()].map((request) => structuredClone(request));
   }
@@ -280,6 +291,7 @@ export class AggregatorBridge implements MessageSink {
     }
     this.pendingCalls.clear();
     this.serverRequests.clear();
+    this.completedItems.clear();
     for (const subscription of [...this.eventSubscriptions]) subscription.close();
     const client = this.activeClient;
     this.activeClient = undefined;
@@ -367,6 +379,7 @@ export class AggregatorBridge implements MessageSink {
   private appendEvent(event: RpcNotification): void {
     const retained = boundedJournalEvent(event);
     const record = { cursor: this.nextEventCursor++, event: retained };
+    this.rememberItemLifecycle(event, record.cursor);
     const bytes = eventRecordBytes(record);
     this.events.push(record);
     this.retainedEventBytes += bytes;
@@ -376,6 +389,29 @@ export class AggregatorBridge implements MessageSink {
       this.retainedEventBytes -= eventRecordBytes(removed);
     }
     for (const subscription of [...this.eventSubscriptions]) subscription.enqueue(record);
+  }
+
+  private rememberItemLifecycle(event: RpcNotification, cursor: number): void {
+    const params = asRecord(event.params);
+    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (event.method === "thread/deleted" && threadId) {
+      for (const [key, completed] of this.completedItems) {
+        if (completed.threadId === threadId) this.completedItems.delete(key);
+      }
+      return;
+    }
+    if (event.method !== "item/completed" || !threadId) return;
+    const item = asRecord(params.item);
+    const itemId = typeof item.id === "string"
+      ? item.id
+      : typeof params.itemId === "string" ? params.itemId : undefined;
+    if (!itemId) return;
+    const key = JSON.stringify([threadId, itemId]);
+    if (this.completedItems.has(key)) return;
+    this.completedItems.set(key, { threadId, itemId, cursor });
+    if (this.completedItems.size > MAX_COMPLETED_ITEM_IDS) {
+      this.completedItems.delete(this.completedItems.keys().next().value!);
+    }
   }
 
   private queueInitializingNotification(client: ActiveClient, notification: RpcNotification): void {
@@ -513,16 +549,23 @@ function boundedJournalEvent(event: RpcNotification): RpcNotification {
   const item = asRecord(params.item);
   const thread = asRecord(params.thread);
   const turn = asRecord(params.turn);
+  const project = asRecord(params.project);
   return {
-    method: "skizzles/event/oversized",
+    method: copy.method,
     params: {
-      originalMethod: copy.method,
-      bytes,
+      oversizedBytes: bytes,
       ...(typeof params.threadId === "string"
         ? { threadId: params.threadId }
         : typeof thread.id === "string" ? { threadId: thread.id } : {}),
-      ...(typeof item.id === "string" ? { itemId: item.id } : {}),
-      ...(typeof turn.id === "string" ? { turnId: turn.id } : {}),
+      ...(typeof params.cwd === "string"
+        ? { cwd: params.cwd }
+        : typeof project.cwd === "string" ? { cwd: project.cwd } : {}),
+      ...(typeof params.itemId === "string"
+        ? { itemId: params.itemId }
+        : typeof item.id === "string" ? { itemId: item.id } : {}),
+      ...(typeof params.turnId === "string"
+        ? { turnId: params.turnId }
+        : typeof turn.id === "string" ? { turnId: turn.id } : {}),
     },
   };
 }

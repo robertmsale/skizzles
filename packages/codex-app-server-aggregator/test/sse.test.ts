@@ -16,6 +16,10 @@ import {
   type TimelineEntryDto,
 } from "../src/sse.ts";
 import { AggregatorState } from "../src/state.ts";
+import {
+  eventPageNeedsReconciliation,
+  eventPageNeedsSelectedThreadRead,
+} from "../src/web/model.ts";
 
 const servers: RestApiServer[] = [];
 const states: AggregatorState[] = [];
@@ -212,6 +216,63 @@ describe("aggregator SSE API", () => {
     await reader.cancel();
   });
 
+  test("retains prior status-less completions and opaque delta-named finalized payload keys", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    const finalized = {
+      id: "completed-before-selection",
+      type: "functionCallOutput",
+      output: {
+        deltaCount: 3,
+        nested: { deltaLabel: "opaque application data" },
+      },
+    };
+    bridge.thread = {
+      id: "thread-1",
+      turns: [{ id: "active-turn", status: "inProgress", items: [finalized] }],
+    };
+    await bridge.send({
+      method: "item/completed",
+      params: { threadId: "thread-1", turnId: "active-turn", item: finalized },
+    });
+
+    const reader = new SseReader(await fetch(`${origin}/v1/threads/thread-1/stream`));
+    const snapshot = await reader.through("snapshot.end");
+    const entries = snapshot
+      .filter((event) => event.event === "snapshot.entries")
+      .flatMap((event) => (event.data.entries ?? []) as Array<Record<string, unknown>>);
+    expect(entries).toEqual([expect.objectContaining({
+      id: "completed-before-selection",
+      item: expect.objectContaining({ output: finalized.output }),
+    })]);
+    expect(bridge.completedItemIds("thread-1")).toEqual(new Set(["completed-before-selection"]));
+
+    const history = await fetchJson(`${origin}/v1/threads/thread-1/entries?limit=1`);
+    expect(history.body).toMatchObject({ data: [{ item: { output: finalized.output } }] });
+    const hydrated = await fetchJson(`${origin}/v1/threads/thread-1/entries/completed-before-selection`);
+    expect(hydrated.body).toMatchObject({ entry: { item: { output: finalized.output } } });
+
+    await bridge.send({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "active-turn",
+        item: {
+          id: "completed-live",
+          type: "functionCallOutput",
+          output: { deltaCount: 4, deltaDescription: "also opaque" },
+        },
+      },
+    });
+    expect((await reader.nextEvent()).data).toMatchObject({
+      item: { id: "completed-live", item: { output: { deltaCount: 4, deltaDescription: "also opaque" } } },
+    });
+    await reader.cancel();
+    await bridge.send({ method: "thread/deleted", params: { threadId: "thread-1" } });
+    expect(bridge.completedItemIds("thread-1").size).toBe(0);
+  });
+
   test("streams a valid initial thread snapshot larger than the bounded live queue", async () => {
     const { bridge, origin, state } = harness();
     state.saveMachine({ machineId: "host", kind: "host" }, 1);
@@ -404,6 +465,60 @@ describe("SSE transport bounds", () => {
     expect(batches.length).toBeGreaterThan(1);
     expect(batches.every((batch) => batch.byteLength <= SSE_HARD_EVENT_BYTES)).toBe(true);
     expect(() => encodeSseEvent("stream:0", "item.completed", oversized)).toThrow("hard limit");
+  });
+
+  test("preserves oversized journal methods for polling while SSE emits bounded hydration events", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1", { status: { type: "idle" } }), 1);
+    const reader = new SseReader(await fetch(`${origin}/v1/threads/thread-1/stream`));
+    await reader.through("snapshot.end");
+    const huge = "x".repeat(4 * 1024 * 1024 + 1_024);
+
+    await bridge.send({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "oversized-item", type: "functionCallOutput", output: { content: huge } },
+      },
+    });
+    expect(await reader.nextEvent()).toMatchObject({
+      event: "item.available",
+      data: {
+        threadId: "thread-1",
+        item: {
+          id: "oversized-item",
+          turnId: "turn-1",
+          hydrationHref: "/v1/threads/thread-1/entries/oversized-item",
+        },
+      },
+    });
+
+    await bridge.send({
+      method: "thread/status/changed",
+      params: { threadId: "thread-1", status: { type: "systemError", detail: huge } },
+    });
+    expect((await reader.nextEvent()).event).toBe("thread.upsert");
+
+    const page = bridge.eventPage(0, 10);
+    const itemRecord = page.data.find((record) => record.event.method === "item/completed");
+    const statusRecord = page.data.find((record) => record.event.method === "thread/status/changed");
+    expect(itemRecord?.event.params).toMatchObject({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "oversized-item",
+      oversizedBytes: expect.any(Number),
+    });
+    expect(statusRecord?.event.params).toMatchObject({
+      threadId: "thread-1",
+      oversizedBytes: expect.any(Number),
+    });
+    expect(page.data.some((record) => record.event.method === "skizzles/event/oversized")).toBe(false);
+    expect(Buffer.byteLength(JSON.stringify(page.data))).toBeLessThan(4_096);
+    expect(eventPageNeedsSelectedThreadRead(itemRecord ? [itemRecord] : [], "thread-1")).toBe(true);
+    expect(eventPageNeedsReconciliation(statusRecord ? [statusRecord] : [])).toBe(true);
+    await reader.cancel();
   });
 });
 

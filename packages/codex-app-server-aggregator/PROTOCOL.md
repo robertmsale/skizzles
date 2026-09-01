@@ -191,10 +191,13 @@ its project CWD, machine ID, host/container execution mode, loaded state, native
 and pending server requests with owning thread/project when known. It never contains historical
 turns. The thread snapshot contains its metadata, relevant pending requests, and the newest
 <code>tail</code> finalized items in chronological order. <code>tail</code> defaults to and is capped at
-50. Status-less progressive items in an in-progress turn are omitted until their
-<code>item/completed</code> event or a terminal turn snapshot makes them final; they are not inserted
-into the connection's item-deduplication set prematurely. <code>snapshot.end.data.history</code>
-contains <code>olderCursor</code> and
+50. A bounded journal-side completion index distinguishes status-less items that completed before
+snapshot cursor <code>C</code> from partial items and completions after <code>C</code>. Prior completions
+are included in the snapshot even while their turn remains in progress; later completions stay in
+the buffered live handoff and are not inserted into the snapshot's item-deduplication set
+prematurely. Terminal turns also make all of their items final. Finalized item JSON is preserved
+intact; delta suppression applies to delta notifications, not opaque keys inside completed payloads.
+<code>snapshot.end.data.history</code> contains <code>olderCursor</code> and
 <code>hasOlder</code>; older pages come from
 <code>GET /v1/threads/:threadId/entries?before=entry:...&amp;limit=50</code>.
 
@@ -231,7 +234,10 @@ because its total size exceeds the live queue's 16 MiB cap. Snapshot batches tar
 data event may exceed 880 KiB. An item too large for a conservative batch is
 represented by <code>item.available</code> and can be retrieved at
 <code>GET /v1/threads/:threadId/entries/:entryId</code>. These limits are below the transport ceiling
-even though SSE itself is not WebSocket-framed.
+even though SSE itself is not WebSocket-framed. A native journal notification larger than 4 MiB
+retains its original method and stable thread/turn/item identifiers, replaces its large parameters
+with <code>oversizedBytes</code> metadata, and therefore preserves method-based reconciliation for
+polling consumers while SSE emits its bounded state or hydration event.
 
 ## Deliberate limits
 

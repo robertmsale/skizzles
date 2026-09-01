@@ -221,7 +221,10 @@ export function serverRequestStreamDto(request: RpcRequest, state: AggregatorSta
   return dto;
 }
 
-export function timelineEntries(thread: Record<string, unknown>): TimelineEntryDto[] {
+export function timelineEntries(
+  thread: Record<string, unknown>,
+  completedItemIds: ReadonlySet<string> = new Set(),
+): TimelineEntryDto[] {
   const turns = Array.isArray(thread.turns) ? thread.turns : [];
   const entries: TimelineEntryDto[] = [];
   for (let turnIndex = 0; turnIndex < turns.length; turnIndex++) {
@@ -230,9 +233,9 @@ export function timelineEntries(thread: Record<string, unknown>): TimelineEntryD
     const items = Array.isArray(turn.items) ? turn.items : [];
     for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
       const item = asRecord(items[itemIndex]);
-      if (!isFinalizedItem(item, turn)) continue;
       const id = typeof item.id === "string" ? item.id : `${turnId}:item:${itemIndex}`;
-      entries.push({ kind: "item", id, turnId, item: sanitizeFinalizedValue(item) as Record<string, unknown> });
+      if (!isFinalizedItem(item, turn, completedItemIds.has(id))) continue;
+      entries.push({ kind: "item", id, turnId, item: cloneFinalizedValue(item) as Record<string, unknown> });
     }
   }
   return entries;
@@ -242,8 +245,9 @@ export function timelinePage(
   thread: Record<string, unknown>,
   before: number | undefined,
   limit: number,
+  completedItemIds: ReadonlySet<string> = new Set(),
 ): TimelinePageDto {
-  const entries = timelineEntries(thread);
+  const entries = timelineEntries(thread, completedItemIds);
   const end = Math.min(before ?? entries.length, entries.length);
   const start = Math.max(0, end - limit);
   return {
@@ -310,6 +314,7 @@ export class SseEventMapper {
     const notification = record.event;
     const params = asRecord(notification.params);
     const threadId = eventThreadId(notification.method, params);
+    const oversizedBytes = typeof params.oversizedBytes === "number" ? params.oversizedBytes : undefined;
     if (this.scope === "thread" && threadId !== this.selectedThreadId) return null;
 
     if (isDeltaMethod(notification.method)) {
@@ -320,8 +325,11 @@ export class SseEventMapper {
     }
 
     if (notification.method === "skizzles/project/upsert" && this.scope === "app") {
-      const project = asRecord(params.project);
-      return { event: "project.upsert", data: { project } };
+      const inline = asRecord(params.project);
+      const project = typeof inline.cwd === "string"
+        ? inline
+        : this.state.projects().find((candidate) => candidate.cwd === params.cwd);
+      return project ? { event: "project.upsert", data: { project } } : null;
     }
     if (notification.method === "skizzles/project/removed" && this.scope === "app") {
       return { event: "project.removed", data: { cwd: params.cwd } };
@@ -368,6 +376,11 @@ export class SseEventMapper {
     }
     if (notification.method === "thread/status/changed") {
       if (!threadId) return null;
+      if (oversizedBytes !== undefined) {
+        const thread = threadDtoForId(this.state, threadId);
+        if (statusEndsResponse(thread.status)) this.respondingThreads.delete(threadId);
+        return { event: "thread.upsert", data: { thread } };
+      }
       if (statusEndsResponse(params.status)) this.respondingThreads.delete(threadId);
       return { event: "thread.status", data: { threadId, status: compactStatus(params.status) } };
     }
@@ -387,12 +400,18 @@ export class SseEventMapper {
       return { event: "thread.removed", data: { threadId } };
     }
     if (notification.method === "turn/started") {
-      return threadId ? { event: "turn.started", data: { threadId, turn: compactTurn(params.turn) } } : null;
+      return threadId ? {
+        event: "turn.started",
+        data: { threadId, turn: oversizedBytes === undefined ? compactTurn(params.turn) : compactTurn({ id: params.turnId }) },
+      } : null;
     }
     if (notification.method === "turn/completed") {
       if (!threadId) return null;
       this.respondingThreads.delete(threadId);
-      return { event: "turn.completed", data: { threadId, turn: compactTurn(params.turn) } };
+      return {
+        event: "turn.completed",
+        data: { threadId, turn: oversizedBytes === undefined ? compactTurn(params.turn) : compactTurn({ id: params.turnId }) },
+      };
     }
     if (notification.method === "item/completed") {
       if (!threadId) return null;
@@ -400,55 +419,34 @@ export class SseEventMapper {
       if (this.scope === "app") {
         return { event: "thread.upsert", data: { thread: threadDtoForId(this.state, threadId) } };
       }
-      const item = sanitizeFinalizedValue(asRecord(params.item)) as Record<string, unknown>;
-      const itemId = typeof item.id === "string" ? item.id : undefined;
+      const item = cloneFinalizedValue(asRecord(params.item)) as Record<string, unknown>;
+      const itemId = typeof item.id === "string"
+        ? item.id
+        : typeof params.itemId === "string" ? params.itemId : undefined;
       if (itemId && this.deliveredItems.has(itemId)) return null;
       if (itemId) this.deliveredItems.add(itemId);
       const turnId = typeof params.turnId === "string" ? params.turnId : "";
+      if (oversizedBytes !== undefined) {
+        const id = itemId ?? `oversized:${record.cursor}`;
+        return {
+          event: "item.available",
+          data: {
+            threadId,
+            item: {
+              kind: "available",
+              id,
+              turnId,
+              bytes: oversizedBytes,
+              hydrationHref: timelineHydrationHref(threadId, id),
+            },
+          },
+        };
+      }
       const entry: TimelineEntryDto = { kind: "item", id: itemId ?? `${turnId}:completed:${record.cursor}`, turnId, item };
       const bounded = timelineEntryForStream(entry, threadId);
       return bounded.kind === "available"
         ? { event: "item.available", data: { threadId, item: bounded } }
         : { event: "item.completed", data: { threadId, item: bounded } };
-    }
-    if (notification.method === "skizzles/event/oversized" && params.originalMethod === "item/completed") {
-      if (!threadId || this.scope === "app") {
-        return threadId ? { event: "thread.upsert", data: { thread: threadDtoForId(this.state, threadId) } } : null;
-      }
-      const itemId = typeof params.itemId === "string" ? params.itemId : `oversized:${record.cursor}`;
-      if (this.deliveredItems.has(itemId)) return null;
-      this.deliveredItems.add(itemId);
-      return {
-        event: "item.available",
-        data: {
-          threadId,
-          item: {
-            kind: "available",
-            id: itemId,
-            turnId: "",
-            bytes: typeof params.bytes === "number" ? params.bytes : null,
-            hydrationHref: timelineHydrationHref(threadId, itemId),
-          },
-        },
-      };
-    }
-    if (notification.method === "skizzles/event/oversized" && typeof params.originalMethod === "string") {
-      if (!threadId) return null;
-      if (params.originalMethod === "thread/started" || params.originalMethod === "thread/name/updated") {
-        return { event: "thread.upsert", data: { thread: threadDtoForId(this.state, threadId) } };
-      }
-      if (params.originalMethod === "turn/started" || params.originalMethod === "turn/completed") {
-        if (params.originalMethod === "turn/completed") this.respondingThreads.delete(threadId);
-        return {
-          event: params.originalMethod === "turn/started" ? "turn.started" : "turn.completed",
-          data: { threadId, turn: typeof params.turnId === "string" ? { id: params.turnId } : {} },
-        };
-      }
-      if (isDeltaMethod(params.originalMethod)) {
-        if (this.respondingThreads.has(threadId)) return null;
-        this.respondingThreads.add(threadId);
-        return { event: "thread.responding", data: { threadId } };
-      }
     }
     return null;
   }
@@ -658,7 +656,7 @@ function compactTurn(value: unknown): Record<string, unknown> {
   const turn = asRecord(value);
   const compact: Record<string, unknown> = {};
   for (const key of ["id", "status", "error", "startedAt", "completedAt"] as const) {
-    if (key in turn) compact[key] = sanitizeFinalizedValue(turn[key]);
+    if (key in turn) compact[key] = cloneFinalizedValue(turn[key]);
   }
   if (jsonBytes(compact) > 64 * 1024) {
     return {
@@ -676,7 +674,7 @@ function compactThreadMetadata(metadata: Record<string, unknown>): Record<string
   const compact: Record<string, unknown> = {};
   for (const key of ["name", "preview", "status", "createdAt", "updatedAt", "recencyAt", "source"] as const) {
     if (!(key in metadata)) continue;
-    const value = key === "status" ? compactStatus(metadata[key]) : sanitizeFinalizedValue(metadata[key]);
+    const value = key === "status" ? compactStatus(metadata[key]) : cloneFinalizedValue(metadata[key]);
     compact[key] = typeof value === "string" && value.length > 2_048 ? `${value.slice(0, 2_048)}…` : value;
   }
   if (jsonBytes(compact) > 16 * 1024) return { status: compactStatus(compact.status) };
@@ -684,7 +682,7 @@ function compactThreadMetadata(metadata: Record<string, unknown>): Record<string
 }
 
 function compactStatus(value: unknown): unknown {
-  const status = sanitizeFinalizedValue(value);
+  const status = cloneFinalizedValue(value);
   if (jsonBytes(status) <= 16 * 1024) return status;
   const type = asRecord(status).type;
   return typeof type === "string" ? { type } : { type: "unknown" };
@@ -692,7 +690,7 @@ function compactStatus(value: unknown): unknown {
 
 function compactError(value: unknown): unknown {
   if (typeof value === "string") return value.length > 8_192 ? `${value.slice(0, 8_192)}…` : value;
-  const error = asRecord(sanitizeFinalizedValue(value));
+  const error = asRecord(cloneFinalizedValue(value));
   const message = error.message;
   return {
     ...(typeof error.code === "string" || typeof error.code === "number" ? { code: error.code } : {}),
@@ -700,7 +698,8 @@ function compactError(value: unknown): unknown {
   };
 }
 
-function isFinalizedItem(item: Record<string, unknown>, turn: Record<string, unknown>): boolean {
+function isFinalizedItem(item: Record<string, unknown>, turn: Record<string, unknown>, knownCompleted: boolean): boolean {
+  if (knownCompleted) return true;
   const itemStatus = lifecycleStatus(item.status);
   if (itemStatus !== undefined) {
     if (["completed", "failed", "declined", "interrupted", "cancelled", "canceled"].includes(itemStatus)) return true;
@@ -722,15 +721,8 @@ function lifecycleStatus(value: unknown): string | undefined {
   return typeof status === "string" ? status.replaceAll(/[-_\s]/g, "").toLowerCase() : undefined;
 }
 
-function sanitizeFinalizedValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sanitizeFinalizedValue);
-  if (value === null || typeof value !== "object") return value;
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, member] of Object.entries(value as Record<string, unknown>)) {
-    if (key.toLowerCase().includes("delta")) continue;
-    sanitized[key] = sanitizeFinalizedValue(member);
-  }
-  return sanitized;
+function cloneFinalizedValue(value: unknown): unknown {
+  return structuredClone(value);
 }
 
 function asRpcRequest(value: unknown): RpcRequest | undefined {

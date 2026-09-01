@@ -368,7 +368,12 @@ export class RestApiServer {
     }
 
     try {
-      const page = timelinePage(read, undefined, tail);
+      const page = timelinePage(
+        read,
+        undefined,
+        tail,
+        this.bridge.completedItemIds(threadId, subscription.cursor),
+      );
       const entries = page.data.map((entry) => timelineEntryForStream(entry, threadId));
       const pending = this.bridge.pendingServerRequests()
         .map((serverRequest) => serverRequestStreamDto(serverRequest, state))
@@ -425,7 +430,7 @@ export class RestApiServer {
     }
     const thread = await this.readThread(threadId);
     if (thread instanceof Response) return thread;
-    const page = timelinePage(thread, before, limit);
+    const page = timelinePage(thread, before, limit, this.bridge.completedItemIds(threadId));
     return json({
       ...page,
       data: page.data.map((entry) => timelineEntryForStream(entry, threadId)),
@@ -435,7 +440,8 @@ export class RestApiServer {
   private async threadEntry(threadId: string, entryId: string): Promise<Response> {
     const thread = await this.readThread(threadId);
     if (thread instanceof Response) return thread;
-    const entry = timelineEntries(thread).find((candidate) => candidate.id === entryId);
+    const entry = timelineEntries(thread, this.bridge.completedItemIds(threadId))
+      .find((candidate) => candidate.id === entryId);
     return entry
       ? json({ entry })
       : json({ error: { code: "not_found", message: "timeline entry not found" } }, 404);
