@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { resolve, sep } from "node:path";
 import type { AggregatorBridge, EventSubscription } from "./bridge.ts";
+import type { ThreadTurnsListParams } from "./generated/v2/ThreadTurnsListParams.ts";
 import type { RpcError, RpcOutcome } from "./protocol.ts";
 import {
   SSE_RETRY_MS,
@@ -12,20 +13,24 @@ import {
   batchSseItems,
   decodeTimelineCursor,
   encodeSseEvent,
+  initialTimelineCursor,
   parseSseEventId,
   serverRequestStreamDto,
   snapshotProjects,
   sseEventId,
-  timelineEntries,
   timelineEntryForStream,
   timelinePage,
   visibleAppThreads,
+  type PreparedTimelinePage,
   type SseIntervalScheduler,
   type SseSnapshotReset,
+  type TimelineCursor,
 } from "./sse.ts";
 import type { AggregatorState } from "./state.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const UPSTREAM_TURN_PAGE_LIMIT = 100;
+const MAX_HYDRATION_PAGES = 128;
 
 export type RestServerOptions = {
   hostname: string;
@@ -135,7 +140,7 @@ export class RestApiServer {
     }
     const threadEntry = path.match(/^\/v1\/threads\/([^/]+)\/entries\/([^/]+)$/);
     if (request.method === "GET" && threadEntry) {
-      return this.threadEntry(decodeURIComponent(threadEntry[1]!), decodeURIComponent(threadEntry[2]!));
+      return this.threadEntry(decodeURIComponent(threadEntry[1]!), decodeURIComponent(threadEntry[2]!), url);
     }
     const threadEntries = path.match(/^\/v1\/threads\/([^/]+)\/entries$/);
     if (request.method === "GET" && threadEntries) {
@@ -343,9 +348,19 @@ export class RestApiServer {
 
     const cancelSnapshot = () => subscription.close();
     request.signal.addEventListener("abort", cancelSnapshot, { once: true });
-    let read: Record<string, unknown> | Response;
+    let page: PreparedTimelinePage | Response;
     try {
-      read = await this.readThread(threadId);
+      const metadata = await this.readThreadMetadata(threadId);
+      if (metadata instanceof Response) {
+        subscription.close();
+        return metadata;
+      }
+      page = await this.readTimelinePage(
+        threadId,
+        initialTimelineCursor(threadId),
+        tail,
+        this.bridge.completedItemIds(threadId, subscription.cursor),
+      );
     } catch (error) {
       subscription.close();
       throw error;
@@ -356,9 +371,9 @@ export class RestApiServer {
       subscription.close();
       return json({ error: { code: "client_closed_request", message: "request was cancelled" } }, 499);
     }
-    if (read instanceof Response) {
+    if (page instanceof Response) {
       subscription.close();
-      return read;
+      return page;
     }
     if (subscription.overflowed) {
       subscription.close();
@@ -371,13 +386,7 @@ export class RestApiServer {
     }
 
     try {
-      const page = timelinePage(
-        read,
-        undefined,
-        tail,
-        this.bridge.completedItemIds(threadId, subscription.cursor),
-      );
-      const entries = page.data.map((entry) => timelineEntryForStream(entry, threadId));
+      const entries = page.data.map((entry) => timelineEntryForStream(entry, threadId, page.hydrationCursor));
       const pending = this.bridge.pendingServerRequests()
         .map((serverRequest) => serverRequestStreamDto(serverRequest, state))
         .filter((serverRequest) => serverRequest.threadId === threadId);
@@ -423,55 +432,99 @@ export class RestApiServer {
   private async threadEntries(threadId: string, url: URL): Promise<Response> {
     const limit = boundedPositiveIntegerQuery(url, "limit", 50, 100);
     const rawBefore = url.searchParams.get("before");
-    let before: ReturnType<typeof decodeTimelineCursor> | undefined;
+    let cursor = initialTimelineCursor(threadId);
     if (rawBefore !== null) {
       try {
-        before = decodeTimelineCursor(rawBefore);
+        cursor = decodeTimelineCursor(rawBefore, threadId);
       } catch (error) {
         throw new HttpError(400, error instanceof Error ? error.message : String(error));
       }
     }
-    const thread = await this.readThread(threadId);
-    if (thread instanceof Response) return thread;
-    let page: ReturnType<typeof timelinePage>;
-    try {
-      page = timelinePage(thread, before, limit, this.bridge.completedItemIds(threadId));
-    } catch (error) {
-      if (error instanceof TimelineCursorExpiredError) {
-        return json({
-          error: {
-            code: "timeline_cursor_expired",
-            message: "history cursor boundary is no longer available; refresh the selected thread",
-          },
-        }, 410);
-      }
-      throw error;
-    }
+    const page = await this.readTimelinePage(threadId, cursor, limit, this.bridge.completedItemIds(threadId));
+    if (page instanceof Response) return page;
     return json({
-      ...page,
-      data: page.data.map((entry) => timelineEntryForStream(entry, threadId)),
+      data: page.data.map((entry) => timelineEntryForStream(entry, threadId, page.hydrationCursor)),
+      olderCursor: page.olderCursor,
+      hasOlder: page.hasOlder,
     });
   }
 
-  private async threadEntry(threadId: string, entryId: string): Promise<Response> {
-    const thread = await this.readThread(threadId);
-    if (thread instanceof Response) return thread;
-    const entry = timelineEntries(thread, this.bridge.completedItemIds(threadId))
-      .find((candidate) => candidate.id === entryId);
-    return entry
-      ? json({ entry })
-      : json({ error: { code: "not_found", message: "timeline entry not found" } }, 404);
+  private async threadEntry(threadId: string, entryId: string, url: URL): Promise<Response> {
+    const rawPage = url.searchParams.get("page");
+    let cursor = initialTimelineCursor(threadId);
+    if (rawPage !== null) {
+      try {
+        cursor = decodeTimelineCursor(rawPage, threadId);
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    for (let pageNumber = 0; pageNumber < (rawPage === null ? MAX_HYDRATION_PAGES : 1); pageNumber++) {
+      const page = await this.readTimelinePage(threadId, cursor, 100, this.bridge.completedItemIds(threadId));
+      if (page instanceof Response) return page;
+      const entry = page.data.find((candidate) => candidate.id === entryId);
+      if (entry) return json({ entry });
+      if (!page.olderCursor) break;
+      cursor = decodeTimelineCursor(page.olderCursor, threadId);
+    }
+    return json({ error: { code: "not_found", message: "timeline entry not found" } }, 404);
   }
 
-  private async readThread(threadId: string): Promise<Record<string, unknown> | Response> {
-    const rpcOutcome = await this.bridge.call("thread/read", { threadId, includeTurns: true });
+  private async readThreadMetadata(threadId: string): Promise<Record<string, unknown> | Response> {
+    const rpcOutcome = await this.bridge.call("thread/read", { threadId, includeTurns: false });
     if ("error" in rpcOutcome) return outcome(rpcOutcome, 200);
     const result = asRecord(rpcOutcome.result);
     const thread = asRecord(result.thread);
-    if (typeof thread.id !== "string") {
+    if (thread.id !== threadId) {
       return json({ error: { code: "invalid_upstream_response", message: "thread/read returned no thread" } }, 502);
     }
     return thread;
+  }
+
+  private async readTimelinePage(
+    threadId: string,
+    cursor: TimelineCursor,
+    limit: number,
+    completedItemIds: ReadonlySet<string>,
+  ): Promise<PreparedTimelinePage | Response> {
+    const params: ThreadTurnsListParams = {
+      threadId,
+      cursor: cursor.turnsCursor,
+      limit: Math.min(Math.max(limit, 1), UPSTREAM_TURN_PAGE_LIMIT),
+      sortDirection: "desc",
+      itemsView: "full",
+    };
+    const rpcOutcome = await this.bridge.call("thread/turns/list", params);
+    if ("error" in rpcOutcome) {
+      const initialPage = cursor.turnsCursor === null && cursor.boundaryHash === null;
+      if (initialPage && isUnmaterializedTimelineError(rpcOutcome.error)) {
+        return timelinePage(threadId, [], cursor, null, limit, completedItemIds);
+      }
+      if (!initialPage && (isUnmaterializedTimelineError(rpcOutcome.error) || isTimelineCursorError(rpcOutcome.error))) {
+        return timelineCursorExpired();
+      }
+      return outcome(rpcOutcome, 200);
+    }
+    const result = asRecord(rpcOutcome.result);
+    const turns = result.data;
+    const nextCursor = result.nextCursor;
+    if (
+      !Array.isArray(turns)
+      || !(nextCursor === null || typeof nextCursor === "string")
+      || (typeof nextCursor === "string" && nextCursor.length > 4_096)
+      || turns.some((turn) => typeof asRecord(turn).id !== "string" || !Array.isArray(asRecord(turn).items))
+    ) {
+      return json({
+        error: { code: "invalid_upstream_response", message: "thread/turns/list returned an invalid page" },
+      }, 502);
+    }
+    try {
+      return timelinePage(threadId, turns, cursor, nextCursor, limit, completedItemIds);
+    } catch (error) {
+      if (error instanceof TimelineCursorExpiredError) return timelineCursorExpired();
+      throw error;
+    }
   }
 
   private replayStream(
@@ -730,6 +783,24 @@ function streamCursor(request: Request, url: URL): { cursor: number; streamId?: 
   if (!Number.isSafeInteger(cursor) || cursor < 0) throw new HttpError(400, "cursor must be a non-negative integer");
   const streamId = url.searchParams.get("stream") ?? undefined;
   return streamId === undefined ? { cursor } : { cursor, streamId };
+}
+
+function isUnmaterializedTimelineError(error: RpcError): boolean {
+  return error.code === -32602
+    && error.message.includes("thread/turns/list is unavailable before first user message");
+}
+
+function isTimelineCursorError(error: RpcError): boolean {
+  return error.code === -32602 && error.message.toLowerCase().includes("cursor");
+}
+
+function timelineCursorExpired(): Response {
+  return json({
+    error: {
+      code: "timeline_cursor_expired",
+      message: "history cursor boundary is no longer available; refresh the selected thread",
+    },
+  }, 410);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

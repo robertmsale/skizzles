@@ -249,6 +249,17 @@ describe("aggregator REST API", () => {
         snapshot: { name: "Authoritative name", status: { type: "idle" } },
         loaded: true,
       });
+      expect(factory.transport.request("thread/read")?.params).toEqual({
+        threadId: factory.threadId,
+        includeTurns: false,
+      });
+      expect(factory.transport.request("thread/turns/list")?.params).toEqual({
+        threadId: factory.threadId,
+        cursor: null,
+        limit: 50,
+        sortDirection: "desc",
+        itemsView: "full",
+      });
     } finally {
       await daemon.close();
     }
@@ -740,6 +751,26 @@ class RestFactory implements BackendFactory {
             ...structuredClone(this.readThreadPatch),
             turns: [{ id: "turn-1" }],
           },
+        },
+      });
+      return;
+    }
+    if (message.method === "thread/turns/list") {
+      this.transport.emit({
+        id: message.id,
+        result: {
+          data: [{
+            id: "turn-1",
+            items: [],
+            itemsView: "full",
+            status: "completed",
+            error: null,
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1_000,
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
         },
       });
       return;

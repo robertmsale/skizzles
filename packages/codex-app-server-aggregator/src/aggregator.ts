@@ -795,12 +795,21 @@ function backendInitializeParams(params: unknown, applyClientNotificationOptOuts
   const root = asRecord(params);
   const capabilities = asRecord(root.capabilities);
   const methods = capabilities.optOutNotificationMethods;
-  if (!Array.isArray(methods)) return params;
-  const filtered = applyClientNotificationOptOuts
-    ? methods.filter((method) => typeof method !== "string" || !TOPOLOGY_NOTIFICATION_METHODS.has(method))
-    : methods.filter((method) => typeof method !== "string");
-  if (filtered.length === methods.length) return params;
-  return { ...root, capabilities: { ...capabilities, optOutNotificationMethods: filtered } };
+  const filtered = Array.isArray(methods)
+    ? applyClientNotificationOptOuts
+      ? methods.filter((method) => typeof method !== "string" || !TOPOLOGY_NOTIFICATION_METHODS.has(method))
+      : methods.filter((method) => typeof method !== "string")
+    : undefined;
+  return {
+    ...root,
+    capabilities: {
+      ...capabilities,
+      // The aggregate HTTP/SSE surface depends on thread/turns/list even when a JSONL relay
+      // initializes the shared daemon first without opting into app-server experiments itself.
+      experimentalApi: true,
+      ...(filtered === undefined ? {} : { optOutNotificationMethods: filtered }),
+    },
+  };
 }
 
 async function modelIds(backend: BackendConnection): Promise<Set<string>> {

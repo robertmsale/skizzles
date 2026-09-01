@@ -192,7 +192,13 @@ of incorrectly replaying from an uncommitted baseline.
 The app snapshot contains registered projects, every non-deleted thread (including archive state),
 its project CWD, machine ID, host/container execution mode, loaded state, native status metadata,
 and pending server requests with owning thread/project when known. It never contains historical
-turns. The thread snapshot contains its metadata, relevant pending requests, and the newest
+turns. A selected-thread snapshot reads metadata with <code>thread/read(includeTurns: false)</code>
+and reads history through the upstream cursor-paginated <code>thread/turns/list</code> method; it
+never asks app-server to serialize the full transcript. A newly started thread whose rollout has
+not yet been materialized produces a valid empty history snapshot. Because this pagination method
+is experimental upstream, the aggregator always enables app-server's experimental API internally,
+even when a JSONL relay initializes the shared daemon first without requesting it. The thread snapshot contains
+its metadata, relevant pending requests, and the newest
 <code>tail</code> finalized items in chronological order. <code>tail</code> defaults to and is capped at
 50. Server requests normalize both current <code>threadId</code> and legacy
 <code>conversationId</code> routing keys into the stream DTO's <code>threadId</code>, including their
@@ -206,10 +212,11 @@ opaque keys inside completed payloads.
 <code>snapshot.end.data.history</code> contains <code>olderCursor</code> and
 <code>hasOlder</code>; older pages come from
 <code>GET /v1/threads/:threadId/entries?before=entry:...&amp;limit=50</code>.
-The fixed-size opaque cursor anchors pagination to a digest of the oldest visible entry's stable
-turn/item identity rather than a mutable filtered-array offset. Items that become finalized before
-that boundary therefore appear on a later older page without shifting or duplicating entries
-already returned. If the boundary itself disappears, the history route returns HTTP 410
+The bounded opaque cursor is tied to its thread and wraps both app-server's turn-page cursor and a
+digest of the oldest visible entry's stable turn/item identity within that page. Older requests
+therefore fetch only the relevant bounded upstream turn page. Items that become finalized before
+the boundary appear on a later older page without shifting or duplicating entries already returned.
+If the upstream cursor or boundary disappears, the history route returns HTTP 410
 <code>timeline_cursor_expired</code> so the client can refresh instead of silently mispaging.
 
 ### Live event vocabulary
@@ -247,7 +254,9 @@ and delta-to-responding collapse before they count against the bounded handoff q
 journal remains unchanged for polling and other subscribers. Snapshot batches target 384 KiB. No SSE
 data event may exceed 880 KiB. An item too large for a conservative batch is
 represented by <code>item.available</code> and can be retrieved at
-<code>GET /v1/threads/:threadId/entries/:entryId</code>. These limits are below the transport ceiling
+<code>GET /v1/threads/:threadId/entries/:entryId</code>. Snapshot and history hydration references
+carry their bounded upstream page cursor, so hydration does not scan the transcript. A live
+completion without page context uses a bounded newest-first page scan. These limits are below the transport ceiling
 even though SSE itself is not WebSocket-framed. A native journal notification larger than 4 MiB
 retains its original method and stable thread/turn/item identifiers, replaces its large parameters
 with <code>oversizedBytes</code> metadata, and therefore preserves method-based reconciliation for
@@ -255,6 +264,10 @@ polling consumers while SSE emits its bounded state or hydration event.
 
 ## Deliberate limits
 
+- Current app-server turn pagination bounds network transfer by turn count, not by encoded bytes;
+  one pathological turn can still produce a large internal app-server-to-aggregator response. The
+  aggregator never forwards that response as one SSE event and never falls back to a full-history
+  <code>thread/read</code>.
 - Container rollout history is destroyed with its container; unarchive cannot reconstruct it.
 - The board does not automatically resume persisted host threads after restart, though protocol
   requests retain their host routing binding.

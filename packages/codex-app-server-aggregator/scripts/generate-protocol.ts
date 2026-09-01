@@ -27,6 +27,8 @@ const selected = [
   "v2/ThreadLoadedListResponse.ts",
   "v2/ThreadSortKey.ts",
   "v2/ThreadSourceKind.ts",
+  "v2/ThreadTurnsListParams.ts",
+  "v2/TurnItemsView.ts",
 ] as const;
 
 try {

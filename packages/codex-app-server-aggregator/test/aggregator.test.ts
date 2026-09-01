@@ -610,6 +610,19 @@ describe("host and container app-server aggregation", () => {
       harness.state.close();
     }
   });
+
+  test("keeps internal paginated history APIs enabled for a non-experimental relay", async () => {
+    const harness = createHarness();
+    try {
+      await initialize(harness, { experimentalApi: false });
+      expect(requestFor(harness.host, "initialize")?.params).toMatchObject({
+        capabilities: { experimentalApi: true },
+      });
+    } finally {
+      await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
 });
 
 type ProjectSeed = { cwd: string; cloneUrl: string | null };

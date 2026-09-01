@@ -201,8 +201,8 @@ base_url = "http://{{SKIZZLES_CONTAINER_HOST}}:8080/v1"
 | <code>/v1/events</code> | Bounded daemon-local notification journal |
 | <code>/v1/app-state/stream</code> | Global project, thread, status, and pending-request SSE stream |
 | <code>/v1/threads/:id/stream?tail=50</code> | Selected-thread timeline snapshot and live SSE stream |
-| <code>/v1/threads/:id/entries</code> | Cursor-paginated finalized timeline entries |
-| <code>/v1/threads/:id/entries/:entryId</code> | Hydrate one finalized entry, including oversized SSE items |
+| <code>/v1/threads/:id/entries</code> | Upstream-cursor-paginated finalized timeline entries |
+| <code>/v1/threads/:id/entries/:entryId</code> | Page-targeted hydration for one finalized entry, including oversized SSE items |
 | <code>/v1/server-requests</code> | Pending backend callbacks |
 | <code>/healthz</code> | Process liveness without backend initialization |
 
