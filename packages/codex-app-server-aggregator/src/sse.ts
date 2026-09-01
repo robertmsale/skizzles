@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { EventRecord } from "./bridge.ts";
 import { requestThreadIdFromParams, type RpcId, type RpcRequest } from "./protocol.ts";
 import type { AggregatorState, RegisteredProject, StoredThread } from "./state.ts";
@@ -61,6 +62,17 @@ export type TimelineHistoryPageDto = {
   olderCursor: string | null;
   hasOlder: boolean;
 };
+
+export type TimelineCursor = {
+  boundaryHash: string;
+};
+
+export class TimelineCursorExpiredError extends Error {
+  constructor() {
+    super("history cursor boundary is no longer available");
+    this.name = "TimelineCursorExpiredError";
+  }
+}
 
 export type SseEventDescriptor = {
   event: string;
@@ -243,31 +255,39 @@ export function timelineEntries(
 
 export function timelinePage(
   thread: Record<string, unknown>,
-  before: number | undefined,
+  before: TimelineCursor | undefined,
   limit: number,
   completedItemIds: ReadonlySet<string> = new Set(),
 ): TimelinePageDto {
   const entries = timelineEntries(thread, completedItemIds);
-  const end = Math.min(before ?? entries.length, entries.length);
+  const end = before === undefined
+    ? entries.length
+    : entries.findIndex((entry) => timelineBoundaryHash(entry) === before.boundaryHash);
+  if (end < 0) throw new TimelineCursorExpiredError();
   const start = Math.max(0, end - limit);
   return {
     data: entries.slice(start, end),
-    olderCursor: start > 0 ? encodeTimelineCursor(start) : null,
+    olderCursor: start > 0 ? encodeTimelineCursor(entries[start]!) : null,
     hasOlder: start > 0,
   };
 }
 
-export function encodeTimelineCursor(index: number): string {
-  return `entry:${index.toString(36)}`;
+export function encodeTimelineCursor(boundary: Pick<TimelineEntryDto, "id" | "turnId">): string {
+  return `entry:v1:${timelineBoundaryHash(boundary)}`;
 }
 
-export function decodeTimelineCursor(cursor: string): number {
-  if (!cursor.startsWith("entry:")) throw new Error("before must be a valid entry cursor");
-  const value = cursor.slice("entry:".length);
-  if (!/^[0-9a-z]+$/.test(value)) throw new Error("before must be a valid entry cursor");
-  const index = Number.parseInt(value, 36);
-  if (!Number.isSafeInteger(index) || index < 0) throw new Error("before must be a valid entry cursor");
-  return index;
+export function decodeTimelineCursor(cursor: string): TimelineCursor {
+  const prefix = "entry:v1:";
+  if (!cursor.startsWith(prefix)) throw new Error("before must be a valid entry cursor");
+  const boundaryHash = cursor.slice(prefix.length);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(boundaryHash)) throw new Error("before must be a valid entry cursor");
+  return { boundaryHash };
+}
+
+function timelineBoundaryHash(boundary: Pick<TimelineEntryDto, "id" | "turnId">): string {
+  return createHash("sha256")
+    .update(JSON.stringify([boundary.turnId, boundary.id]), "utf8")
+    .digest("base64url");
 }
 
 export function timelineEntryForStream(entry: TimelineEntryDto, threadId: string): TimelineStreamEntryDto {

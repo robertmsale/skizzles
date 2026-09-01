@@ -7,6 +7,7 @@ import {
   SseEventMapper,
   SseHeartbeatHub,
   SseSession,
+  TimelineCursorExpiredError,
   appThreadDto,
   batchSseItems,
   decodeTimelineCursor,
@@ -422,7 +423,7 @@ export class RestApiServer {
   private async threadEntries(threadId: string, url: URL): Promise<Response> {
     const limit = boundedPositiveIntegerQuery(url, "limit", 50, 100);
     const rawBefore = url.searchParams.get("before");
-    let before: number | undefined;
+    let before: ReturnType<typeof decodeTimelineCursor> | undefined;
     if (rawBefore !== null) {
       try {
         before = decodeTimelineCursor(rawBefore);
@@ -432,7 +433,20 @@ export class RestApiServer {
     }
     const thread = await this.readThread(threadId);
     if (thread instanceof Response) return thread;
-    const page = timelinePage(thread, before, limit, this.bridge.completedItemIds(threadId));
+    let page: ReturnType<typeof timelinePage>;
+    try {
+      page = timelinePage(thread, before, limit, this.bridge.completedItemIds(threadId));
+    } catch (error) {
+      if (error instanceof TimelineCursorExpiredError) {
+        return json({
+          error: {
+            code: "timeline_cursor_expired",
+            message: "history cursor boundary is no longer available; refresh the selected thread",
+          },
+        }, 410);
+      }
+      throw error;
+    }
     return json({
       ...page,
       data: page.data.map((entry) => timelineEntryForStream(entry, threadId)),

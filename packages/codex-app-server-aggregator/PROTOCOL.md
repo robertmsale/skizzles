@@ -206,6 +206,11 @@ opaque keys inside completed payloads.
 <code>snapshot.end.data.history</code> contains <code>olderCursor</code> and
 <code>hasOlder</code>; older pages come from
 <code>GET /v1/threads/:threadId/entries?before=entry:...&amp;limit=50</code>.
+The fixed-size opaque cursor anchors pagination to a digest of the oldest visible entry's stable
+turn/item identity rather than a mutable filtered-array offset. Items that become finalized before
+that boundary therefore appear on a later older page without shifting or duplicating entries
+already returned. If the boundary itself disappears, the history route returns HTTP 410
+<code>timeline_cursor_expired</code> so the client can refresh instead of silently mispaging.
 
 ### Live event vocabulary
 

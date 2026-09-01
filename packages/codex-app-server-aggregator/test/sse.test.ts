@@ -182,7 +182,7 @@ describe("aggregator SSE API", () => {
     expect(data(received, "snapshot.end").history).toEqual({
       count: 50,
       tail: 50,
-      olderCursor: "entry:a",
+      olderCursor: expect.stringMatching(/^entry:v1:/),
       hasOlder: true,
     });
 
@@ -196,10 +196,14 @@ describe("aggregator SSE API", () => {
       item: { id: "live-item", item: { text: "final" } },
     });
 
-    const history = await fetchJson(`${origin}/v1/threads/thread-1/entries?before=entry:a&limit=5`);
+    const snapshotHistory = data(received, "snapshot.end").history as { olderCursor: string };
+    expect(snapshotHistory.olderCursor.length).toBeLessThan(100);
+    const history = await fetchJson(
+      `${origin}/v1/threads/thread-1/entries?before=${encodeURIComponent(snapshotHistory.olderCursor)}&limit=5`,
+    );
     expect(history.body).toMatchObject({
       data: [{ id: "item-5" }, { id: "item-6" }, { id: "item-7" }, { id: "item-8" }, { id: "item-9" }],
-      olderCursor: "entry:5",
+      olderCursor: expect.stringMatching(/^entry:v1:/),
       hasOlder: true,
     });
     const newest = await fetchJson(`${origin}/v1/threads/thread-1/entries?limit=1`);
@@ -246,6 +250,73 @@ describe("aggregator SSE API", () => {
     expect(JSON.stringify(received)).not.toContain("irrelevant-");
     expect(JSON.stringify(received)).not.toContain("discarded-");
     await reader.cancel();
+  });
+
+  test("keeps older-history pagination stable when an earlier item becomes finalized", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    const completed = (id: string) => ({ id, type: "functionCallOutput", status: "completed", output: id });
+    const newlyCompleted = { id: "newly-completed", type: "functionCallOutput", output: "new" };
+    const items = [
+      completed("a"),
+      newlyCompleted,
+      completed("b"),
+      completed("c"),
+      completed("d"),
+      completed("e"),
+    ];
+    bridge.thread = {
+      id: "thread-1",
+      turns: [{
+        id: "active-turn",
+        status: "inProgress",
+        items,
+      }],
+    };
+
+    const newest = await fetchJson(`${origin}/v1/threads/thread-1/entries?limit=2`);
+    expect(newest.body).toMatchObject({ data: [{ id: "d" }, { id: "e" }], hasOlder: true });
+    const firstCursor = (newest.body as { olderCursor: string }).olderCursor;
+
+    await bridge.send({
+      method: "item/completed",
+      params: { threadId: "thread-1", turnId: "active-turn", item: newlyCompleted },
+    });
+    const middle = await fetchJson(
+      `${origin}/v1/threads/thread-1/entries?before=${encodeURIComponent(firstCursor)}&limit=2`,
+    );
+    expect(middle.body).toMatchObject({ data: [{ id: "b" }, { id: "c" }], hasOlder: true });
+    const secondCursor = (middle.body as { olderCursor: string }).olderCursor;
+    const oldest = await fetchJson(
+      `${origin}/v1/threads/thread-1/entries?before=${encodeURIComponent(secondCursor)}&limit=2`,
+    );
+    expect(oldest.body).toMatchObject({
+      data: [{ id: "a" }, { id: "newly-completed" }],
+      olderCursor: null,
+      hasOlder: false,
+    });
+    const ids = [newest, middle, oldest].flatMap(({ body }) =>
+      (body as { data: Array<{ id: string }> }).data.map((entry) => entry.id)
+    );
+    expect(ids).toEqual(["d", "e", "b", "c", "a", "newly-completed"]);
+    expect(new Set(ids).size).toBe(ids.length);
+
+    bridge.thread = {
+      id: "thread-1",
+      turns: [{ id: "active-turn", status: "inProgress", items: items.filter((item) => item.id !== "d") }],
+    };
+    expect(await fetchJson(
+      `${origin}/v1/threads/thread-1/entries?before=${encodeURIComponent(firstCursor)}&limit=2`,
+    )).toEqual({
+      status: 410,
+      body: {
+        error: {
+          code: "timeline_cursor_expired",
+          message: "history cursor boundary is no longer available; refresh the selected thread",
+        },
+      },
+    });
   });
 
   test("does not seed deduplication from a status-less in-flight snapshot item", async () => {
