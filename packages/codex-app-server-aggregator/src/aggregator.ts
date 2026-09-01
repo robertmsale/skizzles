@@ -267,6 +267,11 @@ export class AppServerAggregator {
         await this.withProjectLock(projectCwd, async () => {
           const project = await this.registry.register(projectCwd);
           await this.output.send(response(request.id, { result: { project } }));
+          await this.sendClientNotification({
+            method: "skizzles/project/upsert",
+            params: { project },
+            emittedAtMs: Date.now(),
+          });
         });
         return;
       }
@@ -275,6 +280,13 @@ export class AppServerAggregator {
         if (!project) {
           const removed = await this.registry.remove(cwd);
           await this.output.send(response(request.id, { result: { removed } }));
+          if (removed) {
+            await this.sendClientNotification({
+              method: "skizzles/project/removed",
+              params: { cwd },
+              emittedAtMs: Date.now(),
+            });
+          }
           return;
         }
         await this.withProjectLock(project.cwd, async () => {
@@ -293,6 +305,13 @@ export class AppServerAggregator {
           await Promise.all(projectContainers.map((backend) => this.removeIfDrained(backend)));
           const removed = await this.registry.remove(current.cwd);
           await this.output.send(response(request.id, { result: { removed } }));
+          if (removed) {
+            await this.sendClientNotification({
+              method: "skizzles/project/removed",
+              params: { cwd: current.cwd },
+              emittedAtMs: Date.now(),
+            });
+          }
         });
         return;
       }

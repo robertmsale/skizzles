@@ -141,9 +141,117 @@ The hostname is separately configurable and passed into the container. The entry
 ## Aggregate HTTP boundary
 
 REST and JSONL use one daemon-owned core. REST events are a bounded, process-local journal rather
-than a second rollout store. HTTP 410 tells consumers to reconcile topology and pending requests.
+than a second rollout store. HTTP 410 from the polling journal tells consumers to reconcile topology
+and pending requests; SSE performs that reconciliation by transparently starting a fresh snapshot.
 The machine projection includes machine kind and per-thread project/mode bindings because one host
-machine can own threads from many registered projects.
+machine can own threads from many registered projects. Successful HTTP project mutations, native
+app-server notifications, and backend server-request lifecycle changes all enter this same journal
+and broadcast path.
+
+## Server-Sent Events
+
+The HTTP control plane remains transactional. Robdex keeps one global
+<code>GET /v1/app-state/stream</code> connection and opens
+<code>GET /v1/threads/:threadId/stream?tail=50</code> only for the selected thread. Both routes pass
+through the existing REST Host/Origin and bearer checks before a subscriber is registered. Bearer
+credentials belong in the <code>Authorization</code> header and are never accepted in a stream URL.
+The global route completes the shared host backend's single-flight <code>initialize</code> and
+<code>initialized</code> handshake before it captures the journal cursor or returns HTTP 200, so a
+first-request stream is already able to journal and broadcast native app-server activity.
+
+Responses use <code>text/event-stream</code>, <code>no-cache, no-store, no-transform</code>,
+<code>X-Accel-Buffering: no</code>, standard <code>id</code>/<code>event</code>/JSON
+<code>data</code> fields, and a 3-second retry hint. One daemon-level scheduler writes a
+<code>: heartbeat</code> comment to every live connection every 15 seconds. Disconnect, request
+abort, daemon close, encoder failure, or queue overflow immediately unregisters the journal
+subscriber; the heartbeat timer stops when the last connection leaves. After the existing access
+checks pass, the two SSE routes disable Bun's per-request idle timeout so the 15-second heartbeat,
+rather than Bun's default 10-second limit, owns idle-connection liveness. Other HTTP routes retain
+their normal timeout.
+
+### Snapshot and live handoff
+
+Before snapshot construction, the bridge captures cursor <code>C</code> and registers a bounded
+journal subscription. Events after <code>C</code> accumulate while the snapshot is built. The server
+then emits:
+
+1. <code>snapshot.begin</code> with scope, stream ID, and cursor;
+2. bounded <code>snapshot.projects</code>, <code>snapshot.threads</code>,
+   <code>snapshot.entries</code>, and/or <code>snapshot.requests</code> batches;
+3. <code>snapshot.end</code> with the same cursor and, for a thread, older-history metadata;
+4. buffered journal events in cursor order, followed by live records.
+
+Clients should accumulate snapshot batches away from the main actor and publish one UI state change
+at <code>snapshot.end</code>. A snapshot entry and a concurrent completion share a stable item ID;
+the server suppresses the duplicate completion on that connection. Snapshot-time pending requests
+are deduplicated the same way. Snapshot batches before <code>snapshot.end</code> intentionally omit
+the SSE <code>id</code> field; only the completed snapshot advances <code>Last-Event-ID</code> to
+<code>C</code>. A connection lost halfway through a snapshot therefore repeats the snapshot instead
+of incorrectly replaying from an uncommitted baseline.
+
+The app snapshot contains registered projects, every non-deleted thread (including archive state),
+its project CWD, machine ID, host/container execution mode, loaded state, native status metadata,
+and pending server requests with owning thread/project when known. It never contains historical
+turns. The thread snapshot contains its metadata, relevant pending requests, and the newest
+<code>tail</code> finalized items in chronological order. <code>tail</code> defaults to and is capped at
+50. Server requests normalize both current <code>threadId</code> and legacy
+<code>conversationId</code> routing keys into the stream DTO's <code>threadId</code>, including their
+later resolved events. A bounded journal-side completion index distinguishes status-less items that
+completed before snapshot cursor <code>C</code> from partial items and completions after
+<code>C</code>. Prior completions are included in the snapshot even while their turn remains in
+progress; later completions stay in the buffered live handoff and are not inserted into the
+snapshot's item-deduplication set prematurely. Terminal turns also make all of their items final.
+Finalized item JSON is preserved intact; delta suppression applies to delta notifications, not
+opaque keys inside completed payloads.
+<code>snapshot.end.data.history</code> contains <code>olderCursor</code> and
+<code>hasOlder</code>; older pages come from
+<code>GET /v1/threads/:threadId/entries?before=entry:...&amp;limit=50</code>.
+The fixed-size opaque cursor anchors pagination to a digest of the oldest visible entry's stable
+turn/item identity rather than a mutable filtered-array offset. Items that become finalized before
+that boundary therefore appear on a later older page without shifting or duplicating entries
+already returned. If the boundary itself disappears, the history route returns HTTP 410
+<code>timeline_cursor_expired</code> so the client can refresh instead of silently mispaging.
+
+### Live event vocabulary
+
+| Event | Scope | Payload purpose |
+| --- | --- | --- |
+| <code>project.upsert</code>, <code>project.removed</code> | App | Idempotent project registry changes |
+| <code>thread.upsert</code> | Both | Thread metadata and machine/project binding |
+| <code>thread.status</code>, <code>thread.responding</code> | Both | Native status or one lightweight response transition |
+| <code>thread.archived</code>, <code>thread.removed</code> | Both | Lifecycle changes |
+| <code>turn.started</code>, <code>turn.completed</code> | Both | Compact turn state without embedded item arrays |
+| <code>item.completed</code>, <code>item.available</code> | Thread | Finalized item or an HTTP hydration reference |
+| <code>server-request.pending</code>, <code>server-request.resolved</code> | Both | Approval/input attention and settlement |
+
+Token-usage notifications and all delta text are discarded. The first delta in a response window
+may emit one <code>thread.responding</code>; further deltas are suppressed until an item, turn, or
+terminal status completes the window. Finalized item IDs are connection-locally deduplicated.
+
+### Cursor replay and bounds
+
+Every SSE ID is <code>&lt;daemon-stream-id&gt;:&lt;journal-cursor&gt;</code>. Reconnect with the standard
+<code>Last-Event-ID</code> header, or with the polling-compatible <code>cursor</code> (also
+<code>after</code>) and optional <code>stream</code> query fields. A valid cursor emits
+<code>stream.ready</code>, replays retained matching events, and tails live without a snapshot. A
+cursor outside the retained window or from another daemon begins a fresh snapshot whose
+<code>snapshot.begin.data.reset.reason</code> is <code>cursor_expired</code> or
+<code>stream_restarted</code>.
+
+Journal retention is bounded by both count and bytes. Each subscriber and each response stream has
+a bounded live event/byte queue; overflow closes the client so reconnect can reconcile. A finite
+initial snapshot drains ahead of that separately bounded live backlog and is not rejected merely
+because its total size exceeds the live queue's 16 MiB cap. During snapshot construction, journal
+records pass through an independent copy of the connection's scope filter, request/item deduplication,
+and delta-to-responding collapse before they count against the bounded handoff queue; the canonical
+journal remains unchanged for polling and other subscribers. Snapshot batches target 384 KiB. No SSE
+data event may exceed 880 KiB. An item too large for a conservative batch is
+represented by <code>item.available</code> and can be retrieved at
+<code>GET /v1/threads/:threadId/entries/:entryId</code>. These limits are below the transport ceiling
+even though SSE itself is not WebSocket-framed. A native journal notification larger than 4 MiB
+retains its original method and stable thread/turn/item identifiers, replaces its large parameters
+with <code>oversizedBytes</code> metadata, and therefore preserves method-based reconciliation for
+polling consumers while SSE emits its bounded state or hydration event.
 
 ## Deliberate limits
 

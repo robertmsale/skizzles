@@ -6,6 +6,7 @@ import {
   isNotification,
   isRequest,
   isResponse,
+  requestThreadIdFromParams,
   response,
   type RpcId,
   type RpcMessage,
@@ -17,6 +18,11 @@ import {
 const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 500;
 const MAX_RETAINED_EVENTS = 2_000;
+const MAX_RETAINED_EVENT_BYTES = 32 * 1024 * 1024;
+const MAX_SINGLE_JOURNAL_EVENT_BYTES = 4 * 1024 * 1024;
+const MAX_SUBSCRIPTION_EVENTS = MAX_RETAINED_EVENTS;
+const MAX_SUBSCRIPTION_BYTES = 16 * 1024 * 1024;
+const MAX_COMPLETED_ITEM_IDS = 8_192;
 const MAX_QUEUED_CLIENT_MESSAGES = 256;
 const MAX_QUEUED_CLIENT_BYTES = 16 * 1024 * 1024;
 
@@ -58,17 +64,98 @@ export type EventPage = {
   restarted: boolean;
 };
 
+type EventListener = (record: EventRecord) => boolean;
+export type EventBufferFilter = (record: EventRecord) => boolean;
+type CompletedItemRecord = { threadId: string; itemId: string; cursor: number };
+
+export class EventSubscription {
+  private readonly records: Array<{ record: EventRecord; bytes: number }> = [];
+  private queuedBytes = 0;
+  private listener: EventListener | undefined;
+  private closed = false;
+  private didOverflow = false;
+
+  constructor(
+    readonly cursor: number,
+    readonly streamId: string,
+    readonly gap: boolean,
+    readonly restarted: boolean,
+    private readonly release: () => void,
+    private readonly bufferFilter?: EventBufferFilter,
+  ) {}
+
+  get overflowed(): boolean {
+    return this.didOverflow;
+  }
+
+  enqueue(record: EventRecord): void {
+    if (this.closed) return;
+    if (this.listener) {
+      if (!this.listener(record)) this.close();
+      return;
+    }
+    if (this.bufferFilter) {
+      try {
+        if (!this.bufferFilter(record)) return;
+      } catch {
+        this.didOverflow = true;
+        this.close();
+        return;
+      }
+    }
+    this.buffer(record);
+  }
+
+  start(listener: EventListener): boolean {
+    if (this.closed || this.didOverflow) return false;
+    this.listener = listener;
+    for (const queued of this.records.splice(0)) {
+      this.queuedBytes -= queued.bytes;
+      if (!listener(queued.record)) {
+        this.close();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.listener = undefined;
+    this.records.length = 0;
+    this.queuedBytes = 0;
+    this.release();
+  }
+
+  private buffer(record: EventRecord): boolean {
+    const copy = structuredClone(record);
+    const bytes = eventRecordBytes(copy);
+    if (this.records.length >= MAX_SUBSCRIPTION_EVENTS || this.queuedBytes + bytes > MAX_SUBSCRIPTION_BYTES) {
+      this.didOverflow = true;
+      this.close();
+      return false;
+    }
+    this.records.push({ record: copy, bytes });
+    this.queuedBytes += bytes;
+    return true;
+  }
+}
+
 export class AggregatorBridge implements MessageSink {
   private aggregator: AppServerAggregator | undefined;
   private activeClient: ActiveClient | undefined;
   private readonly pendingCalls = new Map<string, PendingCall>();
   private readonly serverRequests = new Map<string, RpcRequest>();
   private readonly events: EventRecord[] = [];
+  private retainedEventBytes = 0;
+  private readonly eventSubscriptions = new Set<EventSubscription>();
+  private readonly completedItems = new Map<string, CompletedItemRecord>();
   private readonly streamId = crypto.randomUUID();
   private nextEventCursor = 1;
   private initialization: Promise<RpcOutcome> | undefined;
   private initializeOutcome: RpcOutcome | undefined;
-  private initialized = false;
+  private initializedNotification: Promise<void> | undefined;
 
   constructor(private readonly log: (message: string) => void = () => undefined) {}
 
@@ -103,11 +190,17 @@ export class AggregatorBridge implements MessageSink {
 
   async call(method: string, params?: unknown): Promise<RpcOutcome> {
     if (!method.startsWith("skizzles/project/")) {
-      const initialized = await this.ensureInitialized();
+      const initialized = await this.ensureReady();
       if ("error" in initialized) return initialized;
-      await this.ensureInitializedNotification();
     }
     return this.callCore(method, params);
+  }
+
+  async ensureReady(): Promise<RpcOutcome> {
+    const initialized = await this.ensureInitialized();
+    if ("error" in initialized) return initialized;
+    await this.ensureInitializedNotification();
+    return initialized;
   }
 
   eventPage(after = 0, requestedLimit = DEFAULT_EVENT_LIMIT, expectedStreamId?: string): EventPage {
@@ -127,18 +220,62 @@ export class AggregatorBridge implements MessageSink {
     };
   }
 
+  openEventSubscription(
+    after?: number,
+    expectedStreamId?: string,
+    bufferFilter?: EventBufferFilter,
+  ): EventSubscription {
+    const oldestCursor = this.events[0]?.cursor ?? this.nextEventCursor;
+    const currentCursor = this.nextEventCursor - 1;
+    const restarted = expectedStreamId !== undefined && expectedStreamId !== this.streamId;
+    const gap = after !== undefined && (restarted || after < oldestCursor - 1 || after > currentCursor);
+    const replay = after === undefined || gap
+      ? []
+      : this.events.filter((record) => record.cursor > after);
+    let subscription!: EventSubscription;
+    subscription = new EventSubscription(
+      after ?? currentCursor,
+      this.streamId,
+      gap,
+      restarted,
+      () => this.eventSubscriptions.delete(subscription),
+      bufferFilter,
+    );
+    this.eventSubscriptions.add(subscription);
+    for (const record of replay) subscription.enqueue(record);
+    return subscription;
+  }
+
+  get eventSubscriberCount(): number {
+    return this.eventSubscriptions.size;
+  }
+
+  completedItemIds(threadId: string, throughCursor = this.nextEventCursor - 1): ReadonlySet<string> {
+    const ids = new Set<string>();
+    for (const completed of this.completedItems.values()) {
+      if (completed.threadId === threadId && completed.cursor <= throughCursor) ids.add(completed.itemId);
+    }
+    return ids;
+  }
+
   pendingServerRequests(): RpcRequest[] {
     return [...this.serverRequests.values()].map((request) => structuredClone(request));
   }
 
   settleServerRequest(id: RpcId): void {
-    this.serverRequests.delete(idKey(id));
+    const key = idKey(id);
+    const request = this.serverRequests.get(key);
+    if (!request) return;
+    this.serverRequests.delete(key);
+    this.appendEvent(serverRequestNotification("resolved", request));
   }
 
   async respondToServerRequest(id: RpcId, outcome: RpcOutcome): Promise<boolean> {
     const key = idKey(id);
-    if (!this.serverRequests.has(key)) return false;
+    const request = this.serverRequests.get(key);
+    if (!request) return false;
     this.serverRequests.delete(key);
+    this.appendEvent(serverRequestNotification("resolved", request));
     await this.requiredAggregator().handle(response(id, outcome));
     return true;
   }
@@ -165,6 +302,7 @@ export class AggregatorBridge implements MessageSink {
     }
     if (isRequest(message)) {
       this.serverRequests.set(idKey(message.id), structuredClone(message));
+      this.appendEvent(serverRequestNotification("pending", message));
       const client = this.activeClient;
       if (client?.initialized) client.delivery.enqueue(message);
     }
@@ -176,6 +314,8 @@ export class AggregatorBridge implements MessageSink {
     }
     this.pendingCalls.clear();
     this.serverRequests.clear();
+    this.completedItems.clear();
+    for (const subscription of [...this.eventSubscriptions]) subscription.close();
     const client = this.activeClient;
     this.activeClient = undefined;
     client?.delivery.close();
@@ -202,7 +342,6 @@ export class AggregatorBridge implements MessageSink {
   async handleClientMessage(client: ActiveClient, message: RpcMessage): Promise<void> {
     if (this.activeClient !== client) return;
     if (isResponse(message)) {
-      if (this.serverRequests.has(idKey(message.id))) this.serverRequests.delete(idKey(message.id));
       await this.requiredAggregator().handle(message);
       return;
     }
@@ -243,9 +382,16 @@ export class AggregatorBridge implements MessageSink {
   }
 
   private async ensureInitializedNotification(params?: unknown): Promise<void> {
-    if (this.initialized) return;
-    this.initialized = true;
-    await this.requiredAggregator().handle(params === undefined ? { method: "initialized" } : { method: "initialized", params });
+    if (!this.initializedNotification) {
+      const notification = this.requiredAggregator().handle(
+        params === undefined ? { method: "initialized" } : { method: "initialized", params },
+      );
+      this.initializedNotification = notification;
+      notification.catch(() => {
+        if (this.initializedNotification === notification) this.initializedNotification = undefined;
+      });
+    }
+    await this.initializedNotification;
   }
 
   private async callCore(method: string, params?: unknown): Promise<RpcOutcome> {
@@ -261,8 +407,41 @@ export class AggregatorBridge implements MessageSink {
   }
 
   private appendEvent(event: RpcNotification): void {
-    this.events.push({ cursor: this.nextEventCursor++, event: structuredClone(event) });
-    if (this.events.length > MAX_RETAINED_EVENTS) this.events.splice(0, this.events.length - MAX_RETAINED_EVENTS);
+    const retained = boundedJournalEvent(event);
+    const record = { cursor: this.nextEventCursor++, event: retained };
+    this.rememberItemLifecycle(event, record.cursor);
+    const bytes = eventRecordBytes(record);
+    this.events.push(record);
+    this.retainedEventBytes += bytes;
+    while (this.events.length > MAX_RETAINED_EVENTS || this.retainedEventBytes > MAX_RETAINED_EVENT_BYTES) {
+      const removed = this.events.shift();
+      if (!removed) break;
+      this.retainedEventBytes -= eventRecordBytes(removed);
+    }
+    for (const subscription of [...this.eventSubscriptions]) subscription.enqueue(record);
+  }
+
+  private rememberItemLifecycle(event: RpcNotification, cursor: number): void {
+    const params = asRecord(event.params);
+    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (event.method === "thread/deleted" && threadId) {
+      for (const [key, completed] of this.completedItems) {
+        if (completed.threadId === threadId) this.completedItems.delete(key);
+      }
+      return;
+    }
+    if (event.method !== "item/completed" || !threadId) return;
+    const item = asRecord(params.item);
+    const itemId = typeof item.id === "string"
+      ? item.id
+      : typeof params.itemId === "string" ? params.itemId : undefined;
+    if (!itemId) return;
+    const key = JSON.stringify([threadId, itemId]);
+    if (this.completedItems.has(key)) return;
+    this.completedItems.set(key, { threadId, itemId, cursor });
+    if (this.completedItems.size > MAX_COMPLETED_ITEM_IDS) {
+      this.completedItems.delete(this.completedItems.keys().next().value!);
+    }
   }
 
   private queueInitializingNotification(client: ActiveClient, notification: RpcNotification): void {
@@ -368,6 +547,74 @@ class ClientDelivery {
 
 function messageBytes(message: RpcMessage): number {
   return Buffer.byteLength(JSON.stringify(message));
+}
+
+function eventRecordBytes(record: EventRecord): number {
+  return Buffer.byteLength(JSON.stringify(record));
+}
+
+function boundedJournalEvent(event: RpcNotification): RpcNotification {
+  const copy = structuredClone(event);
+  const bytes = messageBytes(copy);
+  if (bytes <= MAX_SINGLE_JOURNAL_EVENT_BYTES) return copy;
+  const params = asRecord(copy.params);
+  if (copy.method === "skizzles/server-request/pending") {
+    const request = asRecord(params.request);
+    const requestParams = asRecord(request.params);
+    const threadId = requestThreadIdFromParams(requestParams);
+    return {
+      method: copy.method,
+      params: {
+        request: {
+          id: request.id,
+          method: request.method,
+          params: {
+            ...(threadId === undefined ? {} : { threadId }),
+            ...(typeof requestParams.cwd === "string" ? { cwd: requestParams.cwd } : {}),
+          },
+        },
+        oversizedBytes: bytes,
+      },
+    };
+  }
+  const item = asRecord(params.item);
+  const thread = asRecord(params.thread);
+  const turn = asRecord(params.turn);
+  const project = asRecord(params.project);
+  return {
+    method: copy.method,
+    params: {
+      oversizedBytes: bytes,
+      ...(typeof params.threadId === "string"
+        ? { threadId: params.threadId }
+        : typeof thread.id === "string" ? { threadId: thread.id } : {}),
+      ...(typeof params.cwd === "string"
+        ? { cwd: params.cwd }
+        : typeof project.cwd === "string" ? { cwd: project.cwd } : {}),
+      ...(typeof params.itemId === "string"
+        ? { itemId: params.itemId }
+        : typeof item.id === "string" ? { itemId: item.id } : {}),
+      ...(typeof params.turnId === "string"
+        ? { turnId: params.turnId }
+        : typeof turn.id === "string" ? { turnId: turn.id } : {}),
+    },
+  };
+}
+
+function serverRequestNotification(state: "pending" | "resolved", request: RpcRequest): RpcNotification {
+  const params = asRecord(request.params);
+  const threadId = requestThreadIdFromParams(params);
+  return {
+    method: `skizzles/server-request/${state}`,
+    params: state === "pending"
+      ? { request: structuredClone(request) }
+      : {
+        id: request.id,
+        method: request.method,
+        ...(threadId === undefined ? {} : { threadId }),
+        ...(typeof params.cwd === "string" ? { cwd: params.cwd } : {}),
+      },
+  };
 }
 
 export class AggregatorClientSession {

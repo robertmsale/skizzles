@@ -16,6 +16,60 @@ afterEach(() => {
 });
 
 describe("aggregator REST API", () => {
+  test("initializes the host backend before serving a first-request global SSE stream", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    state.saveProject({ cwd, cloneUrl: null }, 1);
+    const hostFactory = new RestFactory("host");
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state,
+      containerFactory: new RestFactory(),
+      hostFactory,
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    try {
+      await daemon.start();
+      expect(hostFactory.transport.request("initialize")).toBeUndefined();
+
+      hostFactory.pauseNextInitialized = true;
+      const firstResponse = fetch(`${daemon.httpUrl!.origin}/v1/app-state/stream`);
+      await waitFor(async () => hostFactory.initializedBlocked);
+      let secondSettled = false;
+      const secondResponse = fetch(`${daemon.httpUrl!.origin}/v1/app-state/stream`).then((response) => {
+        secondSettled = true;
+        return response;
+      });
+      await Bun.sleep(5);
+      expect(secondSettled).toBe(false);
+
+      hostFactory.releaseInitialized();
+      const [response, concurrentResponse] = await Promise.all([firstResponse, secondResponse]);
+      expect(response.status).toBe(200);
+      expect(concurrentResponse.status).toBe(200);
+      expect(hostFactory.transport.request("initialize")).toBeDefined();
+      expect(hostFactory.transport.writes).toContainEqual({ method: "initialized" });
+      expect(hostFactory.transport.writes.filter((message) =>
+        "method" in message && message.method === "initialized"
+      )).toHaveLength(1);
+      await concurrentResponse.body?.cancel();
+
+      const threadId = "first-stream-thread";
+      hostFactory.transport.emit({
+        method: "thread/started",
+        params: { thread: { ...threadSnapshot(threadId), cwd } },
+      });
+      const events = await readSseEventsThrough(response, "thread.upsert");
+      expect(events.at(-1)?.data).toMatchObject({
+        thread: { id: threadId, cwd, executionMode: "host" },
+      });
+    } finally {
+      if (hostFactory.initializedBlocked) hostFactory.releaseInitialized();
+      await daemon.close();
+    }
+  });
+
   test("uses one long-lived core for one-off project, thread, turn, read, event, and archive calls", async () => {
     const directory = temporaryDirectory();
     const cwd = join(directory, "project");
@@ -146,6 +200,58 @@ describe("aggregator REST API", () => {
     const persisted = new AggregatorState(databasePath);
     expect(persisted.threads()[0]?.snapshot).not.toHaveProperty("turns");
     persisted.close();
+  });
+
+  test("uses metadata refreshed by the authoritative thread read in a selected-thread SSE snapshot", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    await run("git", "init", cwd);
+    await run("git", "-C", cwd, "remote", "add", "origin", "https://example.test/owner/project.git");
+    const factory = new RestFactory();
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state,
+      containerFactory: factory,
+      hostFactory: new RestFactory("host"),
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    try {
+      await daemon.start();
+      const origin = daemon.httpUrl!.origin;
+      await fetchJson(`${origin}/v1/projects`, { method: "POST", body: JSON.stringify({ cwd }) });
+      await fetchJson(`${origin}/v1/threads`, { method: "POST", body: JSON.stringify({ cwd }) });
+
+      const stale = state.threads().find((thread) => thread.threadId === factory.threadId);
+      if (!stale?.snapshot) throw new Error("started thread binding was not persisted");
+      state.saveThread({
+        ...stale,
+        snapshot: { ...stale.snapshot, name: "Stale name", status: { type: "notLoaded" } },
+        loaded: false,
+      });
+      factory.readThreadPatch = {
+        name: "Authoritative name",
+        status: { type: "idle" },
+        updatedAt: 2,
+      };
+
+      const response = await fetch(`${origin}/v1/threads/${factory.threadId}/stream`);
+      expect(response.status).toBe(200);
+      const events = await readSseEventsThrough(response, "snapshot.end");
+      const snapshot = events.find((event) => event.event === "snapshot.threads");
+      expect(snapshot?.data.threads).toEqual([expect.objectContaining({
+        id: factory.threadId,
+        name: "Authoritative name",
+        status: { type: "idle" },
+        loaded: true,
+      })]);
+      expect(state.threads().find((thread) => thread.threadId === factory.threadId)).toMatchObject({
+        snapshot: { name: "Authoritative name", status: { type: "idle" } },
+        loaded: true,
+      });
+    } finally {
+      await daemon.close();
+    }
   });
 
   test("serves built SPA assets and falls back to index for client routes", async () => {
@@ -359,7 +465,10 @@ describe("aggregator REST API", () => {
 
     const events = await fetchJson(`${origin}/v1/events?after=0`);
     expect(events.body).toMatchObject({
-      data: [{ event: { method: "configWarning" } }],
+      data: [
+        { event: { method: "skizzles/project/upsert", params: { project: { cwd } } } },
+        { event: { method: "configWarning" } },
+      ],
       streamId: expect.any(String),
     });
     await daemon.close();
@@ -518,10 +627,14 @@ class RestFactory implements BackendFactory {
   readonly threadId = "0198f000-7000-7000-8000-000000000000";
   readonly transport: RestTransport;
   delayNextRead = false;
+  readThreadPatch: Record<string, unknown> = {};
   pauseNextCreate = false;
   createBlocked = false;
+  pauseNextInitialized = false;
+  initializedBlocked = false;
   private pendingReadId: RpcId | undefined;
   private releaseBlockedCreate: (() => void) | undefined;
+  private releaseBlockedInitialized: (() => void) | undefined;
 
   constructor(mode: "host" | "container" = "container") {
     this.transport = new RestTransport(mode, (message) => this.handle(message));
@@ -544,6 +657,14 @@ class RestFactory implements BackendFactory {
     release();
   }
 
+  releaseInitialized(): void {
+    const release = this.releaseBlockedInitialized;
+    if (!release) throw new Error("no initialized notification is blocked");
+    this.initializedBlocked = false;
+    this.releaseBlockedInitialized = undefined;
+    release();
+  }
+
   hasPendingRead(): boolean {
     return this.pendingReadId !== undefined;
   }
@@ -559,7 +680,16 @@ class RestFactory implements BackendFactory {
   }
 
   private async handle(message: RpcMessage): Promise<void> {
-    if (!("method" in message) || !("id" in message)) return;
+    if (!("method" in message)) return;
+    if (message.method === "initialized" && !("id" in message)) {
+      if (this.pauseNextInitialized) {
+        this.pauseNextInitialized = false;
+        this.initializedBlocked = true;
+        await new Promise<void>((resolve) => { this.releaseBlockedInitialized = resolve; });
+      }
+      return;
+    }
+    if (!("id" in message)) return;
     if (message.method === "initialize") {
       this.transport.emit({
         id: message.id,
@@ -604,7 +734,13 @@ class RestFactory implements BackendFactory {
       }
       this.transport.emit({
         id: message.id,
-        result: { thread: { ...threadSnapshot(this.threadId), turns: [{ id: "turn-1" }] } },
+        result: {
+          thread: {
+            ...threadSnapshot(this.threadId),
+            ...structuredClone(this.readThreadPatch),
+            turns: [{ id: "turn-1" }],
+          },
+        },
       });
       return;
     }
@@ -690,6 +826,45 @@ async function fetchJson(url: string, init?: RequestInit): Promise<{ status: num
     headers: { "content-type": "application/json", ...init?.headers },
   });
   return { status: response.status, body: await response.json() };
+}
+
+async function readSseEventsThrough(response: Response, endingEvent: string): Promise<Array<{
+  event: string;
+  data: Record<string, unknown>;
+}>> {
+  if (!response.body) throw new Error("SSE response has no body");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+  let buffer = "";
+  try {
+    while (true) {
+      let separator = buffer.indexOf("\n\n");
+      while (separator >= 0) {
+        const raw = buffer.slice(0, separator);
+        buffer = buffer.slice(separator + 2);
+        if (!raw.startsWith(":")) {
+          let event = "message";
+          const data: string[] = [];
+          for (const line of raw.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice("event:".length).trimStart();
+            if (line.startsWith("data:")) data.push(line.slice("data:".length).trimStart());
+          }
+          events.push({ event, data: JSON.parse(data.join("\n") || "{}") as Record<string, unknown> });
+          if (event === endingEvent) return events;
+        }
+        separator = buffer.indexOf("\n\n");
+      }
+      const chunk = await Promise.race([
+        reader.read(),
+        Bun.sleep(5_000).then(() => { throw new Error(`timed out reading ${endingEvent}`); }),
+      ]);
+      if (chunk.done) throw new Error(`SSE stream ended before ${endingEvent}`);
+      buffer += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
 }
 
 function socketRequest(socketPath: string, message: RpcMessage): Promise<RpcMessage> {

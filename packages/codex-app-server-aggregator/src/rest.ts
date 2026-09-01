@@ -1,7 +1,28 @@
 import { timingSafeEqual } from "node:crypto";
 import { resolve, sep } from "node:path";
-import type { AggregatorBridge } from "./bridge.ts";
+import type { AggregatorBridge, EventSubscription } from "./bridge.ts";
 import type { RpcError, RpcOutcome } from "./protocol.ts";
+import {
+  SSE_RETRY_MS,
+  SseEventMapper,
+  SseHeartbeatHub,
+  SseSession,
+  TimelineCursorExpiredError,
+  appThreadDto,
+  batchSseItems,
+  decodeTimelineCursor,
+  encodeSseEvent,
+  parseSseEventId,
+  serverRequestStreamDto,
+  snapshotProjects,
+  sseEventId,
+  timelineEntries,
+  timelineEntryForStream,
+  timelinePage,
+  visibleAppThreads,
+  type SseIntervalScheduler,
+  type SseSnapshotReset,
+} from "./sse.ts";
 import type { AggregatorState } from "./state.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -13,6 +34,8 @@ export type RestServerOptions = {
   staticDirectory?: string;
   state?: AggregatorState;
   inspectContainer?: (containerId: string) => Promise<string | null>;
+  sseHeartbeatMilliseconds?: number;
+  sseIntervalScheduler?: SseIntervalScheduler;
   log?: (message: string) => void;
 };
 
@@ -21,9 +44,11 @@ export class RestApiServer {
   private readonly log: (message: string) => void;
   private readonly staticDirectory: string | undefined;
   private readonly activeRequests = new Set<Promise<Response>>();
+  private readonly sseHub: SseHeartbeatHub;
 
   constructor(private readonly bridge: AggregatorBridge, private readonly options: RestServerOptions) {
     this.log = options.log ?? (() => undefined);
+    this.sseHub = new SseHeartbeatHub(options.sseHeartbeatMilliseconds, options.sseIntervalScheduler);
     this.staticDirectory = options.staticDirectory && isLoopbackHost(options.hostname) && options.token === undefined
       ? options.staticDirectory
       : undefined;
@@ -52,6 +77,7 @@ export class RestApiServer {
   async close(): Promise<void> {
     const server = this.server;
     this.server = undefined;
+    this.sseHub.close();
     server?.stop(true);
     await Promise.allSettled([...this.activeRequests]);
   }
@@ -68,7 +94,7 @@ export class RestApiServer {
       return await this.route(request);
     } catch (error) {
       if (error instanceof HttpError) {
-        return json({ error: { code: "bad_request", message: error.message } }, error.status);
+        return json({ error: { code: error.code, message: error.message } }, error.status);
       }
       throw error;
     }
@@ -92,11 +118,29 @@ export class RestApiServer {
     if (path === "/v1/projects") return this.projects(request, url);
     if (request.method === "GET" && path === "/v1/machines") return this.machines();
     if (request.method === "GET" && path === "/v1/events") return this.events(url);
+    if (request.method === "GET" && path === "/v1/app-state/stream") {
+      this.disableSseIdleTimeout(request);
+      return this.appStateStream(request, url);
+    }
     if (path === "/v1/server-requests") return this.serverRequests(request);
     if (request.method === "GET" && path === "/v1/threads/loaded") {
       return outcome(await this.bridge.call("thread/loaded/list", listParams(url)), 200);
     }
     if (path === "/v1/threads") return this.threads(request, url);
+
+    const threadStream = path.match(/^\/v1\/threads\/([^/]+)\/stream$/);
+    if (request.method === "GET" && threadStream) {
+      this.disableSseIdleTimeout(request);
+      return this.threadStream(request, decodeURIComponent(threadStream[1]!), url);
+    }
+    const threadEntry = path.match(/^\/v1\/threads\/([^/]+)\/entries\/([^/]+)$/);
+    if (request.method === "GET" && threadEntry) {
+      return this.threadEntry(decodeURIComponent(threadEntry[1]!), decodeURIComponent(threadEntry[2]!));
+    }
+    const threadEntries = path.match(/^\/v1\/threads\/([^/]+)\/entries$/);
+    if (request.method === "GET" && threadEntries) {
+      return this.threadEntries(decodeURIComponent(threadEntries[1]!), url);
+    }
 
     const serverResponse = path.match(/^\/v1\/server-requests\/([^/]+)\/responses$/);
     if (request.method === "POST" && serverResponse) {
@@ -227,6 +271,293 @@ export class RestApiServer {
       }, 410);
     }
     return json(page);
+  }
+
+  private async appStateStream(request: Request, url: URL): Promise<Response> {
+    const initialized = await this.bridge.ensureReady();
+    if ("error" in initialized) return outcome(initialized, 200);
+    const state = this.requiredSseState();
+    const cursor = streamCursor(request, url);
+    let subscription = this.openSseSubscription("app", state, { cursor });
+    let reset: SseSnapshotReset | undefined;
+    if (subscription.gap || subscription.overflowed) {
+      reset = {
+        reason: subscription.restarted ? "stream_restarted" : "cursor_expired",
+        requestedCursor: cursor?.cursor ?? subscription.cursor,
+      };
+      subscription.close();
+      subscription = this.openSseSubscription("app", state);
+    } else if (cursor) {
+      return this.replayStream(request, subscription, new SseEventMapper("app", state), "app");
+    }
+
+    try {
+      const id = sseEventId(subscription.streamId, subscription.cursor);
+      const projects = snapshotProjects(state.projects());
+      const threads = visibleAppThreads(state);
+      const pending = this.bridge.pendingServerRequests().map((serverRequest) => serverRequestStreamDto(serverRequest, state));
+      const frames = [
+        encodeSseEvent(undefined, "snapshot.begin", {
+          scope: "app",
+          streamId: subscription.streamId,
+          cursor: subscription.cursor,
+          ...(reset ? { reset } : {}),
+        }, SSE_RETRY_MS),
+        ...batchSseItems(undefined, "snapshot.projects", "projects", projects, { scope: "app" }),
+        ...batchSseItems(undefined, "snapshot.threads", "threads", threads, { scope: "app" }),
+        ...batchSseItems(undefined, "snapshot.requests", "requests", pending, { scope: "app" }),
+        encodeSseEvent(id, "snapshot.end", {
+          scope: "app",
+          streamId: subscription.streamId,
+          cursor: subscription.cursor,
+        }),
+      ];
+      const mapper = new SseEventMapper("app", state, undefined, [], pending.map((item) => item.id));
+      return this.connectSse(request, subscription, mapper, frames);
+    } catch (error) {
+      subscription.close();
+      throw error;
+    }
+  }
+
+  private async threadStream(request: Request, threadId: string, url: URL): Promise<Response> {
+    const state = this.requiredSseState();
+    if (!state.threads().some((thread) => thread.threadId === threadId && !thread.deleted)) {
+      return json({ error: { code: "not_found", message: "thread not found" } }, 404);
+    }
+
+    const tail = boundedPositiveIntegerQuery(url, "tail", 50, 50);
+    const cursor = streamCursor(request, url);
+    let subscription = this.openSseSubscription("thread", state, { cursor, threadId });
+    let reset: SseSnapshotReset | undefined;
+    if (subscription.gap || subscription.overflowed) {
+      reset = {
+        reason: subscription.restarted ? "stream_restarted" : "cursor_expired",
+        requestedCursor: cursor?.cursor ?? subscription.cursor,
+      };
+      subscription.close();
+      subscription = this.openSseSubscription("thread", state, { threadId });
+    } else if (cursor) {
+      return this.replayStream(request, subscription, new SseEventMapper("thread", state, threadId), "thread", threadId);
+    }
+
+    const cancelSnapshot = () => subscription.close();
+    request.signal.addEventListener("abort", cancelSnapshot, { once: true });
+    let read: Record<string, unknown> | Response;
+    try {
+      read = await this.readThread(threadId);
+    } catch (error) {
+      subscription.close();
+      throw error;
+    } finally {
+      request.signal.removeEventListener("abort", cancelSnapshot);
+    }
+    if (request.signal.aborted) {
+      subscription.close();
+      return json({ error: { code: "client_closed_request", message: "request was cancelled" } }, 499);
+    }
+    if (read instanceof Response) {
+      subscription.close();
+      return read;
+    }
+    if (subscription.overflowed) {
+      subscription.close();
+      return json({ error: { code: "sse_snapshot_overflow", message: "events exceeded the bounded snapshot handoff buffer" } }, 503);
+    }
+    const stored = state.threads().find((thread) => thread.threadId === threadId && !thread.deleted);
+    if (!stored) {
+      subscription.close();
+      return json({ error: { code: "not_found", message: "thread not found" } }, 404);
+    }
+
+    try {
+      const page = timelinePage(
+        read,
+        undefined,
+        tail,
+        this.bridge.completedItemIds(threadId, subscription.cursor),
+      );
+      const entries = page.data.map((entry) => timelineEntryForStream(entry, threadId));
+      const pending = this.bridge.pendingServerRequests()
+        .map((serverRequest) => serverRequestStreamDto(serverRequest, state))
+        .filter((serverRequest) => serverRequest.threadId === threadId);
+      const id = sseEventId(subscription.streamId, subscription.cursor);
+      const frames = [
+        encodeSseEvent(undefined, "snapshot.begin", {
+          scope: "thread",
+          threadId,
+          streamId: subscription.streamId,
+          cursor: subscription.cursor,
+          ...(reset ? { reset } : {}),
+        }, SSE_RETRY_MS),
+        ...batchSseItems(undefined, "snapshot.threads", "threads", [appThreadDto(stored)], { scope: "thread", threadId }),
+        ...batchSseItems(undefined, "snapshot.entries", "entries", entries, { scope: "thread", threadId }),
+        ...batchSseItems(undefined, "snapshot.requests", "requests", pending, { scope: "thread", threadId }),
+        encodeSseEvent(id, "snapshot.end", {
+          scope: "thread",
+          threadId,
+          streamId: subscription.streamId,
+          cursor: subscription.cursor,
+          history: {
+            count: entries.length,
+            tail,
+            olderCursor: page.olderCursor,
+            hasOlder: page.hasOlder,
+          },
+        }),
+      ];
+      const mapper = new SseEventMapper(
+        "thread",
+        state,
+        threadId,
+        entries.map((entry) => entry.id),
+        pending.map((serverRequest) => serverRequest.id),
+      );
+      return this.connectSse(request, subscription, mapper, frames);
+    } catch (error) {
+      subscription.close();
+      throw error;
+    }
+  }
+
+  private async threadEntries(threadId: string, url: URL): Promise<Response> {
+    const limit = boundedPositiveIntegerQuery(url, "limit", 50, 100);
+    const rawBefore = url.searchParams.get("before");
+    let before: ReturnType<typeof decodeTimelineCursor> | undefined;
+    if (rawBefore !== null) {
+      try {
+        before = decodeTimelineCursor(rawBefore);
+      } catch (error) {
+        throw new HttpError(400, error instanceof Error ? error.message : String(error));
+      }
+    }
+    const thread = await this.readThread(threadId);
+    if (thread instanceof Response) return thread;
+    let page: ReturnType<typeof timelinePage>;
+    try {
+      page = timelinePage(thread, before, limit, this.bridge.completedItemIds(threadId));
+    } catch (error) {
+      if (error instanceof TimelineCursorExpiredError) {
+        return json({
+          error: {
+            code: "timeline_cursor_expired",
+            message: "history cursor boundary is no longer available; refresh the selected thread",
+          },
+        }, 410);
+      }
+      throw error;
+    }
+    return json({
+      ...page,
+      data: page.data.map((entry) => timelineEntryForStream(entry, threadId)),
+    });
+  }
+
+  private async threadEntry(threadId: string, entryId: string): Promise<Response> {
+    const thread = await this.readThread(threadId);
+    if (thread instanceof Response) return thread;
+    const entry = timelineEntries(thread, this.bridge.completedItemIds(threadId))
+      .find((candidate) => candidate.id === entryId);
+    return entry
+      ? json({ entry })
+      : json({ error: { code: "not_found", message: "timeline entry not found" } }, 404);
+  }
+
+  private async readThread(threadId: string): Promise<Record<string, unknown> | Response> {
+    const rpcOutcome = await this.bridge.call("thread/read", { threadId, includeTurns: true });
+    if ("error" in rpcOutcome) return outcome(rpcOutcome, 200);
+    const result = asRecord(rpcOutcome.result);
+    const thread = asRecord(result.thread);
+    if (typeof thread.id !== "string") {
+      return json({ error: { code: "invalid_upstream_response", message: "thread/read returned no thread" } }, 502);
+    }
+    return thread;
+  }
+
+  private replayStream(
+    request: Request,
+    subscription: EventSubscription,
+    mapper: SseEventMapper,
+    scope: "app" | "thread",
+    threadId?: string,
+  ): Response {
+    const id = sseEventId(subscription.streamId, subscription.cursor);
+    const frame = encodeSseEvent(id, "stream.ready", {
+      scope,
+      ...(threadId ? { threadId } : {}),
+      streamId: subscription.streamId,
+      cursor: subscription.cursor,
+      replay: true,
+    }, SSE_RETRY_MS);
+    return this.connectSse(request, subscription, mapper, [frame]);
+  }
+
+  private connectSse(
+    request: Request,
+    subscription: EventSubscription,
+    mapper: SseEventMapper,
+    initial: Uint8Array[],
+  ): Response {
+    try {
+      let session!: SseSession;
+      session = new SseSession(initial, {
+        onClose: () => {
+          subscription.close();
+          this.sseHub.remove(session);
+        },
+      });
+      const started = subscription.start((record) => {
+        const mapped = mapper.map(record);
+        if (!mapped) return true;
+        try {
+          return session.enqueue(encodeSseEvent(
+            sseEventId(subscription.streamId, record.cursor),
+            mapped.event,
+            { ...mapped.data, cursor: record.cursor },
+          ));
+        } catch (error) {
+          this.log(`closing SSE client after encoding failure: ${error instanceof Error ? error.message : String(error)}`);
+          session.close();
+          return false;
+        }
+      });
+      if (!started) {
+        session.close();
+        return json({ error: { code: "sse_queue_overflow", message: "reconnect from a fresh snapshot" } }, 503);
+      }
+      this.sseHub.add(session);
+      return session.response(request.signal);
+    } catch (error) {
+      subscription.close();
+      throw error;
+    }
+  }
+
+  private openSseSubscription(
+    scope: "app" | "thread",
+    state: AggregatorState,
+    options: {
+      cursor?: { cursor: number; streamId?: string } | undefined;
+      threadId?: string | undefined;
+    } = {},
+  ): EventSubscription {
+    const bufferMapper = new SseEventMapper(scope, state, options.threadId);
+    return this.bridge.openEventSubscription(
+      options.cursor?.cursor,
+      options.cursor?.streamId,
+      (record) => bufferMapper.map(record) !== null,
+    );
+  }
+
+  private requiredSseState(): AggregatorState {
+    if (!this.options.state) throw new HttpError(503, "SSE state projection is unavailable", "sse_unavailable");
+    return this.options.state;
+  }
+
+  private disableSseIdleTimeout(request: Request): void {
+    // Bun defaults HTTP requests to a 10-second idle timeout. SSE heartbeats are intentionally
+    // less frequent, so leave timeout/liveness ownership with the heartbeat hub and abort signal.
+    this.server?.timeout(request, 0);
   }
 
   private serverRequests(request: Request): Response {
@@ -369,12 +700,42 @@ function positiveIntegerQuery(url: URL, name: string, fallback: number): number 
   return parsed;
 }
 
+function boundedPositiveIntegerQuery(url: URL, name: string, fallback: number, maximum: number): number {
+  const value = positiveIntegerQuery(url, name, fallback);
+  if (value > maximum) throw new HttpError(400, `${name} must not exceed ${maximum}`);
+  return value;
+}
+
 function nonNegativeIntegerQuery(url: URL, name: string, fallback: number): number {
   const value = url.searchParams.get(name);
   if (value === null) return fallback;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) throw new HttpError(400, `${name} must be a non-negative integer`);
   return parsed;
+}
+
+function streamCursor(request: Request, url: URL): { cursor: number; streamId?: string } | undefined {
+  const lastEventId = request.headers.get("last-event-id");
+  if (lastEventId) {
+    try {
+      const parsed = parseSseEventId(lastEventId);
+      return { cursor: parsed.cursor, streamId: parsed.streamId };
+    } catch (error) {
+      throw new HttpError(400, error instanceof Error ? error.message : String(error));
+    }
+  }
+  const rawCursor = url.searchParams.get("cursor") ?? url.searchParams.get("after");
+  if (rawCursor === null) return undefined;
+  const cursor = Number(rawCursor);
+  if (!Number.isSafeInteger(cursor) || cursor < 0) throw new HttpError(400, "cursor must be a non-negative integer");
+  const streamId = url.searchParams.get("stream") ?? undefined;
+  return streamId === undefined ? { cursor } : { cursor, streamId };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
 }
 
 function authorized(request: Request, token: string | undefined): boolean {
@@ -423,7 +784,7 @@ function json(value: unknown, status = 200, headers: Record<string, string> = {}
 }
 
 class HttpError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly code = "bad_request") {
     super(message);
   }
 }

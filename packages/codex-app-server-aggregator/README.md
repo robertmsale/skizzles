@@ -199,12 +199,19 @@ base_url = "http://{{SKIZZLES_CONTAINER_HOST}}:8080/v1"
 | <code>/v1/threads/loaded</code> | Aggregate loaded IDs |
 | <code>/v1/machines</code> | Host/container fleet and per-thread project/mode bindings |
 | <code>/v1/events</code> | Bounded daemon-local notification journal |
+| <code>/v1/app-state/stream</code> | Global project, thread, status, and pending-request SSE stream |
+| <code>/v1/threads/:id/stream?tail=50</code> | Selected-thread timeline snapshot and live SSE stream |
+| <code>/v1/threads/:id/entries</code> | Cursor-paginated finalized timeline entries |
+| <code>/v1/threads/:id/entries/:entryId</code> | Hydrate one finalized entry, including oversized SSE items |
 | <code>/v1/server-requests</code> | Pending backend callbacks |
 | <code>/healthz</code> | Process liveness without backend initialization |
 
 The board is served only on an unauthenticated loopback listener. <code>--http-token-env</code>
 enables bearer-authenticated REST and disables board assets. Non-loopback binds require a token.
-Fork and resume deliberately have no mode option.
+The SSE routes use the same bearer/origin gate as every other REST route; credentials remain in the
+<code>Authorization</code> header, never query parameters. Fork and resume deliberately have no mode
+option. See [PROTOCOL.md](PROTOCOL.md#server-sent-events) for the typed stream, replay, heartbeat,
+batching, and hydration contract.
 
 ## Persistence and teardown
 
