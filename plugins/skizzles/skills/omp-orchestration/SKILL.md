@@ -50,5 +50,7 @@ ompctl approvals deny <project> <approval>
 
 Local access uses the daemon's mode-0600 Unix socket. Remote access requires
 `OMP_ORCHESTRATION_URL` and `OMP_ORCHESTRATION_TOKEN`; never print the token or
-put it in command arguments. A missing daemon is an availability failure, not
+put it in command arguments. HTTPS works for any remote host; HTTP is restricted
+to loopback or literal Tailscale IPs in `100.64.0.0/10` and
+`fd7a:115c:a1e0::/48`. A missing daemon is an availability failure, not
 permission to start OMP directly or mutate its SQLite database/session files.

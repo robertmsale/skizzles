@@ -1,4 +1,4 @@
-import { connect } from "node:net";
+import { connect, isIP } from "node:net";
 import { SOCKET_PATH } from "./config.ts";
 import { isRecord, type DaemonResponse } from "./protocol.ts";
 
@@ -85,12 +85,26 @@ function parseDaemonResponse(text: string, source: string): DaemonResponse {
   return parsed as unknown as DaemonResponse;
 }
 
-function normalizeRemoteUrl(value: string): string {
+export function normalizeRemoteUrl(value: string): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("OMP_ORCHESTRATION_URL is invalid"); }
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname))) {
-    throw new Error("remote OMP orchestration requires HTTPS (HTTP is allowed only for loopback)");
+  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const httpAllowed = url.protocol === "http:" && (isLoopbackHost(hostname) || isTailscaleAddress(hostname));
+  if (url.protocol !== "https:" && !httpAllowed) {
+    throw new Error("remote OMP orchestration requires HTTPS or an HTTP loopback/Tailscale IP endpoint");
   }
   if (url.username || url.password || url.search || url.hash) throw new Error("OMP_ORCHESTRATION_URL must not contain credentials, query, or fragment");
   return url.toString().replace(/\/$/, "");
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function isTailscaleAddress(hostname: string): boolean {
+  const family = isIP(hostname);
+  if (family === 6) return hostname.startsWith("fd7a:115c:a1e0:");
+  if (family !== 4) return false;
+  const [first, second] = hostname.split(".").map(Number);
+  return first === 100 && second! >= 64 && second! <= 127;
 }

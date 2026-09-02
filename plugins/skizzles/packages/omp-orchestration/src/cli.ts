@@ -72,9 +72,10 @@ var init_protocol = __esm(() => {
 var exports_client = {};
 __export(exports_client, {
   CLIENT_DEADLINE_MS: () => CLIENT_DEADLINE_MS,
-  daemonRequest: () => daemonRequest
+  daemonRequest: () => daemonRequest,
+  normalizeRemoteUrl: () => normalizeRemoteUrl
 });
-import { connect } from "net";
+import { connect, isIP } from "net";
 async function daemonRequest(payload, options = {}) {
   const deadlineMs = options.deadlineMs ?? CLIENT_DEADLINE_MS;
   if (!Number.isInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > CLIENT_DEADLINE_MS)
@@ -168,12 +169,26 @@ function normalizeRemoteUrl(value) {
   } catch {
     throw new Error("OMP_ORCHESTRATION_URL is invalid");
   }
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname))) {
-    throw new Error("remote OMP orchestration requires HTTPS (HTTP is allowed only for loopback)");
+  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const httpAllowed = url.protocol === "http:" && (isLoopbackHost(hostname) || isTailscaleAddress(hostname));
+  if (url.protocol !== "https:" && !httpAllowed) {
+    throw new Error("remote OMP orchestration requires HTTPS or an HTTP loopback/Tailscale IP endpoint");
   }
   if (url.username || url.password || url.search || url.hash)
     throw new Error("OMP_ORCHESTRATION_URL must not contain credentials, query, or fragment");
   return url.toString().replace(/\/$/, "");
+}
+function isLoopbackHost(hostname) {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+function isTailscaleAddress(hostname) {
+  const family = isIP(hostname);
+  if (family === 6)
+    return hostname.startsWith("fd7a:115c:a1e0:");
+  if (family !== 4)
+    return false;
+  const [first, second] = hostname.split(".").map(Number);
+  return first === 100 && second >= 64 && second <= 127;
 }
 var CLIENT_DEADLINE_MS = 60000;
 var init_client = __esm(() => {
@@ -196,7 +211,7 @@ ompctl events {list|wait} [--project PROJECT] [--after SEQUENCE] [--limit COUNT]
 
 Environment:
   OMP_ORCHESTRATION_SOCKET  Local mode-0600 Unix socket
-  OMP_ORCHESTRATION_URL     Optional remote HTTPS origin
+  OMP_ORCHESTRATION_URL     Remote HTTPS origin or HTTP loopback/Tailscale IP
   OMP_ORCHESTRATION_TOKEN   Bearer token for remote access`;
 async function execute(argv, env = process.env) {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h")

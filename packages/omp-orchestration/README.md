@@ -86,6 +86,12 @@ The listener exposes public `GET /v1/health`, authenticated
 requests are rejected. Missing credentials, invalid credentials, unauthorized
 projects, invalid requests, and unavailable maintainers remain distinct errors.
 
+Remote `ompctl` clients require HTTPS by default. Plain HTTP is accepted only
+for loopback and literal Tailscale addresses in `100.64.0.0/10` or
+`fd7a:115c:a1e0::/48`; bearer authentication and project authorization still
+apply. This permits direct tailnet access without taking over a Tailscale Serve
+target while rejecting ordinary LAN and public plaintext endpoints.
+
 Ingress events require `source`, `sourceKey`, `kind`, `message`, and optional
 `payload`. The tuple `(project, source, sourceKey)` is unique, so webhook retries
 cannot enqueue the same maintainer message twice.

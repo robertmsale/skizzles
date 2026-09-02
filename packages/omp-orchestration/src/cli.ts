@@ -13,7 +13,7 @@ ompctl events {list|wait} [--project PROJECT] [--after SEQUENCE] [--limit COUNT]
 
 Environment:
   OMP_ORCHESTRATION_SOCKET  Local mode-0600 Unix socket
-  OMP_ORCHESTRATION_URL     Optional remote HTTPS origin
+  OMP_ORCHESTRATION_URL     Remote HTTPS origin or HTTP loopback/Tailscale IP
   OMP_ORCHESTRATION_TOKEN   Bearer token for remote access`;
 
 export async function execute(argv: string[], env: Record<string, string | undefined> = process.env): Promise<unknown> {

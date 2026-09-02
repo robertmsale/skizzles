@@ -668,7 +668,7 @@ async function fixture(): Promise<string> {
       platform: "macOS-apfs",
       launchAgentLabel: "io.github.skizzles.omp-orchestration",
       localTransport: "mode-0600-unix-socket",
-      remoteTransport: "bearer-authenticated-https",
+      remoteTransport: "bearer-authenticated-https-or-tailscale-http",
       publicFunnelAllowed: false,
     },
   }));
