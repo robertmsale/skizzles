@@ -191,6 +191,8 @@ base_url = "http://{{SKIZZLES_CONTAINER_HOST}}:8080/v1"
 
 | Route | Operation |
 | --- | --- |
+| <code>/v1/models</code> | Paginated host model, reasoning-effort, and service-tier catalog |
+| <code>/v1/permission-profiles?cwd=/absolute/project</code> | Paginated host permission-profile catalog for a project CWD |
 | <code>/v1/projects</code> | Project registry |
 | <code>/v1/threads</code> | Aggregate list or mode-selecting thread start |
 | <code>/v1/threads/:id</code> | Read/delete |
@@ -212,6 +214,12 @@ The SSE routes use the same bearer/origin gate as every other REST route; creden
 <code>Authorization</code> header, never query parameters. Fork and resume deliberately have no mode
 option. See [PROTOCOL.md](PROTOCOL.md#server-sent-events) for the typed stream, replay, heartbeat,
 batching, and hydration contract.
+
+Catalog routes preserve the app-server pagination contract with <code>cursor</code> and
+<code>limit</code>. <code>/v1/models</code> also accepts <code>includeHidden</code> and returns each
+model's supported reasoning efforts and service tiers. <code>/v1/permission-profiles</code> accepts
+<code>cwd</code> because profile availability is project-sensitive. Both routes are served by the
+single host app-server backend and forward its results without adding permissive defaults.
 
 ## Persistence and teardown
 

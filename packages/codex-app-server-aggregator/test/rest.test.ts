@@ -16,6 +16,54 @@ afterEach(() => {
 });
 
 describe("aggregator REST API", () => {
+  test("proxies paginated model and CWD-sensitive permission catalogs from the host backend", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    const hostFactory = new RestFactory("host");
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      containerFactory: new RestFactory(),
+      hostFactory,
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    try {
+      await daemon.start();
+      const origin = daemon.httpUrl!.origin;
+
+      const models = await fetchJson(`${origin}/v1/models?cursor=model-page-2&limit=25&includeHidden=true`);
+      expect(models).toMatchObject({
+        status: 200,
+        body: { data: [{ id: "fake-model", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }] },
+      });
+      expect(hostFactory.transport.request("model/list")?.params).toEqual({
+        cursor: "model-page-2",
+        limit: 25,
+        includeHidden: true,
+      });
+
+      const profiles = await fetchJson(
+        `${origin}/v1/permission-profiles?cwd=${encodeURIComponent(cwd)}&cursor=profile-page-2&limit=10`,
+      );
+      expect(profiles).toMatchObject({
+        status: 200,
+        body: { data: [{ id: "local-dev", allowed: true }] },
+      });
+      expect(hostFactory.transport.request("permissionProfile/list")?.params).toEqual({
+        cwd,
+        cursor: "profile-page-2",
+        limit: 10,
+      });
+
+      const malformed = await fetchJson(`${origin}/v1/models?includeHidden=yes`);
+      expect(malformed).toMatchObject({ status: 400, body: { error: { code: "bad_request" } } });
+      const wrongMethod = await fetchJson(`${origin}/v1/permission-profiles`, { method: "POST" });
+      expect(wrongMethod.status).toBe(405);
+    } finally {
+      await daemon.close();
+    }
+  });
+
   test("initializes the host backend before serving a first-request global SSE stream", async () => {
     const directory = temporaryDirectory();
     const cwd = join(directory, "project");
@@ -721,7 +769,34 @@ class RestFactory implements BackendFactory {
       return;
     }
     if (message.method === "model/list") {
-      this.transport.emit({ id: message.id, result: { data: [{ id: "fake-model" }], nextCursor: null } });
+      this.transport.emit({
+        id: message.id,
+        result: {
+          data: [{
+            id: "fake-model",
+            model: "fake-model",
+            displayName: "Fake model",
+            description: "Fixture model",
+            hidden: false,
+            supportedReasoningEfforts: [{ reasoningEffort: "high", description: "Deep reasoning" }],
+            defaultReasoningEffort: "high",
+            serviceTiers: [{ id: "standard", name: "Standard", description: "Standard tier" }],
+            defaultServiceTier: "standard",
+            isDefault: true,
+          }],
+          nextCursor: null,
+        },
+      });
+      return;
+    }
+    if (message.method === "permissionProfile/list") {
+      this.transport.emit({
+        id: message.id,
+        result: {
+          data: [{ id: "local-dev", description: "Local development", allowed: true }],
+          nextCursor: null,
+        },
+      });
       return;
     }
     if (message.method === "turn/start") {

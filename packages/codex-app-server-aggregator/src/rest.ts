@@ -120,6 +120,8 @@ export class RestApiServer {
     if (request.method === "GET" && path === "/healthz") {
       return json({ ok: true });
     }
+    if (path === "/v1/models") return this.models(request, url);
+    if (path === "/v1/permission-profiles") return this.permissionProfiles(request, url);
     if (path === "/v1/projects") return this.projects(request, url);
     if (request.method === "GET" && path === "/v1/machines") return this.machines();
     if (request.method === "GET" && path === "/v1/events") return this.events(url);
@@ -221,6 +223,16 @@ export class RestApiServer {
       return outcome(await this.bridge.call("skizzles/project/remove", { cwd }), 200);
     }
     return methodNotAllowed("GET, POST, DELETE");
+  }
+
+  private async models(request: Request, url: URL): Promise<Response> {
+    if (request.method !== "GET") return methodNotAllowed("GET");
+    return outcome(await this.bridge.call("model/list", modelListParams(url)), 200);
+  }
+
+  private async permissionProfiles(request: Request, url: URL): Promise<Response> {
+    if (request.method !== "GET") return methodNotAllowed("GET");
+    return outcome(await this.bridge.call("permissionProfile/list", permissionProfileListParams(url)), 200);
   }
 
   private async threads(request: Request, url: URL): Promise<Response> {
@@ -645,6 +657,27 @@ function listParams(url: URL): Record<string, unknown> {
   if (modelProviders.length) params.modelProviders = modelProviders;
   const sourceKinds = url.searchParams.getAll("sourceKind");
   if (sourceKinds.length) params.sourceKinds = sourceKinds;
+  return params;
+}
+
+function catalogPageParams(url: URL): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  copyStringQuery(url, params, "cursor");
+  if (url.searchParams.has("limit")) params.limit = positiveIntegerQuery(url, "limit", 100);
+  return params;
+}
+
+function modelListParams(url: URL): Record<string, unknown> {
+  const params = catalogPageParams(url);
+  if (url.searchParams.has("includeHidden")) {
+    params.includeHidden = booleanQuery(url, "includeHidden", false);
+  }
+  return params;
+}
+
+function permissionProfileListParams(url: URL): Record<string, unknown> {
+  const params = catalogPageParams(url);
+  copyStringQuery(url, params, "cwd");
   return params;
 }
 
