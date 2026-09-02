@@ -32,16 +32,20 @@ describe("OMP orchestration installer", () => {
   test("host install writes no bearer secret into its LaunchAgent", async () => {
     const root = await fixture();
     const fakeLaunchctl = join(root, "bin/launchctl");
+    const fakeBun = join(root, "bin/bun");
     const fakeOmp = join(root, "bin/omp");
     await Bun.write(fakeLaunchctl, "#!/bin/sh\nexit 0\n");
+    await Bun.write(fakeBun, "#!/bin/sh\nexit 0\n");
     await Bun.write(fakeOmp, "#!/bin/sh\nexit 0\n");
     await chmod(fakeLaunchctl, 0o755);
+    await chmod(fakeBun, 0o755);
     await chmod(fakeOmp, 0o755);
     const env = { ...fixtureEnv(root), PATH: join(root, "bin") };
     const install = runInstaller([], env);
     expect(install.exitCode).toBe(0);
     const plist = await readFile(join(root, "home/Library/LaunchAgents/io.github.skizzles.omp-orchestration.plist"), "utf8");
     expect(plist).not.toContain("OMP_ORCHESTRATION_HTTP_TOKEN");
+    expect(plist).toContain(`<string>${fakeBun}</string>`);
     expect(plist).toContain("<key>OMP_BINARY</key>");
     expect(plist).toContain("scripts/launch.ts");
     await rm(fakeOmp);

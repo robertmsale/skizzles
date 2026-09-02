@@ -57,6 +57,7 @@ if (uninstall) {
 if (existingReceipt) await validateOwned(existingReceipt);
 else if (await optionalLstat(installRoot)) throw new Error(`refusing unowned installation directory ${installRoot}`);
 const ompBinary = clientOnly ? undefined : await resolveOmpBinary();
+const bunBinary = clientOnly ? undefined : await resolveBunBinary();
 const version = await packageVersion();
 const links = [
   { path: join(binRoot, "ompctl"), target: join(runtimeRoot, "src/cli.ts") },
@@ -95,7 +96,7 @@ let launchAgent: Receipt["launchAgent"];
 let httpTokenStored = existingReceipt?.httpTokenStored ?? false;
 if (!clientOnly) {
   if (tokenFromStdin) { await storeHttpToken(); httpTokenStored = true; }
-  const plist = launchAgentPlist(join(runtimeRoot, "scripts/launch.ts"), ompBinary!);
+  const plist = launchAgentPlist(join(runtimeRoot, "scripts/launch.ts"), bunBinary!, ompBinary!);
   await mkdir(dirname(launchAgentPath), { recursive: true, mode: 0o755 });
   await assertReplaceableFile(launchAgentPath, existingReceipt?.launchAgent);
   await writeFile(launchAgentPath, plist, { mode: 0o600 });
@@ -246,12 +247,22 @@ async function deleteHttpToken(): Promise<void> {
   });
 }
 
-function launchAgentPlist(launchPath: string, ompPath: string): string {
+function launchAgentPlist(launchPath: string, bunPath: string, ompPath: string): string {
   const inherited = [
     "OMP_ORCHESTRATION_HOME", "OMP_ORCHESTRATION_SOCKET", "OMP_ORCHESTRATION_DATABASE",
     "OMP_ORCHESTRATION_HTTP_PORT", "OMP_ORCHESTRATION_HTTP_HOST", "OMP_ORCHESTRATION_HTTP_PROJECTS",
   ].flatMap((name) => process.env[name] ? [`<key>${name}</key><string>${xml(process.env[name]!)}</string>`] : []);
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${launchAgentLabel}</string>\n<key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(launchPath)}</string></array>\n<key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(operatorHome!)}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>OMP_BINARY</key><string>${xml(ompPath)}</string>${inherited.join("")}</dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ProcessType</key><string>Background</string>\n<key>StandardOutPath</key><string>${xml(join(operatorHome!, "Library/Logs/omp-orchestrationd.log"))}</string>\n<key>StandardErrorPath</key><string>${xml(join(operatorHome!, "Library/Logs/omp-orchestrationd.error.log"))}</string>\n</dict></plist>\n`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${launchAgentLabel}</string>\n<key>ProgramArguments</key><array><string>${xml(bunPath)}</string><string>${xml(launchPath)}</string></array>\n<key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(operatorHome!)}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>OMP_BINARY</key><string>${xml(ompPath)}</string>${inherited.join("")}</dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ProcessType</key><string>Background</string>\n<key>StandardOutPath</key><string>${xml(join(operatorHome!, "Library/Logs/omp-orchestrationd.log"))}</string>\n<key>StandardErrorPath</key><string>${xml(join(operatorHome!, "Library/Logs/omp-orchestrationd.error.log"))}</string>\n</dict></plist>\n`;
+}
+
+async function resolveBunBinary(): Promise<string> {
+  const configured = process.env.BUN_BINARY?.trim();
+  const candidate = configured ? configured.startsWith("/") ? configured : Bun.which(configured) : Bun.which("bun") ?? process.execPath;
+  if (!candidate || !candidate.startsWith("/") || /[\0\r\n]/.test(candidate)) {
+    throw new Error("Could not resolve an absolute Bun binary; set BUN_BINARY to its absolute path");
+  }
+  try { await access(candidate, constants.X_OK); } catch { throw new Error(`Bun binary is not executable: ${candidate}`); }
+  return candidate;
 }
 
 async function resolveOmpBinary(): Promise<string> {
