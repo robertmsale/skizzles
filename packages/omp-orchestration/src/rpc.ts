@@ -83,6 +83,7 @@ export class OmpRpcClient {
   private stopped = false;
   private stderr = "";
   private protocolV2 = false;
+  private active = false;
 
   constructor(private readonly options: OmpRpcClientOptions) {}
 
@@ -91,6 +92,7 @@ export class OmpRpcClient {
   async start(): Promise<Record<string, unknown>> {
     if (this.process) throw new OmpRpcError("OMP RPC client is already started");
     this.stopped = false;
+    this.active = false;
     const child = Bun.spawn(this.options.command, {
       cwd: this.options.cwd,
       env: { ...process.env, ...this.options.env },
@@ -109,12 +111,14 @@ export class OmpRpcClient {
     void child.exited.then(async (code) => {
       const wasCurrent = this.process === child;
       if (wasCurrent) {
+        const notifyExit = this.active && !this.stopped;
+        this.active = false;
         this.process = undefined;
         this.sink = undefined;
         const error = new OmpRpcError(`OMP exited with code ${code}${this.stderr ? `: ${this.stderr}` : ""}`);
         this.rejectPending(error);
         if (!this.stopped) rejectReady(error);
-        await this.options.onExit?.(code, this.stderr);
+        if (notifyExit) await this.options.onExit?.(code, this.stderr);
       }
     });
 
@@ -127,7 +131,9 @@ export class OmpRpcClient {
       this.protocolV2 = true;
       await this.request("negotiate_protocol", { protocolVersion: 2 });
       await this.request("set_subagent_subscription", { level: "events" });
-      return await this.getState();
+      const state = await this.getState();
+      this.active = true;
+      return state;
     } catch (error) {
       await this.stop();
       throw error;
@@ -136,6 +142,7 @@ export class OmpRpcClient {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.active = false;
     const child = this.process;
     this.process = undefined;
     const sink = this.sink;

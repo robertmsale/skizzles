@@ -65,6 +65,55 @@ describe("OmpManager", () => {
     await manager.stop();
     state.close();
   });
+
+  test("serializes maintainer startup across projects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "skizzles-omp-start-queue-"));
+    temporaryRoots.push(root);
+    const log = join(root, "startup.log");
+    const fake = join(root, "omp");
+    await Bun.write(fake, `#!${process.execPath}\nimport { appendFileSync } from "node:fs";\nimport { createInterface } from "node:readline";\nconst cwd=process.cwd();appendFileSync(${JSON.stringify(log)},"start:"+cwd+"\\n");setTimeout(()=>{appendFileSync(${JSON.stringify(log)},"ready:"+cwd+"\\n");console.log(JSON.stringify({type:"ready",supportedProtocolVersions:[1,2],maxFrameBytes:1048576,maxReassembledFrameBytes:67108864}));},75);const rl=createInterface({input:process.stdin});rl.on("line",line=>{const x=JSON.parse(line);const data=x.type==="get_state"?{sessionId:cwd,sessionFile:cwd+"/session.jsonl",isStreaming:false}:undefined;console.log(JSON.stringify({id:x.id,type:"response",command:x.type,success:true,...(data?{data}:{})}));});\n`);
+    await chmod(fake, 0o755);
+    const first = join(root, "first");
+    const second = join(root, "second");
+    await Promise.all([mkdir(first), mkdir(second)]);
+    const state = new OrchestrationState(":memory:");
+    for (const [id, cwd] of [["first", first], ["second", second]] as const) {
+      state.saveProject({ id, name: id, cwd, remote: null, baseBranch: "main", model: null, thinking: null, autoPublish: false, enabled: true });
+    }
+    const manager = new OmpManager(state, { ompBinary: fake, projectStateRoot: (id) => join(root, "runtime", id) });
+    await manager.start();
+    const lifecycle = (await readFile(log, "utf8")).trim().split("\n").map((line) => {
+      const [phase] = line.split(":", 1);
+      return `${phase}:${line.slice(line.lastIndexOf("/") + 1)}`;
+    });
+    expect(lifecycle).toEqual(["start:first", "ready:first", "start:second", "ready:second"]);
+    await manager.stop();
+    state.close();
+  });
+
+  test("retries a failed maintainer handshake", async () => {
+    const root = await mkdtemp(join(tmpdir(), "skizzles-omp-start-retry-"));
+    temporaryRoots.push(root);
+    const marker = join(root, "attempted");
+    const fake = join(root, "omp");
+    await Bun.write(fake, `#!${process.execPath}\nimport { existsSync,writeFileSync } from "node:fs";\nimport { createInterface } from "node:readline";\nif(!existsSync(${JSON.stringify(marker)})){writeFileSync(${JSON.stringify(marker)},"");setInterval(()=>{},1000);}else{console.log(JSON.stringify({type:"ready",supportedProtocolVersions:[1,2],maxFrameBytes:1048576,maxReassembledFrameBytes:67108864}));const rl=createInterface({input:process.stdin});rl.on("line",line=>{const x=JSON.parse(line);const data=x.type==="get_state"?{sessionId:"recovered",sessionFile:${JSON.stringify(join(root, "session.jsonl"))},isStreaming:false}:undefined;console.log(JSON.stringify({id:x.id,type:"response",command:x.type,success:true,...(data?{data}:{})}));});}\n`);
+    await chmod(fake, 0o755);
+    const repo = join(root, "repo");
+    await mkdir(repo);
+    const state = new OrchestrationState(":memory:");
+    state.saveProject({ id: "retry", name: "retry", cwd: repo, remote: null, baseBranch: "main", model: null, thinking: null, autoPublish: false, enabled: true });
+    const manager = new OmpManager(state, {
+      ompBinary: fake,
+      projectStateRoot: (id) => join(root, "runtime", id),
+      startupTimeoutMs: 500,
+    });
+    await manager.start();
+    expect(state.maintainer("retry")).toMatchObject({ state: "failed", restartCount: 1 });
+    await waitUntil(() => state.maintainer("retry")?.state === "ready", 4_000);
+    expect(state.maintainer("retry")).toMatchObject({ state: "ready", sessionId: "recovered", restartCount: 1 });
+    await manager.stop();
+    state.close();
+  });
 });
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {

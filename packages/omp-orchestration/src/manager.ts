@@ -22,24 +22,29 @@ export class OmpManager {
   readonly projects: ProjectRegistry;
   readonly publisher: PullRequestPublisher;
   private readonly runtimes = new Map<string, Runtime>();
+  private readonly launching = new Map<string, Runtime>();
   private readonly starts = new Map<string, Promise<void>>();
+  private launchQueue: Promise<void> = Promise.resolve();
   private readonly ingressDeliveries = new Map<number, Promise<void>>();
   private readonly eventEmitter = new EventEmitter();
   private shuttingDown = false;
   private readonly ompBinary: string;
   private readonly resolveProjectStateRoot: (projectId: string) => string;
   private readonly maintainerPromptPath: string;
+  private readonly startupTimeoutMs: number;
 
   constructor(readonly state: OrchestrationState, options: {
     ompBinary?: string;
     projectStateRoot?: (projectId: string) => string;
     maintainerPromptPath?: string;
+    startupTimeoutMs?: number;
   } = {}) {
     this.projects = new ProjectRegistry(state);
     this.publisher = new PullRequestPublisher(state);
     this.ompBinary = options.ompBinary ?? OMP_BINARY;
     this.resolveProjectStateRoot = options.projectStateRoot ?? projectStateRoot;
     this.maintainerPromptPath = options.maintainerPromptPath ?? resolve(import.meta.dir, "../prompts/maintainer.md");
+    this.startupTimeoutMs = options.startupTimeoutMs ?? 45_000;
     this.eventEmitter.setMaxListeners(0);
   }
 
@@ -56,12 +61,15 @@ export class OmpManager {
 
   async stop(): Promise<void> {
     this.shuttingDown = true;
-    await Promise.allSettled([...this.runtimes.values()].map(async (runtime) => {
+    const active = new Set([...this.runtimes.values(), ...this.launching.values()]);
+    await Promise.allSettled([...active].map(async (runtime) => {
       runtime.stopping = true;
       await runtime.client.stop();
       this.state.saveMaintainer(runtime.project.id, { state: "stopped", pid: null, heartbeatAt: Date.now() });
     }));
     this.runtimes.clear();
+    this.launching.clear();
+    await Promise.allSettled([...this.starts.values()]);
   }
 
   async registerProject(input: RegisterProjectInput): Promise<Project> {
@@ -88,18 +96,29 @@ export class OmpManager {
 
   async startProject(projectId: string): Promise<void> {
     if (this.runtimes.has(projectId)) return;
+    if (this.shuttingDown) throw new ServiceError("daemon is shutting down", "unavailable", 503);
     const project = this.requireProject(projectId);
     if (!project.enabled) throw new ServiceError("project is stopped", "unavailable", 503);
     const pending = this.starts.get(projectId);
     if (pending) return pending;
-    const start = this.launchProject(projectId).finally(() => this.starts.delete(projectId));
-    this.starts.set(projectId, start);
-    return start;
+    const start = this.launchQueue.then(async () => {
+      if (this.shuttingDown || !this.state.project(projectId)?.enabled) return;
+      await this.launchProject(projectId);
+    });
+    this.launchQueue = start.catch(() => undefined);
+    const tracked = start.finally(() => this.starts.delete(projectId));
+    this.starts.set(projectId, tracked);
+    return tracked;
   }
 
   async stopProject(projectId: string): Promise<void> {
     this.requireProject(projectId);
     this.state.setProjectEnabled(projectId, false);
+    const launching = this.launching.get(projectId);
+    if (launching) {
+      launching.stopping = true;
+      await launching.client.stop();
+    }
     await this.starts.get(projectId)?.catch(() => undefined);
     const runtime = this.runtimes.get(projectId);
     if (!runtime) {
@@ -249,10 +268,12 @@ export class OmpManager {
     const client = new OmpRpcClient({
       command,
       cwd: project.cwd,
+      startupTimeoutMs: this.startupTimeoutMs,
       onFrame: (frame) => this.handleFrame(project, frame),
       onExit: (code, stderr) => this.handleExit(runtime, code, stderr),
     });
     runtime.client = client;
+    this.launching.set(projectId, runtime);
     try {
       const rpcState = await client.start();
       if (this.shuttingDown || !this.state.project(projectId)?.enabled) {
@@ -274,11 +295,18 @@ export class OmpManager {
       });
       this.emit(this.state.appendEvent(projectId, "maintainer.ready", { pid: client.pid, sessionId: data.sessionId }));
     } catch (error) {
-      runtime.stopping = true;
+      if (runtime.stopping || this.shuttingDown || !this.state.project(projectId)?.enabled) {
+        this.state.saveMaintainer(projectId, { state: "stopped", pid: null, heartbeatAt: Date.now() });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
-      this.state.saveMaintainer(projectId, { state: "failed", pid: null, heartbeatAt: Date.now(), lastError: message });
-      this.emit(this.state.appendEvent(projectId, "maintainer.failed", { error: message }));
+      const restartCount = (this.state.maintainer(projectId)?.restartCount ?? 0) + 1;
+      this.state.saveMaintainer(projectId, { state: "failed", pid: null, heartbeatAt: Date.now(), restartCount, lastError: message });
+      this.emit(this.state.appendEvent(projectId, "maintainer.failed", { error: message, restartCount }));
+      this.scheduleRestart(projectId, restartCount);
       throw error;
+    } finally {
+      if (this.launching.get(projectId) === runtime) this.launching.delete(projectId);
     }
   }
 
@@ -290,11 +318,7 @@ export class OmpManager {
     this.state.saveMaintainer(runtime.project.id, { state: "failed", pid: null, heartbeatAt: Date.now(), restartCount, lastError: stderr || `OMP exited with code ${code}` });
     this.emit(this.state.appendEvent(runtime.project.id, "maintainer.exited", { code, restartCount, stderr }));
     if (!this.state.project(runtime.project.id)?.enabled) return;
-    const delay = Math.min(60_000, 1_000 * 2 ** Math.min(6, restartCount - 1));
-    await Bun.sleep(delay);
-    if (!this.shuttingDown && this.state.project(runtime.project.id)?.enabled) {
-      await this.startProject(runtime.project.id).catch(() => undefined);
-    }
+    this.scheduleRestart(runtime.project.id, restartCount);
   }
 
   private async handleFrame(project: Project, frame: Record<string, unknown>): Promise<void> {
@@ -353,6 +377,16 @@ export class OmpManager {
   }
 
   private emit(event: JournalEvent): void { this.eventEmitter.emit("event", event); }
+
+  private scheduleRestart(projectId: string, restartCount: number): void {
+    const delay = Math.min(60_000, 1_000 * 2 ** Math.min(6, restartCount - 1));
+    void (async () => {
+      await Bun.sleep(delay);
+      if (!this.shuttingDown && this.state.project(projectId)?.enabled) {
+        await this.startProject(projectId).catch(() => undefined);
+      }
+    })();
+  }
 }
 
 function maintainerConfig(): string {
