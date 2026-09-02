@@ -189,6 +189,13 @@ the SSE <code>id</code> field; only the completed snapshot advances <code>Last-E
 <code>C</code>. A connection lost halfway through a snapshot therefore repeats the snapshot instead
 of incorrectly replaying from an uncommitted baseline.
 
+An unloaded live container thread may be backed by durable state rather than a running app-server.
+The first history or mutation request creates a replacement container with the persisted machine
+identity, resumes that thread from its private Codex home, and then forwards the request. Metadata-
+only <code>thread/read(includeTurns: false)</code> remains snapshot-only and does not wake the
+container. Concurrent wakeups for one machine and concurrent automatic resumes for one thread are
+coalesced.
+
 The app snapshot contains registered projects, every non-deleted thread (including archive state),
 its project CWD, machine ID, host/container execution mode, loaded state, native status metadata,
 the last server-confirmed model, reasoning effort, service tier and active permission profile when

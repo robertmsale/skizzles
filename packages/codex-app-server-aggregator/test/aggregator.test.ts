@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { AppServerAggregator } from "../src/aggregator.ts";
-import type { BackendFactory, BackendTransport, HostBackendFactory } from "../src/backend.ts";
+import type {
+  BackendFactory,
+  BackendTransport,
+  ContainerBackendCreateOptions,
+  HostBackendFactory,
+} from "../src/backend.ts";
 import { CONTAINER_WORKSPACE } from "../src/docker.ts";
 import type { MessageSink } from "../src/jsonl.ts";
 import { ProjectRegistry } from "../src/projects.ts";
@@ -446,6 +451,26 @@ describe("host and container app-server aggregation", () => {
     }
   });
 
+  test("daemon shutdown removes a live container shell but preserves its private state", async () => {
+    const harness = createHarness();
+    let closed = false;
+    try {
+      await initialize(harness);
+      await startThread(harness, PROJECT_A, "container", 2);
+      const container = harness.containerFactory.transports[0]!;
+
+      await harness.aggregator.close();
+      closed = true;
+      expect(container.destroyed).toBe(true);
+      expect(harness.containerFactory.disposedMachineIds).toEqual([]);
+      expect(harness.state.machines().find((machine) => machine.machineId === container.machineId)?.state)
+        .toBe("orphaned");
+    } finally {
+      if (!closed) await harness.aggregator.close();
+      harness.state.close();
+    }
+  });
+
   test("blocks project removal for either mode and keeps the host when a drained project is removed", async () => {
     const harness = createHarness();
     try {
@@ -484,6 +509,7 @@ describe("host and container app-server aggregation", () => {
       });
       expect(resultFor(harness.output.messages, "container-remove-after-archive")).toEqual({ removed: true });
       expect(harness.host.destroyed).toBe(false);
+      expect(harness.containerFactory.disposedProjectCwds).toEqual([PROJECT_A, PROJECT_B]);
     } finally {
       await harness.aggregator.close();
       harness.state.close();
@@ -522,7 +548,7 @@ describe("host and container app-server aggregation", () => {
     }
   });
 
-  test("routes recovered host threads to the new host process but never migrates stale containers", async () => {
+  test("routes recovered host threads and lazily resumes durable container threads", async () => {
     const recovered: StoredThread[] = [
       {
         threadId: "recovered-host",
@@ -563,8 +589,23 @@ describe("host and container app-server aggregation", () => {
         id: 3,
         params: { threadId: "recovered-container", includeTurns: true },
       });
-      expect(errorFor(harness.output.messages, 3).message).toContain("unavailable");
-      expect(harness.containerFactory.transports).toHaveLength(0);
+      expect(resultFor(harness.output.messages, 3)).toMatchObject({
+        thread: { id: "recovered-container", cwd: PROJECT_A },
+      });
+      expect(harness.containerFactory.transports).toHaveLength(1);
+      expect(harness.containerFactory.createOptions).toEqual([{
+        machineId: "old-container-machine",
+        restore: true,
+      }]);
+      const restored = harness.containerFactory.transports[0]!;
+      expect(requestFor(restored, "thread/resume")?.params).toEqual({
+        threadId: "recovered-container",
+        sandbox: "danger-full-access",
+      });
+      expect(requestFor(restored, "thread/read")?.params).toEqual({
+        threadId: "recovered-container",
+        includeTurns: true,
+      });
 
       await harness.aggregator.handle({
         method: "thread/read",
@@ -583,7 +624,7 @@ describe("host and container app-server aggregation", () => {
       expect(resultFor(harness.output.messages, 5)).toEqual({});
       expect(harness.state.threads().find((thread) => thread.threadId === "recovered-container"))
         .toMatchObject({ archived: true, executionMode: "container", machineId: "old-container-machine" });
-      expect(harness.containerFactory.transports).toHaveLength(0);
+      expect(harness.containerFactory.disposedMachineIds).toEqual(["old-container-machine"]);
     } finally {
       await harness.aggregator.close();
       harness.state.close();
@@ -714,19 +755,34 @@ class FakeHostFactory implements HostBackendFactory {
 class FakeContainerFactory implements BackendFactory {
   readonly transports: FakeTransport[] = [];
   readonly projects: RegisteredProject[] = [];
+  readonly createOptions: Array<ContainerBackendCreateOptions | undefined> = [];
+  readonly disposedMachineIds: string[] = [];
+  readonly disposedProjectCwds: string[] = [];
   createFailures = 0;
 
   constructor(private readonly runtime: FakeRuntime) {}
 
-  async create(project: RegisteredProject): Promise<BackendTransport> {
+  async create(
+    project: RegisteredProject,
+    options?: ContainerBackendCreateOptions,
+  ): Promise<BackendTransport> {
     if (this.createFailures > 0) {
       this.createFailures--;
       throw new Error("fake container provisioning failure");
     }
     this.projects.push(project);
-    const transport = new FakeTransport("container", this.transports.length, this.runtime);
+    this.createOptions.push(options);
+    const transport = new FakeTransport("container", this.transports.length, this.runtime, options?.machineId);
     this.transports.push(transport);
     return transport;
+  }
+
+  async disposeState(machineId: string): Promise<void> {
+    this.disposedMachineIds.push(machineId);
+  }
+
+  async disposeProjectCache(project: RegisteredProject): Promise<void> {
+    this.disposedProjectCwds.push(project.cwd);
   }
 }
 
@@ -837,8 +893,9 @@ class FakeTransport implements BackendTransport {
     readonly kind: "host" | "container",
     index: number,
     private readonly runtime: FakeRuntime,
+    machineId?: string,
   ) {
-    this.machineId = kind === "host" ? "host" : `container-machine-${index}`;
+    this.machineId = kind === "host" ? "host" : machineId ?? `container-machine-${index}`;
     this.containerId = kind === "container" ? `container-${index}` : undefined;
     this.workspace = kind === "container" ? CONTAINER_WORKSPACE : undefined;
     this.disposable = kind === "container";

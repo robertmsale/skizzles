@@ -4,7 +4,7 @@ set -eu
 : "${CODEX_AGGREGATOR_REPO_URL:?CODEX_AGGREGATOR_REPO_URL is required}"
 
 workspace="${CODEX_AGGREGATOR_WORKSPACE:-/workspace/repo}"
-mkdir -p "$CODEX_HOME" "$(dirname "$workspace")"
+mkdir -p "$CODEX_HOME" "$workspace"
 
 if [ -d /codex-home-seed ]; then
   cp -R /codex-home-seed/. "$CODEX_HOME"/
@@ -16,10 +16,22 @@ if [ -f "$CODEX_HOME/config.toml" ]; then
   mv "$CODEX_HOME/config.toml.tmp" "$CODEX_HOME/config.toml"
 fi
 
-git clone -- "$CODEX_AGGREGATOR_REPO_URL" "$workspace"
-if [ -n "${CODEX_AGGREGATOR_REPO_REF:-}" ]; then
-  git -C "$workspace" fetch --depth=1 origin "$CODEX_AGGREGATOR_REPO_REF"
-  git -C "$workspace" checkout --detach FETCH_HEAD
+if [ -d "$workspace/.git" ]; then
+  existing_origin="$(git -C "$workspace" remote get-url origin)"
+  if [ "$existing_origin" != "$CODEX_AGGREGATOR_REPO_URL" ]; then
+    echo "persisted workspace origin does not match the registered project" >&2
+    exit 1
+  fi
+else
+  if [ -n "$(ls -A "$workspace")" ]; then
+    echo "persisted workspace is non-empty but is not a Git checkout" >&2
+    exit 1
+  fi
+  git clone -- "$CODEX_AGGREGATOR_REPO_URL" "$workspace"
+  if [ -n "${CODEX_AGGREGATOR_REPO_REF:-}" ]; then
+    git -C "$workspace" fetch --depth=1 origin "$CODEX_AGGREGATOR_REPO_REF"
+    git -C "$workspace" checkout --detach FETCH_HEAD
+  fi
 fi
 
 if [ -n "${CODEX_AGGREGATOR_PROVIDER_COMMAND:-}" ]; then

@@ -97,12 +97,48 @@ describe("aggregator daemon boundary", () => {
 
     await daemon.start();
     expect(removed).toEqual(["container-a"]);
+    expect(state.machines().find((machine) => machine.machineId === "machine-a")?.state).toBe("removed");
     expect(state.machines().find((machine) => machine.machineId === "host")?.state).toBe("removed");
     expect(state.threads()).toMatchObject([{
       threadId: "thread-a",
       loaded: false,
       snapshot: { id: "thread-a", preview: "persisted" },
     }]);
+    await daemon.close();
+  });
+
+  test("retains durable container state for a live thread after removing the stale container shell", async () => {
+    const directory = temporaryDirectory();
+    const socketPath = join(directory, "aggregator.sock");
+    const state = new AggregatorState(join(directory, "aggregator.sqlite3"));
+    const projectCwd = join(directory, "project");
+    state.saveMachine({ machineId: "machine-a", projectCwd, containerId: "container-a" });
+    state.saveThread({
+      threadId: "thread-a",
+      machineId: "machine-a",
+      projectCwd,
+      snapshot: { id: "thread-a", cwd: projectCwd, preview: "persisted" },
+      loaded: true,
+      archived: false,
+      deleted: false,
+    });
+    const removed: string[] = [];
+    const disposed: string[] = [];
+    const daemon = new AggregatorDaemon({
+      socketPath,
+      state,
+      containerFactory: new UnusedFactory(),
+      hostFactory: new UnusedFactory(),
+      removeOrphan: async (machine) => { removed.push(machine.containerId!); },
+      hasRecoverableState: async () => true,
+      disposeMachineState: async (machine) => { disposed.push(machine.machineId); },
+    });
+
+    await daemon.start();
+    expect(removed).toEqual(["container-a"]);
+    expect(disposed).toEqual([]);
+    expect(state.machines().find((machine) => machine.machineId === "machine-a")?.state).toBe("orphaned");
+    expect(state.threads()).toMatchObject([{ threadId: "thread-a", loaded: false }]);
     await daemon.close();
   });
 

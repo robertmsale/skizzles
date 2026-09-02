@@ -28,12 +28,13 @@ describe("Docker backend process boundary", () => {
       dockerBinary,
       hostGatewayMode: "native",
     });
-    const transport = await factory.create({
+    const project = {
       cwd: join(directory, "project"),
       cloneUrl: "https://example.invalid/repository.git",
       createdAt: 1,
       updatedAt: 1,
-    });
+    };
+    const transport = await factory.create(project);
     const backend = new BackendConnection(transport, {
       onNotification: () => undefined,
       onServerRequest: () => undefined,
@@ -50,7 +51,22 @@ describe("Docker backend process boundary", () => {
     const timedOut = await backend.call("model/list", {});
     expect(timedOut).toEqual({ error: { code: -32002, message: "backend request timed out: model/list" } });
     await backend.close();
-    expect(readFileSync(logPath, "utf8")).toContain("rm --force fake-container");
+    expect(await factory.hasState(transport.machineId)).toBe(true);
+    const restored = await factory.create(project, { machineId: transport.machineId, restore: true });
+    await restored.ready;
+    await restored.destroy();
+    await factory.disposeState(transport.machineId);
+    await factory.disposeState(transport.machineId);
+    expect(await factory.hasState(transport.machineId)).toBe(false);
+
+    const log = readFileSync(logPath, "utf8");
+    expect(log).toContain("rm --force fake-container");
+    expect(log).toContain("dst=/codex-home,volume-nocopy");
+    expect(log).toContain("dst=/workspace/repo,volume-nocopy");
+    expect(log).toContain("dst=/cache,volume-nocopy");
+    expect(log).toContain("BUN_INSTALL_CACHE_DIR=/cache/bun");
+    expect(log.match(/volume create/g)).toHaveLength(3);
+    expect(log.match(/volume rm/g)).toHaveLength(2);
   });
 
   test("uses native backend DNS unless an operator explicitly requests host-gateway", async () => {
@@ -144,17 +160,42 @@ function fakeDockerScript(
   contextHost?: string,
 ): string {
   return `#!/usr/bin/env bun
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
 const contextName = ${JSON.stringify(contextName ?? null)};
 const contextHost = ${JSON.stringify(contextHost ?? null)};
-appendFileSync(${JSON.stringify(logPath)}, args.join(" ") + "\\n");
+const logPath = ${JSON.stringify(logPath)};
+const volumesPath = logPath + ".volumes.json";
+const volumes = existsSync(volumesPath) ? JSON.parse(readFileSync(volumesPath, "utf8")) : {};
+appendFileSync(logPath, args.join(" ") + "\\n");
 if (args[0] === "context" && args[1] === "show" && contextName) {
   process.stdout.write(contextName + "\\n");
 } else if (args[0] === "context" && args[1] === "inspect" && contextHost) {
   process.stdout.write(JSON.stringify([{ Endpoints: { docker: { Host: contextHost } } }]) + "\\n");
+} else if (args[0] === "volume" && args[1] === "inspect") {
+  const name = args.at(-1);
+  if (!(name in volumes)) {
+    process.stderr.write("No such volume: " + name + "\\n");
+    process.exitCode = 1;
+  } else {
+    process.stdout.write(JSON.stringify(volumes[name]) + "\\n");
+  }
+} else if (args[0] === "volume" && args[1] === "create") {
+  const name = args.at(-1);
+  const labels = {};
+  for (let index = 2; index < args.length - 1; index++) {
+    if (args[index] !== "--label") continue;
+    const [key, ...parts] = args[++index].split("=");
+    labels[key] = parts.join("=");
+  }
+  volumes[name] = labels;
+  writeFileSync(volumesPath, JSON.stringify(volumes));
+  process.stdout.write(name + "\\n");
+} else if (args[0] === "volume" && args[1] === "rm") {
+  delete volumes[args[2]];
+  writeFileSync(volumesPath, JSON.stringify(volumes));
 } else if (args[0] === "create") {
   process.stdout.write("fake-container\\n");
 } else if (args[0] === "start") {

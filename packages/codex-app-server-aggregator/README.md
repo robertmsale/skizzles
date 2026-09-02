@@ -5,7 +5,7 @@ This package presents one long-lived Codex app-server surface backed by two exec
 | Mode | Backend | Lifetime | Permissions |
 | --- | --- | --- | --- |
 | host | One shared host <code>codex app-server --stdio</code> | Daemon lifetime after initialization | Forward selected permissions, sandbox, and approval policy |
-| container | One Docker app-server per live thread tree | Removed when its tree drains or the daemon stops | Ignore named permissions, force danger-full-access, preserve approval policy |
+| container | One Docker app-server per live thread tree | Container shell is replaceable; durable state is removed when its tree drains | Ignore named permissions, force danger-full-access, preserve approval policy |
 
 <code>thread/start</code> accepts the optional Skizzles field
 <code>skizzlesExecutionMode: "host" | "container"</code>. Container is the default. A created
@@ -94,6 +94,12 @@ The project extensions work before app-server initialization:
 Host starts use the canonical host path. Container starts clone the origin into
 <code>/workspace/repo</code>; host files are never mounted as the container workspace. Returned
 container thread DTOs expose the host CWD for aggregate filtering.
+
+Each container tree owns durable Docker volumes for <code>/codex-home</code> and
+<code>/workspace/repo</code>. The checkout, uncommitted work, rollout files, and Codex session
+history therefore survive replacement of the container process. Fresh trees for the same project
+also share a managed project cache volume for Bun, npm, Cargo, pip/uv, Gradle, and XDG caches;
+project workspaces remain private and are never shared between agents.
 
 The scripted client exposes mode directly:
 
@@ -230,13 +236,17 @@ After a restart:
 
 - the old host process is removed; the new host process reuses logical machine ID
   <code>host</code>, preserving host-thread routing identity;
-- old container writers cannot be reattached, so exact persisted container IDs are cleaned and
-  their threads remain unloaded snapshots;
+- old container writers are not reattached; exact persisted container IDs are cleaned while
+  managed workspace and Codex-home volumes remain;
+- the first history or mutation request for an unloaded live thread lazily creates a replacement
+  container with the same machine ID and resumes the rollout before forwarding the request;
+- pre-volume legacy threads remain readable as metadata snapshots but cannot be resumed;
 - no thread migrates between modes.
 
-Archiving/deleting a drained container tree removes only that container. Archiving a host thread
-never shuts down the shared host app-server. Daemon shutdown closes all live processes and
-containers.
+Archiving/deleting the final live thread in a container tree removes its container and private
+state volumes. Removing a drained project also removes its shared dependency cache. Archiving a
+host thread never shuts down the shared host app-server. Daemon shutdown closes container shells
+while retaining private state for live trees.
 
 ## Validation
 

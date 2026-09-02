@@ -137,6 +137,16 @@ export class Topology {
     return entry !== undefined && !entry.deleted;
   }
 
+  isLoaded(threadId: string): boolean {
+    const entry = this.threads.get(threadId);
+    return entry !== undefined && entry.loaded && !entry.archived && !entry.deleted;
+  }
+
+  isLive(threadId: string): boolean {
+    const entry = this.threads.get(threadId);
+    return entry !== undefined && !entry.archived && !entry.deleted;
+  }
+
   markArchived(threadId: string): void {
     const entry = this.threads.get(threadId);
     if (!entry) return;

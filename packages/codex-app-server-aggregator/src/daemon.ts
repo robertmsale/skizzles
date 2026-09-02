@@ -18,6 +18,8 @@ export type AggregatorDaemonOptions = {
   containerFactory: BackendFactory;
   hostFactory: HostBackendFactory;
   removeOrphan?: (machine: StoredMachine) => Promise<void>;
+  hasRecoverableState?: (machine: StoredMachine) => Promise<boolean>;
+  disposeMachineState?: (machine: StoredMachine) => Promise<void>;
   inspectContainer?: (containerId: string) => Promise<string | null>;
   http?: Omit<RestServerOptions, "log">;
   log?: (message: string) => void;
@@ -190,7 +192,12 @@ export class AggregatorDaemon {
       }
       try {
         await this.options.removeOrphan(machine);
-        this.options.state.markMachine(machine.machineId, "removed");
+        const recoverable = this.options.state.hasLiveThreads(machine.machineId)
+          && await this.options.hasRecoverableState?.(machine) === true;
+        if (!recoverable) {
+          await this.options.disposeMachineState?.(machine);
+          this.options.state.markMachine(machine.machineId, "removed");
+        }
       } catch (error) {
         this.log(`failed to remove orphaned container ${machine.containerId}: ${error instanceof Error ? error.message : String(error)}`);
       }
