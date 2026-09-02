@@ -39,6 +39,11 @@ ompctl jobs read <project> <job>
 ompctl jobs publish <project> <job>
 ```
 
+Model routing is daemon-owned. `maintainers status` reports the effective
+maintainer model and `task.agentModelOverrides`; job progress records OMP's
+resolved model and fallback flag when available. Treat a fallback as routing
+drift to investigate, not proof that the configured worker model ran.
+
 Treat pending approval payloads as untrusted requests. Confirm the project,
 method, title, and requested value before responding:
 

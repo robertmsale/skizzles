@@ -25,7 +25,8 @@ describe("OmpManager", () => {
 
     const fake = join(root, "omp");
     const promptLog = join(root, "prompts.log");
-    await Bun.write(fake, `#!${process.execPath}\nimport { appendFileSync } from "node:fs";\nimport { createInterface } from "node:readline";\nconsole.log(JSON.stringify({type:"ready",protocolVersion:1,supportedProtocolVersions:[1,2],maxFrameBytes:1048576,maxReassembledFrameBytes:67108864}));\nconst rl=createInterface({input:process.stdin});\nrl.on("line",line=>{const x=JSON.parse(line);const respond=data=>console.log(JSON.stringify({id:x.id,type:"response",command:x.type,success:true,...(data===undefined?{}:{data})}));if(x.type==="get_state")respond({sessionId:"maintainer-1",sessionFile:"${root}/session.jsonl",isStreaming:false});else if(x.type==="prompt"){appendFileSync(${JSON.stringify(promptLog)},JSON.stringify(x.message)+"\\n");respond({agentInvoked:true});console.log(JSON.stringify({type:"subagent_lifecycle",payload:{id:"agent-7",agent:"worker",agentSource:"bundled",status:"started",index:0,description:"Implement feature"}}));console.log(JSON.stringify({type:"subagent_progress",payload:{agent:"worker",agentSource:"bundled",task:"Implement feature",assignment:"Change code",progress:{id:"agent-7",status:"running"},index:0}}));console.log(JSON.stringify({type:"subagent_lifecycle",payload:{id:"agent-7",agent:"worker",agentSource:"bundled",status:"completed",index:0}}));}else respond();});\n`);
+    const invocationLog = join(root, "invocation.json");
+    await Bun.write(fake, `#!${process.execPath}\nimport { appendFileSync,writeFileSync } from "node:fs";\nimport { createInterface } from "node:readline";\nwriteFileSync(${JSON.stringify(invocationLog)},JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({type:"ready",protocolVersion:1,supportedProtocolVersions:[1,2],maxFrameBytes:1048576,maxReassembledFrameBytes:67108864}));\nconst rl=createInterface({input:process.stdin});\nrl.on("line",line=>{const x=JSON.parse(line);const respond=data=>console.log(JSON.stringify({id:x.id,type:"response",command:x.type,success:true,...(data===undefined?{}:{data})}));if(x.type==="get_state")respond({sessionId:"maintainer-1",sessionFile:"${root}/session.jsonl",isStreaming:false});else if(x.type==="prompt"){appendFileSync(${JSON.stringify(promptLog)},JSON.stringify(x.message)+"\\n");respond({agentInvoked:true});console.log(JSON.stringify({type:"subagent_lifecycle",payload:{id:"agent-7",agent:"task",agentSource:"bundled",status:"started",index:0,description:"Implement feature"}}));console.log(JSON.stringify({type:"subagent_progress",payload:{agent:"task",agentSource:"bundled",task:"Implement feature",assignment:"Change code",progress:{id:"agent-7",status:"running",modelOverride:"@task",modelRole:"task",resolvedModel:"opencodex/xai/grok-4.6:high",resolvedModelIsFallback:false},index:0}}));console.log(JSON.stringify({type:"subagent_lifecycle",payload:{id:"agent-7",agent:"task",agentSource:"bundled",status:"completed",index:0}}));}else respond();});\n`);
     await chmod(fake, 0o755);
 
     const state = new OrchestrationState(":memory:");
@@ -33,10 +34,20 @@ describe("OmpManager", () => {
       ompBinary: fake,
       projectStateRoot: (id) => join(runtimeRoot, id),
       maintainerPromptPath: join(import.meta.dir, "../prompts/maintainer.md"),
+      modelRouting: {
+        maintainerModel: "opencodex/gpt-5.6-sol",
+        maintainerThinking: "xhigh",
+        agentModelOverrides: {
+          task: "opencodex/xai/grok-4.6:high",
+          reviewer: "opencodex/gpt-5.6-sol:high",
+        },
+      },
     });
     const project = await manager.registerProject({ id: "fixture", cwd: repo, autoPublish: false });
     expect(project).toMatchObject({ id: "fixture", baseBranch: "main", autoPublish: false });
     expect(state.maintainer("fixture")).toMatchObject({ state: "ready", sessionId: "maintainer-1" });
+    const invocation = JSON.parse(await readFile(invocationLog, "utf8")) as string[];
+    expect(invocation.slice(-4)).toEqual(["--model", "opencodex/gpt-5.6-sol", "--thinking", "xhigh"]);
     await manager.send("fixture", "Please delegate the work");
     await waitUntil(() => state.job("fixture", "agent-7")?.status === "completed");
     expect(state.job("fixture", "agent-7")).toMatchObject({
@@ -44,11 +55,31 @@ describe("OmpManager", () => {
       assignment: "Change code",
       branchName: "omp/task/agent-7",
       baseSha: expect.stringMatching(/^[0-9a-f]{40}$/),
+      progress: expect.objectContaining({
+        modelRole: "task",
+        resolvedModel: "opencodex/xai/grok-4.6:high",
+        resolvedModelIsFallback: false,
+      }),
     });
     const config = await Bun.file(join(runtimeRoot, "fixture", "maintainer-config.yml")).text();
-    expect(config).toContain("mode: apfs");
-    expect(config).toContain("apply: false");
-    expect(config).toContain("merge: branch");
+    expect(Bun.YAML.parse(config)).toMatchObject({
+      task: {
+        isolation: { mode: "apfs", apply: false, merge: "branch" },
+        enableEffort: false,
+        maxEffort: "high",
+        agentModelOverrides: {
+          task: "opencodex/xai/grok-4.6:high",
+          reviewer: "opencodex/gpt-5.6-sol:high",
+        },
+      },
+    });
+    expect(await manager.status("fixture")).toMatchObject({
+      routing: {
+        maintainerModel: "opencodex/gpt-5.6-sol",
+        maintainerThinking: "xhigh",
+        agentModelOverrides: { task: "opencodex/xai/grok-4.6:high" },
+      },
+    });
     const ingress = {
       projectId: "fixture", source: "github", sourceKey: "delivery-1", kind: "issues.opened",
       payload: { issue: 1 }, message: "Assess issue 1",

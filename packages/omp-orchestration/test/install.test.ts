@@ -40,13 +40,23 @@ describe("OMP orchestration installer", () => {
     await chmod(fakeLaunchctl, 0o755);
     await chmod(fakeBun, 0o755);
     await chmod(fakeOmp, 0o755);
-    const env = { ...fixtureEnv(root), PATH: join(root, "bin") };
+    const env = {
+      ...fixtureEnv(root),
+      PATH: join(root, "bin"),
+      OMP_ORCHESTRATION_MAINTAINER_MODEL: "opencodex/gpt-5.6-sol",
+      OMP_ORCHESTRATION_MAINTAINER_THINKING: "xhigh",
+      OMP_ORCHESTRATION_AGENT_MODELS: '{"task":"opencodex/xai/grok-4.6:high"}',
+    };
     const install = runInstaller([], env);
     expect(install.exitCode).toBe(0);
     const plist = await readFile(join(root, "home/Library/LaunchAgents/io.github.skizzles.omp-orchestration.plist"), "utf8");
     expect(plist).not.toContain("OMP_ORCHESTRATION_HTTP_TOKEN");
     expect(plist).toContain(`<string>${fakeBun}</string>`);
     expect(plist).toContain("<key>OMP_BINARY</key>");
+    expect(plist).toContain("<key>OMP_ORCHESTRATION_MAINTAINER_MODEL</key>");
+    expect(plist).toContain("opencodex/gpt-5.6-sol");
+    expect(plist).toContain("<key>OMP_ORCHESTRATION_AGENT_MODELS</key>");
+    expect(plist).toContain("opencodex/xai/grok-4.6:high");
     expect(plist).toContain("scripts/launch.ts");
     await rm(fakeOmp);
     expect(runInstaller(["--client-only"], env).exitCode).toBe(0);

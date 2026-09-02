@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { OMP_BINARY, projectStateRoot } from "./config.ts";
+import { MODEL_ROUTING, OMP_BINARY, projectStateRoot, type AgentModelSelector, type ModelRoutingPolicy } from "./config.ts";
 import { checkedCommand, runCommand } from "./process.ts";
 import { ServiceError, isRecord, type Approval, type JournalEvent, type Project } from "./protocol.ts";
 import { ProjectRegistry, type RegisterProjectInput } from "./projects.ts";
@@ -32,12 +32,14 @@ export class OmpManager {
   private readonly resolveProjectStateRoot: (projectId: string) => string;
   private readonly maintainerPromptPath: string;
   private readonly startupTimeoutMs: number;
+  private readonly modelRouting: ModelRoutingPolicy;
 
   constructor(readonly state: OrchestrationState, options: {
     ompBinary?: string;
     projectStateRoot?: (projectId: string) => string;
     maintainerPromptPath?: string;
     startupTimeoutMs?: number;
+    modelRouting?: ModelRoutingPolicy;
   } = {}) {
     this.projects = new ProjectRegistry(state);
     this.publisher = new PullRequestPublisher(state);
@@ -45,6 +47,7 @@ export class OmpManager {
     this.resolveProjectStateRoot = options.projectStateRoot ?? projectStateRoot;
     this.maintainerPromptPath = options.maintainerPromptPath ?? resolve(import.meta.dir, "../prompts/maintainer.md");
     this.startupTimeoutMs = options.startupTimeoutMs ?? 45_000;
+    this.modelRouting = options.modelRouting ?? MODEL_ROUTING;
     this.eventEmitter.setMaxListeners(0);
   }
 
@@ -153,7 +156,7 @@ export class OmpManager {
     if (runtime) {
       try { rpcState = (await runtime.client.getState()).data ?? null; } catch {}
     }
-    return { project, maintainer, rpcState };
+    return { project, maintainer, routing: this.resolveRouting(project), rpcState };
   }
 
   async history(projectId: string, cursor?: string, limit = 50): Promise<unknown> {
@@ -244,7 +247,8 @@ export class OmpManager {
     const sessionRoot = resolve(root, "sessions");
     const configPath = resolve(root, "maintainer-config.yml");
     await mkdir(sessionRoot, { recursive: true, mode: 0o700 });
-    await Bun.write(configPath, maintainerConfig());
+    const routing = this.resolveRouting(project);
+    await Bun.write(configPath, maintainerConfig(routing.agentModelOverrides));
     const promptPath = this.maintainerPromptPath;
     const command = [
       this.ompBinary,
@@ -257,8 +261,8 @@ export class OmpManager {
       "--tools", "read,grep,glob,lsp,task,todo,web_search",
       "--no-title",
     ];
-    if (project.model) command.push("--model", project.model);
-    if (project.thinking) command.push("--thinking", project.thinking);
+    if (routing.maintainerModel) command.push("--model", routing.maintainerModel);
+    if (routing.maintainerThinking) command.push("--thinking", routing.maintainerThinking);
     if (previous?.sessionFile && existsSync(previous.sessionFile)) command.push("--resume", previous.sessionFile);
     const runtime: Runtime = {
       project,
@@ -387,10 +391,25 @@ export class OmpManager {
       }
     })();
   }
+
+  private resolveRouting(project: Project): {
+    maintainerModel: string | null;
+    maintainerThinking: string | null;
+    agentModelOverrides: Readonly<Record<string, AgentModelSelector>>;
+  } {
+    return {
+      maintainerModel: project.model ?? this.modelRouting.maintainerModel ?? null,
+      maintainerThinking: project.thinking ?? this.modelRouting.maintainerThinking ?? null,
+      agentModelOverrides: this.modelRouting.agentModelOverrides,
+    };
+  }
 }
 
-function maintainerConfig(): string {
-  return `task:\n  isolation:\n    mode: apfs\n    apply: false\n    merge: branch\n    commits: generic\n  eager: true\n  batch: true\n  maxConcurrency: 4\nasync:\n  enabled: true\n  maxJobs: 8\n`;
+function maintainerConfig(agentModelOverrides: Readonly<Record<string, AgentModelSelector>>): string {
+  const routes = Object.entries(agentModelOverrides).sort(([left], [right]) => left.localeCompare(right));
+  const renderedRoutes = routes.length === 0 ? "" : `  agentModelOverrides:\n${routes.map(([agent, selector]) =>
+    `    ${JSON.stringify(agent)}: ${JSON.stringify(selector)}`).join("\n")}\n`;
+  return `task:\n  isolation:\n    mode: apfs\n    apply: false\n    merge: branch\n    commits: generic\n  eager: true\n  batch: true\n  enableEffort: false\n  maxEffort: high\n  maxConcurrency: 4\n${renderedRoutes}async:\n  enabled: true\n  maxJobs: 8\n`;
 }
 
 async function currentHead(cwd: string): Promise<string | null> {

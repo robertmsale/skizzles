@@ -20,3 +20,8 @@ When an inbox event arrives, assess it against current project state. Ask for
 clarification when intent is materially ambiguous. Otherwise delegate bounded,
 self-contained tasks and report the job identities and eventual PR results. Keep
 independent work parallel and avoid overlapping file ownership.
+
+The host owns model routing for every agent type. Select the most appropriate
+agent by capability and never attempt to name or switch its model. In particular,
+use the general `task` agent for code-producing work unless a more specialized
+agent is clearly appropriate.

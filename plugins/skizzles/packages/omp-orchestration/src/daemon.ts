@@ -8,6 +8,7 @@ import { dirname as dirname2 } from "path";
 
 // packages/omp-orchestration/src/config.ts
 import { isAbsolute, join, resolve } from "path";
+var THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]);
 function requiredHome() {
   const value = process.env.HOME?.trim();
   if (!value || !isAbsolute(value))
@@ -33,6 +34,58 @@ function parseAllowedProjects(value) {
   const projects = value?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
   return projects.length > 0 ? new Set(projects) : undefined;
 }
+function parseModelRouting(env) {
+  const maintainerModel = optionalSelector(env.OMP_ORCHESTRATION_MAINTAINER_MODEL, "OMP_ORCHESTRATION_MAINTAINER_MODEL");
+  const maintainerThinking = env.OMP_ORCHESTRATION_MAINTAINER_THINKING?.trim() || undefined;
+  if (maintainerThinking && !THINKING_LEVELS.has(maintainerThinking)) {
+    throw new Error("OMP_ORCHESTRATION_MAINTAINER_THINKING is invalid");
+  }
+  const rawOverrides = env.OMP_ORCHESTRATION_AGENT_MODELS?.trim();
+  if (!rawOverrides)
+    return { maintainerModel, maintainerThinking, agentModelOverrides: Object.freeze({}) };
+  let parsed;
+  try {
+    parsed = JSON.parse(rawOverrides);
+  } catch {
+    throw new Error("OMP_ORCHESTRATION_AGENT_MODELS must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OMP_ORCHESTRATION_AGENT_MODELS must be a JSON object");
+  }
+  const overrides = {};
+  for (const [agent, value] of Object.entries(parsed)) {
+    if (!/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(agent)) {
+      throw new Error(`OMP_ORCHESTRATION_AGENT_MODELS contains invalid agent ${JSON.stringify(agent)}`);
+    }
+    if (typeof value === "string") {
+      overrides[agent] = requiredSelector(value, `model selector for ${agent}`);
+      continue;
+    }
+    if (!Array.isArray(value) || value.length === 0) {
+      throw new Error(`model selectors for ${agent} must be a string or non-empty string array`);
+    }
+    overrides[agent] = Object.freeze(value.map((selector) => {
+      if (typeof selector !== "string")
+        throw new Error(`model selectors for ${agent} must contain only strings`);
+      return requiredSelector(selector, `model selector for ${agent}`);
+    }));
+  }
+  return { maintainerModel, maintainerThinking, agentModelOverrides: Object.freeze(overrides) };
+}
+function optionalSelector(value, label) {
+  const selector = value?.trim();
+  if (!selector)
+    return;
+  if (selector.length > 255 || /[\0\r\n]/.test(selector))
+    throw new Error(`${label} is invalid`);
+  return selector;
+}
+function requiredSelector(value, label) {
+  const selector = optionalSelector(value, label);
+  if (!selector)
+    throw new Error(`${label} is invalid`);
+  return selector;
+}
 var userHome = requiredHome();
 var ORCHESTRATION_HOME = absolutePath(process.env.OMP_ORCHESTRATION_HOME, join(userHome, ".omp-orchestration"), "OMP_ORCHESTRATION_HOME");
 var SOCKET_PATH = absolutePath(process.env.OMP_ORCHESTRATION_SOCKET, join(ORCHESTRATION_HOME, "omp-orchestration.sock"), "OMP_ORCHESTRATION_SOCKET");
@@ -42,6 +95,7 @@ var HTTP_PORT = parsePort(process.env.OMP_ORCHESTRATION_HTTP_PORT);
 var HTTP_HOST = process.env.OMP_ORCHESTRATION_HTTP_HOST?.trim() || "127.0.0.1";
 var HTTP_TOKEN = process.env.OMP_ORCHESTRATION_HTTP_TOKEN?.trim() || undefined;
 var HTTP_ALLOWED_PROJECTS = parseAllowedProjects(process.env.OMP_ORCHESTRATION_HTTP_PROJECTS);
+var MODEL_ROUTING = parseModelRouting(process.env);
 function projectStateRoot(projectId) {
   return join(ORCHESTRATION_HOME, "projects", projectId);
 }
@@ -997,6 +1051,7 @@ class OmpManager {
   resolveProjectStateRoot;
   maintainerPromptPath;
   startupTimeoutMs;
+  modelRouting;
   constructor(state, options = {}) {
     this.state = state;
     this.projects = new ProjectRegistry(state);
@@ -1005,6 +1060,7 @@ class OmpManager {
     this.resolveProjectStateRoot = options.projectStateRoot ?? projectStateRoot;
     this.maintainerPromptPath = options.maintainerPromptPath ?? resolve3(import.meta.dir, "../prompts/maintainer.md");
     this.startupTimeoutMs = options.startupTimeoutMs ?? 45000;
+    this.modelRouting = options.modelRouting ?? MODEL_ROUTING;
     this.eventEmitter.setMaxListeners(0);
   }
   async start() {
@@ -1118,7 +1174,7 @@ class OmpManager {
         rpcState = (await runtime.client.getState()).data ?? null;
       } catch {}
     }
-    return { project, maintainer, rpcState };
+    return { project, maintainer, routing: this.resolveRouting(project), rpcState };
   }
   async history(projectId, cursor, limit = 50) {
     const runtime = await this.requireRuntime(projectId);
@@ -1218,7 +1274,8 @@ ${input.message}`);
     const sessionRoot = resolve3(root, "sessions");
     const configPath = resolve3(root, "maintainer-config.yml");
     await mkdir(sessionRoot, { recursive: true, mode: 448 });
-    await Bun.write(configPath, maintainerConfig());
+    const routing = this.resolveRouting(project);
+    await Bun.write(configPath, maintainerConfig(routing.agentModelOverrides));
     const promptPath = this.maintainerPromptPath;
     const command = [
       this.ompBinary,
@@ -1238,10 +1295,10 @@ ${input.message}`);
       "read,grep,glob,lsp,task,todo,web_search",
       "--no-title"
     ];
-    if (project.model)
-      command.push("--model", project.model);
-    if (project.thinking)
-      command.push("--thinking", project.thinking);
+    if (routing.maintainerModel)
+      command.push("--model", routing.maintainerModel);
+    if (routing.maintainerThinking)
+      command.push("--thinking", routing.maintainerThinking);
     if (previous?.sessionFile && existsSync(previous.sessionFile))
       command.push("--resume", previous.sessionFile);
     const runtime = {
@@ -1384,8 +1441,20 @@ ${input.message}`);
       }
     })();
   }
+  resolveRouting(project) {
+    return {
+      maintainerModel: project.model ?? this.modelRouting.maintainerModel ?? null,
+      maintainerThinking: project.thinking ?? this.modelRouting.maintainerThinking ?? null,
+      agentModelOverrides: this.modelRouting.agentModelOverrides
+    };
+  }
 }
-function maintainerConfig() {
+function maintainerConfig(agentModelOverrides) {
+  const routes = Object.entries(agentModelOverrides).sort(([left], [right]) => left.localeCompare(right));
+  const renderedRoutes = routes.length === 0 ? "" : `  agentModelOverrides:
+${routes.map(([agent, selector]) => `    ${JSON.stringify(agent)}: ${JSON.stringify(selector)}`).join(`
+`)}
+`;
   return `task:
   isolation:
     mode: apfs
@@ -1394,8 +1463,10 @@ function maintainerConfig() {
     commits: generic
   eager: true
   batch: true
+  enableEffort: false
+  maxEffort: high
   maxConcurrency: 4
-async:
+${renderedRoutes}async:
   enabled: true
   maxJobs: 8
 `;

@@ -43,8 +43,61 @@ function parseAllowedProjects(value) {
   const projects = value?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
   return projects.length > 0 ? new Set(projects) : undefined;
 }
-var userHome, ORCHESTRATION_HOME, SOCKET_PATH, DATABASE_PATH, OMP_BINARY, HTTP_PORT, HTTP_HOST, HTTP_TOKEN, HTTP_ALLOWED_PROJECTS;
+function parseModelRouting(env) {
+  const maintainerModel = optionalSelector(env.OMP_ORCHESTRATION_MAINTAINER_MODEL, "OMP_ORCHESTRATION_MAINTAINER_MODEL");
+  const maintainerThinking = env.OMP_ORCHESTRATION_MAINTAINER_THINKING?.trim() || undefined;
+  if (maintainerThinking && !THINKING_LEVELS.has(maintainerThinking)) {
+    throw new Error("OMP_ORCHESTRATION_MAINTAINER_THINKING is invalid");
+  }
+  const rawOverrides = env.OMP_ORCHESTRATION_AGENT_MODELS?.trim();
+  if (!rawOverrides)
+    return { maintainerModel, maintainerThinking, agentModelOverrides: Object.freeze({}) };
+  let parsed;
+  try {
+    parsed = JSON.parse(rawOverrides);
+  } catch {
+    throw new Error("OMP_ORCHESTRATION_AGENT_MODELS must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OMP_ORCHESTRATION_AGENT_MODELS must be a JSON object");
+  }
+  const overrides = {};
+  for (const [agent, value] of Object.entries(parsed)) {
+    if (!/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(agent)) {
+      throw new Error(`OMP_ORCHESTRATION_AGENT_MODELS contains invalid agent ${JSON.stringify(agent)}`);
+    }
+    if (typeof value === "string") {
+      overrides[agent] = requiredSelector(value, `model selector for ${agent}`);
+      continue;
+    }
+    if (!Array.isArray(value) || value.length === 0) {
+      throw new Error(`model selectors for ${agent} must be a string or non-empty string array`);
+    }
+    overrides[agent] = Object.freeze(value.map((selector) => {
+      if (typeof selector !== "string")
+        throw new Error(`model selectors for ${agent} must contain only strings`);
+      return requiredSelector(selector, `model selector for ${agent}`);
+    }));
+  }
+  return { maintainerModel, maintainerThinking, agentModelOverrides: Object.freeze(overrides) };
+}
+function optionalSelector(value, label) {
+  const selector = value?.trim();
+  if (!selector)
+    return;
+  if (selector.length > 255 || /[\0\r\n]/.test(selector))
+    throw new Error(`${label} is invalid`);
+  return selector;
+}
+function requiredSelector(value, label) {
+  const selector = optionalSelector(value, label);
+  if (!selector)
+    throw new Error(`${label} is invalid`);
+  return selector;
+}
+var THINKING_LEVELS, userHome, ORCHESTRATION_HOME, SOCKET_PATH, DATABASE_PATH, OMP_BINARY, HTTP_PORT, HTTP_HOST, HTTP_TOKEN, HTTP_ALLOWED_PROJECTS, MODEL_ROUTING;
 var init_config = __esm(() => {
+  THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]);
   userHome = requiredHome();
   ORCHESTRATION_HOME = absolutePath(process.env.OMP_ORCHESTRATION_HOME, join(userHome, ".omp-orchestration"), "OMP_ORCHESTRATION_HOME");
   SOCKET_PATH = absolutePath(process.env.OMP_ORCHESTRATION_SOCKET, join(ORCHESTRATION_HOME, "omp-orchestration.sock"), "OMP_ORCHESTRATION_SOCKET");
@@ -54,6 +107,7 @@ var init_config = __esm(() => {
   HTTP_HOST = process.env.OMP_ORCHESTRATION_HTTP_HOST?.trim() || "127.0.0.1";
   HTTP_TOKEN = process.env.OMP_ORCHESTRATION_HTTP_TOKEN?.trim() || undefined;
   HTTP_ALLOWED_PROJECTS = parseAllowedProjects(process.env.OMP_ORCHESTRATION_HTTP_PROJECTS);
+  MODEL_ROUTING = parseModelRouting(process.env);
 });
 
 // packages/omp-orchestration/src/protocol.ts

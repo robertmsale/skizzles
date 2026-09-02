@@ -51,6 +51,26 @@ OMP may report a platform fallback if APFS isolation is unavailable; treat that
 as an operational defect for this deployment rather than silently changing the
 Skizzles policy.
 
+## Model routing
+
+Maintainer and subagent models are a daemon-owned policy, independent of the
+operator's global interactive OMP defaults. Set an optional maintainer default
+and a JSON object of OMP agent names to model selectors:
+
+```sh
+OMP_ORCHESTRATION_MAINTAINER_MODEL=opencodex/gpt-5.6-sol
+OMP_ORCHESTRATION_MAINTAINER_THINKING=xhigh
+OMP_ORCHESTRATION_AGENT_MODELS='{"task":"opencodex/xai/grok-4.6:high","reviewer":"opencodex/gpt-5.6-sol:high"}'
+```
+
+Per-project `model` and `thinking` values override the maintainer defaults. The
+daemon renders agent routes into each private OMP config overlay using
+`task.agentModelOverrides`; selectors may also be non-empty arrays for ordered
+fallbacks. Per-task effort selection is disabled and capped at `high`, so an
+agent cannot silently override a pinned reasoning level. `maintainers status`
+reports the effective routing policy, while each job's durable progress records
+OMP's requested role, resolved model, and fallback flag when OMP supplies them.
+
 ## Source operation
 
 ```sh
@@ -121,4 +141,5 @@ LaunchAgent environment, so Bun-managed installations do not depend on an
 interactive shell PATH. To enable HTTP ingress, set the documented port/project
 variables and pipe a freshly generated token into `--http-token-stdin`; the
 installer stores it in macOS Keychain and the launch wrapper retrieves it at
-startup without writing the bearer token into the plist.
+startup without writing the bearer token into the plist. Model-routing variables
+are non-secret host configuration and are preserved in the generated LaunchAgent.

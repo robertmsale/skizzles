@@ -251,6 +251,7 @@ function launchAgentPlist(launchPath: string, bunPath: string, ompPath: string):
   const inherited = [
     "OMP_ORCHESTRATION_HOME", "OMP_ORCHESTRATION_SOCKET", "OMP_ORCHESTRATION_DATABASE",
     "OMP_ORCHESTRATION_HTTP_PORT", "OMP_ORCHESTRATION_HTTP_HOST", "OMP_ORCHESTRATION_HTTP_PROJECTS",
+    "OMP_ORCHESTRATION_MAINTAINER_MODEL", "OMP_ORCHESTRATION_MAINTAINER_THINKING", "OMP_ORCHESTRATION_AGENT_MODELS",
   ].flatMap((name) => process.env[name] ? [`<key>${name}</key><string>${xml(process.env[name]!)}</string>`] : []);
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${launchAgentLabel}</string>\n<key>ProgramArguments</key><array><string>${xml(bunPath)}</string><string>${xml(launchPath)}</string></array>\n<key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(operatorHome!)}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>OMP_BINARY</key><string>${xml(ompPath)}</string>${inherited.join("")}</dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ProcessType</key><string>Background</string>\n<key>StandardOutPath</key><string>${xml(join(operatorHome!, "Library/Logs/omp-orchestrationd.log"))}</string>\n<key>StandardErrorPath</key><string>${xml(join(operatorHome!, "Library/Logs/omp-orchestrationd.error.log"))}</string>\n</dict></plist>\n`;
 }

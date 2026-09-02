@@ -469,6 +469,7 @@ async function validateOmpOrchestrationDescriptor(repoRoot: string, pluginRoot: 
       launchAgentLabel: "io.github.skizzles.omp-orchestration",
       localTransport: "mode-0600-unix-socket",
       remoteTransport: "bearer-authenticated-https-or-tailscale-http",
+      modelRouting: "daemon-owned-agent-overrides",
       publicFunnelAllowed: false,
     })
   ) {
