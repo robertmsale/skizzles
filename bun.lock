@@ -57,11 +57,12 @@
       "name": "@skizzles/installer",
       "version": "0.1.0",
     },
-    "packages/ompweb-orchestrator": {
-      "name": "@skizzles/ompweb-orchestrator",
+    "packages/omp-orchestration": {
+      "name": "@skizzles/omp-orchestration",
       "version": "0.1.0",
       "bin": {
         "ompctl": "./src/cli.ts",
+        "omp-orchestrationd": "./src/daemon.ts",
       },
     },
     "packages/t3-orchestration": {
@@ -116,7 +117,7 @@
 
     "@skizzles/installer": ["@skizzles/installer@workspace:packages/installer"],
 
-    "@skizzles/ompweb-orchestrator": ["@skizzles/ompweb-orchestrator@workspace:packages/ompweb-orchestrator"],
+    "@skizzles/omp-orchestration": ["@skizzles/omp-orchestration@workspace:packages/omp-orchestration"],
 
     "@skizzles/t3-orchestration": ["@skizzles/t3-orchestration@workspace:packages/t3-orchestration"],
 

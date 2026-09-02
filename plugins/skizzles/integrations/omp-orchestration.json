@@ -1,0 +1,38 @@
+{
+  "id": "omp-orchestration",
+  "integrationContract": 1,
+  "configuredRuntime": "0.1.0",
+  "supportedRuntime": ">=0.1.0 <0.2.0",
+  "ompRuntime": ">=18.0.0 <19.0.0",
+  "versionVerification": "rpc-protocol-v2",
+  "ownership": {
+    "runtimeOwner": "skizzles",
+    "canonicalSource": "packages/omp-orchestration"
+  },
+  "bundled": {
+    "operationalEntrypoint": "packages/omp-orchestration/src/cli.ts",
+    "daemonEntrypoint": "packages/omp-orchestration/src/daemon.ts",
+    "launcher": "skills/omp-orchestration/scripts/ompctl",
+    "hostWiring": "packages/omp-orchestration/scripts/install.ts",
+    "documentation": [
+      "packages/omp-orchestration/README.md"
+    ]
+  },
+  "binaries": {
+    "operational": "ompctl",
+    "daemon": "omp-orchestrationd"
+  },
+  "isolation": {
+    "maintainer": "read-only-tool-surface",
+    "subagents": "omp-native-apfs-clone",
+    "applyBack": false,
+    "artifact": "git-branch"
+  },
+  "host": {
+    "platform": "macOS-apfs",
+    "launchAgentLabel": "io.github.skizzles.omp-orchestration",
+    "localTransport": "mode-0600-unix-socket",
+    "remoteTransport": "bearer-authenticated-https",
+    "publicFunnelAllowed": false
+  }
+}

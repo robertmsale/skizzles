@@ -1,0 +1,4 @@
+interface:
+  display_name: "OMP Orchestration"
+  short_description: "Operate durable OMP project maintainers"
+  default_prompt: "Use $omp-orchestration to inspect an OMP maintainer and its APFS-isolated subagent jobs."

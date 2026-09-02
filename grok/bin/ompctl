@@ -5,8 +5,8 @@ import { dirname, resolve } from "node:path";
 
 const launcherDir = dirname(realpathSync(import.meta.path));
 const runtimeCandidates = [
-  resolve(launcherDir, "../../packages/ompweb-orchestrator/src/cli.ts"),
-  resolve(launcherDir, "../.skizzles/runtime/ompweb-orchestrator/src/cli.ts"),
+  resolve(launcherDir, "../../packages/omp-orchestration/src/cli.ts"),
+  resolve(launcherDir, "../.skizzles/runtime/omp-orchestration/src/cli.ts"),
 ];
 
 function runtime(): string | undefined {
@@ -19,7 +19,7 @@ function runtime(): string | undefined {
 
 const entrypoint = runtime();
 if (!entrypoint) {
-  console.error("Skizzles Grok ompweb orchestrator runtime is unavailable; reinstall the Skizzles Grok harness.");
+  console.error("Skizzles Grok OMP orchestration runtime is unavailable; reinstall the Skizzles Grok harness.");
   process.exit(1);
 }
 

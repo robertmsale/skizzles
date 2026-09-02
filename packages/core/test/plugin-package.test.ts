@@ -30,7 +30,7 @@ describe("deterministic plugin packaging", () => {
       '"@skizzles/t3-orchestration@workspace:packages/t3-orchestration"',
     );
     expect(await readFile(join(repoRoot, "bun.lock"), "utf8")).toContain(
-      '"@skizzles/ompweb-orchestrator@workspace:packages/ompweb-orchestrator"',
+      '"@skizzles/omp-orchestration@workspace:packages/omp-orchestration"',
     );
   });
 
@@ -263,23 +263,28 @@ esac
     });
   });
 
-  test("ships a runnable dependency-self-contained ompweb orchestrator bundle", async () => {
+  test("ships a runnable dependency-self-contained OMP orchestration bundle", async () => {
     const repoRoot = resolve(import.meta.dir, "../../..");
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "skizzles-ompweb-orchestrator-plugin-"));
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "skizzles-omp-orchestration-plugin-"));
     temporaryRoots.push(temporaryRoot);
     const stagedPlugin = join(temporaryRoot, "staged");
     const isolatedPlugin = join(temporaryRoot, "isolated");
     await stagePlugin(repoRoot, stagedPlugin);
     await cp(stagedPlugin, isolatedPlugin, { recursive: true });
 
-    const runtimeRoot = join(isolatedPlugin, "packages/ompweb-orchestrator");
+    const runtimeRoot = join(isolatedPlugin, "packages/omp-orchestration");
     expect(await filesUnder(runtimeRoot)).toEqual([
       "README.md",
       "package.json",
+      "prompts/maintainer.md",
+      "scripts/install.ts",
+      "scripts/launch.ts",
       "src/cli.ts",
+      "src/daemon.ts",
     ]);
     expect(await Bun.file(join(isolatedPlugin, "node_modules")).exists()).toBe(false);
     expect((await stat(join(runtimeRoot, "src/cli.ts"))).mode & 0o111).not.toBe(0);
+    expect((await stat(join(runtimeRoot, "src/daemon.ts"))).mode & 0o111).not.toBe(0);
 
     const result = Bun.spawnSync([process.execPath, join(runtimeRoot, "src/cli.ts"), "--help"], {
       cwd: isolatedPlugin,
@@ -293,7 +298,7 @@ esac
 
     const launcher = Bun.spawnSync([
       process.execPath,
-      join(isolatedPlugin, "skills/ompweb-orchestrator/scripts/ompctl"),
+      join(isolatedPlugin, "skills/omp-orchestration/scripts/ompctl"),
       "--help",
     ], {
       cwd: isolatedPlugin,
@@ -603,13 +608,19 @@ async function fixture(): Promise<string> {
   await write(root, "packages/t3-orchestration/package.json", JSON.stringify({ name: "@skizzles/t3-orchestration", version: "0.1.0" }));
   await write(
     root,
-    "packages/ompweb-orchestrator/src/cli.ts",
+    "packages/omp-orchestration/src/cli.ts",
     "#!/usr/bin/env bun\nif (import.meta.main) console.log(JSON.stringify({ help: 'fixture ompctl' }));\n",
   );
-  await write(root, "packages/ompweb-orchestrator/README.md", "# Fixture ompweb orchestrator\n");
-  await write(root, "packages/ompweb-orchestrator/package.json", JSON.stringify({ name: "@skizzles/ompweb-orchestrator", version: "0.1.0" }));
+  await write(root, "packages/omp-orchestration/src/daemon.ts", "#!/usr/bin/env bun\nsetInterval(() => {}, 1000);\n");
+  await write(root, "packages/omp-orchestration/scripts/install.ts", "console.log('fixture installer');\n");
+  await write(root, "packages/omp-orchestration/scripts/launch.ts", "console.log('fixture launcher');\n");
+  await write(root, "packages/omp-orchestration/prompts/maintainer.md", "# Fixture maintainer\n");
+  await write(root, "packages/omp-orchestration/README.md", "# Fixture OMP orchestration\n");
+  await write(root, "packages/omp-orchestration/package.json", JSON.stringify({ name: "@skizzles/omp-orchestration", version: "0.1.0" }));
   await write(root, "skills/t3-orchestration/scripts/t3ctl", "#!/usr/bin/env bun\nconsole.log('fixture');\n");
   await chmod(join(root, "skills/t3-orchestration/scripts/t3ctl"), 0o755);
+  await write(root, "skills/omp-orchestration/scripts/ompctl", "#!/usr/bin/env bun\nconsole.log('fixture');\n");
+  await chmod(join(root, "skills/omp-orchestration/scripts/ompctl"), 0o755);
   await write(root, "integrations/t3-orchestration.json", JSON.stringify({
     integrationContract: 1,
     configuredRuntime: "0.1.0",
@@ -634,6 +645,30 @@ async function fixture(): Promise<string> {
       localTransport: "mode-0600-unix-socket",
       credentialStore: "macOS-keychain",
       remoteTransport: "tailscale-serve-https",
+      publicFunnelAllowed: false,
+    },
+  }));
+  await write(root, "integrations/omp-orchestration.json", JSON.stringify({
+    integrationContract: 1,
+    configuredRuntime: "0.1.0",
+    supportedRuntime: ">=0.1.0 <0.2.0",
+    ompRuntime: ">=18.0.0 <19.0.0",
+    versionVerification: "rpc-protocol-v2",
+    ownership: { runtimeOwner: "skizzles", canonicalSource: "packages/omp-orchestration" },
+    bundled: {
+      operationalEntrypoint: "packages/omp-orchestration/src/cli.ts",
+      daemonEntrypoint: "packages/omp-orchestration/src/daemon.ts",
+      launcher: "skills/omp-orchestration/scripts/ompctl",
+      hostWiring: "packages/omp-orchestration/scripts/install.ts",
+      documentation: ["packages/omp-orchestration/README.md"],
+    },
+    binaries: { operational: "ompctl", daemon: "omp-orchestrationd" },
+    isolation: { maintainer: "read-only-tool-surface", subagents: "omp-native-apfs-clone", applyBack: false, artifact: "git-branch" },
+    host: {
+      platform: "macOS-apfs",
+      launchAgentLabel: "io.github.skizzles.omp-orchestration",
+      localTransport: "mode-0600-unix-socket",
+      remoteTransport: "bearer-authenticated-https",
       publicFunnelAllowed: false,
     },
   }));

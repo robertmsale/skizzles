@@ -24,7 +24,12 @@ describe("installer CLI target gates", () => {
       roots.push(root);
       const result = Bun.spawnSync({
         cmd: [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), ...invocation],
-        env: { ...process.env, HOME: join(root, "ambient-home"), CODEX_HOME: join(root, "ambient-codex") },
+        env: {
+          ...process.env,
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+          HOME: join(root, "ambient-home"),
+          CODEX_HOME: join(root, "ambient-codex"),
+        },
         stdout: "pipe",
         stderr: "pipe",
       });

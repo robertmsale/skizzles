@@ -122,8 +122,8 @@ function plannedEntries(options: GrokHarnessOptions): InstalledEntry[] {
       fingerprint: "",
     },
     {
-      source: join(sourceRoot, "packages/ompweb-orchestrator"),
-      target: join(grokHome, ".skizzles/runtime/ompweb-orchestrator"),
+      source: join(sourceRoot, "packages/omp-orchestration"),
+      target: join(grokHome, ".skizzles/runtime/omp-orchestration"),
       kind: "directory",
       transfer: options.transfer,
       fingerprint: "",
@@ -213,10 +213,10 @@ function validateReceiptEntries(receipt: GrokHarnessReceipt, grokHome: string): 
       },
     ],
     [
-      join(grokHome, ".skizzles/runtime/ompweb-orchestrator"),
+      join(grokHome, ".skizzles/runtime/omp-orchestration"),
       {
-        source: join(sourceRoot, "packages/ompweb-orchestrator"),
-        target: join(grokHome, ".skizzles/runtime/ompweb-orchestrator"),
+        source: join(sourceRoot, "packages/omp-orchestration"),
+        target: join(grokHome, ".skizzles/runtime/omp-orchestration"),
         kind: "directory" as const,
         transfer: receipt.transfer,
       },
@@ -239,10 +239,6 @@ function validateReceiptEntries(receipt: GrokHarnessReceipt, grokHome: string): 
         transfer: "copy-only" as const,
       },
     ],
-  ]);
-  const ompctlTargets = new Set([
-    join(grokHome, "bin", "ompctl"),
-    join(grokHome, ".skizzles/runtime/ompweb-orchestrator"),
   ]);
   const seen = new Set<string>();
   for (const entry of receipt.entries) {
@@ -282,9 +278,8 @@ function validateReceiptEntries(receipt: GrokHarnessReceipt, grokHome: string): 
       throw new Error(`Grok harness receipt contains an unexpected target: ${target}`);
     }
   }
-  const hasModernOmpctlEntry = [...ompctlTargets].some((target) => seen.has(target));
   for (const target of fixedEntries.keys()) {
-    if (!seen.has(target) && (!ompctlTargets.has(target) || hasModernOmpctlEntry)) {
+    if (!seen.has(target)) {
       throw new Error(`Grok harness receipt is missing an owned target: ${target}`);
     }
   }
