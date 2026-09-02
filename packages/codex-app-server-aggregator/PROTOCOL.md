@@ -191,8 +191,11 @@ of incorrectly replaying from an uncommitted baseline.
 
 The app snapshot contains registered projects, every non-deleted thread (including archive state),
 its project CWD, machine ID, host/container execution mode, loaded state, native status metadata,
-and pending server requests with owning thread/project when known. It never contains historical
-turns. A selected-thread snapshot reads metadata with <code>thread/read(includeTurns: false)</code>
+the last server-confirmed model, reasoning effort, service tier and active permission profile when
+known, and pending server requests with owning thread/project when known. Thread-start responses and
+<code>thread/settings/updated</code> notifications update that persisted configuration projection;
+the latter produces an idempotent <code>thread.upsert</code> for connected clients. It never contains
+historical turns. A selected-thread snapshot reads metadata with <code>thread/read(includeTurns: false)</code>
 and reads history through the upstream cursor-paginated <code>thread/turns/list</code> method; it
 never asks app-server to serialize the full transcript. A newly started thread whose rollout has
 not yet been materialized produces a valid empty history snapshot. Because this pagination method

@@ -453,6 +453,9 @@ export class SseEventMapper {
     if (notification.method === "thread/name/updated") {
       return threadId ? { event: "thread.upsert", data: { thread: threadDtoForId(this.state, threadId) } } : null;
     }
+    if (notification.method === "thread/settings/updated") {
+      return threadId ? { event: "thread.upsert", data: { thread: threadDtoForId(this.state, threadId) } } : null;
+    }
     if (notification.method === "thread/status/changed") {
       if (!threadId) return null;
       if (oversizedBytes !== undefined) {

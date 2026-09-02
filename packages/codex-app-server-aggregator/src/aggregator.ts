@@ -868,6 +868,7 @@ const TOPOLOGY_NOTIFICATION_METHODS = new Set([
   "thread/deleted",
   "thread/closed",
   "thread/name/updated",
+  "thread/settings/updated",
   "turn/started",
   "turn/completed",
   "item/started",

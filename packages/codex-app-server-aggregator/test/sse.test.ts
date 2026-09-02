@@ -619,6 +619,47 @@ describe("aggregator SSE API", () => {
     await reader.cancel();
   });
 
+  test("publishes server-confirmed thread settings as an updated thread projection", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    const reader = new SseReader(await fetch(`${origin}/v1/app-state/stream`));
+    await reader.through("snapshot.end");
+
+    state.saveThread(storedThread("thread-1", {
+      model: "gpt-5.6-luna",
+      reasoningEffort: "low",
+      serviceTier: "standard",
+      activePermissionProfile: { id: "local-dev" },
+    }), 2);
+    await bridge.send({
+      method: "thread/settings/updated",
+      params: {
+        threadId: "thread-1",
+        threadSettings: {
+          model: "gpt-5.6-luna",
+          effort: "low",
+          serviceTier: "standard",
+          activePermissionProfile: { id: "local-dev" },
+        },
+      },
+    });
+
+    expect(await reader.nextEvent()).toMatchObject({
+      event: "thread.upsert",
+      data: {
+        thread: {
+          id: "thread-1",
+          model: "gpt-5.6-luna",
+          reasoningEffort: "low",
+          serviceTier: "standard",
+          activePermissionProfile: { id: "local-dev" },
+        },
+      },
+    });
+    await reader.cancel();
+  });
+
   test("removes the subscriber immediately when a client aborts during thread snapshot construction", async () => {
     const { bridge, origin, state } = harness();
     state.saveMachine({ machineId: "host", kind: "host" }, 1);

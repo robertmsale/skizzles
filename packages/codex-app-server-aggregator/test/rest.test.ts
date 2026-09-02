@@ -158,11 +158,20 @@ describe("aggregator REST API", () => {
 
     const started = await fetchJson(`${origin}/v1/threads`, {
       method: "POST",
-      body: JSON.stringify({ cwd }),
+      body: JSON.stringify({ cwd, model: "gpt-start", serviceTier: "standard" }),
     });
     expect(started.status).toBe(201);
-    expect(started.body).toMatchObject({ thread: { id: factory.threadId, cwd } });
-    expect(factory.transport.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
+    expect(started.body).toMatchObject({
+      thread: { id: factory.threadId, cwd },
+      model: "gpt-start",
+      reasoningEffort: "medium",
+      serviceTier: "standard",
+    });
+    expect(factory.transport.request("thread/start")?.params).toMatchObject({
+      cwd: CONTAINER_WORKSPACE,
+      model: "gpt-start",
+      serviceTier: "standard",
+    });
 
     const machines = await fetchJson(`${origin}/v1/machines`);
     const fleet = (machines.body as { data: Array<Record<string, unknown>> }).data;
@@ -182,17 +191,46 @@ describe("aggregator REST API", () => {
     });
 
     const listed = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
-    expect(listed.body).toMatchObject({ data: [{ id: factory.threadId, cwd }] });
+    expect(listed.body).toMatchObject({
+      data: [{
+        id: factory.threadId,
+        cwd,
+        model: "gpt-start",
+        reasoningEffort: "medium",
+        serviceTier: "standard",
+      }],
+    });
 
     const sent = await fetchJson(`${origin}/v1/threads/${factory.threadId}/turns`, {
       method: "POST",
-      body: JSON.stringify({ input: [{ type: "text", text: "ship it" }] }),
+      body: JSON.stringify({
+        input: [{ type: "text", text: "ship it" }],
+        model: "gpt-turn",
+        effort: "low",
+        serviceTier: "priority",
+      }),
     });
     expect(sent.status).toBe(202);
     expect(sent.body).toMatchObject({ turn: { id: "turn-1" } });
     expect(factory.transport.request("turn/start")?.params).toMatchObject({
       threadId: factory.threadId,
       input: [{ type: "text", text: "ship it" }],
+      model: "gpt-turn",
+      effort: "low",
+      serviceTier: "priority",
+    });
+    await waitFor(async () => {
+      const current = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
+      return JSON.stringify(current.body).includes('"reasoningEffort":"low"');
+    });
+    const configured = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
+    expect(configured.body).toMatchObject({
+      data: [{
+        id: factory.threadId,
+        model: "gpt-turn",
+        reasoningEffort: "low",
+        serviceTier: "priority",
+      }],
     });
 
     const read = await fetchJson(`${origin}/v1/threads/${factory.threadId}`);
@@ -200,6 +238,15 @@ describe("aggregator REST API", () => {
     expect(factory.transport.request("thread/read")?.params).toEqual({
       threadId: factory.threadId,
       includeTurns: true,
+    });
+    const listedAfterRead = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
+    expect(listedAfterRead.body).toMatchObject({
+      data: [{
+        id: factory.threadId,
+        model: "gpt-turn",
+        reasoningEffort: "low",
+        serviceTier: "priority",
+      }],
     });
 
     await waitFor(async () => {
@@ -764,7 +811,17 @@ class RestFactory implements BackendFactory {
     }
     if (message.method === "thread/start") {
       const thread = threadSnapshot(this.threadId);
-      this.transport.emit({ id: message.id, result: { thread } });
+      const request = asRecord(message.params);
+      this.transport.emit({
+        id: message.id,
+        result: {
+          thread,
+          model: typeof request.model === "string" ? request.model : "fake-model",
+          reasoningEffort: "medium",
+          serviceTier: typeof request.serviceTier === "string" ? request.serviceTier : null,
+          activePermissionProfile: typeof request.permissions === "string" ? { id: request.permissions } : null,
+        },
+      });
       this.transport.emit({ method: "thread/started", params: { thread } });
       return;
     }
@@ -800,7 +857,20 @@ class RestFactory implements BackendFactory {
       return;
     }
     if (message.method === "turn/start") {
+      const request = asRecord(message.params);
       this.transport.emit({ id: message.id, result: { turn: { id: "turn-1" } } });
+      this.transport.emit({
+        method: "thread/settings/updated",
+        params: {
+          threadId: this.threadId,
+          threadSettings: {
+            model: typeof request.model === "string" ? request.model : "fake-model",
+            effort: typeof request.effort === "string" ? request.effort : "medium",
+            serviceTier: typeof request.serviceTier === "string" ? request.serviceTier : null,
+            activePermissionProfile: null,
+          },
+        },
+      });
       this.transport.emit({
         method: "turn/started",
         params: { threadId: this.threadId, turn: { id: "turn-1", items: [] } },
@@ -924,6 +994,12 @@ function threadSnapshot(id: string) {
     source: "vscode",
     turns: [],
   };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<{ status: number; body: unknown }> {
