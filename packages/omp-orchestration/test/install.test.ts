@@ -34,7 +34,7 @@ describe("OMP orchestration installer", () => {
     const fakeLaunchctl = join(root, "bin/launchctl");
     const fakeBun = join(root, "bin/bun");
     const fakeOmp = join(root, "bin/omp");
-    await Bun.write(fakeLaunchctl, "#!/bin/sh\nexit 0\n");
+    await Bun.write(fakeLaunchctl, "#!/bin/sh\nif [ \"$1\" = print ]; then printf '    pid = 2147483647\\n'; fi\nexit 0\n");
     await Bun.write(fakeBun, "#!/bin/sh\nexit 0\n");
     await Bun.write(fakeOmp, "#!/bin/sh\nexit 0\n");
     await chmod(fakeLaunchctl, 0o755);

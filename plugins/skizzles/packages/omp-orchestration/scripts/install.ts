@@ -276,7 +276,17 @@ async function resolveOmpBinary(): Promise<string> {
 }
 
 async function bootout(): Promise<void> {
-  Bun.spawnSync(["launchctl", "bootout", `gui/${operatorUid()}/${launchAgentLabel}`], { stdout: "ignore", stderr: "ignore" });
+  const service = `gui/${operatorUid()}/${launchAgentLabel}`;
+  const current = Bun.spawnSync(["launchctl", "print", service], { stdout: "pipe", stderr: "ignore" });
+  const match = current.exitCode === 0 ? current.stdout.toString().match(/^\s*pid = (\d+)$/m) : undefined;
+  const pid = match ? Number(match[1]) : undefined;
+  Bun.spawnSync(["launchctl", "bootout", service], { stdout: "ignore", stderr: "ignore" });
+  if (pid === undefined) return;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (!processIsRunning(pid)) return;
+    await Bun.sleep(100);
+  }
+  throw new Error(`LaunchAgent process ${pid} did not exit after bootout`);
 }
 
 async function bootstrap(): Promise<void> {
@@ -287,6 +297,13 @@ async function bootstrap(): Promise<void> {
 
 function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function operatorUid(): number { const uid = process.getuid?.(); if (uid === undefined) throw new Error("macOS user id is unavailable"); return uid; }
+function processIsRunning(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH") return false;
+    throw error;
+  }
+}
 function xml(value: string): string { return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"); }
 function isMissing(error: unknown): boolean { return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT"); }
 async function optionalLstat(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
