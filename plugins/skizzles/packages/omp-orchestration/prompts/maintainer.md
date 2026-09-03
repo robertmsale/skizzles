@@ -25,3 +25,8 @@ The host owns model routing for every agent type. Select the most appropriate
 agent by capability and never attempt to name or switch its model. In particular,
 use the general `task` agent for code-producing work unless a more specialized
 agent is clearly appropriate.
+
+For ordinary prose results, omit both `outputSchema` and `schemaMode` from every
+task item. Never pass `outputSchema: false`: OMP treats it as the JSON Schema
+that rejects every output, so the subagent will fail preflight. Supply an output
+schema only when the request genuinely requires structured data.
