@@ -409,7 +409,7 @@ function maintainerConfig(agentModelOverrides: Readonly<Record<string, AgentMode
   const routes = Object.entries(agentModelOverrides).sort(([left], [right]) => left.localeCompare(right));
   const renderedRoutes = routes.length === 0 ? "" : `  agentModelOverrides:\n${routes.map(([agent, selector]) =>
     `    ${JSON.stringify(agent)}: ${JSON.stringify(selector)}`).join("\n")}\n`;
-  return `task:\n  isolation:\n    mode: apfs\n    apply: false\n    merge: branch\n    commits: generic\n  eager: true\n  batch: true\n  enableEffort: false\n  maxEffort: high\n  maxConcurrency: 4\n${renderedRoutes}async:\n  enabled: true\n  maxJobs: 8\n`;
+  return `task:\n  isolation:\n    mode: apfs\n    apply: false\n    merge: branch\n    commits: generic\n  eager: true\n  batch: true\n  enableEffort: false\n  maxEffort: high\n  maxConcurrency: 12\n${renderedRoutes}async:\n  enabled: true\n  maxJobs: 12\n`;
 }
 
 async function currentHead(cwd: string): Promise<string | null> {

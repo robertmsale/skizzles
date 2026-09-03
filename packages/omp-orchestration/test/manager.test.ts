@@ -67,11 +67,13 @@ describe("OmpManager", () => {
         isolation: { mode: "apfs", apply: false, merge: "branch" },
         enableEffort: false,
         maxEffort: "high",
+        maxConcurrency: 12,
         agentModelOverrides: {
           task: "opencodex/xai/grok-4.6:high",
           reviewer: "opencodex/gpt-5.6-sol:high",
         },
       },
+      async: { enabled: true, maxJobs: 12 },
     });
     expect(await manager.status("fixture")).toMatchObject({
       routing: {

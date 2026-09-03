@@ -1465,10 +1465,10 @@ ${routes.map(([agent, selector]) => `    ${JSON.stringify(agent)}: ${JSON.string
   batch: true
   enableEffort: false
   maxEffort: high
-  maxConcurrency: 4
+  maxConcurrency: 12
 ${renderedRoutes}async:
   enabled: true
-  maxJobs: 8
+  maxJobs: 12
 `;
 }
 async function currentHead(cwd) {

@@ -71,6 +71,12 @@ agent cannot silently override a pinned reasoning level. `maintainers status`
 reports the effective routing policy, while each job's durable progress records
 OMP's requested role, resolved model, and fallback flag when OMP supplies them.
 
+Each maintainer permits up to 12 concurrent subagent jobs. This leaves room for
+six coding workers to own independent PRs while as many as six scout, review,
+security-review, or support jobs run alongside them. Both OMP's task concurrency
+and async job ceilings are 12, so the advertised capacity is available at both
+gates.
+
 ## Source operation
 
 ```sh
