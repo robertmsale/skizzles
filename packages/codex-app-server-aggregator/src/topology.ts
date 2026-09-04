@@ -54,11 +54,17 @@ export class Topology {
     )) {
       throw new Error(`thread ${threadId} cannot change its execution backend`);
     }
+    const incoming = sanitizeSnapshot(snapshot);
     this.threads.set(threadId, {
       machineId,
       projectCwd,
       executionMode,
-      snapshot: sanitizeSnapshot(snapshot) ?? current?.snapshot,
+      // Native Thread payloads deliberately omit response-level settings such as model,
+      // effort, service tier, and active permission profile. Preserve those projected
+      // fields when a later thread/read or notification refreshes the core snapshot.
+      snapshot: incoming
+        ? { ...current?.snapshot, ...incoming }
+        : current?.snapshot,
       loaded: loadedFromStatus(snapshot?.status) ?? current?.loaded ?? true,
       archived: current?.archived ?? false,
       deleted: current?.deleted ?? false,
@@ -76,7 +82,10 @@ export class Topology {
     const result = asRecord(envelope.result);
     const params = asRecord(envelope.params);
     const thread = asThread(result?.thread) ?? asThread(params?.thread);
-    if (thread) this.bind(machineId, projectCwd, thread.id, thread, executionMode);
+    if (thread) {
+      this.bind(machineId, projectCwd, thread.id, thread, executionMode);
+      this.patchSnapshot(thread.id, configurationPatch(result));
+    }
 
     const reviewThreadId = result?.reviewThreadId;
     if (typeof reviewThreadId === "string") this.bind(machineId, projectCwd, reviewThreadId, undefined, executionMode);
@@ -96,6 +105,9 @@ export class Topology {
     }
     if (method === "thread/name/updated" && threadId && typeof params?.threadName === "string") {
       this.patchSnapshot(threadId, { name: params.threadName });
+    }
+    if (method === "thread/settings/updated" && threadId) {
+      this.patchSnapshot(threadId, configurationPatch(asRecord(params?.threadSettings), "effort"));
     }
     if (threadId && params) this.observeActivity(threadId, method, params, envelope.emittedAtMs);
   }
@@ -123,6 +135,16 @@ export class Topology {
   has(threadId: string): boolean {
     const entry = this.threads.get(threadId);
     return entry !== undefined && !entry.deleted;
+  }
+
+  isLoaded(threadId: string): boolean {
+    const entry = this.threads.get(threadId);
+    return entry !== undefined && entry.loaded && !entry.archived && !entry.deleted;
+  }
+
+  isLive(threadId: string): boolean {
+    const entry = this.threads.get(threadId);
+    return entry !== undefined && !entry.archived && !entry.deleted;
   }
 
   markArchived(threadId: string): void {
@@ -199,6 +221,7 @@ export class Topology {
   }
 
   private patchSnapshot(threadId: string, patch: Record<string, unknown>): void {
+    if (Object.keys(patch).length === 0) return;
     const entry = this.threads.get(threadId);
     if (entry?.snapshot) {
       entry.snapshot = { ...entry.snapshot, ...patch };
@@ -245,6 +268,27 @@ export class Topology {
     if (!entry) return;
     this.persist?.({ threadId, ...entry, snapshot: sanitizeSnapshot(entry.snapshot) });
   }
+}
+
+function configurationPatch(
+  source: Record<string, unknown> | undefined,
+  effortKey: "reasoningEffort" | "effort" = "reasoningEffort",
+): Record<string, unknown> {
+  if (!source) return {};
+  const patch: Record<string, unknown> = {};
+  if (typeof source.model === "string") patch.model = source.model;
+  const effort = source[effortKey];
+  if (typeof effort === "string" || effort === null) patch.reasoningEffort = effort;
+  if (typeof source.serviceTier === "string" || source.serviceTier === null) {
+    patch.serviceTier = source.serviceTier;
+  }
+  const activePermissionProfile = asRecord(source.activePermissionProfile);
+  if (typeof activePermissionProfile?.id === "string") {
+    patch.activePermissionProfile = structuredClone(activePermissionProfile);
+  } else if (source.activePermissionProfile === null) {
+    patch.activePermissionProfile = null;
+  }
+  return patch;
 }
 
 function sanitizeSnapshot(snapshot: ThreadSnapshot | undefined): ThreadSnapshot | undefined {

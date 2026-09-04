@@ -5,7 +5,7 @@ This package presents one long-lived Codex app-server surface backed by two exec
 | Mode | Backend | Lifetime | Permissions |
 | --- | --- | --- | --- |
 | host | One shared host <code>codex app-server --stdio</code> | Daemon lifetime after initialization | Forward selected permissions, sandbox, and approval policy |
-| container | One Docker app-server per live thread tree | Removed when its tree drains or the daemon stops | Ignore named permissions, force danger-full-access, preserve approval policy |
+| container | One Docker app-server per live thread tree | Container shell is replaceable; durable state is removed when its tree drains | Ignore named permissions, force danger-full-access, preserve approval policy |
 
 <code>thread/start</code> accepts the optional Skizzles field
 <code>skizzlesExecutionMode: "host" | "container"</code>. Container is the default. A created
@@ -94,6 +94,12 @@ The project extensions work before app-server initialization:
 Host starts use the canonical host path. Container starts clone the origin into
 <code>/workspace/repo</code>; host files are never mounted as the container workspace. Returned
 container thread DTOs expose the host CWD for aggregate filtering.
+
+Each container tree owns durable Docker volumes for <code>/codex-home</code> and
+<code>/workspace/repo</code>. The checkout, uncommitted work, rollout files, and Codex session
+history therefore survive replacement of the container process. Fresh trees for the same project
+also share a managed project cache volume for Bun, npm, Cargo, pip/uv, Gradle, and XDG caches;
+project workspaces remain private and are never shared between agents.
 
 The scripted client exposes mode directly:
 
@@ -191,6 +197,8 @@ base_url = "http://{{SKIZZLES_CONTAINER_HOST}}:8080/v1"
 
 | Route | Operation |
 | --- | --- |
+| <code>/v1/models</code> | Paginated host model, reasoning-effort, and service-tier catalog |
+| <code>/v1/permission-profiles?cwd=/absolute/project</code> | Paginated host permission-profile catalog for a project CWD |
 | <code>/v1/projects</code> | Project registry |
 | <code>/v1/threads</code> | Aggregate list or mode-selecting thread start |
 | <code>/v1/threads/:id</code> | Read/delete |
@@ -201,8 +209,8 @@ base_url = "http://{{SKIZZLES_CONTAINER_HOST}}:8080/v1"
 | <code>/v1/events</code> | Bounded daemon-local notification journal |
 | <code>/v1/app-state/stream</code> | Global project, thread, status, and pending-request SSE stream |
 | <code>/v1/threads/:id/stream?tail=50</code> | Selected-thread timeline snapshot and live SSE stream |
-| <code>/v1/threads/:id/entries</code> | Cursor-paginated finalized timeline entries |
-| <code>/v1/threads/:id/entries/:entryId</code> | Hydrate one finalized entry, including oversized SSE items |
+| <code>/v1/threads/:id/entries</code> | Upstream-cursor-paginated finalized timeline entries |
+| <code>/v1/threads/:id/entries/:entryId</code> | Page-targeted hydration for one finalized entry, including oversized SSE items |
 | <code>/v1/server-requests</code> | Pending backend callbacks |
 | <code>/healthz</code> | Process liveness without backend initialization |
 
@@ -213,6 +221,12 @@ The SSE routes use the same bearer/origin gate as every other REST route; creden
 option. See [PROTOCOL.md](PROTOCOL.md#server-sent-events) for the typed stream, replay, heartbeat,
 batching, and hydration contract.
 
+Catalog routes preserve the app-server pagination contract with <code>cursor</code> and
+<code>limit</code>. <code>/v1/models</code> also accepts <code>includeHidden</code> and returns each
+model's supported reasoning efforts and service tiers. <code>/v1/permission-profiles</code> accepts
+<code>cwd</code> because profile availability is project-sensitive. Both routes are served by the
+single host app-server backend and forward its results without adding permissive defaults.
+
 ## Persistence and teardown
 
 SQLite stores project eligibility, machine kind, exact container IDs, and per-thread project/mode
@@ -222,13 +236,17 @@ After a restart:
 
 - the old host process is removed; the new host process reuses logical machine ID
   <code>host</code>, preserving host-thread routing identity;
-- old container writers cannot be reattached, so exact persisted container IDs are cleaned and
-  their threads remain unloaded snapshots;
+- old container writers are not reattached; exact persisted container IDs are cleaned while
+  managed workspace and Codex-home volumes remain;
+- the first history or mutation request for an unloaded live thread lazily creates a replacement
+  container with the same machine ID and resumes the rollout before forwarding the request;
+- pre-volume legacy threads remain readable as metadata snapshots but cannot be resumed;
 - no thread migrates between modes.
 
-Archiving/deleting a drained container tree removes only that container. Archiving a host thread
-never shuts down the shared host app-server. Daemon shutdown closes all live processes and
-containers.
+Archiving/deleting the final live thread in a container tree removes its container and private
+state volumes. Removing a drained project also removes its shared dependency cache. Archiving a
+host thread never shuts down the shared host app-server. Daemon shutdown closes container shells
+while retaining private state for live trees.
 
 ## Validation
 

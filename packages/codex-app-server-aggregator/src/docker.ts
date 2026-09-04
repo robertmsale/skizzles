@@ -1,11 +1,23 @@
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
-import type { BackendFactory, BackendTransport } from "./backend.ts";
+import type {
+  BackendFactory,
+  BackendTransport,
+  ContainerBackendCreateOptions,
+} from "./backend.ts";
 import type { RegisteredProject } from "./state.ts";
 
 export const CONTAINER_WORKSPACE = "/workspace/repo";
 export const DEFAULT_IMAGE = "skizzles/codex-app-server:0.149.1";
 export const APP_SERVER_READY_MARKER = "__SKIZZLES_CODEX_APP_SERVER_READY__";
+
+const MANAGED_LABEL = "dev.skizzles.codex-aggregator";
+const MACHINE_LABEL = "dev.skizzles.machine-id";
+const PROJECT_LABEL = "dev.skizzles.project-key";
+const STATE_KIND_LABEL = "dev.skizzles.state-kind";
+const CODEX_HOME_TARGET = "/codex-home";
+const CACHE_TARGET = "/cache";
 
 export type DockerBackendOptions = {
   image?: string | undefined;
@@ -52,40 +64,65 @@ export class DockerBackendFactory implements BackendFactory {
     this.options = { ...options, image, dockerBinary, containerHost, hostGatewayMode };
   }
 
-  async create(project: RegisteredProject): Promise<BackendTransport> {
+  async create(
+    project: RegisteredProject,
+    createOptions: ContainerBackendCreateOptions = {},
+  ): Promise<BackendTransport> {
     if (project.cloneUrl === null) {
       throw new Error(`project is host-only because it has no container-reachable Git origin: ${project.cwd}`);
     }
     validateText("repo URL", project.cloneUrl);
-    const machineId = crypto.randomUUID();
+    if (createOptions.restore && !createOptions.machineId) {
+      throw new Error("restoring a container backend requires its machine id");
+    }
+    const machineId = createOptions.machineId ?? crypto.randomUUID();
+    validateMachineId(machineId);
     const name = `skizzles-codex-${machineId}`;
-    const args = [
+    const privateVolumes = machineVolumeSpecs(machineId);
+    let containerId: string | undefined;
+    try {
+      if (createOptions.restore) {
+        for (const volume of privateVolumes) await requireManagedVolume(this.options.dockerBinary, volume);
+      } else {
+        for (const volume of privateVolumes) await ensureManagedVolume(this.options.dockerBinary, volume);
+      }
+      const projectCache = projectCacheVolumeSpec(project);
+      await ensureManagedVolume(this.options.dockerBinary, projectCache);
+      const args = [
       "create",
       "--interactive",
       "--name", name,
-      "--label", "dev.skizzles.codex-aggregator=true",
-      "--label", `dev.skizzles.machine-id=${machineId}`,
+      "--label", `${MANAGED_LABEL}=true`,
+      "--label", `${MACHINE_LABEL}=${machineId}`,
       "--env", `CODEX_AGGREGATOR_REPO_URL=${project.cloneUrl}`,
       "--env", `CODEX_AGGREGATOR_WORKSPACE=${CONTAINER_WORKSPACE}`,
       "--env", `CODEX_AGGREGATOR_CONTAINER_HOST=${this.options.containerHost}`,
+      "--env", `XDG_CACHE_HOME=${CACHE_TARGET}/xdg`,
+      "--env", `npm_config_cache=${CACHE_TARGET}/npm`,
+      "--env", `BUN_INSTALL_CACHE_DIR=${CACHE_TARGET}/bun`,
+      "--env", `CARGO_HOME=${CACHE_TARGET}/cargo`,
+      "--env", `PIP_CACHE_DIR=${CACHE_TARGET}/pip`,
+      "--env", `UV_CACHE_DIR=${CACHE_TARGET}/uv`,
+      "--env", `GRADLE_USER_HOME=${CACHE_TARGET}/gradle`,
+      "--mount", volumeMount(privateVolumes[0]!, CODEX_HOME_TARGET),
+      "--mount", volumeMount(privateVolumes[1]!, CONTAINER_WORKSPACE),
+      "--mount", volumeMount(projectCache, CACHE_TARGET),
     ];
-    const gatewayMode = await resolveHostGatewayMode(
-      this.options.dockerBinary,
-      this.options.hostGatewayMode,
-    );
-    if (gatewayMode === "host-gateway") {
-      args.push("--add-host", `${this.options.containerHost}:host-gateway`);
-    }
-    if (this.options.providerCommand) args.push("--env", `CODEX_AGGREGATOR_PROVIDER_COMMAND=${this.options.providerCommand}`);
-    if (this.options.providerReadyUrl) args.push("--env", `CODEX_AGGREGATOR_PROVIDER_READY_URL=${this.options.providerReadyUrl}`);
-    for (const name of this.options.passEnv ?? []) args.push("--env", name);
-    if (this.options.codexHomeTemplate) {
-      args.push("--mount", `type=bind,src=${this.options.codexHomeTemplate},dst=/codex-home-seed,readonly`);
-    }
-    args.push(this.options.image);
+      const gatewayMode = await resolveHostGatewayMode(
+        this.options.dockerBinary,
+        this.options.hostGatewayMode,
+      );
+      if (gatewayMode === "host-gateway") {
+        args.push("--add-host", `${this.options.containerHost}:host-gateway`);
+      }
+      if (this.options.providerCommand) args.push("--env", `CODEX_AGGREGATOR_PROVIDER_COMMAND=${this.options.providerCommand}`);
+      if (this.options.providerReadyUrl) args.push("--env", `CODEX_AGGREGATOR_PROVIDER_READY_URL=${this.options.providerReadyUrl}`);
+      for (const name of this.options.passEnv ?? []) args.push("--env", name);
+      if (this.options.codexHomeTemplate) {
+        args.push("--mount", `type=bind,src=${this.options.codexHomeTemplate},dst=/codex-home-seed,readonly`);
+      }
+      args.push(this.options.image);
 
-    let containerId: string | undefined;
-    try {
       containerId = (await runDocker(this.options.dockerBinary, args)).trim();
       if (!containerId) throw new Error("docker create returned no container id");
       const process = Bun.spawn([this.options.dockerBinary, "start", "--attach", "--interactive", containerId], {
@@ -102,8 +139,31 @@ export class DockerBackendFactory implements BackendFactory {
       });
     } catch (error) {
       if (containerId) await removeContainer(this.options.dockerBinary, containerId);
+      if (!createOptions.restore) await this.disposeState(machineId).catch(() => undefined);
       throw error;
     }
+  }
+
+  async hasState(machineId: string): Promise<boolean> {
+    validateMachineId(machineId);
+    const states = await Promise.all(machineVolumeSpecs(machineId).map(async (volume) => {
+      const labels = await inspectVolume(this.options.dockerBinary, volume.name);
+      if (!labels) return false;
+      validateVolumeLabels(volume, labels);
+      return true;
+    }));
+    return states.every(Boolean);
+  }
+
+  async disposeState(machineId: string): Promise<void> {
+    validateMachineId(machineId);
+    for (const volume of machineVolumeSpecs(machineId)) {
+      await removeManagedVolume(this.options.dockerBinary, volume);
+    }
+  }
+
+  async disposeProjectCache(project: RegisteredProject): Promise<void> {
+    await removeManagedVolume(this.options.dockerBinary, projectCacheVolumeSpec(project));
   }
 
   async remove(containerId: string): Promise<void> {
@@ -264,11 +324,128 @@ async function removeContainer(binary: string, containerId: string): Promise<voi
     new Response(process.stderr).text(),
     process.exited,
   ]);
-  if (exitCode !== 0) throw new Error(`docker rm failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  if (exitCode !== 0 && !/no such container/i.test(stderr)) {
+    throw new Error(`docker rm failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
 }
 
 function validateText(label: string, value: string): void {
   if (!value.trim() || /[\0\r\n]/.test(value)) throw new Error(`invalid ${label}`);
+}
+
+type ManagedVolume = {
+  name: string;
+  labels: Record<string, string>;
+};
+
+function machineVolumeSpecs(machineId: string): [ManagedVolume, ManagedVolume] {
+  const labels = { [MANAGED_LABEL]: "true", [MACHINE_LABEL]: machineId };
+  return [
+    {
+      name: `skizzles-codex-home-${machineId}`,
+      labels: { ...labels, [STATE_KIND_LABEL]: "codex-home" },
+    },
+    {
+      name: `skizzles-workspace-${machineId}`,
+      labels: { ...labels, [STATE_KIND_LABEL]: "workspace" },
+    },
+  ];
+}
+
+function projectCacheVolumeSpec(project: RegisteredProject): ManagedVolume {
+  const projectKey = createHash("sha256").update(project.cwd).digest("hex").slice(0, 24);
+  return {
+    name: `skizzles-project-cache-${projectKey}`,
+    labels: {
+      [MANAGED_LABEL]: "true",
+      [PROJECT_LABEL]: projectKey,
+      [STATE_KIND_LABEL]: "project-cache",
+    },
+  };
+}
+
+function volumeMount(volume: ManagedVolume, target: string): string {
+  return `type=volume,src=${volume.name},dst=${target},volume-nocopy`;
+}
+
+async function ensureManagedVolume(binary: string, volume: ManagedVolume): Promise<void> {
+  const existing = await inspectVolume(binary, volume.name);
+  if (existing) {
+    validateVolumeLabels(volume, existing);
+    return;
+  }
+  const args = ["volume", "create"];
+  for (const [name, value] of Object.entries(volume.labels)) args.push("--label", `${name}=${value}`);
+  args.push(volume.name);
+  await runDocker(binary, args);
+  const created = await inspectVolume(binary, volume.name);
+  if (!created) throw new Error(`Docker did not create managed volume ${volume.name}`);
+  validateVolumeLabels(volume, created);
+}
+
+async function requireManagedVolume(binary: string, volume: ManagedVolume): Promise<void> {
+  const labels = await inspectVolume(binary, volume.name);
+  if (!labels) throw new Error(`recoverable container state is missing: ${volume.name}`);
+  validateVolumeLabels(volume, labels);
+}
+
+async function removeManagedVolume(binary: string, volume: ManagedVolume): Promise<void> {
+  const labels = await inspectVolume(binary, volume.name);
+  if (!labels) return;
+  validateVolumeLabels(volume, labels);
+  const process = Bun.spawn([binary, "volume", "rm", volume.name], { stdout: "ignore", stderr: "pipe" });
+  const [stderr, exitCode] = await Promise.all([
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  if (exitCode !== 0 && !/no such volume/i.test(stderr)) {
+    throw new Error(`docker volume rm failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
+}
+
+async function inspectVolume(binary: string, name: string): Promise<Record<string, string> | null> {
+  const process = Bun.spawn([
+    binary,
+    "volume",
+    "inspect",
+    "--format",
+    "{{json .Labels}}",
+    name,
+  ], { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  if (exitCode !== 0) {
+    if (/no such volume/i.test(stderr)) return null;
+    throw new Error(`docker volume inspect failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
+  let labels: unknown;
+  try {
+    labels = JSON.parse(stdout);
+  } catch {
+    throw new Error(`docker volume inspect returned invalid labels for ${name}`);
+  }
+  if (labels === null || typeof labels !== "object" || Array.isArray(labels)) {
+    throw new Error(`docker volume ${name} has invalid labels`);
+  }
+  if (!Object.values(labels).every((value) => typeof value === "string")) {
+    throw new Error(`docker volume ${name} has invalid labels`);
+  }
+  return labels as Record<string, string>;
+}
+
+function validateVolumeLabels(volume: ManagedVolume, actual: Record<string, string>): void {
+  for (const [name, value] of Object.entries(volume.labels)) {
+    if (actual[name] !== value) throw new Error(`refusing unmanaged Docker volume: ${volume.name}`);
+  }
+}
+
+function validateMachineId(value: string): void {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new Error(`invalid container machine id: ${value}`);
+  }
 }
 
 function validateHostname(value: string): void {

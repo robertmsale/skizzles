@@ -75,6 +75,8 @@ export async function cliMain(argv: string[]): Promise<number> {
     containerFactory,
     hostFactory,
     removeOrphan: (machine) => containerFactory.remove(machine.containerId!),
+    hasRecoverableState: (machine) => containerFactory.hasState(machine.machineId),
+    disposeMachineState: (machine) => containerFactory.disposeState(machine.machineId),
     inspectContainer: (containerId) => containerFactory.inspect(containerId),
     http: {
       hostname: options.httpHost,

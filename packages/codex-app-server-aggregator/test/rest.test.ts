@@ -16,6 +16,54 @@ afterEach(() => {
 });
 
 describe("aggregator REST API", () => {
+  test("proxies paginated model and CWD-sensitive permission catalogs from the host backend", async () => {
+    const directory = temporaryDirectory();
+    const cwd = join(directory, "project");
+    const hostFactory = new RestFactory("host");
+    const daemon = new AggregatorDaemon({
+      socketPath: join(directory, "aggregator.sock"),
+      state: new AggregatorState(join(directory, "aggregator.sqlite3")),
+      containerFactory: new RestFactory(),
+      hostFactory,
+      http: { hostname: "127.0.0.1", port: 0 },
+    });
+    try {
+      await daemon.start();
+      const origin = daemon.httpUrl!.origin;
+
+      const models = await fetchJson(`${origin}/v1/models?cursor=model-page-2&limit=25&includeHidden=true`);
+      expect(models).toMatchObject({
+        status: 200,
+        body: { data: [{ id: "fake-model", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }] },
+      });
+      expect(hostFactory.transport.request("model/list")?.params).toEqual({
+        cursor: "model-page-2",
+        limit: 25,
+        includeHidden: true,
+      });
+
+      const profiles = await fetchJson(
+        `${origin}/v1/permission-profiles?cwd=${encodeURIComponent(cwd)}&cursor=profile-page-2&limit=10`,
+      );
+      expect(profiles).toMatchObject({
+        status: 200,
+        body: { data: [{ id: "local-dev", allowed: true }] },
+      });
+      expect(hostFactory.transport.request("permissionProfile/list")?.params).toEqual({
+        cwd,
+        cursor: "profile-page-2",
+        limit: 10,
+      });
+
+      const malformed = await fetchJson(`${origin}/v1/models?includeHidden=yes`);
+      expect(malformed).toMatchObject({ status: 400, body: { error: { code: "bad_request" } } });
+      const wrongMethod = await fetchJson(`${origin}/v1/permission-profiles`, { method: "POST" });
+      expect(wrongMethod.status).toBe(405);
+    } finally {
+      await daemon.close();
+    }
+  });
+
   test("initializes the host backend before serving a first-request global SSE stream", async () => {
     const directory = temporaryDirectory();
     const cwd = join(directory, "project");
@@ -110,11 +158,20 @@ describe("aggregator REST API", () => {
 
     const started = await fetchJson(`${origin}/v1/threads`, {
       method: "POST",
-      body: JSON.stringify({ cwd }),
+      body: JSON.stringify({ cwd, model: "gpt-start", serviceTier: "standard" }),
     });
     expect(started.status).toBe(201);
-    expect(started.body).toMatchObject({ thread: { id: factory.threadId, cwd } });
-    expect(factory.transport.request("thread/start")?.params).toMatchObject({ cwd: CONTAINER_WORKSPACE });
+    expect(started.body).toMatchObject({
+      thread: { id: factory.threadId, cwd },
+      model: "gpt-start",
+      reasoningEffort: "medium",
+      serviceTier: "standard",
+    });
+    expect(factory.transport.request("thread/start")?.params).toMatchObject({
+      cwd: CONTAINER_WORKSPACE,
+      model: "gpt-start",
+      serviceTier: "standard",
+    });
 
     const machines = await fetchJson(`${origin}/v1/machines`);
     const fleet = (machines.body as { data: Array<Record<string, unknown>> }).data;
@@ -134,17 +191,46 @@ describe("aggregator REST API", () => {
     });
 
     const listed = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
-    expect(listed.body).toMatchObject({ data: [{ id: factory.threadId, cwd }] });
+    expect(listed.body).toMatchObject({
+      data: [{
+        id: factory.threadId,
+        cwd,
+        model: "gpt-start",
+        reasoningEffort: "medium",
+        serviceTier: "standard",
+      }],
+    });
 
     const sent = await fetchJson(`${origin}/v1/threads/${factory.threadId}/turns`, {
       method: "POST",
-      body: JSON.stringify({ input: [{ type: "text", text: "ship it" }] }),
+      body: JSON.stringify({
+        input: [{ type: "text", text: "ship it" }],
+        model: "gpt-turn",
+        effort: "low",
+        serviceTier: "priority",
+      }),
     });
     expect(sent.status).toBe(202);
     expect(sent.body).toMatchObject({ turn: { id: "turn-1" } });
     expect(factory.transport.request("turn/start")?.params).toMatchObject({
       threadId: factory.threadId,
       input: [{ type: "text", text: "ship it" }],
+      model: "gpt-turn",
+      effort: "low",
+      serviceTier: "priority",
+    });
+    await waitFor(async () => {
+      const current = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
+      return JSON.stringify(current.body).includes('"reasoningEffort":"low"');
+    });
+    const configured = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
+    expect(configured.body).toMatchObject({
+      data: [{
+        id: factory.threadId,
+        model: "gpt-turn",
+        reasoningEffort: "low",
+        serviceTier: "priority",
+      }],
     });
 
     const read = await fetchJson(`${origin}/v1/threads/${factory.threadId}`);
@@ -152,6 +238,15 @@ describe("aggregator REST API", () => {
     expect(factory.transport.request("thread/read")?.params).toEqual({
       threadId: factory.threadId,
       includeTurns: true,
+    });
+    const listedAfterRead = await fetchJson(`${origin}/v1/threads?cwd=${encodeURIComponent(cwd)}`);
+    expect(listedAfterRead.body).toMatchObject({
+      data: [{
+        id: factory.threadId,
+        model: "gpt-turn",
+        reasoningEffort: "low",
+        serviceTier: "priority",
+      }],
     });
 
     await waitFor(async () => {
@@ -248,6 +343,17 @@ describe("aggregator REST API", () => {
       expect(state.threads().find((thread) => thread.threadId === factory.threadId)).toMatchObject({
         snapshot: { name: "Authoritative name", status: { type: "idle" } },
         loaded: true,
+      });
+      expect(factory.transport.request("thread/read")?.params).toEqual({
+        threadId: factory.threadId,
+        includeTurns: false,
+      });
+      expect(factory.transport.request("thread/turns/list")?.params).toEqual({
+        threadId: factory.threadId,
+        cursor: null,
+        limit: 50,
+        sortDirection: "desc",
+        itemsView: "full",
       });
     } finally {
       await daemon.close();
@@ -705,16 +811,66 @@ class RestFactory implements BackendFactory {
     }
     if (message.method === "thread/start") {
       const thread = threadSnapshot(this.threadId);
-      this.transport.emit({ id: message.id, result: { thread } });
+      const request = asRecord(message.params);
+      this.transport.emit({
+        id: message.id,
+        result: {
+          thread,
+          model: typeof request.model === "string" ? request.model : "fake-model",
+          reasoningEffort: "medium",
+          serviceTier: typeof request.serviceTier === "string" ? request.serviceTier : null,
+          activePermissionProfile: typeof request.permissions === "string" ? { id: request.permissions } : null,
+        },
+      });
       this.transport.emit({ method: "thread/started", params: { thread } });
       return;
     }
     if (message.method === "model/list") {
-      this.transport.emit({ id: message.id, result: { data: [{ id: "fake-model" }], nextCursor: null } });
+      this.transport.emit({
+        id: message.id,
+        result: {
+          data: [{
+            id: "fake-model",
+            model: "fake-model",
+            displayName: "Fake model",
+            description: "Fixture model",
+            hidden: false,
+            supportedReasoningEfforts: [{ reasoningEffort: "high", description: "Deep reasoning" }],
+            defaultReasoningEffort: "high",
+            serviceTiers: [{ id: "standard", name: "Standard", description: "Standard tier" }],
+            defaultServiceTier: "standard",
+            isDefault: true,
+          }],
+          nextCursor: null,
+        },
+      });
+      return;
+    }
+    if (message.method === "permissionProfile/list") {
+      this.transport.emit({
+        id: message.id,
+        result: {
+          data: [{ id: "local-dev", description: "Local development", allowed: true }],
+          nextCursor: null,
+        },
+      });
       return;
     }
     if (message.method === "turn/start") {
+      const request = asRecord(message.params);
       this.transport.emit({ id: message.id, result: { turn: { id: "turn-1" } } });
+      this.transport.emit({
+        method: "thread/settings/updated",
+        params: {
+          threadId: this.threadId,
+          threadSettings: {
+            model: typeof request.model === "string" ? request.model : "fake-model",
+            effort: typeof request.effort === "string" ? request.effort : "medium",
+            serviceTier: typeof request.serviceTier === "string" ? request.serviceTier : null,
+            activePermissionProfile: null,
+          },
+        },
+      });
       this.transport.emit({
         method: "turn/started",
         params: { threadId: this.threadId, turn: { id: "turn-1", items: [] } },
@@ -740,6 +896,26 @@ class RestFactory implements BackendFactory {
             ...structuredClone(this.readThreadPatch),
             turns: [{ id: "turn-1" }],
           },
+        },
+      });
+      return;
+    }
+    if (message.method === "thread/turns/list") {
+      this.transport.emit({
+        id: message.id,
+        result: {
+          data: [{
+            id: "turn-1",
+            items: [],
+            itemsView: "full",
+            status: "completed",
+            error: null,
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1_000,
+          }],
+          nextCursor: null,
+          backwardsCursor: null,
         },
       });
       return;
@@ -818,6 +994,12 @@ function threadSnapshot(id: string) {
     source: "vscode",
     turns: [],
   };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<{ status: number; body: unknown }> {

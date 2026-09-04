@@ -14,7 +14,7 @@ Skizzles also includes a Grok Build harness with full root/Worker/Explorer/Revie
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **T3 Code orchestration** — a worktree-first task collaboration skill plus bundled CLI/daemon for local or private-tailnet coordination across T3 projects, with an optional host-only settled-worktree artifact reaper. 🌳
 - **Host/container app-server aggregation** — a source-only backend with host-native discovery, sticky per-thread execution modes, disposable Docker writers, and one REST/React management surface. It is deliberately not a plugin payload. 🐳
-- **ompweb orchestration** — a small `ompctl` HTTP client for listing, creating, messaging, reading, and checking default OMP sessions through an existing community ompweb server. 🥧
+- **OMP orchestration** — a durable Bun/SQLite server with one persistent OMP maintainer per project, native APFS-isolated subagents, verified draft-PR publishing, authenticated ingress, and an agent-friendly `ompctl`. 🥧
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
 - **Instruction-only roles** — generated Default/Worker/Explorer/Review overlays describe duties while the dispatcher selects model and reasoning.
 - **A practical skill shelf** — auth semantics, Cargo optimization, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
@@ -59,7 +59,11 @@ cd skizzles
 bunx skills add ./skills --skill install-skizzles
 ```
 
-Container Lab, T3 orchestration, and the ompweb orchestration client are fully included in this repository—not merely documented here. A source-linked installation runs the canonical runtimes directly from the checkout, while the stable plugin carries dependency-self-contained bundles. If you install only a copied skill, `install-skizzles` guides Codex through obtaining a selected Skizzles version and installing the complete surface; launchers can also use existing distinct PATH commands. Host PATH, LaunchAgent, Keychain, and Tailscale wiring are optional, explicit, and machine-local.
+Container Lab, T3 orchestration, and OMP orchestration are fully included in this repository—not merely documented here. A source-linked installation runs the canonical runtimes directly from the checkout, while the stable plugin carries dependency-self-contained bundles. If you install only a copied skill, `install-skizzles` guides Codex through obtaining a selected Skizzles version and installing the complete surface; launchers can also use existing distinct PATH commands. Host PATH, LaunchAgent, Keychain, and remote-ingress wiring are optional, explicit, and machine-local.
+
+See the [OMP orchestration runtime](packages/omp-orchestration/README.md) for its
+Bun/SQLite architecture, APFS worker contract, `ompctl` API, and explicit
+client-only or LaunchAgent installation commands.
 
 The [Codex app-server aggregator](packages/codex-app-server-aggregator/README.md) is a separate
 source workspace package. Run it from a checkout when you want its host/container backend; plugin

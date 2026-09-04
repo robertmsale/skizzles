@@ -136,6 +136,98 @@ describe("aggregator SSE API", () => {
     await reader.cancel();
   });
 
+  test("opens an unmaterialized new thread with metadata and an empty timeline", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1", { name: "Fresh thread" }), 1);
+    bridge.thread = { id: "thread-1", cwd: "/project", name: "Fresh thread", turns: [] };
+    bridge.unmaterialized = true;
+
+    const response = await fetch(`${origin}/v1/threads/thread-1/stream`);
+    expect(response.status).toBe(200);
+    const reader = new SseReader(response);
+    const snapshot = await reader.through("snapshot.end");
+    expect(data(snapshot, "snapshot.entries").entries).toEqual([]);
+    expect(data(snapshot, "snapshot.end").history).toEqual({
+      count: 0,
+      tail: 50,
+      olderCursor: null,
+      hasOlder: false,
+    });
+    expect(bridge.calls).toContainEqual({
+      method: "thread/read",
+      params: { threadId: "thread-1", includeTurns: false },
+    });
+    expect(bridge.calls).toContainEqual({
+      method: "thread/turns/list",
+      params: {
+        threadId: "thread-1",
+        cursor: null,
+        limit: 50,
+        sortDirection: "desc",
+        itemsView: "full",
+      },
+    });
+    expect(bridge.calls.some(({ method, params }) => method === "thread/read" && params.includeTurns === true)).toBe(false);
+    await reader.cancel();
+  });
+
+  test("backs entry history with opaque upstream turn cursors instead of full thread reads", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    bridge.thread = {
+      id: "thread-1",
+      turns: Array.from({ length: 4 }, (_, index) => ({
+        id: `turn-${index}`,
+        status: "completed",
+        items: [{ id: `item-${index}`, type: "agentMessage", text: `message ${index}` }],
+      })),
+    };
+
+    const newest = await fetchJson(`${origin}/v1/threads/thread-1/entries?limit=2`);
+    const cursor = (newest.body as { olderCursor: string }).olderCursor;
+    expect(newest.body).toMatchObject({
+      data: [{ id: "item-2" }, { id: "item-3" }],
+      olderCursor: expect.stringMatching(/^entry:v2:/),
+      hasOlder: true,
+    });
+    const older = await fetchJson(
+      `${origin}/v1/threads/thread-1/entries?before=${encodeURIComponent(cursor)}&limit=2`,
+    );
+    expect(older.body).toMatchObject({
+      data: [{ id: "item-0" }, { id: "item-1" }],
+      olderCursor: null,
+      hasOlder: false,
+    });
+
+    const historyCalls = bridge.calls.filter(({ method }) => method === "thread/turns/list");
+    expect(historyCalls).toEqual([
+      {
+        method: "thread/turns/list",
+        params: { threadId: "thread-1", cursor: null, limit: 2, sortDirection: "desc", itemsView: "full" },
+      },
+      {
+        method: "thread/turns/list",
+        params: {
+          threadId: "thread-1",
+          cursor: "test-after:turn-2",
+          limit: 2,
+          sortDirection: "desc",
+          itemsView: "full",
+        },
+      },
+    ]);
+    expect(bridge.calls.some(({ method }) => method === "thread/read")).toBe(false);
+
+    expect(await fetchJson(
+      `${origin}/v1/threads/another-thread/entries?before=${encodeURIComponent(cursor)}&limit=2`,
+    )).toEqual({
+      status: 400,
+      body: { error: { code: "bad_request", message: "before must be a valid entry cursor" } },
+    });
+  });
+
   test("streams the newest 50 finalized entries, buffers snapshot-time events, collapses deltas, and hydrates oversized items", async () => {
     const { bridge, origin, state } = harness();
     state.saveMachine({ machineId: "host", kind: "host" }, 1);
@@ -177,12 +269,12 @@ describe("aggregator SSE API", () => {
     expect(snapshotEntries.at(-1)).toMatchObject({
       kind: "available",
       id: "item-59",
-      hydrationHref: "/v1/threads/thread-1/entries/item-59",
+      hydrationHref: expect.stringMatching(/^\/v1\/threads\/thread-1\/entries\/item-59\?page=/),
     });
     expect(data(received, "snapshot.end").history).toEqual({
       count: 50,
       tail: 50,
-      olderCursor: expect.stringMatching(/^entry:v1:/),
+      olderCursor: expect.stringMatching(/^entry:v2:/),
       hasOlder: true,
     });
 
@@ -197,23 +289,63 @@ describe("aggregator SSE API", () => {
     });
 
     const snapshotHistory = data(received, "snapshot.end").history as { olderCursor: string };
-    expect(snapshotHistory.olderCursor.length).toBeLessThan(100);
+    expect(snapshotHistory.olderCursor.length).toBeLessThan(512);
     const history = await fetchJson(
       `${origin}/v1/threads/thread-1/entries?before=${encodeURIComponent(snapshotHistory.olderCursor)}&limit=5`,
     );
     expect(history.body).toMatchObject({
       data: [{ id: "item-5" }, { id: "item-6" }, { id: "item-7" }, { id: "item-8" }, { id: "item-9" }],
-      olderCursor: expect.stringMatching(/^entry:v1:/),
+      olderCursor: expect.stringMatching(/^entry:v2:/),
       hasOlder: true,
     });
     const newest = await fetchJson(`${origin}/v1/threads/thread-1/entries?limit=1`);
+    const hydrationHref = (newest.body as { data: Array<{ hydrationHref: string }> }).data[0]!.hydrationHref;
     expect(newest.body).toMatchObject({
-      data: [{ kind: "available", id: "item-59", hydrationHref: "/v1/threads/thread-1/entries/item-59" }],
+      data: [{
+        kind: "available",
+        id: "item-59",
+        hydrationHref: expect.stringMatching(/^\/v1\/threads\/thread-1\/entries\/item-59\?page=/),
+      }],
     });
-    const hydrated = await fetchJson(`${origin}/v1/threads/thread-1/entries/item-59`);
+    const hydrated = await fetchJson(`${origin}${hydrationHref}`);
     expect((hydrated.body as { entry: { item: { text: string } } }).entry.item.text.length).toBeGreaterThan(SSE_HARD_EVENT_BYTES);
     expect(received.every((event) => event.bytes < SSE_HARD_EVENT_BYTES)).toBe(true);
     await reader.cancel();
+  });
+
+  test("hydrates an oversized item from an older slice of the same upstream turn page", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    bridge.thread = {
+      id: "thread-1",
+      turns: [{
+        id: "large-turn",
+        status: "completed",
+        items: Array.from({ length: 130 }, (_, index) => ({
+          id: `item-${index}`,
+          type: "agentMessage",
+          text: index === 10 ? "x".repeat(400_000) : `message ${index}`,
+        })),
+      }],
+    };
+
+    const newest = await fetchJson(`${origin}/v1/threads/thread-1/entries?limit=100`);
+    const olderCursor = (newest.body as { olderCursor: string }).olderCursor;
+    const older = await fetchJson(
+      `${origin}/v1/threads/thread-1/entries?before=${encodeURIComponent(olderCursor)}&limit=100`,
+    );
+    const available = (older.body as {
+      data: Array<{ id: string; kind: string; hydrationHref?: string }>;
+    }).data.find((entry) => entry.id === "item-10");
+    const hydrationHref = available?.hydrationHref;
+    expect(available).toMatchObject({
+      kind: "available",
+      hydrationHref: expect.stringMatching(/^\/v1\/threads\/thread-1\/entries\/item-10\?page=/),
+    });
+
+    const hydrated = await fetchJson(`${origin}${hydrationHref}`);
+    expect((hydrated.body as { entry: { item: { text: string } } }).entry.item.text).toHaveLength(400_000);
   });
 
   test("filters and collapses snapshot-handoff traffic before applying subscription bounds", async () => {
@@ -487,6 +619,47 @@ describe("aggregator SSE API", () => {
     await reader.cancel();
   });
 
+  test("publishes server-confirmed thread settings as an updated thread projection", async () => {
+    const { bridge, origin, state } = harness();
+    state.saveMachine({ machineId: "host", kind: "host" }, 1);
+    state.saveThread(storedThread("thread-1"), 1);
+    const reader = new SseReader(await fetch(`${origin}/v1/app-state/stream`));
+    await reader.through("snapshot.end");
+
+    state.saveThread(storedThread("thread-1", {
+      model: "gpt-5.6-luna",
+      reasoningEffort: "low",
+      serviceTier: "standard",
+      activePermissionProfile: { id: "local-dev" },
+    }), 2);
+    await bridge.send({
+      method: "thread/settings/updated",
+      params: {
+        threadId: "thread-1",
+        threadSettings: {
+          model: "gpt-5.6-luna",
+          effort: "low",
+          serviceTier: "standard",
+          activePermissionProfile: { id: "local-dev" },
+        },
+      },
+    });
+
+    expect(await reader.nextEvent()).toMatchObject({
+      event: "thread.upsert",
+      data: {
+        thread: {
+          id: "thread-1",
+          model: "gpt-5.6-luna",
+          reasoningEffort: "low",
+          serviceTier: "standard",
+          activePermissionProfile: { id: "local-dev" },
+        },
+      },
+    });
+    await reader.cancel();
+  });
+
   test("removes the subscriber immediately when a client aborts during thread snapshot construction", async () => {
     const { bridge, origin, state } = harness();
     state.saveMachine({ machineId: "host", kind: "host" }, 1);
@@ -684,6 +857,8 @@ describe("SSE transport bounds", () => {
 
 class TestBridge extends AggregatorBridge {
   thread: Record<string, unknown> = { id: "thread-1", turns: [] };
+  readonly calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  unmaterialized = false;
   pauseRead = false;
   readStarted = false;
   private releaseReadPromise: (() => void) | undefined;
@@ -698,13 +873,44 @@ class TestBridge extends AggregatorBridge {
   }
 
   override async call(method: string, params?: unknown): Promise<RpcOutcome> {
+    const request = asRecord(params);
+    this.calls.push({ method, params: structuredClone(request) });
     if (method === "thread/read") {
+      const thread = structuredClone(this.thread);
+      delete thread.turns;
+      return { result: { thread } };
+    }
+    if (method === "thread/turns/list") {
       this.readStarted = true;
       if (this.pauseRead) await new Promise<void>((resolve) => { this.releaseReadPromise = resolve; });
-      return { result: { thread: structuredClone(this.thread) } };
+      if (this.unmaterialized) {
+        return {
+          error: {
+            code: -32602,
+            message: "thread thread-1 is not materialized yet; thread/turns/list is unavailable before first user message",
+          },
+        };
+      }
+      const turns = Array.isArray(this.thread.turns)
+        ? structuredClone(this.thread.turns).reverse().map(asRecord)
+        : [];
+      const rawCursor = request.cursor;
+      let start = 0;
+      if (typeof rawCursor === "string") {
+        const anchor = rawCursor.startsWith("test-after:") ? rawCursor.slice("test-after:".length) : "";
+        const index = turns.findIndex((turn) => turn.id === anchor);
+        if (index < 0) return { error: { code: -32602, message: `invalid cursor: ${rawCursor}` } };
+        start = index + 1;
+      }
+      const limit = typeof request.limit === "number" ? request.limit : 25;
+      const data = turns.slice(start, start + limit);
+      const lastId = data.at(-1)?.id;
+      const nextCursor = start + data.length < turns.length && typeof lastId === "string"
+        ? `test-after:${lastId}`
+        : null;
+      return { result: { data, nextCursor, backwardsCursor: null } };
     }
     if (method === "thread/start") {
-      const request = asRecord(params);
       const thread = { id: "http-thread", cwd: request.cwd, status: { type: "idle" }, turns: [] };
       this.state.saveThread({
         threadId: "http-thread",

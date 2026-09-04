@@ -57,6 +57,10 @@ export type TimelinePageDto = {
   hasOlder: boolean;
 };
 
+export type PreparedTimelinePage = TimelinePageDto & {
+  hydrationCursor: string;
+};
+
 export type TimelineHistoryPageDto = {
   data: TimelineStreamEntryDto[];
   olderCursor: string | null;
@@ -64,7 +68,9 @@ export type TimelineHistoryPageDto = {
 };
 
 export type TimelineCursor = {
-  boundaryHash: string;
+  threadId: string;
+  turnsCursor: string | null;
+  boundaryHash: string | null;
 };
 
 export class TimelineCursorExpiredError extends Error {
@@ -247,41 +253,89 @@ export function timelineEntries(
       const item = asRecord(items[itemIndex]);
       const id = typeof item.id === "string" ? item.id : `${turnId}:item:${itemIndex}`;
       if (!isFinalizedItem(item, turn, completedItemIds.has(id))) continue;
-      entries.push({ kind: "item", id, turnId, item: cloneFinalizedValue(item) as Record<string, unknown> });
+      // The upstream page is already private to this request. Keep one reference here and clone
+      // only bounded inline entries when encoding; duplicating an oversized tool result would
+      // defeat the hydration path's memory bound before it can be replaced by item.available.
+      entries.push({ kind: "item", id, turnId, item });
     }
   }
   return entries;
 }
 
 export function timelinePage(
-  thread: Record<string, unknown>,
-  before: TimelineCursor | undefined,
+  threadId: string,
+  turns: unknown[],
+  cursor: TimelineCursor,
+  nextTurnsCursor: string | null,
   limit: number,
   completedItemIds: ReadonlySet<string> = new Set(),
-): TimelinePageDto {
-  const entries = timelineEntries(thread, completedItemIds);
-  const end = before === undefined
+): PreparedTimelinePage {
+  // app-server returns descending turn pages. The Robdex timeline is chronological.
+  const entries = timelineEntries({ turns: [...turns].reverse() }, completedItemIds);
+  const end = cursor.boundaryHash === null
     ? entries.length
-    : entries.findIndex((entry) => timelineBoundaryHash(entry) === before.boundaryHash);
+    : entries.findIndex((entry) => timelineBoundaryHash(entry) === cursor.boundaryHash);
   if (end < 0) throw new TimelineCursorExpiredError();
   const start = Math.max(0, end - limit);
+  const hydrationCursor = encodeTimelineCursor(cursor);
+  const olderCursor = start > 0
+    ? encodeTimelineCursor({ ...cursor, boundaryHash: timelineBoundaryHash(entries[start]!) })
+    : nextTurnsCursor === null
+      ? null
+      : encodeTimelineCursor({ threadId, turnsCursor: nextTurnsCursor, boundaryHash: null });
   return {
     data: entries.slice(start, end),
-    olderCursor: start > 0 ? encodeTimelineCursor(entries[start]!) : null,
-    hasOlder: start > 0,
+    olderCursor,
+    hasOlder: olderCursor !== null,
+    hydrationCursor,
   };
 }
 
-export function encodeTimelineCursor(boundary: Pick<TimelineEntryDto, "id" | "turnId">): string {
-  return `entry:v1:${timelineBoundaryHash(boundary)}`;
+export function initialTimelineCursor(threadId: string): TimelineCursor {
+  return { threadId, turnsCursor: null, boundaryHash: null };
 }
 
-export function decodeTimelineCursor(cursor: string): TimelineCursor {
-  const prefix = "entry:v1:";
-  if (!cursor.startsWith(prefix)) throw new Error("before must be a valid entry cursor");
-  const boundaryHash = cursor.slice(prefix.length);
-  if (!/^[A-Za-z0-9_-]{43}$/.test(boundaryHash)) throw new Error("before must be a valid entry cursor");
-  return { boundaryHash };
+export function encodeTimelineCursor(cursor: TimelineCursor): string {
+  return `entry:v2:${Buffer.from(JSON.stringify({
+    v: 2,
+    t: cursor.threadId,
+    c: cursor.turnsCursor,
+    b: cursor.boundaryHash,
+  })).toString("base64url")}`;
+}
+
+export function decodeTimelineCursor(raw: string, expectedThreadId: string): TimelineCursor {
+  const prefix = "entry:v2:";
+  const encoded = raw.slice(prefix.length);
+  if (
+    raw.length > 8_192
+    || !raw.startsWith(prefix)
+    || !encoded
+    || !/^[A-Za-z0-9_-]+$/.test(encoded)
+  ) {
+    throw new Error("before must be a valid entry cursor");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("before must be a valid entry cursor");
+  }
+  const record = asRecord(value);
+  const threadId = record.t;
+  const turnsCursor = record.c;
+  const boundaryHash = record.b;
+  if (
+    record.v !== 2
+    || typeof threadId !== "string"
+    || threadId !== expectedThreadId
+    || threadId.length > 512
+    || !(turnsCursor === null || (typeof turnsCursor === "string" && turnsCursor.length <= 4_096))
+    || !(boundaryHash === null || (typeof boundaryHash === "string" && /^[A-Za-z0-9_-]{43}$/.test(boundaryHash)))
+  ) {
+    throw new Error("before must be a valid entry cursor");
+  }
+  return { threadId, turnsCursor, boundaryHash };
 }
 
 function timelineBoundaryHash(boundary: Pick<TimelineEntryDto, "id" | "turnId">): string {
@@ -290,7 +344,11 @@ function timelineBoundaryHash(boundary: Pick<TimelineEntryDto, "id" | "turnId">)
     .digest("base64url");
 }
 
-export function timelineEntryForStream(entry: TimelineEntryDto, threadId: string): TimelineStreamEntryDto {
+export function timelineEntryForStream(
+  entry: TimelineEntryDto,
+  threadId: string,
+  hydrationCursor?: string,
+): TimelineStreamEntryDto {
   const bytes = jsonBytes(entry);
   if (bytes <= SSE_TARGET_EVENT_BYTES - 4_096) return structuredClone(entry);
   return {
@@ -298,12 +356,13 @@ export function timelineEntryForStream(entry: TimelineEntryDto, threadId: string
     id: entry.id,
     turnId: entry.turnId,
     bytes,
-    hydrationHref: timelineHydrationHref(threadId, entry.id),
+    hydrationHref: timelineHydrationHref(threadId, entry.id, hydrationCursor),
   };
 }
 
-export function timelineHydrationHref(threadId: string, entryId: string): string {
-  return `/v1/threads/${encodeURIComponent(threadId)}/entries/${encodeURIComponent(entryId)}`;
+export function timelineHydrationHref(threadId: string, entryId: string, pageCursor?: string): string {
+  const path = `/v1/threads/${encodeURIComponent(threadId)}/entries/${encodeURIComponent(entryId)}`;
+  return pageCursor === undefined ? path : `${path}?page=${encodeURIComponent(pageCursor)}`;
 }
 
 export function visibleAppThreads(state: AggregatorState): AppThreadDto[] {
@@ -392,6 +451,9 @@ export class SseEventMapper {
       return id ? { event: "thread.upsert", data: { thread: threadDtoForId(this.state, id, params.thread) } } : null;
     }
     if (notification.method === "thread/name/updated") {
+      return threadId ? { event: "thread.upsert", data: { thread: threadDtoForId(this.state, threadId) } } : null;
+    }
+    if (notification.method === "thread/settings/updated") {
       return threadId ? { event: "thread.upsert", data: { thread: threadDtoForId(this.state, threadId) } } : null;
     }
     if (notification.method === "thread/status/changed") {

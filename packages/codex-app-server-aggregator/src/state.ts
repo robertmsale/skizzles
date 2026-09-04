@@ -236,6 +236,15 @@ export class AggregatorState {
     `).all().map(threadFromRow);
   }
 
+  hasLiveThreads(machineId: string): boolean {
+    return this.database.query<{ present: number }, [string]>(`
+      SELECT 1 AS present
+      FROM threads
+      WHERE machine_id = ? AND archived = 0 AND deleted = 0
+      LIMIT 1
+    `).get(machineId) !== null;
+  }
+
   private initializeSchema(): void {
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS projects (

@@ -29,8 +29,16 @@ export interface BackendTransport {
 }
 
 export interface BackendFactory {
-  create(project: RegisteredProject): Promise<BackendTransport>;
+  create(project: RegisteredProject, options?: ContainerBackendCreateOptions): Promise<BackendTransport>;
+  hasState?(machineId: string): Promise<boolean>;
+  disposeState?(machineId: string): Promise<void>;
+  disposeProjectCache?(project: RegisteredProject): Promise<void>;
 }
+
+export type ContainerBackendCreateOptions = {
+  machineId?: string | undefined;
+  restore?: boolean | undefined;
+};
 
 export interface HostBackendFactory {
   create(): Promise<BackendTransport>;
