@@ -15,6 +15,8 @@ The full Skizzles plugin and a Skizzles source checkout include the complete run
 
 Examples below use `t3ctl` for readability. Replace it with that resolved literal launcher unless an installed `t3ctl` convenience binary is already known to be healthy.
 
+For a bounded Grok implementation inside a Codex-owned task, use the `grok-worker` skill. It shares the existing worktree and does not create a T3 task. The provider options below remain available for explicit operator requests for a separate work unit.
+
 ## Invariants
 
 - New tasks always use a T3-created Git worktree; never the project’s primary checkout.

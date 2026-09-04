@@ -1,36 +1,22 @@
 {
   "version": 1,
-  "capabilities": {
-    "luna_max": { "model": "gpt-5.6-luna", "reasoningEffort": "max" },
-    "terra_medium": { "model": "gpt-5.6-terra", "reasoningEffort": "medium" },
-    "sol_high": { "model": "gpt-5.6-sol", "reasoningEffort": "high" }
-  },
-  "routes": {},
   "nativeRoleAliases": {},
   "roles": [
     {
       "behavior": "default",
-      "description": "General Skizzles subagent with a compact developer-focused execution contract.",
-      "defaultCapability": "luna_max",
-      "capabilities": ["luna_max"]
+      "description": "General Skizzles subagent with a compact developer-focused execution contract."
     },
     {
       "behavior": "worker",
-      "description": "Implementation ownership through focused validation and evidence.",
-      "defaultCapability": "luna_max",
-      "capabilities": ["luna_max"]
+      "description": "Implementation ownership through focused validation and evidence."
     },
     {
       "behavior": "explorer",
-      "description": "Read-only investigation, runtime reproduction, and implementation-path mapping.",
-      "defaultCapability": "terra_medium",
-      "capabilities": ["terra_medium"]
+      "description": "Read-only investigation, runtime reproduction, and implementation-path mapping."
     },
     {
       "behavior": "review",
-      "description": "Independent adversarial review, verification, and acceptance assessment.",
-      "defaultCapability": "sol_high",
-      "capabilities": ["sol_high"]
+      "description": "Independent adversarial review, verification, and acceptance assessment."
     }
   ]
 }

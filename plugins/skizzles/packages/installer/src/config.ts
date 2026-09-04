@@ -70,9 +70,9 @@ export interface ConfigureOptions {
 const aggressiveModeHint =
   "Fan out genuinely independent work when it improves speed or quality, keep concurrent write ownership clear, and batch failures and review findings.";
 const rootHint =
-  "Use Default or Worker (Luna Max) for implementation, Explorer (Terra Medium) for read-only investigation, and Reviewer (Sol High) for independent adversarial review. Obtain one adversarial Review of a frozen coherent candidate before accepting substantial source changes. Validate proportionally, never weaken checks to manufacture green, and distinguish attributable failures from existing repository failures.";
+  "Roles encode duties, not model. Default/Worker implement; Explorer investigates; Review judges. Use the least expensive capable model: Luna low/medium for bounded work, Terra medium for cross-file investigation, Sol only for a capability gap or consequential review. Raise reasoning for uncertainty, not max. Grok via grok-worker, no nested agents. Parent owns Git; workers leave edits for review. Obtain one adversarial Review of a frozen coherent candidate before accepting substantial changes.";
 const subagentHint =
-  "Complete the assigned coherent slice, preserve unrelated work, and keep concurrent write ownership clear. Own implementation or investigation through proportionate validation, and resolve ordinary in-scope failures instead of stopping early. Fan out only genuinely independent work; do not create overlapping writers or delegate command errands. Return the outcome, changed areas, validation, and remaining risks concisely.";
+  "Complete the assigned coherent slice, preserve unrelated work, and keep concurrent write ownership clear. Own implementation or investigation through proportionate validation, and resolve ordinary in-scope failures instead of stopping early. Fan out only genuinely independent work; do not create overlapping writers or delegate command errands. Leave edits for parent review; do not commit. Return the outcome, changed areas, validation, and remaining risks concisely.";
 
 interface AgentManifest {
   version: 1;

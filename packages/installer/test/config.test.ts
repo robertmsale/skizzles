@@ -141,12 +141,10 @@ describe("Codex configuration lifecycle", () => {
       "Do not broaden scope or create overlapping ownership",
       "Own the slice through focused implementation",
       "keep validation proportional",
-      "Additive commits are mandatory closeout work",
-      "commit your owned changes yourself before completing the assignment",
-      "A source-changing subagent may not hand off dirty state",
-      "only if the hook remains unusable because of externally broken tooling after reasonable repair attempts",
+      "Leave owned edits in place for parent review",
+      "do not commit, push, create pull requests, or publish",
       "Never stage foreign changes",
-      "Never bypass a commit hook",
+      "Do not change unrelated installation, configuration, host wiring, or credentials",
       "Send the parent a concise message when you hit a material blocker",
       "Report changed areas, resulting behavior, validation",
     ]) {
@@ -161,7 +159,9 @@ describe("Codex configuration lifecycle", () => {
       expect(subagent).not.toContain(roleDetail);
     }
     expect(root).not.toContain("create commits only at coherent, validated forward-progress boundaries when authorized");
-    expect(subagent).not.toContain("The parent owns the user relationship, overall outcome, cross-slice decisions, integration, history-changing Git operations");
+    expect(subagent).not.toContain("Additive commits are mandatory closeout work");
+    expect(subagent).not.toContain("serialized commit owner");
+    expect(subagent).not.toContain("A source-changing subagent may not hand off dirty state");
     expect(subagent).not.toContain("transfer the exact owned paths and diff to the parent");
   });
 
@@ -205,11 +205,11 @@ describe("Codex configuration lifecycle", () => {
     expect(policy).toContain("Ensure the exact command remains within ordinary tool approval");
   });
 
-  test("Skizzles instructions configure fixed capability-bearing generated roles", () => {
+  test("Skizzles instructions configure instruction-only generated roles", () => {
     const agents = {
-      default: { description: "Default Luna", configFile: "/skizzles/assets/agents/default.toml" },
-      worker: { description: "Worker Luna xhigh", configFile: "/skizzles/assets/agents/worker.toml" },
-      explorer: { description: "Explorer Terra", configFile: "/skizzles/assets/agents/explorer.toml" },
+      default: { description: "Fixture default", configFile: "/skizzles/assets/agents/default.toml" },
+      worker: { description: "Fixture worker", configFile: "/skizzles/assets/agents/worker.toml" },
+      explorer: { description: "Fixture explorer", configFile: "/skizzles/assets/agents/explorer.toml" },
     };
     const edits = desiredConfigEdits("passive", {
       sourceRoot: "/skizzles",
@@ -232,26 +232,37 @@ describe("Codex configuration lifecycle", () => {
     }]);
   });
 
-  test("generated roles bind durable capability while templates remain model agnostic", () => {
-    const roleRoot = resolve(import.meta.dir, "../../../assets/agents");
-    const templateRoot = resolve(import.meta.dir, "../../../assets/agent-role-templates");
-    const manifest = JSON.parse(readFileSync(join(roleRoot, "manifest.json"), "utf8")) as {
-      agents: Array<{ agentType: string; behavior: string; model: string; reasoningEffort: string; configFile: string }>;
+  test("canonical role spec and templates encode duties without model or reasoning", () => {
+    const specRoot = resolve(import.meta.dir, "../../../assets");
+    const templateRoot = join(specRoot, "agent-role-templates");
+    const spec = JSON.parse(readFileSync(join(specRoot, "agent-role-spec.json"), "utf8")) as {
+      capabilities?: unknown;
+      routes?: unknown;
+      nativeRoleAliases: Record<string, string>;
+      roles: Array<{ behavior: string; description: string; defaultCapability?: string; capabilities?: string[] }>;
     };
-    expect(manifest.agents.map(({ agentType }) => agentType).sort()).toEqual([
-      "default", "explorer", "review", "worker",
-    ]);
-    for (const agent of manifest.agents) {
-      const contents = readFileSync(join(roleRoot, agent.configFile), "utf8");
-      expect(contents).toContain('model_instructions_file = "../skizzles_subagent_instructions.md"');
-      const parsed = Bun.TOML.parse(contents) as { model?: string; model_reasoning_effort?: string; developer_instructions?: string };
-      expect(parsed.model).toBe(agent.model);
-      expect(parsed.model_reasoning_effort).toBe(agent.reasoningEffort);
-      expect(parsed.developer_instructions?.trim().length).toBeGreaterThan(0);
+    expect(spec.capabilities).toBeUndefined();
+    expect(spec.routes).toBeUndefined();
+    expect(spec.nativeRoleAliases).toEqual({});
+    expect(spec.roles.map(({ behavior }) => behavior)).toEqual(["default", "worker", "explorer", "review"]);
+    for (const role of spec.roles) {
+      expect(role.description.trim().length).toBeGreaterThan(0);
+      expect(role.defaultCapability).toBeUndefined();
+      expect(role.capabilities).toBeUndefined();
     }
     for (const behavior of ["default", "worker", "explorer", "review"]) {
       const template = readFileSync(join(templateRoot, `${behavior}.toml`), "utf8");
       expect(template).not.toMatch(/^model(?:_reasoning_effort)?\s*=/m);
+      const parsed = Bun.TOML.parse(template) as {
+        model?: string;
+        model_reasoning_effort?: string;
+        developer_instructions?: string;
+        model_instructions_file?: string;
+      };
+      expect(parsed.model).toBeUndefined();
+      expect(parsed.model_reasoning_effort).toBeUndefined();
+      expect(parsed.model_instructions_file).toBe("../skizzles_subagent_instructions.md");
+      expect(parsed.developer_instructions?.trim().length).toBeGreaterThan(0);
     }
   });
 
@@ -270,10 +281,17 @@ describe("Codex configuration lifecycle", () => {
     const rootHintKey = "features.multi_agent_v2.root_agent_usage_hint_text";
     const rootHint = edits.find(({ keyPath }) => keyPath === rootHintKey)?.value as string;
     expect(rootHint.length).toBeLessThan(500);
-    expect(rootHint).toContain("Luna Max");
-    expect(rootHint).toContain("Terra Medium");
-    expect(rootHint).toContain("Sol High");
+    expect(rootHint).toContain("Roles encode duties, not model");
+    expect(rootHint).toContain("least expensive capable model");
+    expect(rootHint).toContain("Luna");
+    expect(rootHint).toContain("Terra");
+    expect(rootHint).toContain("Sol");
+    expect(rootHint).toContain("grok-worker");
+    expect(rootHint).toContain("Parent owns Git");
     expect(rootHint).toContain("one adversarial Review of a frozen coherent candidate");
+    expect(rootHint).not.toContain("Luna Max");
+    expect(rootHint).not.toContain("Terra Medium");
+    expect(rootHint).not.toContain("Sol High");
     const nonRootHints = edits
       .filter(({ keyPath }) => keyPath !== rootHintKey && keyPath.endsWith("_hint_text"))
       .map(({ value }) => value as string);

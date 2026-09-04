@@ -63,9 +63,9 @@ Ask the user to choose an orchestration mode:
 Also ask whether Codex should keep its native model instructions or use the Skizzles split:
 
 - `native` is the default and does not write instruction or agent-role config.
-- `skizzles` writes the full canonical Skizzles harness contract to `model_instructions_file`, replacing Codex's base model instructions, and configures four fixed roles advertised by `assets/agents/manifest.json`: Default/Worker use Luna Max, Explorer uses Terra Medium, and Reviewer uses Sol High. Generated role files combine one behavioral duty with one durable model/reasoning pair. This mode requires an absolute `--source-root` whose assets remain available after installation.
+- `skizzles` writes the full canonical Skizzles harness contract to `model_instructions_file`, replacing Codex's base model instructions, and configures four instruction-only roles advertised by `assets/agents/manifest.json`. Generated role files describe duties without selecting model or reasoning. This mode requires an absolute `--source-root` whose assets remain available after installation.
 
-With the Skizzles split, select the generated `agent_type`, omit independent model/reasoning overrides, and use a positive integer for `fork_turns`. Do not use `fork_turns="none"` or `fork_turns="all"`: context-free and full-history spawning discard the handoff or inherit the parent role, respectively, bypassing selected-role application.
+With the Skizzles split, select `agent_type` for its duty and model/reasoning for the assignment. Use `fork_turns="none"` with a self-contained handoff or a positive bounded turn count. Full-history forks cannot carry explicit model/reasoning overrides on the supported native tool surface. The `agent-dispatch` skill supplies economical selection guidance. Users may instead copy selected skill directories and generated roles with their referenced shared instruction file; the full installation lifecycle is optional.
 
 Preview against an explicit `CODEX_HOME` and absolute Codex binary:
 

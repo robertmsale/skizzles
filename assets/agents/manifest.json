@@ -1,42 +1,29 @@
 {
   "version": 1,
-  "routes": {},
   "nativeRoleAliases": {},
   "agents": [
     {
       "agentType": "default",
       "behavior": "default",
-      "capability": "luna_max",
-      "model": "gpt-5.6-luna",
-      "reasoningEffort": "max",
-      "description": "General Skizzles subagent with a compact developer-focused execution contract. Default capability: gpt-5.6-luna at max effort.",
+      "description": "General Skizzles subagent with a compact developer-focused execution contract.",
       "configFile": "default.toml"
     },
     {
       "agentType": "worker",
       "behavior": "worker",
-      "capability": "luna_max",
-      "model": "gpt-5.6-luna",
-      "reasoningEffort": "max",
-      "description": "Implementation ownership through focused validation and evidence. Default capability: gpt-5.6-luna at max effort.",
+      "description": "Implementation ownership through focused validation and evidence.",
       "configFile": "worker.toml"
     },
     {
       "agentType": "explorer",
       "behavior": "explorer",
-      "capability": "terra_medium",
-      "model": "gpt-5.6-terra",
-      "reasoningEffort": "medium",
-      "description": "Read-only investigation, runtime reproduction, and implementation-path mapping. Default capability: gpt-5.6-terra at medium effort.",
+      "description": "Read-only investigation, runtime reproduction, and implementation-path mapping.",
       "configFile": "explorer.toml"
     },
     {
       "agentType": "review",
       "behavior": "review",
-      "capability": "sol_high",
-      "model": "gpt-5.6-sol",
-      "reasoningEffort": "high",
-      "description": "Independent adversarial review, verification, and acceptance assessment. Default capability: gpt-5.6-sol at high effort.",
+      "description": "Independent adversarial review, verification, and acceptance assessment.",
       "configFile": "review.toml"
     }
   ]

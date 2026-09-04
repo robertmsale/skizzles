@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 
 /**
- * Keeps spawn-agent children on an explicit role-owned configuration and a
- * bounded context fork.
+ * Allows native spawn defaults, explicit model/reasoning, context-free
+ * fork_turns="none", and positive numbered context forks.
+ * Denies full-history or omitted forks when model/reasoning overrides are
+ * present, because the native surface disallows that combination.
  * This hook only denies invalid requests; it never rewrites tool arguments.
  */
 type HookEvent = {
@@ -17,40 +19,65 @@ export {};
 
 const positiveForkTurns = /^[1-9][0-9]*$/;
 const spawnAgentToolNames = new Set(["spawn_agent", "collaborationspawn_agent"]);
-const roleOwnedOverrideNames = [
+const modelReasoningOverrideNames = [
   "model",
   "reasoning_effort",
-  "model_reasoning_effort",
-  "thinking",
-  "effort",
 ] as const;
-const denialReason =
-  'Select a non-empty agent_type role, omit model/reasoning overrides so the role catalog remains authoritative, and use the smallest useful positive numbered fork_turns (for example, "1"); do not use full-history or context-free forks.';
+const invalidInputReason = "spawn_agent input must be an object.";
+const blankRoleReason =
+  'If agent_type is set, use a non-empty role name; omit it to keep the native default.';
+const overrideForkReason =
+  'Explicit model/reasoning overrides require fork_turns="none" or a positive numbered context fork; the native surface disallows full-history and omitted forks with those overrides.';
+const malformedForkReason =
+  'Use fork_turns="none" for a context-free spawn, a positive numbered context fork (for example, "1"), or a native default ("all" or omitted without model/reasoning overrides).';
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function deniesSpawn(input: unknown): boolean {
-  if (!isJsonObject(input)) return true;
+function hasModelReasoningOverride(input: JsonObject): boolean {
+  return modelReasoningOverrideNames.some((name) => Object.hasOwn(input, name));
+}
 
-  const agentType = input.agent_type;
+function isAllowedExplicitFork(value: unknown): boolean {
+  return value === "none" || (typeof value === "string" && positiveForkTurns.test(value));
+}
+
+function isNativeDefaultFork(value: unknown): boolean {
+  return value === "all" || isAllowedExplicitFork(value);
+}
+
+function spawnDenialReason(input: unknown): string | undefined {
+  if (!isJsonObject(input)) return invalidInputReason;
+
+  if (Object.hasOwn(input, "agent_type")) {
+    const agentType = input.agent_type;
+    if (typeof agentType !== "string" || agentType.trim() === "") return blankRoleReason;
+  }
+
+  const overrides = hasModelReasoningOverride(input);
+  const forkPresent = Object.hasOwn(input, "fork_turns");
   const forkTurns = input.fork_turns;
-  return typeof agentType !== "string" || agentType.trim() === "" ||
-    typeof forkTurns !== "string" || !positiveForkTurns.test(forkTurns) ||
-    roleOwnedOverrideNames.some((name) => Object.hasOwn(input, name));
+
+  if (overrides) {
+    if (!forkPresent || forkTurns === "all" || !isAllowedExplicitFork(forkTurns)) return overrideForkReason;
+    return undefined;
+  }
+
+  if (forkPresent && !isNativeDefaultFork(forkTurns)) return malformedForkReason;
+  return undefined;
 }
 
 function isMultiAgentV2Spawn(input: unknown): input is JsonObject {
   return isJsonObject(input) && typeof input.task_name === "string";
 }
 
-function deny(): void {
+function deny(reason: string): void {
   console.log(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
-      permissionDecisionReason: denialReason,
+      permissionDecisionReason: reason,
     },
   }));
 }
@@ -71,7 +98,8 @@ async function main(): Promise<void> {
     !spawnAgentToolNames.has(hookEvent.tool_name)
   ) return;
   if (!isMultiAgentV2Spawn(hookEvent.tool_input)) return;
-  if (deniesSpawn(hookEvent.tool_input)) deny();
+  const reason = spawnDenialReason(hookEvent.tool_input);
+  if (reason) deny(reason);
 }
 
 await main();

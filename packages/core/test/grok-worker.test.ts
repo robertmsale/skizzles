@@ -9,10 +9,13 @@ describe("Grok worker", () => {
     expect(resultFields("oops", 0).state).toBe("failed");
     expect(resultFields("null", 0).state).toBe("failed");
     expect(resultFields('{"type":"error","message":"denied"}', 0).state).toBe("failed");
-    expect(resultFields('{"text":"partial","stopReason":"max_turns"}', 0).state).toBe("failed");
-    const r = resultFields(JSON.stringify({ text: "x".repeat(20000), thought: "private", stopReason: "end_turn" }), 0);
+    expect(resultFields('{"structuredOutput":{"outcome":"completed","summary":"partial"},"stopReason":"max_turns"}', 0).state).toBe("failed");
+    const r = resultFields(JSON.stringify({ structuredOutput: { outcome: "completed", summary: "x".repeat(20000) }, text: "private narration", thought: "private", stopReason: "end_turn" }), 0);
     expect(r.summary?.length).toBe(12000);
     expect(r).not.toHaveProperty("thought");
+    expect(JSON.stringify(r)).not.toContain("private narration");
+    expect(resultFields(JSON.stringify({ text: "narration only", stopReason: "end_turn" }), 0).state).toBe("failed");
+    expect(resultFields(JSON.stringify({ structuredOutput: { outcome: "blocked", summary: "Need a fixture" }, stopReason: "end_turn" }), 0).state).toBe("blocked");
   });
   test("detached execution, compact waits, resume settings, exclusion and cancellation", async () => {
     const dir = await mkdtemp(join(tmpdir(), "grok-worker-test-"));
@@ -22,7 +25,7 @@ const args = process.argv.slice(2);
 await Bun.write(process.env.ARGV_LOG!, JSON.stringify(args));
 const prompt = await Bun.file(args[args.indexOf('--prompt-file') + 1]!).text();
 if (prompt === 'slow') await Bun.sleep(30000);
-console.log(JSON.stringify({text: 'done', stopReason: 'end_turn', thought: 'DO_NOT_FORWARD'}));
+console.log(JSON.stringify({structuredOutput: {outcome: 'completed', summary: 'done'}, text: 'DO_NOT_FORWARD', stopReason: 'end_turn', thought: 'DO_NOT_FORWARD'}));
 `, { mode: 0o700 });
     const env = { ...process.env, GROK_WORKER_STATE_DIR: join(dir, "state"), GROK_WORKER_BINARY: fake, ARGV_LOG: join(dir, "args.json") };
     const run = async (...args: string[]) => {
@@ -89,6 +92,38 @@ console.log(JSON.stringify({text: 'done', stopReason: 'end_turn', thought: 'DO_N
       await writeFile(path, JSON.stringify({ ...stored, state: "starting", supervisorPid: undefined, startedAt: 0 }));
       expect((await run("wait", j.id, "--timeout-ms", "0")).state).toBe("orphaned");
       await expect(run("followup", j.id, "--prompt-file", prompt)).rejects.toThrow("orphaned");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }, 15000);
+
+  test("does not start a writer when the deadline expires during instruction loading", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "grok-worker-startup-"));
+    const skill = join(dir, "skill");
+    await cp(resolve("skills/grok-worker"), skill, { recursive: true });
+    const rules = join(skill, "worker-rules.md");
+    await rm(rules);
+    expect(Bun.spawnSync(["mkfifo", rules]).exitCode).toBe(0);
+    const binary = join(dir, "grok");
+    const marker = join(dir, "writer-started");
+    await writeFile(binary, `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(marker)}, 'started');\nconsole.log(JSON.stringify({structuredOutput:{outcome:'completed',summary:'done'},stopReason:'end_turn'}));\n`, { mode: 0o700 });
+    const prompt = join(dir, "prompt"); await writeFile(prompt, "test");
+    const state = join(dir, "state");
+    const run = async (...args: string[]) => {
+      const p = Bun.spawn([process.execPath, join(skill, "scripts/grok-worker.ts"), ...args], {
+        env: { ...process.env, GROK_WORKER_STATE_DIR: state, GROK_WORKER_BINARY: binary }, stdout: "pipe", stderr: "pipe",
+      });
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      if (code) throw Error(err);
+      return JSON.parse(out);
+    };
+    try {
+      const j = await run("spawn", "--cwd", dir, "--prompt-file", prompt, "--timeout-ms", "50");
+      // FIFO holds the supervisor in instruction loading until its deadline has fired.
+      await Bun.sleep(500);
+      await writeFile(rules, "worker rules");
+      const terminal = await run("wait", j.id, "--timeout-ms", "10000");
+      expect(terminal.state).toBe("failed");
+      expect(terminal.error).toContain("before Grok started");
+      expect(await Bun.file(marker).exists()).toBe(false);
     } finally { await rm(dir, { recursive: true, force: true }); }
   }, 15000);
 

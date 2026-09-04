@@ -9,14 +9,14 @@ Skizzles also includes a Grok Build harness with full root/Worker/Explorer/Revie
 ## What’s inside
 
 - **Hot-reloadable local-development permissions** — approves a conservative set of build, test, and repo-contained patch operations before Guardian while leaving Git surgery, publication, and consequential work on the normal approval path.
-- **Lean native orchestration** — Luna Max implements, Terra Medium explores, and Sol High supplies one adversarial terminal Review. Native Ultra-style fan-out stays available without a procedural obstacle course. 🗺️🤌
+- **Economical dispatch** — instruction-only Worker, Explorer, and Review roles; select model and reasoning for the assignment, starting with the least expensive capable option. Native Codex and a shared-workspace Grok implementer can work beneath a Codex-owned T3 task.
 - **Usage analyzer** — privacy-conscious, read-only rollout analysis using an explicit `CODEX_HOME`.
 - **Container Lab, batteries included** — a skill, full canonical source project, bundled CLI/reaper, compatibility descriptor, and safe doctor boundary for disposable Docker Compose labs. 🔬
 - **T3 Code orchestration** — a worktree-first task collaboration skill plus bundled CLI/daemon for local or private-tailnet coordination across T3 projects, with an optional host-only settled-worktree artifact reaper. 🌳
 - **Host/container app-server aggregation** — a source-only backend with host-native discovery, sticky per-thread execution modes, disposable Docker writers, and one REST/React management surface. It is deliberately not a plugin payload. 🐳
 - **ompweb orchestration** — a small `ompctl` HTTP client for listing, creating, messaging, reading, and checking default OMP sessions through an existing community ompweb server. 🥧
 - **Luna joins the V2 party** — an opt-in model-catalog overlay and tiny launchd refresher preserve the official catalog while enabling proven Luna workers in native MultiAgentV2. 🌙
-- **Durable role brains** — tiny generated Default/Worker/Explorer/Reviewer overlays bind each duty to a configured model and reasoning effort that survives eviction and rework. 🧠✨
+- **Instruction-only roles** — generated Default/Worker/Explorer/Review overlays describe duties while the dispatcher selects model and reasoning.
 - **A practical skill shelf** — auth semantics, Cargo optimization, counterfactual engineering, design proof gates, legacy cleanup, Rinf boundaries, project tooling, and a gated designer runtime.
 - **Installation help** — the public `install-skizzles` skill guides an LLM through optional host wiring after a skill-only install.
 - **A polite config handshake** — enable the hooks, then choose passive native orchestration or proactive lean fan-out without trampling the rest of `config.toml`. 🤝
@@ -39,6 +39,16 @@ bunx skills add https://github.com/robertsale/skizzles --skill install-skizzles
 
 Add `--skill <name>` for another public skill, or omit it to choose interactively. Skill-only installs do not activate Skizzles hooks or runtime helpers; [install-skizzles](skills/install-skizzles/SKILL.md) explains the optional next steps.
 
+### Selective copying and Grok workers
+
+Copy only the skills and role assets you intend to use. The installer is optional; copying a skill does not enable hooks, replace model instructions, or change Codex configuration.
+
+- `skills/agent-dispatch/` supplies economical dispatch and ownership guidance.
+- `skills/grok-worker/` is self-contained: copy the entire directory, then run its Bun script. It requires an authenticated Grok CLI and runs with trusted permissions and no nested agents in the parent's existing workspace.
+- Native roles under `assets/agents/` encode duties only. Copy selected TOML files together with `assets/skizzles_subagent_instructions.md`, preserving their relative paths, and declare the desired roles in your own Codex configuration.
+
+The Grok dispatcher exposes spawn, status, wait, result, followup, cancel, and bounded diagnostic inspection. Raw output stays in local job artifacts; the parent reads only compact state and the final report. Followups preserve the original model/reasoning and session. No T3 task or worktree is created. The parent owns Git operations and reviews shared edits before accepting them.
+
 ### Source-linked development
 
 For maintainer work, use a local checkout and point the Skills CLI at its canonical `skills/` directory:
@@ -60,7 +70,7 @@ After installing the complete plugin surface, Skizzles can safely finish the Cod
 - **Passive orchestration** enables the packaged hooks and leaves Codex’s native MultiAgentV2 defaults completely alone.
 - **Aggressive orchestration** also enables MultiAgentV2, keeps fourteen task slots available for parallel work, and adds tiny role and ownership hints. 🚀
 - **Native instructions** (the default) leave Codex's model instructions untouched.
-- **Skizzles instructions** replace Codex's base model instructions with the full Skizzles harness contract and configure four fixed capability-bearing roles from the generated role catalog: Default/Worker use Luna Max, Explorer uses Terra Medium, and Reviewer uses Sol High. Select the generated `agent_type` without separate model overrides, and use a positive numbered fork so Codex applies the selected role instead of inheriting full parent context.
+- **Skizzles instructions** replace Codex's base model instructions with the full Skizzles harness contract and configure four instruction-only roles. Select `agent_type` for its duty and model/reasoning for the assignment. Use a self-contained `fork_turns="none"` or a bounded positive turn count when selecting explicit model/reasoning overrides.
 
 Preview the full developer setup from the checkout:
 
@@ -107,7 +117,7 @@ bun install --frozen-lockfile
 bun run verify
 ```
 
-Agent roles are generated too: edit `assets/agent-role-spec.json` for the fixed capability pairs or `assets/agent-role-templates/` for duties, then run `bun run agents:build`. The checked-in `assets/agents/` directory is derived output and `bun run agents:check` guards it from hand-edited goblin drift. 👹
+Agent roles are generated too: edit `assets/agent-role-spec.json` for role names and descriptions or `assets/agent-role-templates/` for duties, then run `bun run agents:build`. The checked-in `assets/agents/` directory is derived output and `bun run agents:check` guards it from hand-edited goblin drift. 👹
 
 Plugins and new tasks use cached, versioned content, so start a fresh task after an update. For ownership, release rules, and safety details, see [AGENTS.md](AGENTS.md).
 
