@@ -26,7 +26,7 @@ Select model and reasoning explicitly when making a cost-sensitive native dispat
 
 Give the worker objective, owned paths, constraints, necessary context, and acceptance/validation criteria. Identify pre-existing edits and concurrent owners. Serialize overlapping writes, including generated artifacts and lockfiles. The root owns Git staging, commits, integration, publication, and user communication; workers leave their edits for root review. No automatic rollback on cancellation.
 
-Use compact completion and blocker reports. Do not routinely read worker transcripts or duplicate their execution loops. Inspect the actual diff and validation evidence; use independent review for substantial source changes. Review is a duty, not an automatic reason for the most expensive model at maximum effort.
+Use compact completion and blocker reports. Do not routinely read worker transcripts or duplicate their execution loops. Inspect the actual diff and validation evidence; use `request-review` for independent native review of substantial committed source changes. The integration owner requests it after workers finish; the reviewer settings belong to the user. Review is a duty, not an automatic reason for the most expensive model at maximum effort.
 
 ## Selective use
 

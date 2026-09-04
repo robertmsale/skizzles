@@ -9,6 +9,7 @@
     "designer-runtime",
     "no-legacy-cleanup",
     "omp-orchestration",
+    "request-review",
     "rinf-boundary"
   ]
 }

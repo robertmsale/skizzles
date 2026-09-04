@@ -1,0 +1,6 @@
+# Operator-owned. Agents must not change this without the user's explicit authorization.
+model = "gpt-6-astra"
+reasoning_effort = "low"
+timeout_seconds = 1800
+# Optional absolute path to the Codex executable; otherwise resolve codex on PATH.
+# codex_binary = "/path/to/codex"

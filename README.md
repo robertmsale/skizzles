@@ -47,6 +47,8 @@ Copy only the skills and role assets you intend to use. The installer is optiona
 - `skills/grok-worker/` is self-contained: copy the entire directory, then run its Bun script. It requires an authenticated Grok CLI and runs with trusted permissions and no nested agents in the parent's existing workspace.
 - Native roles under `assets/agents/` encode duties only. Copy selected TOML files together with `assets/skizzles_subagent_instructions.md`, preserving their relative paths, and declare the desired roles in your own Codex configuration.
 
+For independent native code review, copy `skills/request-review/` into either Codex or Grok's skills directory. Both use `~/.config/skizzles/request-review/config.toml`; create it from the included example only if absent. The initial reviewer is Astra Low. Only the user may authorize reviewer-setting changes. The runner accepts a clean committed `--base` or `--commit` target, caches completed candidates, and returns the native final report without streaming events into the implementor's context. No bulk installation, scheduler, or PR posting is required.
+
 The Grok dispatcher exposes spawn, status, wait, result, followup, cancel, and bounded diagnostic inspection. Raw output stays in local job artifacts; the parent reads only compact state and the final report. Followups preserve the original model/reasoning and session. No T3 task or worktree is created. The parent owns Git operations and reviews shared edits before accepting them.
 
 ### Source-linked development
