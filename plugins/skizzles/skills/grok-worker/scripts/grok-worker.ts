@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { Database } from "bun:sqlite";
 import { mkdir, readFile, writeFile, rename, rm, realpath, open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -84,6 +85,18 @@ export function resultFields(raw: string, exitCode: number | null): Partial<Job>
     ...(typeof result.total_cost_usd === "number" ? { costUsd: result.total_cost_usd } : {}),
     ...(result.stopReason === "end_turn" ? {} : { error: `Grok stopped: ${result.stopReason ?? "unknown"}` }) };
 }
+export async function withControl<T>(path: string, action: () => Promise<T>): Promise<T> {
+  // Short cross-process gate; SQLite releases the OS lock if a controller crashes.
+  const db = new Database(path, { create: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE");
+    try {
+      const value = await action();
+      db.exec("COMMIT");
+      return value;
+    } catch (e) { db.exec("ROLLBACK"); throw e; }
+  } finally { db.close(); }
+}
 async function supervise(id: string) {
   const j = await read(id);
   const dir = file(id);
@@ -111,26 +124,33 @@ async function supervise(id: string) {
   const poll = setInterval(async () => {
     if (await Bun.file(join(dir, `${j.turn}.cancel`)).exists()) { cancelled = true; stop(); }
   }, 200);
+  const executionDeadline = Date.now() + j.timeoutMs;
   const timer = setTimeout(() => { timedOut = true; stop(); }, j.timeoutMs);
   try {
     const rules = await readFile(join(import.meta.dir, "../worker-rules.md"), "utf8");
-    cancelled ||= existsSync(join(dir, `${j.turn}.cancel`));
-    if (cancelled || timedOut) {
-      j.state = cancelled ? "cancelled" : "failed";
-      j.error = cancelled ? "Cancelled before Grok started; workspace edits are preserved."
-        : "Execution deadline exceeded before Grok started; workspace edits are preserved.";
-      return;
-    }
-    child = spawn(j.binary, grokArgs(j, join(dir, `${j.turn}.prompt.txt`), rules), {
-      cwd: j.cwd, stdio: ["ignore", out.fd, err.fd], detached: true,
+    const started = await withControl(join(dir, "control.sqlite"), async () => {
+      cancelled ||= existsSync(join(dir, `${j.turn}.cancel`));
+      timedOut ||= Date.now() >= executionDeadline;
+      if (cancelled || timedOut) {
+        j.state = cancelled ? "cancelled" : "failed";
+        j.error = cancelled ? "Cancelled before Grok started; workspace edits are preserved."
+          : "Execution deadline exceeded before Grok started; workspace edits are preserved.";
+        return undefined;
+      }
+      const spawned = spawn(j.binary, grokArgs(j, join(dir, `${j.turn}.prompt.txt`), rules), {
+        cwd: j.cwd, stdio: ["ignore", out.fd, err.fd], detached: true,
+      });
+      child = spawned;
+      const completion = new Promise<{ code: number | null; error?: Error }>((accept) => {
+        spawned.once("error", error => accept({ code: null, error }));
+        spawned.once("close", code => accept({ code }));
+      });
+      if (spawned.pid) j.childPid = spawned.pid;
+      await save(j);
+      return { completion };
     });
-    const completion = new Promise<{ code: number | null; error?: Error }>((accept) => {
-      child!.once("error", error => accept({ code: null, error }));
-      child!.once("close", code => accept({ code }));
-    });
-    if (child.pid) j.childPid = child.pid;
-    await save(j);
-    const outcome = await completion;
+    if (!started) return;
+    const outcome = await started.completion;
     if (outcome.error) throw outcome.error;
     const code = outcome.code;
     j.exitCode = code;
@@ -259,8 +279,12 @@ async function main() {
   }
   options(args, []);
   if (cmd === "cancel") {
-    if (active(j)) await writeFile(join(file(id), `${j.turn}.cancel`), "cancel", { mode: 0o600 });
-    console.log(JSON.stringify({ ...compact(j), cancellationRequested: active(j) }));
+    const result = await withControl(join(file(id), "control.sqlite"), async () => {
+      const current = await read(id);
+      if (active(current)) await writeFile(join(file(id), `${current.turn}.cancel`), "cancel", { mode: 0o600 });
+      return { ...compact(current), cancellationRequested: active(current) };
+    });
+    console.log(JSON.stringify(result));
   } else if (cmd === "status") console.log(JSON.stringify(compact(j)));
   else if (cmd === "result") console.log(JSON.stringify({ ...compact(j), summary: j.summary, stopReason: j.stopReason,
     usage: j.usage, costUsd: j.costUsd, artifacts: file(id) }));

@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { cp, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Database } from "bun:sqlite";
 import { resultFields } from "../../../skills/grok-worker/scripts/grok-worker";
 const cli = resolve("skills/grok-worker/scripts/grok-worker.ts");
 describe("Grok worker", () => {
@@ -148,9 +149,41 @@ console.log(JSON.stringify({structuredOutput: {outcome: 'completed', summary: 'd
       return out;
     };
     try {
-      expect(JSON.parse(await run("cancel", id)).cancellationRequested).toBe(true);
+      const db = new Database(join(jobDir, "control.sqlite"), { create: true });
+      db.exec("BEGIN IMMEDIATE");
+      let acknowledged = false;
+      const cancellation = run("cancel", id).then(value => { acknowledged = true; return value; });
+      try {
+        await Bun.sleep(100);
+        expect(acknowledged).toBe(false);
+        expect(await Bun.file(join(jobDir, "1.cancel")).exists()).toBe(false);
+      } finally { db.exec("COMMIT"); db.close(); }
+      expect(JSON.parse(await cancellation).cancellationRequested).toBe(true);
       await run("_supervise", id);
       expect(JSON.parse(await run("status", id)).state).toBe("cancelled");
+      expect(await Bun.file(marker).exists()).toBe(false);
+      // A controller holding the SQLite gate must not hide an elapsed deadline
+      // from the supervisor's event loop while SQLite waits synchronously.
+      await rm(join(jobDir, "1.cancel"));
+      const previous = await Bun.file(join(jobDir, "job.json")).json();
+      await writeFile(join(jobDir, "job.json"), JSON.stringify({ ...previous,
+        state: "starting", supervisorPid: undefined, startedAt: Date.now(), timeoutMs: 50,
+      }));
+      const deadlineGate = new Database(join(jobDir, "control.sqlite"));
+      deadlineGate.exec("BEGIN IMMEDIATE");
+      const supervisor = run("_supervise", id);
+      try {
+        for (let i = 0; i < 100; i++) {
+          if ((await Bun.file(join(jobDir, "job.json")).json()).state === "running") break;
+          await Bun.sleep(10);
+        }
+        await Bun.sleep(200);
+        expect(await Bun.file(marker).exists()).toBe(false);
+      } finally { deadlineGate.exec("COMMIT"); deadlineGate.close(); }
+      await supervisor;
+      const afterDeadline = JSON.parse(await run("status", id));
+      expect(afterDeadline.state).toBe("failed");
+      expect(afterDeadline.error).toContain("deadline");
       expect(await Bun.file(marker).exists()).toBe(false);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
