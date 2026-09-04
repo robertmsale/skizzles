@@ -100,3 +100,12 @@ test("pre-launch mutation finalizes failure and permits explicit recovery", asyn
   const recovered = await f.run(["run", "--cwd", f.repo, "--base", f.base, "--rerun"]);
   expect(recovered.code).toBe(0); expect(recovered.result.status).toBe("completed");
 });
+
+
+test("cached review delivery revalidates the candidate without poisoning the cache", async () => {
+  const f = await fixture(); expect((await f.run()).code).toBe(0);
+  const changed = await f.run(undefined, { REVIEW_TEST_DIRTY_BEFORE: join(f.repo, "code.txt") });
+  expect(changed.code).toBe(1); expect(changed.result.status).toBe("failed");
+  f.git("restore", "code.txt");
+  const cached = await f.run(); expect(cached.code).toBe(0); expect(cached.result.cached).toBe(true);
+});

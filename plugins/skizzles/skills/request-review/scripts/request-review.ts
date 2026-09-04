@@ -105,6 +105,7 @@ async function main() {
     let prior: RecordData | undefined;
     try { prior = await record(id); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     if (prior && !rerun) {
+      if (await snapshot(cwd) !== head) throw Error("Candidate changed before cached review delivery");
       await emit(prior, true);
       if (prior.status !== "completed") process.exitCode = 1;
       return;
