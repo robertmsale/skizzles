@@ -1599,10 +1599,27 @@ async function preflightProviderSelection(selection) {
   const config = await requestRpc("server.getConfig", {});
   return requireAvailableProviderSelection(config, selection);
 }
-async function resolveCreateTaskSelection(selection) {
+function applyTaskReasoningOverride(config, selection, reasoningEffort) {
+  if (reasoningEffort === undefined)
+    return selection;
+  const effort = reasoningEffort.trim();
+  if (!effort)
+    throw new Error("Reasoning effort must be nonempty");
+  if (selection.instanceId !== "codex")
+    throw new Error("--reasoning-effort is supported only for Codex task creation");
+  const model = catalogModels(config, selection.instanceId).find((entry) => entry?.slug === selection.model);
+  const descriptors = model?.capabilities?.optionDescriptors;
+  const descriptor = Array.isArray(descriptors) ? descriptors.find((entry) => entry?.id === "reasoningEffort") : undefined;
+  const choices = descriptor?.options;
+  if (!Array.isArray(choices) || !choices.some((choice) => choice?.id === effort)) {
+    throw new Error(`Model '${selection.model}' does not advertise reasoning effort '${effort}'`);
+  }
+  return { ...selection, options: [...selection.options.filter((entry) => entry.id !== "reasoningEffort"), { id: "reasoningEffort", value: effort }] };
+}
+async function resolveCreateTaskSelection(selection, reasoningEffort) {
   const config = await requestRpc("server.getConfig", {});
   requireAvailableProviderSelection(config, selection);
-  return applyCatalogSelectionDefaults(config, selection);
+  return applyCatalogSelectionDefaults(config, applyTaskReasoningOverride(config, selection, reasoningEffort));
 }
 function now() {
   return new Date().toISOString();
@@ -1661,7 +1678,7 @@ async function gitBaseBranch(workspaceRoot) {
   return branch;
 }
 async function createTask(input) {
-  const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model));
+  const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model), input.reasoningEffort);
   const runtimeMode = taskRuntimeMode(input.provider);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
@@ -1851,6 +1868,12 @@ function parseExpectedAction(value) {
   };
 }
 async function executeCommand(command, dependencies) {
+  if (command.reasoningEffort !== undefined && (typeof command.reasoningEffort !== "string" || !command.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a nonempty string");
+  }
+  if (command.op !== "tasks.create" && command.op !== "handoff.create" && (command.model !== undefined || command.reasoningEffort !== undefined)) {
+    throw new Error("Model and reasoning overrides are creation-only; existing tasks retain their saved selection");
+  }
   const caller = command.op === "tasks.create" ? dependencies.resolveCallerThread(command.callerThreadId) : null;
   const projectId = command.op === "tasks.create" && command.projectId === "current" ? caller?.projectId : command.projectId;
   if (caller && command.op === "tasks.create" && projectId !== caller.projectId) {
@@ -1868,7 +1891,8 @@ async function executeCommand(command, dependencies) {
         message: String(command.message),
         ...command.baseBranch ? { baseBranch: String(command.baseBranch) } : {},
         ...command.provider ? { provider: String(command.provider) } : {},
-        ...command.model ? { model: String(command.model) } : {}
+        ...command.model ? { model: String(command.model) } : {},
+        ...command.reasoningEffort !== undefined ? { reasoningEffort: command.reasoningEffort } : {}
       });
     case "tasks.create":
       return dependencies.createTask({
@@ -1877,7 +1901,8 @@ async function executeCommand(command, dependencies) {
         message: String(command.message),
         ...command.baseBranch ? { baseBranch: String(command.baseBranch) } : {},
         ...command.provider ? { provider: String(command.provider) } : {},
-        ...command.model ? { model: String(command.model) } : {}
+        ...command.model ? { model: String(command.model) } : {},
+        ...command.reasoningEffort !== undefined ? { reasoningEffort: command.reasoningEffort } : {}
       });
     case "tasks.list":
       return dependencies.taskList({

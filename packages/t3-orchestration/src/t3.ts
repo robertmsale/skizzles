@@ -397,10 +397,25 @@ async function preflightProviderSelection(selection: ModelSelection): Promise<st
   return requireAvailableProviderSelection(config, selection);
 }
 
-async function resolveCreateTaskSelection(selection: ModelSelection): Promise<ModelSelection> {
+export function applyTaskReasoningOverride(config: unknown, selection: ModelSelection, reasoningEffort?: string): ModelSelection {
+  if (reasoningEffort === undefined) return selection;
+  const effort = reasoningEffort.trim();
+  if (!effort) throw new Error("Reasoning effort must be nonempty");
+  if (selection.instanceId !== "codex") throw new Error("--reasoning-effort is supported only for Codex task creation");
+  const model = catalogModels(config, selection.instanceId).find((entry: any) => entry?.slug === selection.model) as any;
+  const descriptors = model?.capabilities?.optionDescriptors;
+  const descriptor = Array.isArray(descriptors) ? descriptors.find((entry: any) => entry?.id === "reasoningEffort") : undefined;
+  const choices = descriptor?.options;
+  if (!Array.isArray(choices) || !choices.some((choice: any) => choice?.id === effort)) {
+    throw new Error(`Model '${selection.model}' does not advertise reasoning effort '${effort}'`);
+  }
+  return { ...selection, options: [...selection.options.filter((entry) => entry.id !== "reasoningEffort"), { id: "reasoningEffort", value: effort }] };
+}
+
+async function resolveCreateTaskSelection(selection: ModelSelection, reasoningEffort?: string): Promise<ModelSelection> {
   const config = await requestRpc("server.getConfig", {});
   requireAvailableProviderSelection(config, selection);
-  return applyCatalogSelectionDefaults(config, selection);
+  return applyCatalogSelectionDefaults(config, applyTaskReasoningOverride(config, selection, reasoningEffort));
 }
 
 function now() { return new Date().toISOString(); }
@@ -447,8 +462,8 @@ async function gitBaseBranch(workspaceRoot: string): Promise<string> {
   return branch;
 }
 
-export async function createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string }): Promise<{ sequence: number; threadId: string; model: ModelSelection; worktreeRequired: true }> {
-  const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model));
+export async function createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string; reasoningEffort?: string }): Promise<{ sequence: number; threadId: string; model: ModelSelection; worktreeRequired: true }> {
+  const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model), input.reasoningEffort);
   const runtimeMode = taskRuntimeMode(input.provider);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);

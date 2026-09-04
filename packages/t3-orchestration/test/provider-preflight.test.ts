@@ -174,3 +174,18 @@ describe("task provider preflight", () => {
     });
   });
 });
+
+test("explicit creation effort replaces defaults, validates catalog, and survives follow-up", async () => {
+  const { applyTaskReasoningOverride } = await import("../src/t3.ts");
+  const catalog = { providers: [{ instanceId: "codex", models: [{ slug: "sol", capabilities: { optionDescriptors: [{ id: "reasoningEffort", options: [{ id: "medium", isDefault: true }, { id: "xhigh" }] }] } }] }] };
+  const original = { instanceId: "codex", model: "sol", options: [{ id: "reasoningEffort", value: "medium" }, { id: "serviceTier", value: "priority" }] };
+  const selected = applyCatalogSelectionDefaults(catalog, applyTaskReasoningOverride(catalog, original, "xhigh"));
+  expect(selected.options).toEqual([{ id: "serviceTier", value: "priority" }, { id: "reasoningEffort", value: "xhigh" }]);
+  expect(original.options[0]?.value).toBe("medium");
+  for (const value of ["", "ultra"]) expect(() => applyTaskReasoningOverride(catalog, original, value)).toThrow();
+  expect(() => applyTaskReasoningOverride({}, original, "xhigh")).toThrow("does not advertise");
+  expect(() => applyTaskReasoningOverride(catalog, { ...original, instanceId: "grok" }, "high")).toThrow("only for Codex");
+  expect(applyTaskReasoningOverride({}, original)).toBe(original);
+  const target = { id: "t", projectId: "p", title: "test", modelSelection: selected, runtimeMode: "auto" as const, interactionMode: "default" as const, worktreePath: null, branch: null, session: null };
+  expect(taskTurnCommand(target, "continue").modelSelection).toEqual(selected);
+});

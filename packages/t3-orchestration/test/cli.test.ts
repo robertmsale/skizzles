@@ -404,3 +404,15 @@ describe("cross-project collaboration CLI", () => {
     }
   });
 });
+
+test("creation CLI forwards explicit reasoning effort", async () => {
+  expect(await captureCli(["handoff", "create", "--project", "p", "--title", "t", "--message", "m", "--model", "sol", "--reasoning-effort", "xhigh"])).toMatchObject({ model: "sol", reasoningEffort: "xhigh" });
+});
+
+test("send rejects model and reasoning flags without contacting daemon", async () => {
+  for (const flag of ["--model", "--reasoning-effort"]) {
+    const child = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "tasks", "send", "t", "--message", "m", flag, "high"], { stdout: "pipe", stderr: "pipe" });
+    expect(await child.exited).not.toBe(0);
+    expect(await new Response(child.stderr).text()).toContain("creation-only");
+  }
+});

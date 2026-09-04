@@ -8,7 +8,7 @@ export type CommandDependencies = {
   projectList(): Promise<unknown>;
   taskList(options: TaskListOptions): Promise<unknown>;
   taskWait(input: TaskWaitInput): Promise<unknown>;
-  createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string }): Promise<unknown>;
+  createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string; reasoningEffort?: string }): Promise<unknown>;
   sendTask(threadId: string, message: string): Promise<unknown>;
   taskStatus(threadId: string): Promise<unknown>;
   taskHistory(threadId: string, turns: number, before?: string): Promise<unknown>;
@@ -52,6 +52,12 @@ function parseExpectedAction(value: unknown): {
 }
 
 export async function executeCommand(command: Record<string, unknown>, dependencies: CommandDependencies): Promise<unknown> {
+  if (command.reasoningEffort !== undefined && (typeof command.reasoningEffort !== "string" || !command.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a nonempty string");
+  }
+  if (command.op !== "tasks.create" && command.op !== "handoff.create" && (command.model !== undefined || command.reasoningEffort !== undefined)) {
+    throw new Error("Model and reasoning overrides are creation-only; existing tasks retain their saved selection");
+  }
   const caller = command.op === "tasks.create" ? dependencies.resolveCallerThread(command.callerThreadId) : null;
   const projectId = command.op === "tasks.create" && command.projectId === "current" ? caller?.projectId : command.projectId;
   if (caller && command.op === "tasks.create" && projectId !== caller.projectId) {
@@ -68,6 +74,7 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
       ...(command.baseBranch ? { baseBranch: String(command.baseBranch) } : {}),
       ...(command.provider ? { provider: String(command.provider) } : {}),
       ...(command.model ? { model: String(command.model) } : {}),
+      ...(command.reasoningEffort !== undefined ? { reasoningEffort: command.reasoningEffort as string } : {}),
     });
     case "tasks.create": return dependencies.createTask({
       projectId: String(projectId),
@@ -76,6 +83,7 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
       ...(command.baseBranch ? { baseBranch: String(command.baseBranch) } : {}),
       ...(command.provider ? { provider: String(command.provider) } : {}),
       ...(command.model ? { model: String(command.model) } : {}),
+      ...(command.reasoningEffort !== undefined ? { reasoningEffort: command.reasoningEffort as string } : {}),
     });
     case "tasks.list": return dependencies.taskList({
       limit: Number(command.limit),

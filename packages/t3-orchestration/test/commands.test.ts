@@ -123,3 +123,14 @@ describe("daemon command routing", () => {
     expect(await executeCommand({ op: "worktrees.listCleanable" }, deps)).toEqual({ tasks: [], count: 0, truncated: false, occupied: [] });
   });
 });
+
+test("creation forwards effort but follow-up overrides fail before dispatch", async () => {
+  const deps = dependencies({ resolveCallerThread: () => ({ codexThreadId: "c", t3ThreadId: "t", projectId: "p" }) });
+  for (const op of ["tasks.create", "handoff.create"]) {
+    expect(await executeCommand({ op, projectId: "p", title: "t", message: "m", model: "sol", reasoningEffort: "xhigh" }, deps)).toMatchObject({ model: "sol", reasoningEffort: "xhigh" });
+  }
+  for (const override of [{ model: "sol" }, { reasoningEffort: "high" }]) {
+    await expect(executeCommand({ op: "tasks.send", threadId: "t", message: "m", ...override }, deps)).rejects.toThrow("creation-only");
+  }
+  for (const reasoningEffort of ["", null, 1]) await expect(executeCommand({ op: "handoff.create", reasoningEffort }, deps)).rejects.toThrow("nonempty");
+});
