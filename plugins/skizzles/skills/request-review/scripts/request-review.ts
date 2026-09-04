@@ -15,7 +15,7 @@ const help = "request-review.ts run --cwd PATH (--base REF | --commit HEAD) [--r
 type RecordData = {
   id: string; status: "running" | "completed" | "failed" | "stale"; cwd: string;
   head: string; base?: string; commit?: string; model: string; reasoningEffort: string;
-  configHash: string; codexVersion: string; startedAt: string; finishedAt?: string;
+  configHash: string; runnerHash: string; codexVersion: string; startedAt: string; finishedAt?: string;
   reviewerPid?: number; error?: string; reportPath: string;
 };
 async function atomic(path: string, value: unknown) {
@@ -99,7 +99,8 @@ async function main() {
     const [versionText, versionErr, versionCode] = await Promise.all([new Response(version.stdout).text(), new Response(version.stderr).text(), version.exited]);
     if (versionCode) throw Error(`Could not identify Codex: ${versionErr.trim()}`);
     const configHash = hash(rawConfig);
-    const id = hash(JSON.stringify({ format: 1, cwd, head, base, commit: base ? undefined : head, configHash, codexVersion: versionText.trim() }));
+    const runnerHash = hash(await readFile(import.meta.path, "utf8"));
+    const id = hash(JSON.stringify({ format: 1, cwd, head, base, commit: base ? undefined : head, configHash, runnerHash, codexVersion: versionText.trim() }));
     const dir = join(stateRoot, "reviews", id);
     let prior: RecordData | undefined;
     try { prior = await record(id); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -111,12 +112,10 @@ async function main() {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     const attempt = randomUUID();
     const reportPath = join(dir, `${attempt}.report.txt`);
-    const data: RecordData = { id, cwd, head, ...(base ? { base } : { commit: head }), model, reasoningEffort: effort, configHash, codexVersion: versionText.trim(), status: "running", startedAt: new Date().toISOString(), reportPath };
+    const data: RecordData = { id, cwd, head, ...(base ? { base } : { commit: head }), model, reasoningEffort: effort, configHash, runnerHash, codexVersion: versionText.trim(), status: "running", startedAt: new Date().toISOString(), reportPath };
     const persist = async () => { await atomic(join(dir, "review.json"), data); await atomic(activePath, data); };
-    await persist();
-    if (await snapshot(cwd) !== head) throw Error("Candidate changed before launch");
-    const stdout = await open(join(dir, `${attempt}.events.jsonl`), "wx", 0o600);
-    const stderr = await open(join(dir, `${attempt}.stderr.log`), "wx", 0o600);
+    let stdout: Awaited<ReturnType<typeof open>> | undefined;
+    let stderr: Awaited<ReturnType<typeof open>> | undefined;
     const argv = ["exec", "--ignore-user-config", "--ephemeral", "-s", "read-only", "-m", model,
       "-c", `review_model=${JSON.stringify(model)}`, "-c", `model_reasoning_effort=${JSON.stringify(effort)}`,
       "-c", "project_doc_max_bytes=0", "-c", "skills.include_instructions=false",
@@ -133,6 +132,11 @@ async function main() {
     const timer = setTimeout(stop, timeout * 1000);
     process.on("SIGINT", stop); process.on("SIGTERM", stop);
     try {
+      if (await snapshot(cwd) !== head) throw Error("Candidate changed before launch");
+      stdout = await open(join(dir, `${attempt}.events.jsonl`), "wx", 0o600);
+      stderr = await open(join(dir, `${attempt}.stderr.log`), "wx", 0o600);
+      await persist();
+      if (killed) throw Error("Review was cancelled or timed out before launch");
       child = spawn(binary, argv, { cwd, detached: true, env: { ...process.env, SKIZZLES_REVIEW_ACTIVE: "1" }, stdio: ["ignore", stdout.fd, stderr.fd] });
       ended = new Promise<number | null>((resolveExit, reject) => { child!.once("error", reject); child!.once("close", resolveExit); });
       void ended.catch(() => {});
@@ -150,7 +154,7 @@ async function main() {
     finally {
       clearTimeout(timer); if (killTimer) clearTimeout(killTimer);
       process.off("SIGINT", stop); process.off("SIGTERM", stop);
-      await stdout.close(); await stderr.close();
+      await stdout?.close(); await stderr?.close();
       data.finishedAt = new Date().toISOString(); await persist();
     }
     await emit(data);

@@ -19,7 +19,7 @@ async function fixture() {
   const binary = join(root, "codex");
   await writeFile(binary, `#!${process.execPath}
 const args=process.argv.slice(2);
-if(args[0]==="--version"){console.log("codex test");process.exit(0);}
+if(args[0]==="--version"){if(process.env.REVIEW_TEST_DIRTY_BEFORE) await Bun.write(process.env.REVIEW_TEST_DIRTY_BEFORE,"changed before launch");console.log("codex test");process.exit(0);}
 await Bun.write(process.env.REVIEW_TEST_ARGS,JSON.stringify(args));
 console.log("private progress that must not reach caller");
 if(process.env.REVIEW_TEST_DELAY) await Bun.sleep(Number(process.env.REVIEW_TEST_DELAY));
@@ -89,3 +89,14 @@ test("timeout is failure and operator settings invalidate the cache", async () =
   const timed = await f.run(undefined, { REVIEW_TEST_DELAY: "3000" });
   expect(timed.code).toBe(1); expect(timed.result.error).toContain("timed out"); expect(timed.result.id).not.toBe(first.result.id);
 }, 10000);
+
+
+test("pre-launch mutation finalizes failure and permits explicit recovery", async () => {
+  const f = await fixture();
+  const failed = await f.run(undefined, { REVIEW_TEST_DIRTY_BEFORE: join(f.repo, "code.txt") });
+  expect(failed.code).toBe(1); expect(failed.result.status).toBe("failed");
+  expect(await Bun.file(join(f.root, "args.json")).exists()).toBe(false);
+  f.git("restore", "code.txt");
+  const recovered = await f.run(["run", "--cwd", f.repo, "--base", f.base, "--rerun"]);
+  expect(recovered.code).toBe(0); expect(recovered.result.status).toBe("completed");
+});
