@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { cp, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resultFields } from "../../../skills/grok-worker/scripts/grok-worker";
@@ -126,5 +126,33 @@ console.log(JSON.stringify({structuredOutput: {outcome: 'completed', summary: 'd
       expect(await Bun.file(marker).exists()).toBe(false);
     } finally { await rm(dir, { recursive: true, force: true }); }
   }, 15000);
+
+  test("honors acknowledged cancellation before the supervisor starts", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "grok-worker-pre-cancel-"));
+    const id = crypto.randomUUID();
+    const state = join(dir, "state"); const jobDir = join(state, id);
+    await mkdir(join(jobDir, "busy"), { recursive: true });
+    const marker = join(dir, "writer-started"); const binary = join(dir, "grok");
+    await writeFile(binary, `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(marker)}, 'started');\nconsole.log(JSON.stringify({structuredOutput:{outcome:'completed',summary:'done'},stopReason:'end_turn'}));\n`, { mode: 0o700 });
+    await writeFile(join(jobDir, "1.prompt.txt"), "test");
+    await writeFile(join(jobDir, "job.json"), JSON.stringify({
+      id, sessionId: crypto.randomUUID(), cwd: dir, binary, model: "test", effort: "low", maxTurns: 1,
+      timeoutMs: 10000, turn: 1, cursor: "1:running", state: "starting", startedAt: Date.now(),
+    }));
+    const run = async (...args: string[]) => {
+      const p = Bun.spawn([process.execPath, cli, ...args], {
+        env: { ...process.env, GROK_WORKER_STATE_DIR: state }, stdout: "pipe", stderr: "pipe",
+      });
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      if (code) throw Error(err);
+      return out;
+    };
+    try {
+      expect(JSON.parse(await run("cancel", id)).cancellationRequested).toBe(true);
+      await run("_supervise", id);
+      expect(JSON.parse(await run("status", id)).state).toBe("cancelled");
+      expect(await Bun.file(marker).exists()).toBe(false);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
 
 });

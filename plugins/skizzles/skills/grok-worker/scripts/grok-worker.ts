@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, rename, rm, realpath, open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -113,6 +114,7 @@ async function supervise(id: string) {
   const timer = setTimeout(() => { timedOut = true; stop(); }, j.timeoutMs);
   try {
     const rules = await readFile(join(import.meta.dir, "../worker-rules.md"), "utf8");
+    cancelled ||= existsSync(join(dir, `${j.turn}.cancel`));
     if (cancelled || timedOut) {
       j.state = cancelled ? "cancelled" : "failed";
       j.error = cancelled ? "Cancelled before Grok started; workspace edits are preserved."
