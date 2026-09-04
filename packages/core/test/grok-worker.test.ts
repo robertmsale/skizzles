@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resultFields } from "../../../skills/grok-worker/scripts/grok-worker";
@@ -7,6 +7,7 @@ const cli = resolve("skills/grok-worker/scripts/grok-worker.ts");
 describe("Grok worker", () => {
   test("does not accept errors, malformed output, or turn exhaustion as completion", () => {
     expect(resultFields("oops", 0).state).toBe("failed");
+    expect(resultFields("null", 0).state).toBe("failed");
     expect(resultFields('{"type":"error","message":"denied"}', 0).state).toBe("failed");
     expect(resultFields('{"text":"partial","stopReason":"max_turns"}', 0).state).toBe("failed");
     const r = resultFields(JSON.stringify({ text: "x".repeat(20000), thought: "private", stopReason: "end_turn" }), 0);
@@ -30,9 +31,11 @@ console.log(JSON.stringify({text: 'done', stopReason: 'end_turn', thought: 'DO_N
       if (code !== 0) throw Error(err);
       return JSON.parse(out);
     };
+    let runningId: string | undefined;
     try {
       const prompt = join(dir, "prompt"); await writeFile(prompt, "hello");
       const job = await run("spawn", "--cwd", dir, "--prompt-file", prompt, "--model", "test-model", "--effort", "low");
+      runningId = job.id;
       const first = await run("wait", job.id, "--timeout-ms", "10000");
       expect(first.state).toBe("completed"); expect(first).not.toHaveProperty("summary");
       const result = await run("result", job.id); expect(result.summary).toBe("done");
@@ -53,6 +56,40 @@ console.log(JSON.stringify({text: 'done', stopReason: 'end_turn', thought: 'DO_N
       expect(args).not.toContain("--worktree"); expect(args).toContain(job.cwd);
       await run("cancel", job.id);
       expect((await run("wait", job.id, "--timeout-ms", "10000")).state).toBe("cancelled");
-    } finally { await rm(dir, { recursive: true, force: true }); }
+    } finally {
+      if (runningId) {
+        await run("cancel", runningId).catch(() => {});
+        await run("wait", runningId, "--timeout-ms", "10000").catch(() => {});
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
   }, 20000);
+  test("copied skill enforces deadlines and reports dead supervisors without permitting takeover", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "grok-worker-copy-"));
+    await cp(resolve("skills/grok-worker"), join(dir, "skill"), { recursive: true });
+    const binary = join(dir, "grok");
+    await writeFile(binary, "#!/usr/bin/env bun\nawait Bun.sleep(30000);\n", { mode: 0o700 });
+    const prompt = join(dir, "prompt"); await writeFile(prompt, "slow");
+    const state = join(dir, "state");
+    const run = async (...args: string[]) => {
+      const p = Bun.spawn([process.execPath, join(dir, "skill/scripts/grok-worker.ts"), ...args], {
+        env: { ...process.env, GROK_WORKER_STATE_DIR: state, GROK_WORKER_BINARY: binary }, stdout: "pipe", stderr: "pipe",
+      });
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      if (code) throw Error(err);
+      return JSON.parse(out);
+    };
+    try {
+      const j = await run("spawn", "--cwd", dir, "--prompt-file", prompt, "--timeout-ms", "250");
+      const terminal = await run("wait", j.id, "--timeout-ms", "10000");
+      expect(terminal.state).toBe("failed"); expect(terminal.error).toContain("deadline");
+      const path = join(state, j.id, "job.json");
+      const stored = await Bun.file(path).json();
+      // Simulate a launcher that died before its supervisor could register.
+      await writeFile(path, JSON.stringify({ ...stored, state: "starting", supervisorPid: undefined, startedAt: 0 }));
+      expect((await run("wait", j.id, "--timeout-ms", "0")).state).toBe("orphaned");
+      await expect(run("followup", j.id, "--prompt-file", prompt)).rejects.toThrow("orphaned");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }, 15000);
+
 });
