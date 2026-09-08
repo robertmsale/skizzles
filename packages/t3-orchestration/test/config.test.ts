@@ -206,10 +206,12 @@ describe("task runtime mode", () => {
     expect(taskRuntimeMode("cursor")).toBe("full-access");
   });
 
-  test("keeps Codex Auto for codex, openai, and unset providers", () => {
-    expect(taskRuntimeMode("codex")).toBe("auto");
-    expect(taskRuntimeMode("openai")).toBe("auto");
-    expect(taskRuntimeMode(undefined)).toBe("auto");
-    expect(taskRuntimeMode("")).toBe("auto");
+  test("boots Codex Full Access for codex, openai, and unset providers", () => {
+    expect(taskRuntimeMode("codex")).toBe("full-access");
+    expect(taskRuntimeMode("openai")).toBe("full-access");
+    expect(taskRuntimeMode(undefined)).toBe("full-access");
+    expect(taskRuntimeMode("")).toBe("full-access");
+    expect(taskRuntimeMode("  CODEX  ")).toBe("full-access");
+    expect(taskRuntimeMode("unknown")).toBe("auto");
   });
 });

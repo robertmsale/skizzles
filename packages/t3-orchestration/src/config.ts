@@ -129,10 +129,10 @@ export function taskRuntimeMode(provider?: string): "auto" | "full-access" {
   switch (provider?.trim().toLowerCase() || "codex") {
     case "grok":
     case "cursor":
-      return "full-access";
     case "codex":
     case "openai":
+      return "full-access";
     default:
-      return "auto";
+      return provider?.trim() ? "auto" : "full-access";
   }
 }
