@@ -87,13 +87,13 @@ export function projectThread(result: ThreadSnapshot): T3Thread {
     } : null,
   };
 }
-// Shell includes active-thread signals; the command read model also includes
-// archived threads with empty message/activity arrays. Never load history here.
+// Both shell APIs contain metadata only. The command read model is unsuitable
+// here: it still includes full proposed-plan bodies across all threads.
 async function taskMetadata(id: string) {
   const shell = await shellSnapshot();
   const active = shell.threads.find((entry) => entry.id === id);
   if (active) return { target: active, projects: shell.projects };
-  const model = await snapshot();
+  const model: ShellSnapshot = await requestRpc("orchestration.getArchivedShellSnapshot", {}, 2_000_000);
   const target = model.threads.find((entry) => entry.id === id && !entry.deletedAt);
   if (!target) throw new Error(`T3 thread '${id}' was not found`);
   return { target, projects: model.projects };
@@ -228,14 +228,12 @@ export function bootstrapRpcResponse(frame: string, requestId: string):
 async function requestRpc(
   tag: string,
   payload: Record<string, unknown>,
+  maxResponseBytes?: number,
 ): Promise<any> {
   const base = await origin();
-  const ticketResponse = await fetch(`${base}/api/auth/websocket-ticket`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${await token()}` },
-  });
-  if (!ticketResponse.ok) throw new Error(`T3 WebSocket ticket failed (${ticketResponse.status}): ${await ticketResponse.text()}`);
-  const ticket = (await ticketResponse.json()) as { ticket?: unknown };
+  // Tickets are tiny; bound their body and keep auth-service error text private.
+  const ticket = await request("/api/auth/websocket-ticket", { method: "POST" }, 16_000)
+    .catch(() => { throw new Error("T3 WebSocket ticket request failed"); }) as { ticket?: unknown };
   if (typeof ticket.ticket !== "string" || !ticket.ticket) throw new Error("T3 WebSocket ticket response was invalid");
   const url = new URL(base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -246,6 +244,7 @@ async function requestRpc(
     const socket = new WebSocket(url);
     let settled = false;
     let lastFrame = "none";
+    let responseBytes = 0;
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
@@ -260,7 +259,16 @@ async function requestRpc(
     }, BOOTSTRAP_TIMEOUT_MS);
     socket.addEventListener("open", () => socket.send(JSON.stringify(bootstrapRpcRequest(requestId, payload, tag))));
     socket.addEventListener("message", (event) => {
-      const response = bootstrapRpcResponse(String(event.data), requestId);
+      const frame = String(event.data);
+      responseBytes += Buffer.byteLength(frame);
+      if (maxResponseBytes !== undefined && responseBytes > maxResponseBytes) {
+        finish(() => {
+          socket.close();
+          reject(new Error(`T3 metadata response exceeded ${maxResponseBytes} bytes`));
+        });
+        return;
+      }
+      const response = bootstrapRpcResponse(frame, requestId);
       if (response.type === "ignore") {
         lastFrame = response.description;
         return;

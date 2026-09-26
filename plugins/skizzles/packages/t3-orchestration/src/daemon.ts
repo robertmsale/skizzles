@@ -1344,7 +1344,7 @@ async function taskMetadata(id) {
   const active = shell.threads.find((entry) => entry.id === id);
   if (active)
     return { target: active, projects: shell.projects };
-  const model = await snapshot();
+  const model = await requestRpc("orchestration.getArchivedShellSnapshot", {}, 2000000);
   const target = model.threads.find((entry) => entry.id === id && !entry.deletedAt);
   if (!target)
     throw new Error(`T3 thread '${id}' was not found`);
@@ -1449,15 +1449,11 @@ function bootstrapRpcResponse(frame, requestId) {
     return { type: "success", value: response.exit.value };
   return { type: "failure", message: `T3 WebSocket dispatch failed: ${JSON.stringify(response.exit?.cause ?? response.exit)}` };
 }
-async function requestRpc(tag, payload) {
+async function requestRpc(tag, payload, maxResponseBytes) {
   const base = await origin();
-  const ticketResponse = await fetch(`${base}/api/auth/websocket-ticket`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${await token()}` }
+  const ticket = await request("/api/auth/websocket-ticket", { method: "POST" }, 16000).catch(() => {
+    throw new Error("T3 WebSocket ticket request failed");
   });
-  if (!ticketResponse.ok)
-    throw new Error(`T3 WebSocket ticket failed (${ticketResponse.status}): ${await ticketResponse.text()}`);
-  const ticket = await ticketResponse.json();
   if (typeof ticket.ticket !== "string" || !ticket.ticket)
     throw new Error("T3 WebSocket ticket response was invalid");
   const url = new URL(base);
@@ -1469,6 +1465,7 @@ async function requestRpc(tag, payload) {
     const socket = new WebSocket(url);
     let settled = false;
     let lastFrame = "none";
+    let responseBytes = 0;
     const finish = (callback) => {
       if (settled)
         return;
@@ -1484,7 +1481,16 @@ async function requestRpc(tag, payload) {
     }, BOOTSTRAP_TIMEOUT_MS);
     socket.addEventListener("open", () => socket.send(JSON.stringify(bootstrapRpcRequest(requestId, payload, tag))));
     socket.addEventListener("message", (event) => {
-      const response = bootstrapRpcResponse(String(event.data), requestId);
+      const frame = String(event.data);
+      responseBytes += Buffer.byteLength(frame);
+      if (maxResponseBytes !== undefined && responseBytes > maxResponseBytes) {
+        finish(() => {
+          socket.close();
+          reject(new Error(`T3 metadata response exceeded ${maxResponseBytes} bytes`));
+        });
+        return;
+      }
+      const response = bootstrapRpcResponse(frame, requestId);
       if (response.type === "ignore") {
         lastFrame = response.description;
         return;

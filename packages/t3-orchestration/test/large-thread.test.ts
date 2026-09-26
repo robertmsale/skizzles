@@ -18,6 +18,8 @@ test("large histories do not block send/status; reads remain bounded", async () 
   let archived = false;
   let activityBytes = 600_000;
   let detailRequests = 0;
+  let snapshotRequests = 0;
+  let archivedMetadataBytes = 0;
   let lastQuery = "";
   const commands: any[] = [];
   const server = Bun.serve({
@@ -29,7 +31,10 @@ test("large histories do not block send/status; reads remain bounded", async () 
       const thread = { ...target, archivedAt: archived ? "2026-09-26T00:00:00Z" : null };
       const model = { snapshotSequence: 1, projects: [{ id: "project", title: "Project", workspaceRoot: "/fixture" }], threads: [thread], updatedAt: "now" };
       if (url.pathname === "/api/orchestration/shell") return Response.json({ ...model, threads: archived ? [] : [thread] });
-      if (url.pathname === "/api/orchestration/snapshot") return Response.json({ ...model, threads: [{ ...thread, messages: [], activities: [] }] });
+      if (url.pathname === "/api/orchestration/snapshot") {
+        snapshotRequests++;
+        return Response.json({ ...model, threads: [{ ...thread, messages: [], activities: [], proposedPlans: [{ planMarkdown: "p".repeat(2_000_001) }] }] });
+      }
       if (url.pathname === "/api/orchestration/threads/large") {
         detailRequests++;
         lastQuery = url.search;
@@ -49,6 +54,14 @@ test("large histories do not block send/status; reads remain bounded", async () 
     websocket: {
       message(socket, message) {
         const frame = JSON.parse(String(message));
+        if (frame.tag === "orchestration.getArchivedShellSnapshot") {
+          socket.send(JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value: {
+            snapshotSequence: 1, updatedAt: "now",
+            projects: [{ id: "project", title: "Project", workspaceRoot: "/fixture" }],
+            threads: archived ? [{ ...target, archivedAt: "2026-09-26T00:00:00Z", title: "Large thread" + "x".repeat(archivedMetadataBytes) }] : [],
+          } } }));
+          return;
+        }
         expect(frame.tag).toBe("server.getConfig");
         socket.send(JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value: {
           providers: [{ instanceId: "codex", driver: "codex", enabled: true, installed: true, status: "ready", models: [{ slug: "saved-model" }] }],
@@ -86,6 +99,7 @@ test("large histories do not block send/status; reads remain bounded", async () 
       expect(JSON.parse(send.stdout)).toEqual({ sequence: 2 });
     }
     expect(detailRequests).toBe(0);
+    expect(snapshotRequests).toBe(0);
     for (const command of commands) {
       expect(command.modelSelection).toEqual(target.modelSelection);
       expect(command.runtimeMode).toBe(target.runtimeMode);
@@ -114,6 +128,11 @@ test("large histories do not block send/status; reads remain bounded", async () 
     expect((await run('client.taskStatus("missing")')).stderr).toContain("was not found");
     expect((await run('client.taskStatus("large")')).code).toBe(0);
     expect((await run('client.sendTask("large", "still reachable")')).code).toBe(0);
+    expect(snapshotRequests).toBe(0);
+    archivedMetadataBytes = 2_000_001;
+    const tooMuchMetadata = await run('client.taskStatus("large")');
+    expect(tooMuchMetadata.code).toBe(1);
+    expect(tooMuchMetadata.stderr).toContain("metadata response exceeded 2000000 bytes");
   } finally {
     server.stop(true);
     await rm(home, { recursive: true, force: true });
