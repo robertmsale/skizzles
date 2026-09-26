@@ -1271,6 +1271,8 @@ function requireSelection(value, providerDriver) {
 }
 
 // packages/t3-orchestration/src/t3.ts
+class ResponseTooLargeError extends Error {
+}
 async function request(path, init = {}, maxBodyBytes = 2000000) {
   const response = await fetch(`${await origin()}${path}`, {
     ...init,
@@ -1288,7 +1290,7 @@ async function request(path, init = {}, maxBodyBytes = 2000000) {
     size += next.value.byteLength;
     if (size > maxBodyBytes) {
       await reader.cancel();
-      throw new Error(`${init.method ?? "GET"} ${path} response exceeded ${maxBodyBytes} bytes`);
+      throw new ResponseTooLargeError(`${init.method ?? "GET"} ${path} response exceeded ${maxBodyBytes} bytes`);
     }
     chunks.push(next.value);
   }
@@ -1299,14 +1301,15 @@ async function request(path, init = {}, maxBodyBytes = 2000000) {
 }
 var snapshot = () => request("/api/orchestration/snapshot");
 var shellSnapshot = () => request("/api/orchestration/shell", {}, 2000000);
-var threadSnapshot = (id, turnLimit, beforeCursor) => {
+function loadThreadSnapshot(id, turnLimit, beforeCursor, maxBodyBytes) {
   if (!Number.isInteger(turnLimit) || turnLimit < 1 || turnLimit > 10)
     throw new Error("History --turns must be an integer from 1 through 10");
   const query = new URLSearchParams({ turnLimit: String(turnLimit) });
   if (beforeCursor?.trim())
     query.set("beforeCursor", beforeCursor.trim());
-  return request(`/api/orchestration/threads/${encodeURIComponent(id)}?${query}`, {}, 512000);
-};
+  return request(`/api/orchestration/threads/${encodeURIComponent(id)}?${query}`, {}, maxBodyBytes);
+}
+var threadSnapshot = (id, turnLimit, beforeCursor) => loadThreadSnapshot(id, turnLimit, beforeCursor, 512000);
 function projectThread(result) {
   const source = result.thread;
   return {
@@ -1336,7 +1339,21 @@ function projectThread(result) {
     } : null
   };
 }
-var thread = async (id) => projectThread(await threadSnapshot(id, 1));
+async function taskMetadata(id) {
+  const shell = await shellSnapshot();
+  const active = shell.threads.find((entry) => entry.id === id);
+  if (active)
+    return { target: active, projects: shell.projects };
+  const model = await snapshot();
+  const target = model.threads.find((entry) => entry.id === id && !entry.deletedAt);
+  if (!target)
+    throw new Error(`T3 thread '${id}' was not found`);
+  return { target, projects: model.projects };
+}
+var thread = async (id) => {
+  const { target } = await taskMetadata(id);
+  return projectThread({ snapshotSequence: 0, thread: { ...target, messages: [] } });
+};
 var projectList = async () => projectProjects(await snapshot());
 var taskList = async (options) => {
   const shell = await shellSnapshot();
@@ -1349,12 +1366,8 @@ var taskWait = async (input) => waitForTasks(input, shellSnapshot, Bun.sleep, Da
   return full.threads.filter((entry) => ids.has(entry.id));
 });
 var taskStatus = async (id) => {
-  const shell = await shellSnapshot();
-  const active = shell.threads.find((entry) => entry.id === id);
-  if (active)
-    return projectTask(active, new Map(shell.projects.map((project) => [project.id, project])));
-  const [result, full] = await Promise.all([threadSnapshot(id, 1), snapshot()]);
-  return projectTask(result.thread, new Map(full.projects.map((project) => [project.id, project])));
+  const { target, projects } = await taskMetadata(id);
+  return projectTask(target, new Map(projects.map((project) => [project.id, project])));
 };
 var listCleanableWorktrees = async () => {
   const [shell, full] = await Promise.all([shellSnapshot(), snapshot()]);
@@ -1401,8 +1414,15 @@ function projectTaskHistory(result) {
     messagesOmitted
   };
 }
+var HISTORY_PAGE_BYTE_LIMIT = 8000000;
 async function taskHistory(id, turnLimit, beforeCursor) {
-  return projectTaskHistory(await threadSnapshot(id, turnLimit, beforeCursor));
+  try {
+    return projectTaskHistory(await loadThreadSnapshot(id, turnLimit, beforeCursor, HISTORY_PAGE_BYTE_LIMIT));
+  } catch (error) {
+    if (!(error instanceof ResponseTooLargeError))
+      throw error;
+    throw new Error(`Task history page exceeds the ${HISTORY_PAGE_BYTE_LIMIT}-byte limit. ` + (turnLimit > 1 ? "Retry tasks read with --turns 1. " : "A single turn is too large to read through t3ctl. ") + "Use an earlier --before cursor if available, or open the thread in T3. Tasks send and tasks status remain available.");
+  }
 }
 var BOOTSTRAP_TIMEOUT_MS = 180000;
 function bootstrapRpcRequest(requestId, payload, tag = "orchestration.dispatchCommand") {

@@ -22,6 +22,8 @@ import { mergeArchivedTasks, projectCleanableWorktrees, projectOccupiedWorktrees
 import { withWorktreeGate } from "./worktree-reaper-lease.ts";
 import { requireSelection, type ModelSelection, type ShellSnapshot, type Snapshot, type T3Thread, type ThreadSnapshot } from "./protocol.ts";
 
+class ResponseTooLargeError extends Error {}
+
 async function request(path: string, init: RequestInit = {}, maxBodyBytes = 2_000_000): Promise<any> {
   const response = await fetch(`${await origin()}${path}`, {
     ...init,
@@ -37,7 +39,7 @@ async function request(path: string, init: RequestInit = {}, maxBodyBytes = 2_00
     size += next.value.byteLength;
     if (size > maxBodyBytes) {
       await reader.cancel();
-      throw new Error(`${init.method ?? "GET"} ${path} response exceeded ${maxBodyBytes} bytes`);
+      throw new ResponseTooLargeError(`${init.method ?? "GET"} ${path} response exceeded ${maxBodyBytes} bytes`);
     }
     chunks.push(next.value);
   }
@@ -48,12 +50,14 @@ async function request(path: string, init: RequestInit = {}, maxBodyBytes = 2_00
 
 export const snapshot = (): Promise<Snapshot> => request("/api/orchestration/snapshot");
 export const shellSnapshot = (): Promise<ShellSnapshot> => request("/api/orchestration/shell", {}, 2_000_000);
-export const threadSnapshot = (id: string, turnLimit: number, beforeCursor?: string): Promise<ThreadSnapshot> => {
+function loadThreadSnapshot(id: string, turnLimit: number, beforeCursor: string | undefined, maxBodyBytes: number): Promise<ThreadSnapshot> {
   if (!Number.isInteger(turnLimit) || turnLimit < 1 || turnLimit > 10) throw new Error("History --turns must be an integer from 1 through 10");
   const query = new URLSearchParams({ turnLimit: String(turnLimit) });
   if (beforeCursor?.trim()) query.set("beforeCursor", beforeCursor.trim());
-  return request(`/api/orchestration/threads/${encodeURIComponent(id)}?${query}`, {}, 512_000);
-};
+  return request(`/api/orchestration/threads/${encodeURIComponent(id)}?${query}`, {}, maxBodyBytes);
+}
+export const threadSnapshot = (id: string, turnLimit: number, beforeCursor?: string): Promise<ThreadSnapshot> =>
+  loadThreadSnapshot(id, turnLimit, beforeCursor, 512_000);
 export function projectThread(result: ThreadSnapshot): T3Thread {
   const source = result.thread;
   return {
@@ -83,7 +87,21 @@ export function projectThread(result: ThreadSnapshot): T3Thread {
     } : null,
   };
 }
-export const thread = async (id: string): Promise<T3Thread> => projectThread(await threadSnapshot(id, 1));
+// Shell includes active-thread signals; the command read model also includes
+// archived threads with empty message/activity arrays. Never load history here.
+async function taskMetadata(id: string) {
+  const shell = await shellSnapshot();
+  const active = shell.threads.find((entry) => entry.id === id);
+  if (active) return { target: active, projects: shell.projects };
+  const model = await snapshot();
+  const target = model.threads.find((entry) => entry.id === id && !entry.deletedAt);
+  if (!target) throw new Error(`T3 thread '${id}' was not found`);
+  return { target, projects: model.projects };
+}
+export const thread = async (id: string): Promise<T3Thread> => {
+  const { target } = await taskMetadata(id);
+  return projectThread({ snapshotSequence: 0, thread: { ...target, messages: [] } });
+};
 
 export const projectList = async () => projectProjects(await snapshot());
 export const taskList = async (options: TaskListOptions) => {
@@ -103,11 +121,8 @@ export const taskWait = async (input: TaskWaitInput) => waitForTasks(
   },
 );
 export const taskStatus = async (id: string) => {
-  const shell = await shellSnapshot();
-  const active = shell.threads.find((entry) => entry.id === id);
-  if (active) return projectTask(active, new Map(shell.projects.map((project) => [project.id, project])));
-  const [result, full] = await Promise.all([threadSnapshot(id, 1), snapshot()]);
-  return projectTask(result.thread, new Map(full.projects.map((project) => [project.id, project])));
+  const { target, projects } = await taskMetadata(id);
+  return projectTask(target, new Map(projects.map((project) => [project.id, project])));
 };
 export const listCleanableWorktrees = async () => {
   const [shell, full] = await Promise.all([shellSnapshot(), snapshot()]);
@@ -157,8 +172,20 @@ export function projectTaskHistory(result: ThreadSnapshot) {
   };
 }
 
+// T3's HTTP detail API cannot omit activities. Bound the page on the wire as
+// well as the projected message text; approval reads retain their separate cap.
+const HISTORY_PAGE_BYTE_LIMIT = 8_000_000;
 export async function taskHistory(id: string, turnLimit: number, beforeCursor?: string) {
-  return projectTaskHistory(await threadSnapshot(id, turnLimit, beforeCursor));
+  try {
+    return projectTaskHistory(await loadThreadSnapshot(id, turnLimit, beforeCursor, HISTORY_PAGE_BYTE_LIMIT));
+  } catch (error) {
+    if (!(error instanceof ResponseTooLargeError)) throw error;
+    throw new Error(
+      `Task history page exceeds the ${HISTORY_PAGE_BYTE_LIMIT}-byte limit. ` +
+      (turnLimit > 1 ? "Retry tasks read with --turns 1. " : "A single turn is too large to read through t3ctl. ") +
+      "Use an earlier --before cursor if available, or open the thread in T3. Tasks send and tasks status remain available.",
+    );
+  }
 }
 const BOOTSTRAP_TIMEOUT_MS = 180_000;
 

@@ -170,7 +170,13 @@ t3ctl tasks read <thread-id> [--turns 1..10]
 ```
 
 When the response says `hasMore`, pass its opaque `beforeCursor` back as
-`--before <cursor>` to read the preceding window.
+`--before <cursor>` to read the preceding window. Reads accept at most 8,000,000
+response bytes, then return messages only (8,000 characters per message and
+32,000 total). T3 currently includes activities in each turn page. If a page
+exceeds the byte ceiling, retry with `--turns 1`; if one turn is still too large,
+use an earlier cursor if available or open the thread in T3. Send and status
+use history-free metadata, including for archived threads, so conversation
+size does not prevent coordination.
 
 Message delivery, status, and bounded history intentionally accept any known
 T3 task ID across projects. This mirrors ChatGPT Desktop's root-to-root
