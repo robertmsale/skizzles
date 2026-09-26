@@ -16,7 +16,7 @@ const thread: T3Thread = {
 
 function dependencies(overrides: Partial<CommandDependencies> = {}): CommandDependencies {
   return {
-    resolveCallerThread: () => { throw new Error("caller resolution must not run"); },
+    resolveCallerProject: async () => { throw new Error("caller resolution must not run"); },
     importProjects: async () => "imported",
     projectList: async () => "projects",
     taskList: async (options) => options,
@@ -45,32 +45,25 @@ describe("daemon command routing", () => {
     expect(await executeCommand({ op: "tasks.history", threadId: "other", turns: 4, before: "cursor" }, deps)).toEqual({ threadId: "other", turns: 4, before: "cursor" });
   });
 
-  test("task creation remains scoped to the mapped caller project", async () => {
-    const deps = dependencies({
-      resolveCallerThread: () => ({ codexThreadId: "codex", t3ThreadId: "t3", projectId: "own-project" }),
-    });
-    expect(await executeCommand({ op: "tasks.create", callerThreadId: "codex", projectId: "current", title: "Child", message: "work", provider: "grok" }, deps)).toEqual({
+  test("task creation resolves the current project from the caller's working directory", async () => {
+    const seen: unknown[] = [];
+    const deps = dependencies({ resolveCallerProject: async (cwd) => { seen.push(cwd); return "own-project"; } });
+    expect(await executeCommand({ op: "tasks.create", callerCwd: "/work/tree", projectId: "current", title: "Child", message: "work", provider: "claude" }, deps)).toEqual({
       projectId: "own-project",
       title: "Child",
       message: "work",
-      provider: "grok",
+      provider: "claude",
     });
-    expect(await executeCommand({
-      op: "tasks.create",
-      callerThreadId: "codex",
-      projectId: "current",
+    expect(seen).toEqual(["/work/tree"]);
+  });
+
+  test("an explicit project is honored from any caller without resolution", async () => {
+    expect(await executeCommand({ op: "tasks.create", callerCwd: "/elsewhere", projectId: "other-project", title: "Child", message: "work", model: "sol" }, dependencies())).toEqual({
+      projectId: "other-project",
       title: "Child",
       message: "work",
-      provider: "codex",
-      model: "xai/grok-4.6",
-    }, deps)).toEqual({
-      projectId: "own-project",
-      title: "Child",
-      message: "work",
-      provider: "codex",
-      model: "xai/grok-4.6",
+      model: "sol",
     });
-    await expect(executeCommand({ op: "tasks.create", callerThreadId: "codex", projectId: "other-project", title: "Child", message: "work" }, deps)).rejects.toThrow("only in its own T3 project");
   });
 
   test("external handoff creation retains explicit project ingress", async () => {
@@ -125,7 +118,7 @@ describe("daemon command routing", () => {
 });
 
 test("creation forwards effort but follow-up overrides fail before dispatch", async () => {
-  const deps = dependencies({ resolveCallerThread: () => ({ codexThreadId: "c", t3ThreadId: "t", projectId: "p" }) });
+  const deps = dependencies({ resolveCallerProject: async () => "p" });
   for (const op of ["tasks.create", "handoff.create"]) {
     expect(await executeCommand({ op, projectId: "p", title: "t", message: "m", model: "sol", reasoningEffort: "xhigh" }, deps)).toMatchObject({ model: "sol", reasoningEffort: "xhigh" });
   }

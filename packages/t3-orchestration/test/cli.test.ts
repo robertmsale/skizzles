@@ -24,7 +24,8 @@ async function captureCli(args: string[]): Promise<Record<string, unknown>> {
   }));
   await new Promise<void>((resolveListen) => server!.listen(socketPath, resolveListen));
   const process = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), ...args], {
-    env: { ...Bun.env, T3_ORCHESTRATION_SOCKET: socketPath, CODEX_THREAD_ID: "desktop-root" },
+    cwd: import.meta.dir,
+    env: { ...Bun.env, T3_ORCHESTRATION_SOCKET: socketPath, T3_ORCHESTRATION_REMOTE_CONFIG: join(root, "remote.json") },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -45,8 +46,8 @@ describe("cross-project collaboration CLI", () => {
     ]);
     expect(exitCode).toBe(0);
     const help = JSON.parse(stdout) as { help: string };
-    expect(help.help).toContain("t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG]");
-    expect(help.help).toContain("t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG]");
+    expect(help.help).toContain("t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|claude|grok|cursor|INSTANCE_ID] [--model SLUG]");
+    expect(help.help).toContain("t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|claude|grok|cursor|INSTANCE_ID] [--model SLUG]");
     expect(help.help).toContain("t3ctl tasks approvals");
     expect(help.help).toContain("t3ctl tasks approve ID [REQUEST_ID]");
     expect(help.help).toContain("t3ctl tasks deny ID [REQUEST_ID] [--reason TEXT]");
@@ -257,7 +258,7 @@ describe("cross-project collaboration CLI", () => {
   test("selects a provider only when creating a task", async () => {
     expect(await captureCli(["tasks", "create", "--title", "Grok task", "--message", "work", "--provider", "grok"])).toEqual({
       op: "tasks.create",
-      callerThreadId: "desktop-root",
+      callerCwd: import.meta.dir,
       projectId: "current",
       title: "Grok task",
       message: "work",
@@ -265,12 +266,35 @@ describe("cross-project collaboration CLI", () => {
     });
     expect(await captureCli(["tasks", "create", "--title", "Cursor task", "--message", "work", "--provider", "cursor"])).toEqual({
       op: "tasks.create",
-      callerThreadId: "desktop-root",
+      callerCwd: import.meta.dir,
       projectId: "current",
       title: "Cursor task",
       message: "work",
       provider: "cursor",
     });
+  });
+
+  test("identifies the caller by working directory, never by a harness-specific variable", async () => {
+    const payload = await captureCli(["tasks", "create", "--title", "Claude task", "--message", "work", "--provider", "claude"]);
+    expect(payload).toEqual({
+      op: "tasks.create",
+      callerCwd: import.meta.dir,
+      projectId: "current",
+      title: "Claude task",
+      message: "work",
+      provider: "claude",
+    });
+    expect(payload).not.toHaveProperty("callerThreadId");
+  });
+
+  test("remote task creation requires an explicit project", async () => {
+    root = await mkdtemp("/tmp/t3-cli-");
+    const env = { ...Bun.env, T3_ORCHESTRATION_REMOTE_CONFIG: join(root, "remote.json") };
+    const configure = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "remote", "configure", "--url", "https://host.example.ts.net"], { env, stdout: "pipe", stderr: "pipe" });
+    expect(await configure.exited).toBe(0);
+    const create = Bun.spawn(["bun", resolve(import.meta.dir, "../src/cli.ts"), "tasks", "create", "--title", "t", "--message", "m"], { env, stdout: "pipe", stderr: "pipe" });
+    expect(await create.exited).toBe(1);
+    expect(await new Response(create.stderr).text()).toContain("Remote tasks create needs --project");
   });
 
   test("forwards an optional per-spawn model override on create and handoff", async () => {
@@ -282,7 +306,7 @@ describe("cross-project collaboration CLI", () => {
       "--model", "xai/grok-4.6",
     ])).toEqual({
       op: "tasks.create",
-      callerThreadId: "desktop-root",
+      callerCwd: import.meta.dir,
       projectId: "current",
       title: "Codex grok",
       message: "work",

@@ -14,8 +14,8 @@ const clientDeadlineMs = resolveClientDeadlineMs();
 const maxWaitMs = maxWaitTimeoutMs(clientDeadlineMs);
 const USAGE = `t3ctl remote {configure --url HTTPS_URL|status|clear}
 t3ctl projects {list|import}
-t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG] [--reasoning-effort EFFORT]
-t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG] [--reasoning-effort EFFORT]
+t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|claude|grok|cursor|INSTANCE_ID] [--model SLUG] [--reasoning-effort EFFORT]
+t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|claude|grok|cursor|INSTANCE_ID] [--model SLUG] [--reasoning-effort EFFORT]
 t3ctl tasks list [--project ID] [--limit 1..200] [--include-settled] [--include-archived]
 t3ctl tasks {read|history|status} ID
 t3ctl tasks wait ID [ID ...] [--timeout-ms 0..${maxWaitMs}] [--after ID=CURSOR]
@@ -141,11 +141,10 @@ const waitIds = (): string[] => {
   if (ids.length < 1 || ids.length > 8) throw new Error("tasks wait requires 1 through 8 task ids");
   return ids;
 };
-const callerThreadId = process.env.CODEX_THREAD_ID?.trim();
 const payload = group === "projects" && action === "import" ? { op: "projects.import" }
   : group === "projects" && action === "list" ? { op: "projects.list" }
   : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model"), reasoningEffort: option("reasoning-effort") }
-  : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model"), reasoningEffort: option("reasoning-effort") }
+  : group === "tasks" && action === "create" ? { op: "tasks.create", callerCwd: process.cwd(), projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model"), reasoningEffort: option("reasoning-effort") }
   : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" }
   : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3_600_000), clientDeadlineMs), after: waitAfter() }
   : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") }
@@ -174,7 +173,11 @@ try {
     console.log(JSON.stringify({ ...report, log: formatReaperLogs(report) }, null, 2));
     process.exit(report.ok ? 0 : 1);
   }
-  const result = await daemonRequest(payload, undefined, clientDeadlineMs, await configuredRemoteUrl());
+  const remoteUrl = await configuredRemoteUrl();
+  if (remoteUrl && payload.op === "tasks.create" && payload.projectId === "current") {
+    throw new Error("Remote tasks create needs --project; this machine's working directory means nothing to the T3 host");
+  }
+  const result = await daemonRequest(payload, undefined, clientDeadlineMs, remoteUrl);
   console.log(JSON.stringify(result.ok ? result.result : { error: result.error }, null, 2));
   process.exit(result.ok ? 0 : 1);
 } catch (error) {

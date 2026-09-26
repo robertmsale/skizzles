@@ -5,42 +5,11 @@
 import { connect, createServer as createServer2 } from "net";
 import { chmodSync } from "fs";
 import { lstat as lstat2, mkdir as mkdir2, unlink as unlink2 } from "fs/promises";
-import { dirname } from "path";
+import { dirname as dirname2 } from "path";
 
 // packages/t3-orchestration/src/config.ts
 import { join } from "path";
 var {$ } = globalThis.Bun;
-
-// packages/t3-orchestration/src/protocol.ts
-function requireSelection(value, providerDriver) {
-  if (!value || typeof value !== "object")
-    throw new Error("Model selection is missing");
-  const candidate = value;
-  if (typeof candidate.instanceId !== "string" || typeof candidate.model !== "string") {
-    throw new Error("Model selection is malformed");
-  }
-  if (candidate.instanceId.trim() === "" || candidate.model.trim() === "")
-    throw new Error("Model selection has an empty provider or model");
-  const driver = providerDriver ?? candidate.instanceId;
-  const rawOptions = candidate.options === undefined ? [] : candidate.options;
-  if (!Array.isArray(rawOptions))
-    throw new Error("Model selection is malformed");
-  const options = rawOptions.map((entry) => {
-    if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || entry.id.trim() === "")
-      throw new Error("Model selection contains a malformed option");
-    if (!(typeof entry.value === "string" || typeof entry.value === "boolean" || typeof entry.value === "number"))
-      throw new Error(`Model option '${entry.id}' has an invalid value`);
-    return { id: entry.id, value: entry.value };
-  });
-  if (new Set(options.map((entry) => entry.id)).size !== options.length)
-    throw new Error("Model selection contains duplicate options");
-  if (driver === "codex" && !options.some((entry) => entry.id === "reasoningEffort")) {
-    throw new Error("Codex reasoning effort is missing");
-  }
-  return { instanceId: candidate.instanceId, model: candidate.model, options };
-}
-
-// packages/t3-orchestration/src/config.ts
 var home = process.env.HOME ?? (() => {
   throw new Error("HOME is required");
 })();
@@ -62,13 +31,17 @@ var TAILSCALE_GATEWAY_PORT = parseTailscaleGatewayPort(process.env.T3_ORCHESTRAT
 var TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
 var KEYCHAIN_SERVICE = "t3-orchestration";
 var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
-var GROK_DEFAULT_MODEL = "grok-4.6";
-var CURSOR_INSTANCE_ID = "cursor";
-var CURSOR_DEFAULT_MODEL = "grok-4.6";
-var CURSOR_REASONING_OPTION_ID = "reasoning";
-var CURSOR_REASONING_HIGH = "high";
-var CURSOR_FAST_MODE_OPTION_ID = "fastMode";
-var SUPPORTED_PROVIDERS = "codex, grok, cursor";
+var PROVIDER_ALIASES = {
+  "": "codex",
+  openai: "codex",
+  claude: "claudeAgent",
+  "claude-code": "claudeAgent"
+};
+var FULL_ACCESS_INSTANCES = new Set(["codex", "claudeAgent", "grok", "cursor"]);
+function taskProviderInstance(provider) {
+  const key = provider?.trim() ?? "";
+  return PROVIDER_ALIASES[key.toLowerCase()] ?? key;
+}
 async function origin() {
   const path = join(T3_HOME, "userdata/server-runtime.json");
   const runtime = await Bun.file(path).json();
@@ -84,70 +57,37 @@ async function token() {
   return value;
 }
 async function codexDefaults() {
-  const text = await Bun.file(join(CODEX_HOME, "config.toml")).text();
-  const parsed = Bun.TOML.parse(text);
-  const model = parsed.model;
-  const effort = parsed.model_reasoning_effort;
-  const provider = parsed.model_provider;
-  const serviceTier = parsed.service_tier;
-  if (typeof model !== "string" || typeof effort !== "string" || typeof provider !== "string") {
-    throw new Error("config.toml must define model, model_reasoning_effort, and model_provider");
-  }
-  if (provider.length === 0)
-    throw new Error("config.toml model_provider is empty");
-  const selection = requireSelection({
+  const file = Bun.file(join(CODEX_HOME, "config.toml"));
+  const parsed = await file.exists() ? Bun.TOML.parse(await file.text()) : {};
+  const setting = (key) => {
+    const value = parsed[key];
+    if (value === undefined)
+      return;
+    if (typeof value !== "string" || !value.trim())
+      throw new Error(`config.toml ${key} must be a nonempty string`);
+    return value;
+  };
+  const model = setting("model");
+  const effort = setting("model_reasoning_effort");
+  const serviceTier = setting("service_tier");
+  return {
     instanceId: "codex",
-    model,
+    ...model ? { model } : {},
     options: [
-      { id: "reasoningEffort", value: effort },
-      ...typeof serviceTier === "string" ? [{ id: "serviceTier", value: serviceTier }] : []
+      ...effort ? [{ id: "reasoningEffort", value: effort }] : [],
+      ...serviceTier ? [{ id: "serviceTier", value: serviceTier }] : []
     ]
-  });
-  if (!selection.options.some((entry) => entry.id === "reasoningEffort")) {
-    throw new Error("Codex default reasoning effort is missing");
-  }
-  return selection;
-}
-function applyTaskModelOverride(selection, model) {
-  const override = model?.trim();
-  if (!override)
-    return selection;
-  return requireSelection({ ...selection, model: override });
+  };
 }
 async function taskProviderDefaults(provider, model) {
+  const instanceId = taskProviderInstance(provider);
   const override = model?.trim();
-  switch (provider?.trim().toLowerCase() || "codex") {
-    case "codex":
-    case "openai":
-      if (override) {
-        return { instanceId: "codex", model: override, options: [] };
-      }
-      return codexDefaults();
-    case "grok":
-      return applyTaskModelOverride(requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] }), model);
-    case "cursor":
-      return applyTaskModelOverride(requireSelection({
-        instanceId: CURSOR_INSTANCE_ID,
-        model: CURSOR_DEFAULT_MODEL,
-        options: [
-          { id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH },
-          { id: CURSOR_FAST_MODE_OPTION_ID, value: false }
-        ]
-      }), model);
-    default:
-      throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
-  }
+  if (instanceId === "codex" && !override)
+    return codexDefaults();
+  return { instanceId, ...override ? { model: override } : {}, options: [] };
 }
-function taskRuntimeMode(provider) {
-  switch (provider?.trim().toLowerCase() || "codex") {
-    case "grok":
-    case "cursor":
-      return "full-access";
-    case "codex":
-    case "openai":
-    default:
-      return "auto";
-  }
+function taskRuntimeMode(instanceId) {
+  return FULL_ACCESS_INSTANCES.has(instanceId) ? "full-access" : "auto";
 }
 
 // packages/t3-orchestration/src/t3.ts
@@ -1300,6 +1240,35 @@ async function withWorktreeGate(path, threadId, role, fn, options = {}) {
   }
 }
 
+// packages/t3-orchestration/src/protocol.ts
+function requireSelection(value, providerDriver) {
+  if (!value || typeof value !== "object")
+    throw new Error("Model selection is missing");
+  const candidate = value;
+  if (typeof candidate.instanceId !== "string" || typeof candidate.model !== "string") {
+    throw new Error("Model selection is malformed");
+  }
+  if (candidate.instanceId.trim() === "" || candidate.model.trim() === "")
+    throw new Error("Model selection has an empty provider or model");
+  const driver = providerDriver ?? candidate.instanceId;
+  const rawOptions = candidate.options === undefined ? [] : candidate.options;
+  if (!Array.isArray(rawOptions))
+    throw new Error("Model selection is malformed");
+  const options = rawOptions.map((entry) => {
+    if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || entry.id.trim() === "")
+      throw new Error("Model selection contains a malformed option");
+    if (!(typeof entry.value === "string" || typeof entry.value === "boolean" || typeof entry.value === "number"))
+      throw new Error(`Model option '${entry.id}' has an invalid value`);
+    return { id: entry.id, value: entry.value };
+  });
+  if (new Set(options.map((entry) => entry.id)).size !== options.length)
+    throw new Error("Model selection contains duplicate options");
+  if (driver === "codex" && !options.some((entry) => entry.id === "reasoningEffort")) {
+    throw new Error("Codex reasoning effort is missing");
+  }
+  return { instanceId: candidate.instanceId, model: candidate.model, options };
+}
+
 // packages/t3-orchestration/src/t3.ts
 async function request(path, init = {}, maxBodyBytes = 2000000) {
   const response = await fetch(`${await origin()}${path}`, {
@@ -1599,25 +1568,55 @@ async function preflightProviderSelection(selection) {
   const config = await requestRpc("server.getConfig", {});
   return requireAvailableProviderSelection(config, selection);
 }
+var REASONING_OPTION_IDS = ["reasoningEffort", "effort", "reasoning"];
+function modelOptionDescriptors(model) {
+  const descriptors = model?.capabilities?.optionDescriptors;
+  return Array.isArray(descriptors) ? descriptors : [];
+}
 function applyTaskReasoningOverride(config, selection, reasoningEffort) {
   if (reasoningEffort === undefined)
     return selection;
   const effort = reasoningEffort.trim();
   if (!effort)
     throw new Error("Reasoning effort must be nonempty");
-  if (selection.instanceId !== "codex")
-    throw new Error("--reasoning-effort is supported only for Codex task creation");
   const model = catalogModels(config, selection.instanceId).find((entry) => entry?.slug === selection.model);
-  const descriptors = model?.capabilities?.optionDescriptors;
-  const descriptor = Array.isArray(descriptors) ? descriptors.find((entry) => entry?.id === "reasoningEffort") : undefined;
+  const descriptor = modelOptionDescriptors(model).find((entry) => REASONING_OPTION_IDS.includes(entry?.id));
   const choices = descriptor?.options;
-  if (!Array.isArray(choices) || !choices.some((choice) => choice?.id === effort)) {
+  if (!descriptor || !Array.isArray(choices) || !choices.some((choice) => choice?.id === effort)) {
     throw new Error(`Model '${selection.model}' does not advertise reasoning effort '${effort}'`);
   }
-  return { ...selection, options: [...selection.options.filter((entry) => entry.id !== "reasoningEffort"), { id: "reasoningEffort", value: effort }] };
+  return { ...selection, options: [...selection.options.filter((entry) => entry.id !== descriptor.id), { id: descriptor.id, value: effort }] };
 }
-async function resolveCreateTaskSelection(selection, reasoningEffort) {
+function resolveCatalogSelection(config, request2) {
+  const providers = config && typeof config === "object" && "providers" in config ? config.providers : undefined;
+  if (!Array.isArray(providers))
+    throw new Error("T3 provider catalog is unavailable");
+  const entries = providers.filter((entry) => Boolean(entry && typeof entry === "object" && typeof entry.instanceId === "string"));
+  const wanted = request2.instanceId.toLowerCase();
+  const exact = entries.find((entry) => entry.instanceId === request2.instanceId);
+  const folded = entries.filter((entry) => entry.instanceId.toLowerCase() === wanted);
+  const provider = exact ?? (folded.length === 1 ? folded[0] : undefined);
+  if (!provider) {
+    const known = entries.map((entry) => entry.instanceId).join(", ");
+    throw new Error(`T3 provider '${request2.instanceId}' is not configured. Known instances: ${known} (aliases: claude, openai)`);
+  }
+  const models = Array.isArray(provider.models) ? provider.models : [];
+  const fallback = models.find((entry) => entry?.isDefault === true) ?? models.find((entry) => entry && entry.isLegacy !== true) ?? models[0];
+  const model = request2.model ?? (typeof fallback?.slug === "string" ? fallback.slug : undefined);
+  if (!model) {
+    const ready = provider.enabled === true && provider.installed === true && provider.status === "ready";
+    throw new Error(`T3 provider '${provider.instanceId}' ${ready ? "exposes no models" : "is not ready"}`);
+  }
+  const options = [...request2.options];
+  const catalogModel = models.find((entry) => entry?.slug === model);
+  if (!options.some((entry) => entry.id === "fastMode") && modelOptionDescriptors(catalogModel).some((entry) => entry?.id === "fastMode")) {
+    options.push({ id: "fastMode", value: false });
+  }
+  return { instanceId: provider.instanceId, model, options };
+}
+async function resolveCreateTaskSelection(request2, reasoningEffort) {
   const config = await requestRpc("server.getConfig", {});
+  const selection = resolveCatalogSelection(config, request2);
   requireAvailableProviderSelection(config, selection);
   return applyCatalogSelectionDefaults(config, applyTaskReasoningOverride(config, selection, reasoningEffort));
 }
@@ -1679,7 +1678,7 @@ async function gitBaseBranch(workspaceRoot) {
 }
 async function createTask(input) {
   const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model), input.reasoningEffort);
-  const runtimeMode = taskRuntimeMode(input.provider);
+  const runtimeMode = taskRuntimeMode(selection.instanceId);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
   if (!project)
@@ -1813,34 +1812,58 @@ async function resolveTaskApproval(input) {
 }
 
 // packages/t3-orchestration/src/identity.ts
-import { Database } from "bun:sqlite";
-import { join as join3 } from "path";
-function rootProviderId(id2, db) {
-  const edges = db.query("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges").all();
-  const parentByChild = new Map(edges.map((edge) => [edge.child_thread_id, edge.parent_thread_id]));
-  const seen = new Set;
-  let current = id2;
-  while (parentByChild.has(current)) {
-    if (!seen.add(current))
-      throw new Error("Codex spawn graph contains a cycle");
-    current = parentByChild.get(current);
-  }
-  return current;
+import { realpath as realpath2 } from "fs/promises";
+import { basename, dirname, join as join3 } from "path";
+var {$: $3 } = globalThis.Bun;
+async function callerPathCandidates(cwd) {
+  const real = await realpath2(cwd);
+  const candidates = [real];
+  const git = await $3`git -C ${real} rev-parse --path-format=absolute --git-common-dir --show-prefix`.nothrow().quiet();
+  if (git.exitCode !== 0)
+    return candidates;
+  const [commonDir = "", prefix = ""] = git.text().split(`
+`);
+  if (basename(commonDir) !== ".git")
+    return candidates;
+  const primary = join3(await realpath2(dirname(commonDir)), prefix);
+  const normalized = primary.endsWith("/") && primary.length > 1 ? primary.slice(0, -1) : primary;
+  if (!candidates.includes(normalized))
+    candidates.push(normalized);
+  return candidates;
 }
-function resolveCallerThread(correlationId) {
-  const codexThreadId = typeof correlationId === "string" ? correlationId.trim() : "";
-  if (!codexThreadId)
-    throw new Error("CODEX_THREAD_ID is required for task-to-task orchestration");
-  const codexDb = new Database(join3(CODEX_HOME, "state_5.sqlite"), { readonly: true });
-  const root = rootProviderId(codexThreadId, codexDb);
-  codexDb.close();
-  const t3Db = new Database(join3(T3_HOME, "userdata/state.sqlite"), { readonly: true });
-  const rows = t3Db.query("SELECT thread_id, project_id FROM projection_threads WHERE json_extract((SELECT resume_cursor_json FROM provider_session_runtime WHERE thread_id = projection_threads.thread_id), '$.threadId') = ? AND deleted_at IS NULL").all(root);
-  t3Db.close();
-  if (rows.length !== 1)
-    throw new Error(`Could not uniquely map Codex root ${root} to a live T3 task`);
-  const row = rows[0];
-  return { codexThreadId, t3ThreadId: row.thread_id, projectId: row.project_id };
+function selectCallerProject(candidates, projects) {
+  let best = [];
+  for (const project of projects) {
+    const root = project.workspaceRoot;
+    if (!candidates.some((path) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`)))
+      continue;
+    if (best.length === 0 || root.length > best[0].workspaceRoot.length)
+      best = [project];
+    else if (root.length === best[0].workspaceRoot.length)
+      best.push(project);
+  }
+  if (best.length === 0) {
+    throw new Error(`No T3 project contains ${candidates[0]}; pass --project with an id from 't3ctl projects list'`);
+  }
+  if (best.length > 1) {
+    throw new Error(`Several T3 projects share ${best[0].workspaceRoot}; pass --project explicitly`);
+  }
+  return best[0].id;
+}
+async function resolveCallerProject(cwd, projects) {
+  if (typeof cwd !== "string" || !cwd.trim()) {
+    throw new Error("The caller's working directory is unknown; pass --project with an id from 't3ctl projects list'");
+  }
+  const candidates = await callerPathCandidates(cwd);
+  const roots = [];
+  for (const project of await projects()) {
+    if (project.deletedAt)
+      continue;
+    try {
+      roots.push({ id: project.id, workspaceRoot: await realpath2(project.workspaceRoot) });
+    } catch {}
+  }
+  return selectCallerProject(candidates, roots);
 }
 
 // packages/t3-orchestration/src/commands.ts
@@ -1874,11 +1897,7 @@ async function executeCommand(command, dependencies) {
   if (command.op !== "tasks.create" && command.op !== "handoff.create" && (command.model !== undefined || command.reasoningEffort !== undefined)) {
     throw new Error("Model and reasoning overrides are creation-only; existing tasks retain their saved selection");
   }
-  const caller = command.op === "tasks.create" ? dependencies.resolveCallerThread(command.callerThreadId) : null;
-  const projectId = command.op === "tasks.create" && command.projectId === "current" ? caller?.projectId : command.projectId;
-  if (caller && command.op === "tasks.create" && projectId !== caller.projectId) {
-    throw new Error("A root may create tasks only in its own T3 project");
-  }
+  const projectId = command.op === "tasks.create" && command.projectId === "current" ? await dependencies.resolveCallerProject(command.callerCwd) : command.projectId;
   switch (command.op) {
     case "projects.import":
       return dependencies.importProjects();
@@ -2052,7 +2071,7 @@ function createTailscaleGateway(allowedLogins, execute) {
 
 // packages/t3-orchestration/src/daemon.ts
 var commandDependencies = {
-  resolveCallerThread,
+  resolveCallerProject: (cwd) => resolveCallerProject(cwd, async () => (await snapshot()).projects),
   importProjects,
   projectList,
   taskList,
@@ -2128,7 +2147,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => void shutdown(0));
 }
 process.umask(63);
-await mkdir2(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
+await mkdir2(dirname2(SOCKET_PATH), { recursive: true, mode: 448 });
 var prepareSocket = async (path, isLive) => {
   try {
     const existing = await lstat2(path);

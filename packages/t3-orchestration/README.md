@@ -7,16 +7,16 @@ Optional Skizzles sidecar tooling for orchestrating T3 Code tasks through its su
 - macOS (the host installer uses Keychain and LaunchAgents)
 - [Bun](https://bun.sh/)
 - T3 Code with its local orchestration API enabled
-- Codex, and optionally the Skizzles Grok harness
+- At least one T3 provider (Codex, Claude Code, Grok, Cursor, ...)
 - Tailscale only when remote access is enabled
 
 ## Design
 
 - `t3-orchestrationd` owns the least-privilege T3 bearer from macOS Keychain.
 - `t3ctl` talks to the daemon over a same-user Unix socket.
-- T3 SQLite and Codex SQLite are read-only identity/configuration sources; mutations use T3 dispatch.
-- New root tasks always use T3's worktree bootstrap. The CLI exposes a bounded provider selector and an optional per-spawn `--model` override. Codex creation also accepts `--reasoning-effort EFFORT`, validated against the selected model’s catalog choices; unsupported values and providers fail before creation.
-- Codex remains the default provider and uses the explicit top-level defaults in `~/.codex/config.toml`. `--provider grok` selects the installed Grok harness with Grok 4.6. `--provider cursor` selects this machine's T3 Cursor instance with catalog model `grok-4.6`, option `reasoning=high`, and `fastMode=false` (Cursor Grok 4.6 High, not Fast). `--model SLUG` replaces only the catalog model on that create/handoff. Codex `--model` never reads or writes `config.toml`; it sends `instanceId: "codex"` plus the slug, then fills missing `reasoningEffort` from the T3 catalog current/default, or T3's documented session fallback `medium` so follow-up send can replay the saved selection. Cursor keeps `reasoning=high` and `fastMode=false`. The override still fails closed if the T3 catalog does not expose that slug. Explicit `--reasoning-effort` replaces the creation default. Messages replay the recipient's exact saved selection and reject model/reasoning overrides. Profile/CLI model overrides are intentionally not inherited. New Cursor work requires a new task; an existing thread's provider cannot be flipped by messaging it.
+- T3 SQLite and Codex SQLite are read-only configuration sources; mutations use T3 dispatch. Callers are identified by working directory, not by a harness-specific thread id.
+- New root tasks always use T3's worktree bootstrap. `--provider` accepts `codex` (default), `claude` (instance `claudeAgent`), `grok`, `cursor`, or any other ready T3 instance id, checked against the live catalog before creation.
+- Codex without `--model` uses the top-level `model`, `model_reasoning_effort` and `service_tier` in `~/.codex/config.toml` where present. Every other provider, and anything config.toml omits, falls back to the catalog's default model and T3's option defaults. `--model SLUG` must exist in the catalog and never reads or writes `config.toml`. `--reasoning-effort` maps to the model's own reasoning option (`reasoningEffort`, `effort` or `reasoning`) and unsupported values fail before creation. Fast mode is never enabled implicitly. Messages replay the recipient's exact saved selection and reject model/reasoning overrides; an existing thread's provider cannot be flipped by messaging it.
 
 ## First-time setup
 
@@ -157,10 +157,10 @@ t3ctl tasks list --include-settled --include-archived
 
 Pinned tasks are always included first and do not consume the recent-task limit.
 
-For an explicitly authorized one-time ingress from an external Codex client:
+`tasks create` targets the project containing the caller's working directory (linked Git worktrees map to their primary checkout's project) or an explicit `--project`. `handoff create` is the same operation with `--project` required:
 
 ```sh
-t3ctl handoff create --project <id> --title <title> --message <handoff> [--provider grok|cursor] [--model SLUG] [--reasoning-effort EFFORT]
+t3ctl handoff create --project <id> --title <title> --message <handoff> [--provider PROVIDER] [--model SLUG] [--reasoning-effort EFFORT]
 ```
 
 Tasks can read a bounded window of another task's conversation in the same T3 installation, including across projects. The default is three user-anchored turns and the hard maximum is ten:
@@ -174,7 +174,7 @@ When the response says `hasMore`, pass its opaque `beforeCursor` back as
 
 Message delivery, status, and bounded history intentionally accept any known
 T3 task ID across projects. This mirrors ChatGPT Desktop's root-to-root
-collaboration model; task creation remains project-scoped.
+collaboration model; task creation accepts any project.
 
 Wait for up to eight tasks with one bounded daemon-side polling loop:
 
@@ -300,4 +300,4 @@ bun run packages/t3-orchestration/scripts/install.ts --client-only --uninstall
 
 This is trusted-operator tooling, not a multi-tenant authorization service. Locally, any process running as the same macOS user can use the mode-`0600` daemon socket. The optional Serve-facing listener binds only to `127.0.0.1`, but local processes can forge proxy headers; do not enable it on a shared or mutually untrusted multi-user host. Remotely, any tailnet user who both passes tailnet network policy and appears in `T3_ORCHESTRATION_TAILSCALE_USERS` can read, message, create, and manage T3 tasks across projects. The HTTP gateway rejects missing identities, tagged-device traffic without a user identity, non-HTTPS proxy traffic, browser-origin requests, and requests larger than 1 MiB.
 
-See the installed `t3-orchestration` Codex skill for agent-facing invariants and commands.
+See the installed `t3-orchestration` skill for agent-facing invariants and commands.

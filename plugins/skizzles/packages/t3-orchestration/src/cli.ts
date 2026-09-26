@@ -16,35 +16,6 @@ var __export = (target, all) => {
 };
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 
-// packages/t3-orchestration/src/protocol.ts
-function requireSelection(value, providerDriver) {
-  if (!value || typeof value !== "object")
-    throw new Error("Model selection is missing");
-  const candidate = value;
-  if (typeof candidate.instanceId !== "string" || typeof candidate.model !== "string") {
-    throw new Error("Model selection is malformed");
-  }
-  if (candidate.instanceId.trim() === "" || candidate.model.trim() === "")
-    throw new Error("Model selection has an empty provider or model");
-  const driver = providerDriver ?? candidate.instanceId;
-  const rawOptions = candidate.options === undefined ? [] : candidate.options;
-  if (!Array.isArray(rawOptions))
-    throw new Error("Model selection is malformed");
-  const options = rawOptions.map((entry) => {
-    if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || entry.id.trim() === "")
-      throw new Error("Model selection contains a malformed option");
-    if (!(typeof entry.value === "string" || typeof entry.value === "boolean" || typeof entry.value === "number"))
-      throw new Error(`Model option '${entry.id}' has an invalid value`);
-    return { id: entry.id, value: entry.value };
-  });
-  if (new Set(options.map((entry) => entry.id)).size !== options.length)
-    throw new Error("Model selection contains duplicate options");
-  if (driver === "codex" && !options.some((entry) => entry.id === "reasoningEffort")) {
-    throw new Error("Codex reasoning effort is missing");
-  }
-  return { instanceId: candidate.instanceId, model: candidate.model, options };
-}
-
 // packages/t3-orchestration/src/config.ts
 var exports_config = {};
 __export(exports_config, {
@@ -56,11 +27,11 @@ __export(exports_config, {
   T3_HOME: () => T3_HOME,
   TAILSCALE_ALLOWED_USERS: () => TAILSCALE_ALLOWED_USERS,
   TAILSCALE_GATEWAY_PORT: () => TAILSCALE_GATEWAY_PORT,
-  applyTaskModelOverride: () => applyTaskModelOverride,
   codexDefaults: () => codexDefaults,
   origin: () => origin,
   parseTailscaleGatewayPort: () => parseTailscaleGatewayPort,
   taskProviderDefaults: () => taskProviderDefaults,
+  taskProviderInstance: () => taskProviderInstance,
   taskRuntimeMode: () => taskRuntimeMode,
   token: () => token
 });
@@ -75,6 +46,10 @@ function parseTailscaleGatewayPort(value) {
     throw new Error("T3_ORCHESTRATION_HTTP_PORT must be an integer from 1024 through 65535");
   }
   return port;
+}
+function taskProviderInstance(provider) {
+  const key = provider?.trim() ?? "";
+  return PROVIDER_ALIASES[key.toLowerCase()] ?? key;
 }
 async function origin() {
   const path = join(T3_HOME, "userdata/server-runtime.json");
@@ -91,72 +66,39 @@ async function token() {
   return value;
 }
 async function codexDefaults() {
-  const text = await Bun.file(join(CODEX_HOME, "config.toml")).text();
-  const parsed = Bun.TOML.parse(text);
-  const model = parsed.model;
-  const effort = parsed.model_reasoning_effort;
-  const provider = parsed.model_provider;
-  const serviceTier = parsed.service_tier;
-  if (typeof model !== "string" || typeof effort !== "string" || typeof provider !== "string") {
-    throw new Error("config.toml must define model, model_reasoning_effort, and model_provider");
-  }
-  if (provider.length === 0)
-    throw new Error("config.toml model_provider is empty");
-  const selection = requireSelection({
+  const file = Bun.file(join(CODEX_HOME, "config.toml"));
+  const parsed = await file.exists() ? Bun.TOML.parse(await file.text()) : {};
+  const setting = (key) => {
+    const value = parsed[key];
+    if (value === undefined)
+      return;
+    if (typeof value !== "string" || !value.trim())
+      throw new Error(`config.toml ${key} must be a nonempty string`);
+    return value;
+  };
+  const model = setting("model");
+  const effort = setting("model_reasoning_effort");
+  const serviceTier = setting("service_tier");
+  return {
     instanceId: "codex",
-    model,
+    ...model ? { model } : {},
     options: [
-      { id: "reasoningEffort", value: effort },
-      ...typeof serviceTier === "string" ? [{ id: "serviceTier", value: serviceTier }] : []
+      ...effort ? [{ id: "reasoningEffort", value: effort }] : [],
+      ...serviceTier ? [{ id: "serviceTier", value: serviceTier }] : []
     ]
-  });
-  if (!selection.options.some((entry) => entry.id === "reasoningEffort")) {
-    throw new Error("Codex default reasoning effort is missing");
-  }
-  return selection;
-}
-function applyTaskModelOverride(selection, model) {
-  const override = model?.trim();
-  if (!override)
-    return selection;
-  return requireSelection({ ...selection, model: override });
+  };
 }
 async function taskProviderDefaults(provider, model) {
+  const instanceId = taskProviderInstance(provider);
   const override = model?.trim();
-  switch (provider?.trim().toLowerCase() || "codex") {
-    case "codex":
-    case "openai":
-      if (override) {
-        return { instanceId: "codex", model: override, options: [] };
-      }
-      return codexDefaults();
-    case "grok":
-      return applyTaskModelOverride(requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] }), model);
-    case "cursor":
-      return applyTaskModelOverride(requireSelection({
-        instanceId: CURSOR_INSTANCE_ID,
-        model: CURSOR_DEFAULT_MODEL,
-        options: [
-          { id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH },
-          { id: CURSOR_FAST_MODE_OPTION_ID, value: false }
-        ]
-      }), model);
-    default:
-      throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
-  }
+  if (instanceId === "codex" && !override)
+    return codexDefaults();
+  return { instanceId, ...override ? { model: override } : {}, options: [] };
 }
-function taskRuntimeMode(provider) {
-  switch (provider?.trim().toLowerCase() || "codex") {
-    case "grok":
-    case "cursor":
-      return "full-access";
-    case "codex":
-    case "openai":
-    default:
-      return "auto";
-  }
+function taskRuntimeMode(instanceId) {
+  return FULL_ACCESS_INSTANCES.has(instanceId) ? "full-access" : "auto";
 }
-var home, CODEX_HOME, T3_HOME, SOCKET_PATH, DEFAULT_TAILSCALE_GATEWAY_PORT = 43773, TAILSCALE_GATEWAY_PORT, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, GROK_DEFAULT_MODEL = "grok-4.6", CURSOR_INSTANCE_ID = "cursor", CURSOR_DEFAULT_MODEL = "grok-4.6", CURSOR_REASONING_OPTION_ID = "reasoning", CURSOR_REASONING_HIGH = "high", CURSOR_FAST_MODE_OPTION_ID = "fastMode", SUPPORTED_PROVIDERS = "codex, grok, cursor";
+var home, CODEX_HOME, T3_HOME, SOCKET_PATH, DEFAULT_TAILSCALE_GATEWAY_PORT = 43773, TAILSCALE_GATEWAY_PORT, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, PROVIDER_ALIASES, FULL_ACCESS_INSTANCES;
 var init_config = __esm(() => {
   home = process.env.HOME ?? (() => {
     throw new Error("HOME is required");
@@ -167,6 +109,13 @@ var init_config = __esm(() => {
   TAILSCALE_GATEWAY_PORT = parseTailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
   TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
   KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
+  PROVIDER_ALIASES = {
+    "": "codex",
+    openai: "codex",
+    claude: "claudeAgent",
+    "claude-code": "claudeAgent"
+  };
+  FULL_ACCESS_INSTANCES = new Set(["codex", "claudeAgent", "grok", "cursor"]);
 });
 
 // packages/t3-orchestration/src/remote-config.ts
@@ -2499,8 +2448,8 @@ var clientDeadlineMs = resolveClientDeadlineMs();
 var maxWaitMs = maxWaitTimeoutMs(clientDeadlineMs);
 var USAGE = `t3ctl remote {configure --url HTTPS_URL|status|clear}
 t3ctl projects {list|import}
-t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG] [--reasoning-effort EFFORT]
-t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|grok|cursor] [--model SLUG] [--reasoning-effort EFFORT]
+t3ctl handoff create --project ID --title TITLE --message TEXT [--provider codex|claude|grok|cursor|INSTANCE_ID] [--model SLUG] [--reasoning-effort EFFORT]
+t3ctl tasks create [--project ID] --title TITLE --message TEXT [--provider codex|claude|grok|cursor|INSTANCE_ID] [--model SLUG] [--reasoning-effort EFFORT]
 t3ctl tasks list [--project ID] [--limit 1..200] [--include-settled] [--include-archived]
 t3ctl tasks {read|history|status} ID
 t3ctl tasks wait ID [ID ...] [--timeout-ms 0..${maxWaitMs}] [--after ID=CURSOR]
@@ -2634,8 +2583,7 @@ var waitIds = () => {
     throw new Error("tasks wait requires 1 through 8 task ids");
   return ids;
 };
-var callerThreadId = process.env.CODEX_THREAD_ID?.trim();
-var payload = group === "projects" && action === "import" ? { op: "projects.import" } : group === "projects" && action === "list" ? { op: "projects.list" } : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model"), reasoningEffort: option("reasoning-effort") } : group === "tasks" && action === "create" ? { op: "tasks.create", callerThreadId, projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model"), reasoningEffort: option("reasoning-effort") } : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" } : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3600000), clientDeadlineMs), after: waitAfter() } : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") } : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") } : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") } : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() } : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() } : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() } : group === "worktrees" && action === "clean-settled" ? { op: "worktrees.clean-settled", dryRun: option("dry-run") === "true" } : (() => {
+var payload = group === "projects" && action === "import" ? { op: "projects.import" } : group === "projects" && action === "list" ? { op: "projects.list" } : group === "handoff" && action === "create" ? { op: "handoff.create", projectId: required("project"), title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model"), reasoningEffort: option("reasoning-effort") } : group === "tasks" && action === "create" ? { op: "tasks.create", callerCwd: process.cwd(), projectId: option("project")?.trim() || "current", title: required("title"), message: required("message"), baseBranch: option("base"), provider: option("provider"), model: option("model"), reasoningEffort: option("reasoning-effort") } : group === "tasks" && action === "list" ? { op: "tasks.list", limit: boundedInteger("limit", 50, 1, 200), projectId: option("project")?.trim(), includeSettled: option("include-settled") === "true", includeArchived: option("include-archived") === "true" } : group === "tasks" && action === "wait" ? { op: "tasks.wait", threadIds: waitIds(), timeoutMs: clampWaitTimeoutMs(boundedInteger("timeout-ms", maxWaitMs, 0, 3600000), clientDeadlineMs), after: waitAfter() } : group === "tasks" && action === "send" ? { op: "tasks.send", threadId: requiredPositional(positionals[0], "thread id"), message: required("message") } : group === "tasks" && action === "status" ? { op: "tasks.status", threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && (action === "history" || action === "read") ? { op: "tasks.history", threadId: requiredPositional(positionals[0], "thread id"), turns: turns(), before: option("before") } : group === "tasks" && action === "title" ? { op: "tasks.title", threadId: requiredPositional(positionals[0], "thread id"), title: required("title") } : group === "tasks" && ["archive", "unarchive", "pin", "unpin", "settle", "unsettle", "interrupt"].includes(action ?? "") ? { op: `tasks.${action}`, threadId: requiredPositional(positionals[0], "thread id") } : group === "tasks" && action === "approvals" ? { op: "tasks.approvals", projectId: option("project")?.trim() } : group === "tasks" && action === "approve" ? { op: "tasks.approve", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim() } : group === "tasks" && action === "deny" ? { op: "tasks.deny", threadId: requiredPositional(positionals[0], "thread id"), requestId: positionals[1]?.trim(), reason: option("reason")?.trim() } : group === "worktrees" && action === "clean-settled" ? { op: "worktrees.clean-settled", dryRun: option("dry-run") === "true" } : (() => {
   throw new Error(`Usage:
   ${USAGE.replaceAll(`
 `, `
@@ -2656,7 +2604,11 @@ try {
     console.log(JSON.stringify({ ...report, log: formatReaperLogs2(report) }, null, 2));
     process.exit(report.ok ? 0 : 1);
   }
-  const result = await daemonRequest(payload, undefined, clientDeadlineMs, await configuredRemoteUrl());
+  const remoteUrl = await configuredRemoteUrl();
+  if (remoteUrl && payload.op === "tasks.create" && payload.projectId === "current") {
+    throw new Error("Remote tasks create needs --project; this machine's working directory means nothing to the T3 host");
+  }
+  const result = await daemonRequest(payload, undefined, clientDeadlineMs, remoteUrl);
   console.log(JSON.stringify(result.ok ? result.result : { error: result.error }, null, 2));
   process.exit(result.ok ? 0 : 1);
 } catch (error) {

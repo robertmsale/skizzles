@@ -1,33 +1,55 @@
-import { Database } from "bun:sqlite";
-import { join } from "node:path";
-import { CODEX_HOME, T3_HOME } from "./config.ts";
+import { realpath } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { $ } from "bun";
 
-type Edge = { parent_thread_id: string; child_thread_id: string };
+export type ProjectRoot = { id: string; workspaceRoot: string };
 
-function rootProviderId(id: string, db: Database): string {
-  const edges = db.query<Edge, []>("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges").all();
-  const parentByChild = new Map(edges.map((edge) => [edge.child_thread_id, edge.parent_thread_id]));
-  const seen = new Set<string>();
-  let current = id;
-  while (parentByChild.has(current)) {
-    if (!seen.add(current)) throw new Error("Codex spawn graph contains a cycle");
-    current = parentByChild.get(current)!;
-  }
-  return current;
+// Paths that identify the caller's checkout. A linked Git worktree (T3,
+// Hermes, or hand-made) is mapped back to its primary checkout so it resolves
+// to the project registered for that repository, whichever harness runs there.
+export async function callerPathCandidates(cwd: string): Promise<string[]> {
+  const real = await realpath(cwd);
+  const candidates = [real];
+  const git = await $`git -C ${real} rev-parse --path-format=absolute --git-common-dir --show-prefix`.nothrow().quiet();
+  if (git.exitCode !== 0) return candidates;
+  const [commonDir = "", prefix = ""] = git.text().split("\n");
+  if (basename(commonDir) !== ".git") return candidates;
+  const primary = join(await realpath(dirname(commonDir)), prefix);
+  const normalized = primary.endsWith("/") && primary.length > 1 ? primary.slice(0, -1) : primary;
+  if (!candidates.includes(normalized)) candidates.push(normalized);
+  return candidates;
 }
 
-export function resolveCallerThread(correlationId: unknown): { codexThreadId: string; t3ThreadId: string; projectId: string } {
-  const codexThreadId = typeof correlationId === "string" ? correlationId.trim() : "";
-  if (!codexThreadId) throw new Error("CODEX_THREAD_ID is required for task-to-task orchestration");
-  const codexDb = new Database(join(CODEX_HOME, "state_5.sqlite"), { readonly: true });
-  const root = rootProviderId(codexThreadId, codexDb);
-  codexDb.close();
-  const t3Db = new Database(join(T3_HOME, "userdata/state.sqlite"), { readonly: true });
-  const rows = t3Db.query<{ thread_id: string; project_id: string }, [string]>(
-    "SELECT thread_id, project_id FROM projection_threads WHERE json_extract((SELECT resume_cursor_json FROM provider_session_runtime WHERE thread_id = projection_threads.thread_id), '$.threadId') = ? AND deleted_at IS NULL",
-  ).all(root);
-  t3Db.close();
-  if (rows.length !== 1) throw new Error(`Could not uniquely map Codex root ${root} to a live T3 task`);
-  const row = rows[0]!;
-  return { codexThreadId, t3ThreadId: row.thread_id, projectId: row.project_id };
+// Chooses the most specific project whose root contains a candidate path.
+export function selectCallerProject(candidates: string[], projects: ProjectRoot[]): string {
+  let best: ProjectRoot[] = [];
+  for (const project of projects) {
+    const root = project.workspaceRoot;
+    if (!candidates.some((path) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`))) continue;
+    if (best.length === 0 || root.length > best[0]!.workspaceRoot.length) best = [project];
+    else if (root.length === best[0]!.workspaceRoot.length) best.push(project);
+  }
+  if (best.length === 0) {
+    throw new Error(`No T3 project contains ${candidates[0]}; pass --project with an id from 't3ctl projects list'`);
+  }
+  if (best.length > 1) {
+    throw new Error(`Several T3 projects share ${best[0]!.workspaceRoot}; pass --project explicitly`);
+  }
+  return best[0]!.id;
+}
+
+export async function resolveCallerProject(
+  cwd: unknown,
+  projects: () => Promise<Array<{ id: string; workspaceRoot: string; deletedAt?: string | null }>>,
+): Promise<string> {
+  if (typeof cwd !== "string" || !cwd.trim()) {
+    throw new Error("The caller's working directory is unknown; pass --project with an id from 't3ctl projects list'");
+  }
+  const candidates = await callerPathCandidates(cwd);
+  const roots: ProjectRoot[] = [];
+  for (const project of await projects()) {
+    if (project.deletedAt) continue;
+    try { roots.push({ id: project.id, workspaceRoot: await realpath(project.workspaceRoot) }); } catch { /* stale T3 project */ }
+  }
+  return selectCallerProject(candidates, roots);
 }

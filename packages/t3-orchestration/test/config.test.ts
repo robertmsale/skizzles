@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { applyTaskModelOverride, DEFAULT_TAILSCALE_GATEWAY_PORT, parseTailscaleGatewayPort, taskProviderDefaults, taskRuntimeMode } from "../src/config.ts";
+import { DEFAULT_TAILSCALE_GATEWAY_PORT, parseTailscaleGatewayPort, taskProviderDefaults, taskProviderInstance, taskRuntimeMode } from "../src/config.ts";
 
 describe("Tailscale gateway port", () => {
   test("uses a stable default and accepts an explicit unprivileged port", () => {
@@ -17,69 +17,21 @@ describe("Tailscale gateway port", () => {
 });
 
 describe("task provider defaults", () => {
-  test("selects the installed Grok harness without model option overrides", async () => {
-    expect(await taskProviderDefaults("grok")).toEqual({
-      instanceId: "grok",
-      model: "grok-4.6",
-      options: [],
-    });
+  test("maps friendly aliases and passes other providers through as T3 instance ids", () => {
+    expect(taskProviderInstance(undefined)).toBe("codex");
+    expect(taskProviderInstance("  ")).toBe("codex");
+    expect(taskProviderInstance("OpenAI")).toBe("codex");
+    expect(taskProviderInstance("claude")).toBe("claudeAgent");
+    expect(taskProviderInstance("Claude-Code")).toBe("claudeAgent");
+    expect(taskProviderInstance("grok")).toBe("grok");
+    expect(taskProviderInstance("opencode")).toBe("opencode");
   });
 
-  test("maps --provider cursor to the live T3 catalog Grok 4.6 High selection", async () => {
-    expect(await taskProviderDefaults("cursor")).toEqual({
-      instanceId: "cursor",
-      model: "grok-4.6",
-      options: [
-        { id: "reasoning", value: "high" },
-        { id: "fastMode", value: false },
-      ],
-    });
-  });
-
-  test("rejects providers outside the bounded orchestration contract", async () => {
-    await expect(taskProviderDefaults("claude")).rejects.toThrow(
-      "Supported providers: codex, grok, cursor",
-    );
-  });
-
-  test("overrides only the model slug and keeps Grok/Cursor option defaults", async () => {
-    expect(await taskProviderDefaults("grok", "xai/grok-4.6")).toEqual({
-      instanceId: "grok",
-      model: "xai/grok-4.6",
-      options: [],
-    });
-    expect(await taskProviderDefaults("cursor", "grok-4.5")).toEqual({
-      instanceId: "cursor",
-      model: "grok-4.5",
-      options: [
-        { id: "reasoning", value: "high" },
-        { id: "fastMode", value: false },
-      ],
-    });
-    expect(applyTaskModelOverride({
-      instanceId: "codex",
-      model: "gpt-5.4",
-      options: [
-        { id: "reasoningEffort", value: "high" },
-        { id: "serviceTier", value: "flex" },
-      ],
-    }, "xai/grok-4.6")).toEqual({
-      instanceId: "codex",
-      model: "xai/grok-4.6",
-      options: [
-        { id: "reasoningEffort", value: "high" },
-        { id: "serviceTier", value: "flex" },
-      ],
-    });
-    expect(applyTaskModelOverride({
-      instanceId: "codex",
-      model: "gpt-5.4",
-      options: [{ id: "reasoningEffort", value: "high" }],
-    }, "  ")).toEqual({
-      instanceId: "codex",
-      model: "gpt-5.4",
-      options: [{ id: "reasoningEffort", value: "high" }],
-    });
+  test("leaves non-Codex model and options to the live catalog", async () => {
+    expect(await taskProviderDefaults("claude")).toEqual({ instanceId: "claudeAgent", options: [] });
+    expect(await taskProviderDefaults("grok")).toEqual({ instanceId: "grok", options: [] });
+    expect(await taskProviderDefaults("cursor", " grok-4.5 ")).toEqual({ instanceId: "cursor", model: "grok-4.5", options: [] });
+    expect(await taskProviderDefaults("claude", "claude-fable-5-1")).toEqual({ instanceId: "claudeAgent", model: "claude-fable-5-1", options: [] });
   });
 
   test("omit --model still reads Codex defaults from an isolated config.toml", async () => {
@@ -122,6 +74,29 @@ describe("task provider defaults", () => {
       expect(await Bun.file(configPath).text()).toBe(config);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("omit --model leaves settings absent from config.toml to the T3 catalog", async () => {
+    const root = await mkdtemp("/tmp/t3-codex-partial-");
+    await writeFile(join(root, "config.toml"), 'model = "gpt-6-astra"\nservice_tier = "default"\n');
+    const empty = await mkdtemp("/tmp/t3-codex-empty-");
+    try {
+      const script = `
+        const { taskProviderDefaults } = await import(${JSON.stringify(resolve(import.meta.dir, "../src/config.ts"))});
+        console.log(JSON.stringify(await taskProviderDefaults("codex")));
+      `;
+      for (const [home, expected] of [
+        [root, { instanceId: "codex", model: "gpt-6-astra", options: [{ id: "serviceTier", value: "default" }] }],
+        [empty, { instanceId: "codex", options: [] }],
+      ] as const) {
+        const child = Bun.spawn(["bun", "-e", script], { env: { ...Bun.env, CODEX_HOME: home }, stdout: "pipe", stderr: "pipe" });
+        expect(await child.exited).toBe(0);
+        expect(JSON.parse(await new Response(child.stdout).text())).toEqual(expected);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(empty, { recursive: true, force: true });
     }
   });
 
@@ -190,7 +165,7 @@ describe("task provider defaults", () => {
       ]);
       expect(omitExit).not.toBe(0);
       expect(omitStdout).toBe("");
-      expect(omitStderr).toContain("config.toml must define model, model_reasoning_effort, and model_provider");
+      expect(omitStderr).toContain("config.toml model must be a nonempty string");
       expect(await Bun.file(join(missing, "config.toml")).exists()).toBe(false);
       expect(await Bun.file(brokenPath).text()).toBe(brokenConfig);
     } finally {
@@ -201,17 +176,13 @@ describe("task provider defaults", () => {
 });
 
 describe("task runtime mode", () => {
-  test("boots Full Access for grok and cursor", () => {
-    expect(taskRuntimeMode("grok")).toBe("full-access");
-    expect(taskRuntimeMode("cursor")).toBe("full-access");
+  test("boots Full Access for the supported harnesses", () => {
+    for (const instanceId of ["codex", "claudeAgent", "grok", "cursor"]) expect(taskRuntimeMode(instanceId)).toBe("full-access");
   });
 
-  test("boots Codex Full Access for codex, openai, and unset providers", () => {
-    expect(taskRuntimeMode("codex")).toBe("full-access");
-    expect(taskRuntimeMode("openai")).toBe("full-access");
-    expect(taskRuntimeMode(undefined)).toBe("full-access");
-    expect(taskRuntimeMode("")).toBe("full-access");
-    expect(taskRuntimeMode("  CODEX  ")).toBe("full-access");
+  test("boots other harnesses in Auto so approvals stay visible", () => {
+    expect(taskRuntimeMode("opencode")).toBe("auto");
     expect(taskRuntimeMode("unknown")).toBe("auto");
   });
 });
+

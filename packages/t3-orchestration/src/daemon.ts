@@ -5,12 +5,12 @@ import { lstat, mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { SOCKET_PATH, TAILSCALE_ALLOWED_USERS, TAILSCALE_GATEWAY_PORT } from "./config.ts";
 import * as t3 from "./t3.ts";
-import { resolveCallerThread } from "./identity.ts";
+import { resolveCallerProject } from "./identity.ts";
 import { executeCommand } from "./commands.ts";
 import { createTailscaleGateway } from "./http-gateway.ts";
 
 const commandDependencies = {
-  resolveCallerThread,
+  resolveCallerProject: (cwd: unknown) => resolveCallerProject(cwd, async () => (await t3.snapshot()).projects),
   importProjects: t3.importProjects,
   projectList: t3.projectList,
   taskList: t3.taskList,

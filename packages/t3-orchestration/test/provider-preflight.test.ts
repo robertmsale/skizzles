@@ -184,8 +184,51 @@ test("explicit creation effort replaces defaults, validates catalog, and survive
   expect(original.options[0]?.value).toBe("medium");
   for (const value of ["", "ultra"]) expect(() => applyTaskReasoningOverride(catalog, original, value)).toThrow();
   expect(() => applyTaskReasoningOverride({}, original, "xhigh")).toThrow("does not advertise");
-  expect(() => applyTaskReasoningOverride(catalog, { ...original, instanceId: "grok" }, "high")).toThrow("only for Codex");
+  expect(() => applyTaskReasoningOverride(catalog, { ...original, instanceId: "grok" }, "high")).toThrow("does not advertise");
   expect(applyTaskReasoningOverride({}, original)).toBe(original);
   const target = { id: "t", projectId: "p", title: "test", modelSelection: selected, runtimeMode: "auto" as const, interactionMode: "default" as const, worktreePath: null, branch: null, session: null };
   expect(taskTurnCommand(target, "continue").modelSelection).toEqual(selected);
+});
+
+test("reasoning override uses each harness's own option id", async () => {
+  const { applyTaskReasoningOverride } = await import("../src/t3.ts");
+  const catalog = { providers: [
+    { instanceId: "claudeAgent", models: [{ slug: "opus", capabilities: { optionDescriptors: [{ id: "effort", options: [{ id: "high" }, { id: "max" }] }] } }] },
+    { instanceId: "cursor", models: [{ slug: "grok-4.6", capabilities: { optionDescriptors: [{ id: "reasoning", options: [{ id: "high" }] }] } }] },
+  ] };
+  expect(applyTaskReasoningOverride(catalog, { instanceId: "claudeAgent", model: "opus", options: [] }, "max").options).toEqual([{ id: "effort", value: "max" }]);
+  expect(applyTaskReasoningOverride(catalog, { instanceId: "cursor", model: "grok-4.6", options: [] }, "high").options).toEqual([{ id: "reasoning", value: "high" }]);
+  expect(() => applyTaskReasoningOverride(catalog, { instanceId: "claudeAgent", model: "opus", options: [] }, "ultra")).toThrow("does not advertise");
+});
+
+describe("catalog selection", () => {
+  const catalog = { providers: [
+    { instanceId: "claudeAgent", models: [
+      { slug: "opus", capabilities: { optionDescriptors: [{ id: "effort" }, { id: "fastMode" }] } },
+      { slug: "fable", isDefault: true, capabilities: { optionDescriptors: [{ id: "effort" }] } },
+    ] },
+    { instanceId: "grok", models: [{ slug: "grok-old", isLegacy: true }, { slug: "grok-new" }] },
+    { instanceId: "empty", enabled: true, installed: true, status: "ready", models: [] },
+    { instanceId: "disabled", enabled: false, installed: true, status: "disabled", models: [] },
+  ] };
+
+  test("resolves instance ids case-insensitively and picks the catalog default model", async () => {
+    const { resolveCatalogSelection } = await import("../src/t3.ts");
+    expect(resolveCatalogSelection(catalog, { instanceId: "claudeagent", options: [] })).toEqual({ instanceId: "claudeAgent", model: "fable", options: [] });
+    expect(resolveCatalogSelection(catalog, { instanceId: "grok", options: [] })).toEqual({ instanceId: "grok", model: "grok-new", options: [] });
+  });
+
+  test("keeps an explicit model and never enables fast mode implicitly", async () => {
+    const { resolveCatalogSelection } = await import("../src/t3.ts");
+    expect(resolveCatalogSelection(catalog, { instanceId: "claudeAgent", model: "opus", options: [] }))
+      .toEqual({ instanceId: "claudeAgent", model: "opus", options: [{ id: "fastMode", value: false }] });
+  });
+
+  test("fails before dispatch for unknown providers and empty catalogs", async () => {
+    const { resolveCatalogSelection } = await import("../src/t3.ts");
+    expect(() => resolveCatalogSelection(catalog, { instanceId: "nope", options: [] })).toThrow("'nope' is not configured");
+    expect(() => resolveCatalogSelection(catalog, { instanceId: "empty", options: [] })).toThrow("exposes no models");
+    expect(() => resolveCatalogSelection(catalog, { instanceId: "disabled", options: [] })).toThrow("'disabled' is not ready");
+    expect(() => resolveCatalogSelection({}, { instanceId: "grok", options: [] })).toThrow("catalog is unavailable");
+  });
 });

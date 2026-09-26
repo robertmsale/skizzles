@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { $ } from "bun";
-import { requireSelection, type ModelSelection } from "./protocol.ts";
+import type { ModelSelection } from "./protocol.ts";
 
 const home = process.env.HOME ?? (() => { throw new Error("HOME is required"); })();
 export const CODEX_HOME = process.env.CODEX_HOME ?? join(home, ".codex");
@@ -26,15 +26,25 @@ export const TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_U
 export const KEYCHAIN_SERVICE = "t3-orchestration";
 export const KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
 
-export type TaskProvider = "codex" | "grok" | "cursor";
+// Friendly names for T3 provider instances; any other value is passed through
+// as a literal T3 instanceId and checked against the live catalog.
+const PROVIDER_ALIASES: Record<string, string> = {
+  "": "codex",
+  openai: "codex",
+  claude: "claudeAgent",
+  "claude-code": "claudeAgent",
+};
 
-const GROK_DEFAULT_MODEL = "grok-4.6";
-const CURSOR_INSTANCE_ID = "cursor";
-const CURSOR_DEFAULT_MODEL = "grok-4.6";
-const CURSOR_REASONING_OPTION_ID = "reasoning";
-const CURSOR_REASONING_HIGH = "high";
-const CURSOR_FAST_MODE_OPTION_ID = "fastMode";
-const SUPPORTED_PROVIDERS = "codex, grok, cursor";
+// Harnesses whose T3 tasks boot Full Access. Other instances boot Auto so
+// their approvals stay visible to the coordinator and guardian.
+const FULL_ACCESS_INSTANCES = new Set(["codex", "claudeAgent", "grok", "cursor"]);
+
+export type TaskProviderRequest = { instanceId: string; model?: string; options: ModelSelection["options"] };
+
+export function taskProviderInstance(provider?: string): string {
+  const key = provider?.trim() ?? "";
+  return PROVIDER_ALIASES[key.toLowerCase()] ?? key;
+}
 
 export async function origin(): Promise<string> {
   const path = join(T3_HOME, "userdata/server-runtime.json");
@@ -50,89 +60,42 @@ export async function token(): Promise<string> {
   return value;
 }
 
-export async function codexDefaults(): Promise<ModelSelection> {
-  const text = await Bun.file(join(CODEX_HOME, "config.toml")).text();
-  const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
-  const model = parsed.model;
-  const effort = parsed.model_reasoning_effort;
-  const provider = parsed.model_provider;
-  const serviceTier = parsed.service_tier;
-  if (typeof model !== "string" || typeof effort !== "string" || typeof provider !== "string") {
-    throw new Error("config.toml must define model, model_reasoning_effort, and model_provider");
-  }
-  // T3's installed Codex adapter is addressed as `codex`; the upstream
-  // model_provider (for example codex-lb) is resolved by Codex itself from
-  // CODEX_HOME/config.toml. Never put that upstream id in T3's instanceId.
-  if (provider.length === 0) throw new Error("config.toml model_provider is empty");
-  const selection = requireSelection({
+// Codex creation without --model follows the top-level defaults in
+// CODEX_HOME/config.toml. Anything it leaves out (or a missing file) falls back
+// to the live T3 catalog. model_provider (for example codex-lb) is resolved by
+// Codex itself and never becomes T3's instanceId.
+export async function codexDefaults(): Promise<TaskProviderRequest> {
+  const file = Bun.file(join(CODEX_HOME, "config.toml"));
+  const parsed = await file.exists() ? Bun.TOML.parse(await file.text()) as Record<string, unknown> : {};
+  const setting = (key: string): string | undefined => {
+    const value = parsed[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !value.trim()) throw new Error(`config.toml ${key} must be a nonempty string`);
+    return value;
+  };
+  const model = setting("model");
+  const effort = setting("model_reasoning_effort");
+  const serviceTier = setting("service_tier");
+  return {
     instanceId: "codex",
-    model,
+    ...(model ? { model } : {}),
     options: [
-      { id: "reasoningEffort", value: effort },
-      ...(typeof serviceTier === "string" ? [{ id: "serviceTier", value: serviceTier }] : []),
+      ...(effort ? [{ id: "reasoningEffort", value: effort }] : []),
+      ...(serviceTier ? [{ id: "serviceTier", value: serviceTier }] : []),
     ],
-  });
-  if (!selection.options.some((entry) => entry.id === "reasoningEffort")) {
-    throw new Error("Codex default reasoning effort is missing");
-  }
-  return selection;
+  };
 }
 
-export function applyTaskModelOverride(selection: ModelSelection, model?: string): ModelSelection {
+export async function taskProviderDefaults(provider: string | undefined, model?: string): Promise<TaskProviderRequest> {
+  const instanceId = taskProviderInstance(provider);
   const override = model?.trim();
-  if (!override) return selection;
-  return requireSelection({ ...selection, model: override });
+  // Omitting --model for Codex keeps the user's config.toml defaults. Every other
+  // case leaves the model and options to the live T3 catalog; --model never
+  // reads or writes config.toml.
+  if (instanceId === "codex" && !override) return codexDefaults();
+  return { instanceId, ...(override ? { model: override } : {}), options: [] };
 }
 
-export async function taskProviderDefaults(provider: string | undefined, model?: string): Promise<ModelSelection> {
-  const override = model?.trim();
-  switch (provider?.trim().toLowerCase() || "codex") {
-    case "codex":
-    case "openai":
-      // `--model` tells T3 to use that catalog slug. Do not open
-      // CODEX_HOME/config.toml to copy reasoningEffort or serviceTier.
-      // applyCatalogSelectionDefaults fills missing reasoningEffort from the
-      // T3 catalog current/default, else T3's session fallback "medium", so
-      // follow-up send can pass requireSelection. Omit --model keeps Rob's
-      // config.toml defaults.
-      if (override) {
-        return { instanceId: "codex", model: override, options: [] };
-      }
-      return codexDefaults();
-    case "grok":
-      // T3's Grok ACP provider currently exposes no model option descriptors.
-      // Reasoning is owned by the installed Grok harness, not by task creators.
-      return applyTaskModelOverride(
-        requireSelection({ instanceId: "grok", model: GROK_DEFAULT_MODEL, options: [] }),
-        model,
-      );
-    case "cursor":
-      // Discovered from this machine's live T3 catalog: instanceId `cursor`,
-      // model slug `grok-4.6` ("Cursor Grok 4.6"), option id `reasoning`
-      // value `high`, and boolean `fastMode`. Catalog currentValue for
-      // fastMode is true; pin false so `--provider cursor` is Grok 4.6 High,
-      // not High Fast.
-      return applyTaskModelOverride(requireSelection({
-        instanceId: CURSOR_INSTANCE_ID,
-        model: CURSOR_DEFAULT_MODEL,
-        options: [
-          { id: CURSOR_REASONING_OPTION_ID, value: CURSOR_REASONING_HIGH },
-          { id: CURSOR_FAST_MODE_OPTION_ID, value: false },
-        ],
-      }), model);
-    default:
-      throw new Error(`Unsupported task provider '${provider}'. Supported providers: ${SUPPORTED_PROVIDERS}`);
-  }
-}
-
-export function taskRuntimeMode(provider?: string): "auto" | "full-access" {
-  switch (provider?.trim().toLowerCase() || "codex") {
-    case "grok":
-    case "cursor":
-    case "codex":
-    case "openai":
-      return "full-access";
-    default:
-      return provider?.trim() ? "auto" : "full-access";
-  }
+export function taskRuntimeMode(instanceId: string): "auto" | "full-access" {
+  return FULL_ACCESS_INSTANCES.has(instanceId) ? "full-access" : "auto";
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { $ } from "bun";
-import { origin, token, taskProviderDefaults, taskRuntimeMode } from "./config.ts";
+import { origin, token, taskProviderDefaults, taskRuntimeMode, type TaskProviderRequest } from "./config.ts";
 import {
   APPROVAL_ACTION_CHANGED,
   UNBOUND_ACCEPT_GAP,
@@ -397,23 +397,65 @@ async function preflightProviderSelection(selection: ModelSelection): Promise<st
   return requireAvailableProviderSelection(config, selection);
 }
 
+// Option ids T3 harnesses use for reasoning depth (Codex/Grok, Claude, Cursor).
+const REASONING_OPTION_IDS = ["reasoningEffort", "effort", "reasoning"];
+
+function modelOptionDescriptors(model: unknown): unknown[] {
+  const descriptors = (model as { capabilities?: { optionDescriptors?: unknown } } | undefined)?.capabilities?.optionDescriptors;
+  return Array.isArray(descriptors) ? descriptors : [];
+}
+
 export function applyTaskReasoningOverride(config: unknown, selection: ModelSelection, reasoningEffort?: string): ModelSelection {
   if (reasoningEffort === undefined) return selection;
   const effort = reasoningEffort.trim();
   if (!effort) throw new Error("Reasoning effort must be nonempty");
-  if (selection.instanceId !== "codex") throw new Error("--reasoning-effort is supported only for Codex task creation");
-  const model = catalogModels(config, selection.instanceId).find((entry: any) => entry?.slug === selection.model) as any;
-  const descriptors = model?.capabilities?.optionDescriptors;
-  const descriptor = Array.isArray(descriptors) ? descriptors.find((entry: any) => entry?.id === "reasoningEffort") : undefined;
+  const model = catalogModels(config, selection.instanceId).find((entry: any) => entry?.slug === selection.model);
+  const descriptor = modelOptionDescriptors(model).find((entry: any) => REASONING_OPTION_IDS.includes(entry?.id)) as { id: string; options?: unknown } | undefined;
   const choices = descriptor?.options;
-  if (!Array.isArray(choices) || !choices.some((choice: any) => choice?.id === effort)) {
+  if (!descriptor || !Array.isArray(choices) || !choices.some((choice: any) => choice?.id === effort)) {
     throw new Error(`Model '${selection.model}' does not advertise reasoning effort '${effort}'`);
   }
-  return { ...selection, options: [...selection.options.filter((entry) => entry.id !== "reasoningEffort"), { id: "reasoningEffort", value: effort }] };
+  return { ...selection, options: [...selection.options.filter((entry) => entry.id !== descriptor.id), { id: descriptor.id, value: effort }] };
 }
 
-async function resolveCreateTaskSelection(selection: ModelSelection, reasoningEffort?: string): Promise<ModelSelection> {
+// Resolves a provider request against the live T3 catalog: the instance id
+// (case-insensitively), the model (explicit, else the catalog default, else the
+// first non-legacy model), and fast mode, which is never enabled implicitly.
+export function resolveCatalogSelection(config: unknown, request: TaskProviderRequest): ModelSelection {
+  const providers = config && typeof config === "object" && "providers" in config
+    ? (config as { providers?: unknown }).providers
+    : undefined;
+  if (!Array.isArray(providers)) throw new Error("T3 provider catalog is unavailable");
+  const entries = providers.filter((entry): entry is ProviderCatalogEntry & { instanceId: string } =>
+    Boolean(entry && typeof entry === "object" && typeof (entry as ProviderCatalogEntry).instanceId === "string"));
+  const wanted = request.instanceId.toLowerCase();
+  const exact = entries.find((entry) => entry.instanceId === request.instanceId);
+  const folded = entries.filter((entry) => entry.instanceId.toLowerCase() === wanted);
+  const provider = exact ?? (folded.length === 1 ? folded[0] : undefined);
+  if (!provider) {
+    const known = entries.map((entry) => entry.instanceId).join(", ");
+    throw new Error(`T3 provider '${request.instanceId}' is not configured. Known instances: ${known} (aliases: claude, openai)`);
+  }
+  const models = (Array.isArray(provider.models) ? provider.models : []) as Array<{ slug?: unknown; isDefault?: unknown; isLegacy?: unknown }>;
+  const fallback = models.find((entry) => entry?.isDefault === true)
+    ?? models.find((entry) => entry && entry.isLegacy !== true)
+    ?? models[0];
+  const model = request.model ?? (typeof fallback?.slug === "string" ? fallback.slug : undefined);
+  if (!model) {
+    const ready = provider.enabled === true && provider.installed === true && provider.status === "ready";
+    throw new Error(`T3 provider '${provider.instanceId}' ${ready ? "exposes no models" : "is not ready"}`);
+  }
+  const options = [...request.options];
+  const catalogModel = models.find((entry) => entry?.slug === model);
+  if (!options.some((entry) => entry.id === "fastMode") && modelOptionDescriptors(catalogModel).some((entry: any) => entry?.id === "fastMode")) {
+    options.push({ id: "fastMode", value: false });
+  }
+  return { instanceId: provider.instanceId, model, options };
+}
+
+async function resolveCreateTaskSelection(request: TaskProviderRequest, reasoningEffort?: string): Promise<ModelSelection> {
   const config = await requestRpc("server.getConfig", {});
+  const selection = resolveCatalogSelection(config, request);
   requireAvailableProviderSelection(config, selection);
   return applyCatalogSelectionDefaults(config, applyTaskReasoningOverride(config, selection, reasoningEffort));
 }
@@ -464,7 +506,7 @@ async function gitBaseBranch(workspaceRoot: string): Promise<string> {
 
 export async function createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string; reasoningEffort?: string }): Promise<{ sequence: number; threadId: string; model: ModelSelection; worktreeRequired: true }> {
   const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model), input.reasoningEffort);
-  const runtimeMode = taskRuntimeMode(input.provider);
+  const runtimeMode = taskRuntimeMode(selection.instanceId);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
   if (!project) throw new Error(`Active T3 project not found: ${input.projectId}`);

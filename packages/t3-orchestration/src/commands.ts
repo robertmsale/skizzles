@@ -1,9 +1,7 @@
 import type { TaskListOptions, TaskWaitInput } from "./task-projection.ts";
 
-export type Caller = { codexThreadId: string; t3ThreadId: string; projectId: string };
-
 export type CommandDependencies = {
-  resolveCallerThread(correlationId: unknown): Caller;
+  resolveCallerProject(cwd: unknown): Promise<string>;
   importProjects(): Promise<unknown>;
   projectList(): Promise<unknown>;
   taskList(options: TaskListOptions): Promise<unknown>;
@@ -58,11 +56,9 @@ export async function executeCommand(command: Record<string, unknown>, dependenc
   if (command.op !== "tasks.create" && command.op !== "handoff.create" && (command.model !== undefined || command.reasoningEffort !== undefined)) {
     throw new Error("Model and reasoning overrides are creation-only; existing tasks retain their saved selection");
   }
-  const caller = command.op === "tasks.create" ? dependencies.resolveCallerThread(command.callerThreadId) : null;
-  const projectId = command.op === "tasks.create" && command.projectId === "current" ? caller?.projectId : command.projectId;
-  if (caller && command.op === "tasks.create" && projectId !== caller.projectId) {
-    throw new Error("A root may create tasks only in its own T3 project");
-  }
+  const projectId = command.op === "tasks.create" && command.projectId === "current"
+    ? await dependencies.resolveCallerProject(command.callerCwd)
+    : command.projectId;
 
   switch (command.op) {
     case "projects.import": return dependencies.importProjects();
