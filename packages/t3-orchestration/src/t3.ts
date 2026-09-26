@@ -23,12 +23,21 @@ import { withWorktreeGate } from "./worktree-reaper-lease.ts";
 import { requireSelection, type ModelSelection, type ShellSnapshot, type Snapshot, type T3Thread, type ThreadSnapshot } from "./protocol.ts";
 
 class ResponseTooLargeError extends Error {}
+class HttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+  }
+}
 
-async function request(path: string, init: RequestInit = {}, maxBodyBytes = 2_000_000): Promise<any> {
+async function request(path: string, init: RequestInit = {}, maxBodyBytes = 2_000_000, errorBody: "include" | "omit" = "include"): Promise<any> {
   const response = await fetch(`${await origin()}${path}`, {
     ...init,
     headers: { authorization: `Bearer ${await token()}`, "content-type": "application/json", ...(init.headers ?? {}) },
   });
+  if (!response.ok && errorBody === "omit") {
+    await response.body?.cancel().catch(() => {});
+    throw new HttpStatusError(response.status);
+  }
   if (!response.body) throw new Error(`${init.method ?? "GET"} ${path} returned no body`);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -89,12 +98,21 @@ export function projectThread(result: ThreadSnapshot): T3Thread {
 }
 // Both shell APIs contain metadata only. The command read model is unsuitable
 // here: it still includes full proposed-plan bodies across all threads.
+// Archived metadata grows with the installation's lifetime, not just active work.
+const ARCHIVED_SHELL_BYTE_LIMIT = 16_000_000;
 async function taskMetadata(id: string) {
   const shell = await shellSnapshot();
   const active = shell.threads.find((entry) => entry.id === id);
   if (active) return { target: active, projects: shell.projects };
-  const model: ShellSnapshot = await requestRpc("orchestration.getArchivedShellSnapshot", {}, 2_000_000);
-  const target = model.threads.find((entry) => entry.id === id && !entry.deletedAt);
+  const model: ShellSnapshot = await requestRpc("orchestration.getArchivedShellSnapshot", {}, ARCHIVED_SHELL_BYTE_LIMIT)
+    .catch((error) => {
+      if (!(error instanceof ResponseTooLargeError)) throw error;
+      throw new Error(
+        `T3 archived-thread list exceeded ${ARCHIVED_SHELL_BYTE_LIMIT} bytes. ` +
+        "Increase t3ctl's bounded archived-list limit (ARCHIVED_SHELL_BYTE_LIMIT) and rebuild.",
+      );
+    });
+  const target = model.threads.find((entry) => entry.id === id);
   if (!target) throw new Error(`T3 thread '${id}' was not found`);
   return { target, projects: model.projects };
 }
@@ -232,8 +250,11 @@ async function requestRpc(
 ): Promise<any> {
   const base = await origin();
   // Tickets are tiny; bound their body and keep auth-service error text private.
-  const ticket = await request("/api/auth/websocket-ticket", { method: "POST" }, 16_000)
-    .catch(() => { throw new Error("T3 WebSocket ticket request failed"); }) as { ticket?: unknown };
+  const ticket = await request("/api/auth/websocket-ticket", { method: "POST" }, 16_000, "omit")
+    .catch((error) => {
+      const status = error instanceof HttpStatusError ? ` (HTTP ${error.status})` : "";
+      throw new Error(`T3 WebSocket ticket request failed${status}`);
+    }) as { ticket?: unknown };
   if (typeof ticket.ticket !== "string" || !ticket.ticket) throw new Error("T3 WebSocket ticket response was invalid");
   const url = new URL(base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -264,7 +285,7 @@ async function requestRpc(
       if (maxResponseBytes !== undefined && responseBytes > maxResponseBytes) {
         finish(() => {
           socket.close();
-          reject(new Error(`T3 metadata response exceeded ${maxResponseBytes} bytes`));
+          reject(new ResponseTooLargeError(`T3 RPC ${tag} response exceeded ${maxResponseBytes} bytes`));
         });
         return;
       }

@@ -19,7 +19,9 @@ test("large histories do not block send/status; reads remain bounded", async () 
   let activityBytes = 600_000;
   let detailRequests = 0;
   let snapshotRequests = 0;
-  let archivedMetadataBytes = 0;
+  let archivedFrameBytes = 0;
+  let deleted = false;
+  let ticketStatus = 200;
   let lastQuery = "";
   const commands: any[] = [];
   const server = Bun.serve({
@@ -30,7 +32,7 @@ test("large histories do not block send/status; reads remain bounded", async () 
       expect(request.headers.get("authorization")).toBe("Bearer fake-test-token");
       const thread = { ...target, archivedAt: archived ? "2026-09-26T00:00:00Z" : null };
       const model = { snapshotSequence: 1, projects: [{ id: "project", title: "Project", workspaceRoot: "/fixture" }], threads: [thread], updatedAt: "now" };
-      if (url.pathname === "/api/orchestration/shell") return Response.json({ ...model, threads: archived ? [] : [thread] });
+      if (url.pathname === "/api/orchestration/shell") return Response.json({ ...model, threads: archived || deleted ? [] : [thread] });
       if (url.pathname === "/api/orchestration/snapshot") {
         snapshotRequests++;
         return Response.json({ ...model, threads: [{ ...thread, messages: [], activities: [], proposedPlans: [{ planMarkdown: "p".repeat(2_000_001) }] }] });
@@ -44,7 +46,11 @@ test("large histories do not block send/status; reads remain bounded", async () 
           page: { beforeCursor: "older", hasMore: true, snapshotSequence: 1 },
         });
       }
-      if (url.pathname === "/api/auth/websocket-ticket") return Response.json({ ticket: "fake-ticket" });
+      if (url.pathname === "/api/auth/websocket-ticket") {
+        return ticketStatus === 200
+          ? Response.json({ ticket: "fake-ticket" })
+          : new Response("private-auth-error fake-test-token fake-ticket", { status: ticketStatus });
+      }
       if (url.pathname === "/api/orchestration/dispatch") {
         commands.push(await request.json());
         return Response.json({ sequence: 2 });
@@ -55,11 +61,14 @@ test("large histories do not block send/status; reads remain bounded", async () 
       message(socket, message) {
         const frame = JSON.parse(String(message));
         if (frame.tag === "orchestration.getArchivedShellSnapshot") {
-          socket.send(JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value: {
+          const reply = JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value: {
             snapshotSequence: 1, updatedAt: "now",
             projects: [{ id: "project", title: "Project", workspaceRoot: "/fixture" }],
-            threads: archived ? [{ ...target, archivedAt: "2026-09-26T00:00:00Z", title: "Large thread" + "x".repeat(archivedMetadataBytes) }] : [],
-          } } }));
+            threads: archived && !deleted ? [{ ...target, archivedAt: "2026-09-26T00:00:00Z" }] : [],
+          } } });
+          // JSON permits trailing whitespace: pad the complete wire frame to an
+          // exact byte boundary without flooding projected status output.
+          socket.send(reply + " ".repeat(Math.max(0, archivedFrameBytes - Buffer.byteLength(reply))));
           return;
         }
         expect(frame.tag).toBe("server.getConfig");
@@ -129,10 +138,29 @@ test("large histories do not block send/status; reads remain bounded", async () 
     expect((await run('client.taskStatus("large")')).code).toBe(0);
     expect((await run('client.sendTask("large", "still reachable")')).code).toBe(0);
     expect(snapshotRequests).toBe(0);
-    archivedMetadataBytes = 2_000_001;
+    archivedFrameBytes = 16_000_000;
+    expect((await run('client.taskStatus("large")')).code).toBe(0);
+    expect((await run('client.sendTask("large", "at the boundary")')).code).toBe(0);
+    archivedFrameBytes++;
     const tooMuchMetadata = await run('client.taskStatus("large")');
     expect(tooMuchMetadata.code).toBe(1);
-    expect(tooMuchMetadata.stderr).toContain("metadata response exceeded 2000000 bytes");
+    expect(tooMuchMetadata.stderr).toContain("archived-thread list exceeded 16000000 bytes");
+    expect(tooMuchMetadata.stderr).toContain("ARCHIVED_SHELL_BYTE_LIMIT");
+    expect(tooMuchMetadata.stderr).toContain("rebuild");
+    archivedFrameBytes = 0;
+    // T3 omits deleted threads from both shells, rather than returning deletedAt.
+    deleted = true;
+    const deletedStatus = await run('client.taskStatus("large")');
+    expect(deletedStatus.code).toBe(1);
+    expect(deletedStatus.stderr.trim()).toBe("T3 thread 'large' was not found");
+    deleted = false;
+    for (const status of [401, 503]) {
+      ticketStatus = status;
+      const ticketFailure = await run('client.taskStatus("large")');
+      expect(ticketFailure.code).toBe(1);
+      expect(ticketFailure.stderr.trim()).toBe(`T3 WebSocket ticket request failed (HTTP ${status})`);
+      expect(ticketFailure.stderr).not.toContain("private-auth-error");
+    }
   } finally {
     server.stop(true);
     await rm(home, { recursive: true, force: true });
