@@ -287,6 +287,12 @@ describe("cross-project collaboration CLI", () => {
     expect(payload).not.toHaveProperty("callerThreadId");
   });
 
+  test("--project current behaves like omitting --project", async () => {
+    expect(await captureCli(["tasks", "create", "--project", "current", "--title", "t", "--message", "m"])).toEqual({
+      op: "tasks.create", projectId: "current", callerCwd: import.meta.dir, title: "t", message: "m",
+    });
+  });
+
   test("an explicit project sends no working directory", async () => {
     expect(await captureCli(["tasks", "create", "--project", "p", "--title", "t", "--message", "m"])).toEqual({
       op: "tasks.create", projectId: "p", title: "t", message: "m",
