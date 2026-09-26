@@ -433,7 +433,7 @@ function parseTailscaleGatewayPort(value) {
 var TAILSCALE_GATEWAY_PORT = parseTailscaleGatewayPort(process.env.T3_ORCHESTRATION_HTTP_PORT);
 var TAILSCALE_ALLOWED_USERS = (process.env.T3_ORCHESTRATION_TAILSCALE_USERS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
 var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
-var FULL_ACCESS_INSTANCES = new Set(["codex", "claudeAgent", "grok", "cursor"]);
+var FULL_ACCESS_DRIVERS = new Set(["codex", "claudeAgent", "grok", "cursor"]);
 
 // packages/t3-orchestration/src/remote-config.ts
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "fs/promises";

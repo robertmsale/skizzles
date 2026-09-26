@@ -6,7 +6,7 @@ import { dirname } from "node:path";
 import { SOCKET_PATH, TAILSCALE_ALLOWED_USERS, TAILSCALE_GATEWAY_PORT } from "./config.ts";
 import * as t3 from "./t3.ts";
 import { resolveCallerProject } from "./identity.ts";
-import { executeCommand } from "./commands.ts";
+import { executeCommand, requireRemoteSafeCommand } from "./commands.ts";
 import { createTailscaleGateway } from "./http-gateway.ts";
 
 const commandDependencies = {
@@ -51,7 +51,7 @@ const server = createServer((socket) => {
   socket.on("close", () => { buffer = ""; });
 });
 const gateway = TAILSCALE_ALLOWED_USERS.length > 0
-  ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, dispatch)
+  ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, async (command) => dispatch(requireRemoteSafeCommand(command)))
   : undefined;
 let shuttingDown = false;
 

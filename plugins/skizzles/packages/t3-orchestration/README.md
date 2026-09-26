@@ -14,7 +14,7 @@ Optional Skizzles sidecar tooling for orchestrating T3 Code tasks through its su
 
 - `t3-orchestrationd` owns the least-privilege T3 bearer from macOS Keychain.
 - `t3ctl` talks to the daemon over a same-user Unix socket.
-- T3 SQLite and Codex SQLite are read-only configuration sources; mutations use T3 dispatch. Callers are identified by working directory, not by a harness-specific thread id.
+- T3 SQLite is a read-only source (Codex config.toml and project state are read for defaults and import); mutations use T3 dispatch. Callers are identified by working directory, not by a harness-specific thread id.
 - New root tasks always use T3's worktree bootstrap. `--provider` accepts `codex` (default), `claude` (instance `claudeAgent`), `grok`, `cursor`, or any other ready T3 instance id, checked against the live catalog before creation.
 - Codex without `--model` uses the top-level `model`, `model_reasoning_effort` and `service_tier` in `~/.codex/config.toml` where present. Every other provider, and anything config.toml omits, falls back to the catalog's default model and T3's option defaults. `--model SLUG` must exist in the catalog and never reads or writes `config.toml`. `--reasoning-effort` maps to the model's own reasoning option (`reasoningEffort`, `effort` or `reasoning`) and unsupported values fail before creation. Fast mode is never enabled implicitly. Messages replay the recipient's exact saved selection and reject model/reasoning overrides; an existing thread's provider cannot be flipped by messaging it.
 

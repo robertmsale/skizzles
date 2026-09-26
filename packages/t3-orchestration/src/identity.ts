@@ -1,41 +1,62 @@
 import { realpath } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { join, relative } from "node:path";
 import { $ } from "bun";
 
 export type ProjectRoot = { id: string; workspaceRoot: string };
 
-// Paths that identify the caller's checkout. A linked Git worktree (T3,
-// Hermes, or hand-made) is mapped back to its primary checkout so it resolves
-// to the project registered for that repository, whichever harness runs there.
-export async function callerPathCandidates(cwd: string): Promise<string[]> {
+const MAX_SUPERPROJECT_DEPTH = 4;
+
+async function git(cwd: string, ...args: string[]): Promise<string | undefined> {
+  const result = await $`git -C ${cwd} ${args}`.nothrow().quiet();
+  return result.exitCode === 0 ? result.text() : undefined;
+}
+
+function withoutTrailingSlash(path: string): string {
+  return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+}
+
+// Paths that identify the caller's checkout, most specific first. A linked Git
+// worktree (T3, Hermes, or hand-made) is mapped back to its primary checkout,
+// and a submodule to its location inside the superproject, so the caller
+// resolves to the project registered for that repository whichever harness
+// runs there.
+export async function callerPathCandidates(cwd: string, depth = 0): Promise<string[]> {
+  const candidates: string[] = [];
+  const add = (path: string) => {
+    const normalized = withoutTrailingSlash(path);
+    if (!candidates.includes(normalized)) candidates.push(normalized);
+  };
   const real = await realpath(cwd);
-  const candidates = [real];
-  const git = await $`git -C ${real} rev-parse --path-format=absolute --git-common-dir --show-prefix`.nothrow().quiet();
-  if (git.exitCode !== 0) return candidates;
-  const [commonDir = "", prefix = ""] = git.text().split("\n");
-  if (basename(commonDir) !== ".git") return candidates;
-  const primary = join(await realpath(dirname(commonDir)), prefix);
-  const normalized = primary.endsWith("/") && primary.length > 1 ? primary.slice(0, -1) : primary;
-  if (!candidates.includes(normalized)) candidates.push(normalized);
+  add(real);
+  const [top = "", prefix = ""] = (await git(real, "rev-parse", "--show-toplevel", "--show-prefix"))?.split("\n") ?? [];
+  if (!top) return candidates;
+  const primaryRecord = (await git(real, "worktree", "list", "--porcelain"))?.split("\n\n")[0] ?? "";
+  const primary = primaryRecord.match(/^worktree (.+)$/m)?.[1];
+  if (primary && !/^bare$/m.test(primaryRecord)) add(join(await realpath(primary), prefix));
+  const superproject = (await git(real, "rev-parse", "--show-superproject-working-tree"))?.trim();
+  if (superproject && depth < MAX_SUPERPROJECT_DEPTH) {
+    const superRoot = await realpath(superproject);
+    const inside = relative(superRoot, real);
+    for (const base of await callerPathCandidates(superRoot, depth + 1)) add(join(base, inside));
+  }
   return candidates;
 }
 
-// Chooses the most specific project whose root contains a candidate path.
+// Chooses the most specific project for the earliest candidate that any project
+// contains; only identical roots registered twice are ambiguous.
 export function selectCallerProject(candidates: string[], projects: ProjectRoot[]): string {
-  let best: ProjectRoot[] = [];
-  for (const project of projects) {
-    const root = project.workspaceRoot;
-    if (!candidates.some((path) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`))) continue;
-    if (best.length === 0 || root.length > best[0]!.workspaceRoot.length) best = [project];
-    else if (root.length === best[0]!.workspaceRoot.length) best.push(project);
+  for (const path of candidates) {
+    let best: ProjectRoot[] = [];
+    for (const project of projects) {
+      const root = project.workspaceRoot;
+      if (!(path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`))) continue;
+      if (best.length === 0 || root.length > best[0]!.workspaceRoot.length) best = [project];
+      else if (root === best[0]!.workspaceRoot) best.push(project);
+    }
+    if (best.length > 1) throw new Error(`Several T3 projects share ${best[0]!.workspaceRoot}; pass --project explicitly`);
+    if (best.length === 1) return best[0]!.id;
   }
-  if (best.length === 0) {
-    throw new Error(`No T3 project contains ${candidates[0]}; pass --project with an id from 't3ctl projects list'`);
-  }
-  if (best.length > 1) {
-    throw new Error(`Several T3 projects share ${best[0]!.workspaceRoot}; pass --project explicitly`);
-  }
-  return best[0]!.id;
+  throw new Error(`No T3 project contains ${candidates[0]}; pass --project with an id from 't3ctl projects list'`);
 }
 
 export async function resolveCallerProject(

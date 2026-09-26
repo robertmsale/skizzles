@@ -30,14 +30,15 @@ export const KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ??
 // as a literal T3 instanceId and checked against the live catalog.
 const PROVIDER_ALIASES: Record<string, string> = {
   "": "codex",
+  codex: "codex",
   openai: "codex",
   claude: "claudeAgent",
   "claude-code": "claudeAgent",
 };
 
-// Harnesses whose T3 tasks boot Full Access. Other instances boot Auto so
+// Harness drivers whose T3 tasks boot Full Access. Other drivers boot Auto so
 // their approvals stay visible to the coordinator and guardian.
-const FULL_ACCESS_INSTANCES = new Set(["codex", "claudeAgent", "grok", "cursor"]);
+const FULL_ACCESS_DRIVERS = new Set(["codex", "claudeAgent", "grok", "cursor"]);
 
 export type TaskProviderRequest = { instanceId: string; model?: string; options: ModelSelection["options"] };
 
@@ -96,6 +97,6 @@ export async function taskProviderDefaults(provider: string | undefined, model?:
   return { instanceId, ...(override ? { model: override } : {}), options: [] };
 }
 
-export function taskRuntimeMode(instanceId: string): "auto" | "full-access" {
-  return FULL_ACCESS_INSTANCES.has(instanceId) ? "full-access" : "auto";
+export function taskRuntimeMode(driver: string): "auto" | "full-access" {
+  return FULL_ACCESS_DRIVERS.has(driver) ? "full-access" : "auto";
 }

@@ -381,8 +381,20 @@ function catalogReasoningEffort(model: unknown): string | undefined {
 // send. Never read config.toml for this value.
 const T3_CODEX_SESSION_REASONING_FALLBACK = "medium";
 
+function catalogDriver(config: unknown, instanceId: string): string {
+  const providers = config && typeof config === "object" && "providers" in config
+    ? (config as { providers?: unknown }).providers
+    : undefined;
+  const provider = Array.isArray(providers)
+    ? providers.find((entry) => Boolean(entry && typeof entry === "object" && (entry as ProviderCatalogEntry).instanceId === instanceId)) as ProviderCatalogEntry | undefined
+    : undefined;
+  return typeof provider?.driver === "string" && provider.driver.trim() ? provider.driver : instanceId;
+}
+
+// Keyed by driver, not instance id: any Codex-driver instance needs a saved
+// reasoningEffort for follow-up sends to pass requireSelection.
 export function applyCatalogSelectionDefaults(config: unknown, selection: ModelSelection): ModelSelection {
-  if (selection.instanceId !== "codex" || selection.options.some((entry) => entry.id === "reasoningEffort")) {
+  if (catalogDriver(config, selection.instanceId) !== "codex" || selection.options.some((entry) => entry.id === "reasoningEffort")) {
     return selection;
   }
   const model = catalogModels(config, selection.instanceId).find((entry) =>
@@ -410,7 +422,8 @@ export function applyTaskReasoningOverride(config: unknown, selection: ModelSele
   const effort = reasoningEffort.trim();
   if (!effort) throw new Error("Reasoning effort must be nonempty");
   const model = catalogModels(config, selection.instanceId).find((entry: any) => entry?.slug === selection.model);
-  const descriptor = modelOptionDescriptors(model).find((entry: any) => REASONING_OPTION_IDS.includes(entry?.id)) as { id: string; options?: unknown } | undefined;
+  const descriptors = modelOptionDescriptors(model) as Array<{ id?: unknown; options?: unknown }>;
+  const descriptor = REASONING_OPTION_IDS.map((optionId) => descriptors.find((entry) => entry?.id === optionId)).find(Boolean) as { id: string; options?: unknown } | undefined;
   const choices = descriptor?.options;
   if (!descriptor || !Array.isArray(choices) || !choices.some((choice: any) => choice?.id === effort)) {
     throw new Error(`Model '${selection.model}' does not advertise reasoning effort '${effort}'`);
@@ -453,11 +466,11 @@ export function resolveCatalogSelection(config: unknown, request: TaskProviderRe
   return { instanceId: provider.instanceId, model, options };
 }
 
-async function resolveCreateTaskSelection(request: TaskProviderRequest, reasoningEffort?: string): Promise<ModelSelection> {
+async function resolveCreateTaskSelection(request: TaskProviderRequest, reasoningEffort?: string): Promise<{ selection: ModelSelection; driver: string }> {
   const config = await requestRpc("server.getConfig", {});
   const selection = resolveCatalogSelection(config, request);
-  requireAvailableProviderSelection(config, selection);
-  return applyCatalogSelectionDefaults(config, applyTaskReasoningOverride(config, selection, reasoningEffort));
+  const driver = requireAvailableProviderSelection(config, selection);
+  return { selection: applyCatalogSelectionDefaults(config, applyTaskReasoningOverride(config, selection, reasoningEffort)), driver };
 }
 
 function now() { return new Date().toISOString(); }
@@ -505,8 +518,8 @@ async function gitBaseBranch(workspaceRoot: string): Promise<string> {
 }
 
 export async function createTask(input: { projectId: string; title: string; message: string; baseBranch?: string; provider?: string; model?: string; reasoningEffort?: string }): Promise<{ sequence: number; threadId: string; model: ModelSelection; worktreeRequired: true }> {
-  const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model), input.reasoningEffort);
-  const runtimeMode = taskRuntimeMode(selection.instanceId);
+  const { selection, driver } = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model), input.reasoningEffort);
+  const runtimeMode = taskRuntimeMode(driver);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
   if (!project) throw new Error(`Active T3 project not found: ${input.projectId}`);

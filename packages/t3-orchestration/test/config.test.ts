@@ -21,6 +21,7 @@ describe("task provider defaults", () => {
     expect(taskProviderInstance(undefined)).toBe("codex");
     expect(taskProviderInstance("  ")).toBe("codex");
     expect(taskProviderInstance("OpenAI")).toBe("codex");
+    expect(taskProviderInstance(" Codex ")).toBe("codex");
     expect(taskProviderInstance("claude")).toBe("claudeAgent");
     expect(taskProviderInstance("Claude-Code")).toBe("claudeAgent");
     expect(taskProviderInstance("grok")).toBe("grok");

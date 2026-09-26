@@ -232,3 +232,18 @@ describe("catalog selection", () => {
     expect(() => resolveCatalogSelection({}, { instanceId: "grok", options: [] })).toThrow("catalog is unavailable");
   });
 });
+
+test("Codex-driver instances get a saved reasoningEffort whatever their instance id", () => {
+  const catalog = { providers: [{ instanceId: "codex-work", driver: "codex", models: [{ slug: "sol", capabilities: { optionDescriptors: [{ id: "reasoningEffort", currentValue: "low" }] } }] }] };
+  expect(applyCatalogSelectionDefaults(catalog, { instanceId: "codex-work", model: "sol", options: [] }).options)
+    .toEqual([{ id: "reasoningEffort", value: "low" }]);
+});
+
+test("reasoning override prefers reasoningEffort over effort over reasoning", async () => {
+  const { applyTaskReasoningOverride } = await import("../src/t3.ts");
+  const catalog = { providers: [{ instanceId: "x", models: [{ slug: "m", capabilities: { optionDescriptors: [
+    { id: "reasoning", options: [{ id: "high" }] },
+    { id: "reasoningEffort", options: [{ id: "high" }] },
+  ] } }] }] };
+  expect(applyTaskReasoningOverride(catalog, { instanceId: "x", model: "m", options: [] }, "high").options).toEqual([{ id: "reasoningEffort", value: "high" }]);
+});

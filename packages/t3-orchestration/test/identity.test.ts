@@ -43,6 +43,28 @@ describe("caller project resolution", () => {
     expect(await resolveCallerProject(join(root, "plain/sub"), async () => [{ id: "plain", workspaceRoot: join(root!, "plain") }])).toBe("plain");
   });
 
+  test("a submodule inside a linked worktree resolves to the superproject's project", async () => {
+    const { primary, linked } = await repositoryWithWorktree();
+    const library = join(root!, "library");
+    await $`git init -q ${library} && git -C ${library} -c user.email=t@t -c user.name=t commit -q --allow-empty -m lib`.quiet();
+    await $`git -C ${linked} -c protocol.file.allow=always submodule add -q ${library} vendor/lib`.quiet();
+    const inside = join(linked, "vendor/lib");
+    expect(await callerPathCandidates(inside)).toContain(join(primary, "vendor/lib"));
+    expect(await resolveCallerProject(inside, async () => [{ id: "repo", workspaceRoot: primary }])).toBe("repo");
+  });
+
+  test("a worktree of a bare repository falls back to its own path", async () => {
+    root = await realpath(await mkdtemp("/tmp/t3-identity-"));
+    const bare = join(root, "repo.git");
+    await $`git init -q --bare ${bare}`.quiet();
+    const seed = join(root, "seed");
+    await $`git clone -q ${bare} ${seed} 2>/dev/null; git -C ${seed} -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && git -C ${seed} push -q origin HEAD:main`.quiet();
+    const linked = join(root, "linked");
+    await $`git -C ${bare} worktree add -q ${linked} main`.quiet();
+    expect(await callerPathCandidates(linked)).toEqual([linked]);
+    expect(await resolveCallerProject(linked, async () => [{ id: "linked", workspaceRoot: linked }])).toBe("linked");
+  });
+
   test("prefers the most specific project and refuses ambiguity or no match", () => {
     const projects = [{ id: "repo", workspaceRoot: "/r" }, { id: "app", workspaceRoot: "/r/app" }];
     expect(selectCallerProject(["/r/app/src"], projects)).toBe("app");
@@ -50,6 +72,9 @@ describe("caller project resolution", () => {
     expect(() => selectCallerProject(["/r2"], projects)).toThrow("pass --project");
     expect(() => selectCallerProject(["/rapp"], [{ id: "repo", workspaceRoot: "/r" }])).toThrow("No T3 project");
     expect(() => selectCallerProject(["/r"], [{ id: "a", workspaceRoot: "/r" }, { id: "b", workspaceRoot: "/r" }])).toThrow("Several T3 projects");
+    // Equal-length roots matching different candidates are not ambiguous: the
+    // caller's own path (the first candidate) wins.
+    expect(selectCallerProject(["/wt/a", "/pr/a"], [{ id: "worktree", workspaceRoot: "/wt" }, { id: "primary", workspaceRoot: "/pr" }])).toBe("worktree");
   });
 
   test("an unknown working directory asks for --project", async () => {

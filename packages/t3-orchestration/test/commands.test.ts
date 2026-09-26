@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { executeCommand, type CommandDependencies } from "../src/commands.ts";
+import { executeCommand, requireRemoteSafeCommand, type CommandDependencies } from "../src/commands.ts";
 import type { T3Thread } from "../src/protocol.ts";
 
 const thread: T3Thread = {
@@ -55,6 +55,14 @@ describe("daemon command routing", () => {
       provider: "claude",
     });
     expect(seen).toEqual(["/work/tree"]);
+  });
+
+  test("the remote gateway admits creation only with an explicit project", () => {
+    expect(() => requireRemoteSafeCommand({ op: "tasks.create", projectId: "current" })).toThrow("needs --project");
+    expect(() => requireRemoteSafeCommand({ op: "tasks.create", projectId: "p", callerCwd: "/etc" })).toThrow("needs --project");
+    const explicit = { op: "tasks.create", projectId: "p" };
+    expect(requireRemoteSafeCommand(explicit)).toBe(explicit);
+    expect(requireRemoteSafeCommand({ op: "tasks.list" })).toEqual({ op: "tasks.list" });
   });
 
   test("an explicit project is honored from any caller without resolution", async () => {

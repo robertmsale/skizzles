@@ -5,7 +5,7 @@
 import { connect, createServer as createServer2 } from "net";
 import { chmodSync } from "fs";
 import { lstat as lstat2, mkdir as mkdir2, unlink as unlink2 } from "fs/promises";
-import { dirname as dirname2 } from "path";
+import { dirname } from "path";
 
 // packages/t3-orchestration/src/config.ts
 import { join } from "path";
@@ -33,11 +33,12 @@ var KEYCHAIN_SERVICE = "t3-orchestration";
 var KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
 var PROVIDER_ALIASES = {
   "": "codex",
+  codex: "codex",
   openai: "codex",
   claude: "claudeAgent",
   "claude-code": "claudeAgent"
 };
-var FULL_ACCESS_INSTANCES = new Set(["codex", "claudeAgent", "grok", "cursor"]);
+var FULL_ACCESS_DRIVERS = new Set(["codex", "claudeAgent", "grok", "cursor"]);
 function taskProviderInstance(provider) {
   const key = provider?.trim() ?? "";
   return PROVIDER_ALIASES[key.toLowerCase()] ?? key;
@@ -86,8 +87,8 @@ async function taskProviderDefaults(provider, model) {
     return codexDefaults();
   return { instanceId, ...override ? { model: override } : {}, options: [] };
 }
-function taskRuntimeMode(instanceId) {
-  return FULL_ACCESS_INSTANCES.has(instanceId) ? "full-access" : "auto";
+function taskRuntimeMode(driver) {
+  return FULL_ACCESS_DRIVERS.has(driver) ? "full-access" : "auto";
 }
 
 // packages/t3-orchestration/src/t3.ts
@@ -1556,8 +1557,13 @@ function catalogReasoningEffort(model) {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 var T3_CODEX_SESSION_REASONING_FALLBACK = "medium";
+function catalogDriver(config, instanceId) {
+  const providers = config && typeof config === "object" && "providers" in config ? config.providers : undefined;
+  const provider = Array.isArray(providers) ? providers.find((entry) => Boolean(entry && typeof entry === "object" && entry.instanceId === instanceId)) : undefined;
+  return typeof provider?.driver === "string" && provider.driver.trim() ? provider.driver : instanceId;
+}
 function applyCatalogSelectionDefaults(config, selection) {
-  if (selection.instanceId !== "codex" || selection.options.some((entry) => entry.id === "reasoningEffort")) {
+  if (catalogDriver(config, selection.instanceId) !== "codex" || selection.options.some((entry) => entry.id === "reasoningEffort")) {
     return selection;
   }
   const model = catalogModels(config, selection.instanceId).find((entry) => Boolean(entry && typeof entry === "object" && entry.slug === selection.model));
@@ -1580,7 +1586,8 @@ function applyTaskReasoningOverride(config, selection, reasoningEffort) {
   if (!effort)
     throw new Error("Reasoning effort must be nonempty");
   const model = catalogModels(config, selection.instanceId).find((entry) => entry?.slug === selection.model);
-  const descriptor = modelOptionDescriptors(model).find((entry) => REASONING_OPTION_IDS.includes(entry?.id));
+  const descriptors = modelOptionDescriptors(model);
+  const descriptor = REASONING_OPTION_IDS.map((optionId) => descriptors.find((entry) => entry?.id === optionId)).find(Boolean);
   const choices = descriptor?.options;
   if (!descriptor || !Array.isArray(choices) || !choices.some((choice) => choice?.id === effort)) {
     throw new Error(`Model '${selection.model}' does not advertise reasoning effort '${effort}'`);
@@ -1617,8 +1624,8 @@ function resolveCatalogSelection(config, request2) {
 async function resolveCreateTaskSelection(request2, reasoningEffort) {
   const config = await requestRpc("server.getConfig", {});
   const selection = resolveCatalogSelection(config, request2);
-  requireAvailableProviderSelection(config, selection);
-  return applyCatalogSelectionDefaults(config, applyTaskReasoningOverride(config, selection, reasoningEffort));
+  const driver = requireAvailableProviderSelection(config, selection);
+  return { selection: applyCatalogSelectionDefaults(config, applyTaskReasoningOverride(config, selection, reasoningEffort)), driver };
 }
 function now() {
   return new Date().toISOString();
@@ -1677,8 +1684,8 @@ async function gitBaseBranch(workspaceRoot) {
   return branch;
 }
 async function createTask(input) {
-  const selection = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model), input.reasoningEffort);
-  const runtimeMode = taskRuntimeMode(selection.instanceId);
+  const { selection, driver } = await resolveCreateTaskSelection(await taskProviderDefaults(input.provider, input.model), input.reasoningEffort);
+  const runtimeMode = taskRuntimeMode(driver);
   const projects = await snapshot();
   const project = projects.projects.find((entry) => entry.id === input.projectId && !entry.deletedAt);
   if (!project)
@@ -1813,42 +1820,62 @@ async function resolveTaskApproval(input) {
 
 // packages/t3-orchestration/src/identity.ts
 import { realpath as realpath2 } from "fs/promises";
-import { basename, dirname, join as join3 } from "path";
+import { join as join3, relative } from "path";
 var {$: $3 } = globalThis.Bun;
-async function callerPathCandidates(cwd) {
+var MAX_SUPERPROJECT_DEPTH = 4;
+async function git(cwd, ...args) {
+  const result = await $3`git -C ${cwd} ${args}`.nothrow().quiet();
+  return result.exitCode === 0 ? result.text() : undefined;
+}
+function withoutTrailingSlash(path) {
+  return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+}
+async function callerPathCandidates(cwd, depth = 0) {
+  const candidates = [];
+  const add = (path) => {
+    const normalized = withoutTrailingSlash(path);
+    if (!candidates.includes(normalized))
+      candidates.push(normalized);
+  };
   const real = await realpath2(cwd);
-  const candidates = [real];
-  const git = await $3`git -C ${real} rev-parse --path-format=absolute --git-common-dir --show-prefix`.nothrow().quiet();
-  if (git.exitCode !== 0)
+  add(real);
+  const [top = "", prefix = ""] = (await git(real, "rev-parse", "--show-toplevel", "--show-prefix"))?.split(`
+`) ?? [];
+  if (!top)
     return candidates;
-  const [commonDir = "", prefix = ""] = git.text().split(`
-`);
-  if (basename(commonDir) !== ".git")
-    return candidates;
-  const primary = join3(await realpath2(dirname(commonDir)), prefix);
-  const normalized = primary.endsWith("/") && primary.length > 1 ? primary.slice(0, -1) : primary;
-  if (!candidates.includes(normalized))
-    candidates.push(normalized);
+  const primaryRecord = (await git(real, "worktree", "list", "--porcelain"))?.split(`
+
+`)[0] ?? "";
+  const primary = primaryRecord.match(/^worktree (.+)$/m)?.[1];
+  if (primary && !/^bare$/m.test(primaryRecord))
+    add(join3(await realpath2(primary), prefix));
+  const superproject = (await git(real, "rev-parse", "--show-superproject-working-tree"))?.trim();
+  if (superproject && depth < MAX_SUPERPROJECT_DEPTH) {
+    const superRoot = await realpath2(superproject);
+    const inside = relative(superRoot, real);
+    for (const base of await callerPathCandidates(superRoot, depth + 1))
+      add(join3(base, inside));
+  }
   return candidates;
 }
 function selectCallerProject(candidates, projects) {
-  let best = [];
-  for (const project of projects) {
-    const root = project.workspaceRoot;
-    if (!candidates.some((path) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`)))
-      continue;
-    if (best.length === 0 || root.length > best[0].workspaceRoot.length)
-      best = [project];
-    else if (root.length === best[0].workspaceRoot.length)
-      best.push(project);
+  for (const path of candidates) {
+    let best = [];
+    for (const project of projects) {
+      const root = project.workspaceRoot;
+      if (!(path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`)))
+        continue;
+      if (best.length === 0 || root.length > best[0].workspaceRoot.length)
+        best = [project];
+      else if (root === best[0].workspaceRoot)
+        best.push(project);
+    }
+    if (best.length > 1)
+      throw new Error(`Several T3 projects share ${best[0].workspaceRoot}; pass --project explicitly`);
+    if (best.length === 1)
+      return best[0].id;
   }
-  if (best.length === 0) {
-    throw new Error(`No T3 project contains ${candidates[0]}; pass --project with an id from 't3ctl projects list'`);
-  }
-  if (best.length > 1) {
-    throw new Error(`Several T3 projects share ${best[0].workspaceRoot}; pass --project explicitly`);
-  }
-  return best[0].id;
+  throw new Error(`No T3 project contains ${candidates[0]}; pass --project with an id from 't3ctl projects list'`);
 }
 async function resolveCallerProject(cwd, projects) {
   if (typeof cwd !== "string" || !cwd.trim()) {
@@ -1889,6 +1916,12 @@ function parseExpectedAction(value) {
       throw new Error("expected action identity is invalid");
     })()
   };
+}
+function requireRemoteSafeCommand(command) {
+  if (command.op === "tasks.create" && (command.projectId === "current" || command.callerCwd !== undefined)) {
+    throw new Error("Remote tasks create needs --project");
+  }
+  return command;
 }
 async function executeCommand(command, dependencies) {
   if (command.reasoningEffort !== undefined && (typeof command.reasoningEffort !== "string" || !command.reasoningEffort.trim())) {
@@ -2126,7 +2159,7 @@ var server = createServer2((socket) => {
     buffer = "";
   });
 });
-var gateway = TAILSCALE_ALLOWED_USERS.length > 0 ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, dispatch2) : undefined;
+var gateway = TAILSCALE_ALLOWED_USERS.length > 0 ? createTailscaleGateway(TAILSCALE_ALLOWED_USERS, async (command) => dispatch2(requireRemoteSafeCommand(command))) : undefined;
 var shuttingDown = false;
 var closeServer = (listener) => {
   if (!listener?.listening)
@@ -2147,7 +2180,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => void shutdown(0));
 }
 process.umask(63);
-await mkdir2(dirname2(SOCKET_PATH), { recursive: true, mode: 448 });
+await mkdir2(dirname(SOCKET_PATH), { recursive: true, mode: 448 });
 var prepareSocket = async (path, isLive) => {
   try {
     const existing = await lstat2(path);

@@ -95,10 +95,10 @@ async function taskProviderDefaults(provider, model) {
     return codexDefaults();
   return { instanceId, ...override ? { model: override } : {}, options: [] };
 }
-function taskRuntimeMode(instanceId) {
-  return FULL_ACCESS_INSTANCES.has(instanceId) ? "full-access" : "auto";
+function taskRuntimeMode(driver) {
+  return FULL_ACCESS_DRIVERS.has(driver) ? "full-access" : "auto";
 }
-var home, CODEX_HOME, T3_HOME, SOCKET_PATH, DEFAULT_TAILSCALE_GATEWAY_PORT = 43773, TAILSCALE_GATEWAY_PORT, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, PROVIDER_ALIASES, FULL_ACCESS_INSTANCES;
+var home, CODEX_HOME, T3_HOME, SOCKET_PATH, DEFAULT_TAILSCALE_GATEWAY_PORT = 43773, TAILSCALE_GATEWAY_PORT, TAILSCALE_ALLOWED_USERS, KEYCHAIN_SERVICE = "t3-orchestration", KEYCHAIN_ACCOUNT, PROVIDER_ALIASES, FULL_ACCESS_DRIVERS;
 var init_config = __esm(() => {
   home = process.env.HOME ?? (() => {
     throw new Error("HOME is required");
@@ -111,11 +111,12 @@ var init_config = __esm(() => {
   KEYCHAIN_ACCOUNT = process.env.T3_ORCHESTRATION_KEYCHAIN_ACCOUNT ?? "access-token";
   PROVIDER_ALIASES = {
     "": "codex",
+    codex: "codex",
     openai: "codex",
     claude: "claudeAgent",
     "claude-code": "claudeAgent"
   };
-  FULL_ACCESS_INSTANCES = new Set(["codex", "claudeAgent", "grok", "cursor"]);
+  FULL_ACCESS_DRIVERS = new Set(["codex", "claudeAgent", "grok", "cursor"]);
 });
 
 // packages/t3-orchestration/src/remote-config.ts
