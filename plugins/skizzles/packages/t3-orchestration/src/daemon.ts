@@ -1839,16 +1839,18 @@ async function callerPathCandidates(cwd, depth = 0) {
   };
   const real = await realpath2(cwd);
   add(real);
-  const [top = "", prefix = ""] = (await git(real, "rev-parse", "--show-toplevel", "--show-prefix"))?.split(`
-`) ?? [];
-  if (!top)
+  const revParse = await git(real, "rev-parse", "--show-toplevel", "--show-prefix");
+  if (revParse === undefined)
     return candidates;
+  const prefix = revParse.split(`
+`)[1] ?? "";
   const primaryRecord = (await git(real, "worktree", "list", "--porcelain"))?.split(`
 
 `)[0] ?? "";
   const primary = primaryRecord.match(/^worktree (.+)$/m)?.[1];
-  if (primary && !/^bare$/m.test(primaryRecord))
-    add(join3(await realpath2(primary), prefix));
+  const primaryTop = primary && !/^bare$/m.test(primaryRecord) ? (await git(primary, "rev-parse", "--show-toplevel"))?.trim() : undefined;
+  if (primaryTop)
+    add(join3(await realpath2(primaryTop), prefix));
   const superproject = (await git(real, "rev-parse", "--show-superproject-working-tree"))?.trim();
   if (superproject && depth < MAX_SUPERPROJECT_DEPTH) {
     const superRoot = await realpath2(superproject);
@@ -1918,10 +1920,12 @@ function parseExpectedAction(value) {
   };
 }
 function requireRemoteSafeCommand(command) {
-  if (command.op === "tasks.create" && (command.projectId === "current" || command.callerCwd !== undefined)) {
+  if (command.op !== "tasks.create")
+    return command;
+  if (command.projectId === "current")
     throw new Error("Remote tasks create needs --project");
-  }
-  return command;
+  const { callerCwd: _ignored, ...rest } = command;
+  return rest;
 }
 async function executeCommand(command, dependencies) {
   if (command.reasoningEffort !== undefined && (typeof command.reasoningEffort !== "string" || !command.reasoningEffort.trim())) {

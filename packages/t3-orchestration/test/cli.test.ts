@@ -287,6 +287,12 @@ describe("cross-project collaboration CLI", () => {
     expect(payload).not.toHaveProperty("callerThreadId");
   });
 
+  test("an explicit project sends no working directory", async () => {
+    expect(await captureCli(["tasks", "create", "--project", "p", "--title", "t", "--message", "m"])).toEqual({
+      op: "tasks.create", projectId: "p", title: "t", message: "m",
+    });
+  });
+
   test("remote task creation requires an explicit project", async () => {
     root = await mkdtemp("/tmp/t3-cli-");
     const env = { ...Bun.env, T3_ORCHESTRATION_REMOTE_CONFIG: join(root, "remote.json") };

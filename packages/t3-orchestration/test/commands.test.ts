@@ -59,9 +59,8 @@ describe("daemon command routing", () => {
 
   test("the remote gateway admits creation only with an explicit project", () => {
     expect(() => requireRemoteSafeCommand({ op: "tasks.create", projectId: "current" })).toThrow("needs --project");
-    expect(() => requireRemoteSafeCommand({ op: "tasks.create", projectId: "p", callerCwd: "/etc" })).toThrow("needs --project");
-    const explicit = { op: "tasks.create", projectId: "p" };
-    expect(requireRemoteSafeCommand(explicit)).toBe(explicit);
+    expect(() => requireRemoteSafeCommand({ op: "tasks.create", projectId: "current", callerCwd: "/etc" })).toThrow("needs --project");
+    expect(requireRemoteSafeCommand({ op: "tasks.create", projectId: "p", callerCwd: "/etc" })).toEqual({ op: "tasks.create", projectId: "p" });
     expect(requireRemoteSafeCommand({ op: "tasks.list" })).toEqual({ op: "tasks.list" });
   });
 

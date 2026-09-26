@@ -50,12 +50,13 @@ function parseExpectedAction(value: unknown): {
 }
 
 // A remote caller's working directory names a path on another machine, so the
-// tailnet gateway only admits task creation with an explicit project.
+// tailnet gateway only admits task creation with an explicit project and never
+// resolves a supplied path on the host.
 export function requireRemoteSafeCommand<T extends Record<string, unknown>>(command: T): T {
-  if (command.op === "tasks.create" && (command.projectId === "current" || command.callerCwd !== undefined)) {
-    throw new Error("Remote tasks create needs --project");
-  }
-  return command;
+  if (command.op !== "tasks.create") return command;
+  if (command.projectId === "current") throw new Error("Remote tasks create needs --project");
+  const { callerCwd: _ignored, ...rest } = command;
+  return rest as T;
 }
 
 export async function executeCommand(command: Record<string, unknown>, dependencies: CommandDependencies): Promise<unknown> {

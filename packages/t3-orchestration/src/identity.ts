@@ -28,11 +28,16 @@ export async function callerPathCandidates(cwd: string, depth = 0): Promise<stri
   };
   const real = await realpath(cwd);
   add(real);
-  const [top = "", prefix = ""] = (await git(real, "rev-parse", "--show-toplevel", "--show-prefix"))?.split("\n") ?? [];
-  if (!top) return candidates;
+  const revParse = await git(real, "rev-parse", "--show-toplevel", "--show-prefix");
+  if (revParse === undefined) return candidates;
+  const prefix = revParse.split("\n")[1] ?? "";
+  // The first `worktree list` entry is the primary checkout, except that a
+  // submodule reports its Git directory; rev-parse there follows core.worktree
+  // back to the checkout. Bare primaries have no checkout to map to.
   const primaryRecord = (await git(real, "worktree", "list", "--porcelain"))?.split("\n\n")[0] ?? "";
   const primary = primaryRecord.match(/^worktree (.+)$/m)?.[1];
-  if (primary && !/^bare$/m.test(primaryRecord)) add(join(await realpath(primary), prefix));
+  const primaryTop = primary && !/^bare$/m.test(primaryRecord) ? (await git(primary, "rev-parse", "--show-toplevel"))?.trim() : undefined;
+  if (primaryTop) add(join(await realpath(primaryTop), prefix));
   const superproject = (await git(real, "rev-parse", "--show-superproject-working-tree"))?.trim();
   if (superproject && depth < MAX_SUPERPROJECT_DEPTH) {
     const superRoot = await realpath(superproject);

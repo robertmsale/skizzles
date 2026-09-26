@@ -53,6 +53,24 @@ describe("caller project resolution", () => {
     expect(await resolveCallerProject(inside, async () => [{ id: "repo", workspaceRoot: primary }])).toBe("repo");
   });
 
+  test("submodules resolve to the most specific registered project, not the superproject's Git directory", async () => {
+    root = await realpath(await mkdtemp("/tmp/t3-identity-"));
+    const library = join(root, "library");
+    await $`git init -q ${library} && git -C ${library} -c user.email=t@t -c user.name=t commit -q --allow-empty -m lib`.quiet();
+    const superRoot = join(root, "super");
+    await $`git init -q ${superRoot} && git -C ${superRoot} -c protocol.file.allow=always submodule add -q ${library} sub && git -C ${superRoot} -c user.email=t@t -c user.name=t commit -q -m sub`.quiet();
+    const superLinked = join(root, "superwt");
+    await $`git -C ${superRoot} worktree add -q -b task ${superLinked} && git -C ${superLinked} -c protocol.file.allow=always submodule update -q --init`.quiet();
+    await mkdir(join(superLinked, "sub/x"), { recursive: true });
+    const subLinked = join(root, "subwt");
+    await $`git -C ${join(superRoot, "sub")} worktree add -q -b subtask ${subLinked}`.quiet();
+    const projects = async () => [{ id: "super", workspaceRoot: superRoot }, { id: "sub", workspaceRoot: join(superRoot, "sub") }];
+    expect(await resolveCallerProject(join(superLinked, "sub/x"), projects)).toBe("sub");
+    expect(await resolveCallerProject(subLinked, projects)).toBe("sub");
+    expect(await resolveCallerProject(superLinked, projects)).toBe("super");
+    expect(await callerPathCandidates(subLinked)).not.toContain(join(superRoot, ".git/modules/sub"));
+  });
+
   test("a worktree of a bare repository falls back to its own path", async () => {
     root = await realpath(await mkdtemp("/tmp/t3-identity-"));
     const bare = join(root, "repo.git");
